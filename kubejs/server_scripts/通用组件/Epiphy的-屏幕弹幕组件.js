@@ -1556,6 +1556,17 @@
 
     // ======================================================================== 方块弹幕发射源自动绑定（委托 EpiphyBlockTracker）
 
+    var SCOPE_CACHE_TTL_TICKS = 20
+    var boundScopeRevision    = 0
+    var scopeListCache        = new Map() // '<dim>|<scopeKey>' -> { rev, builtTick, list: [{ rec, binding, seq, cx, cy, cz, rSq }], idxByKey: Map }
+    var blockSeqByKey         = new Map() // '<posKey>' -> seq
+
+    function invalidateScopeCache(removedKey) {
+        boundScopeRevision++
+        if (scopeListCache.size > 0) scopeListCache.clear()
+        if (removedKey != null) blockSeqByKey.delete(removedKey)
+    }
+
     function getBlockConflictScopeKey(rec, binding) {
         var sc = (binding && binding.conflictScope) ? binding.conflictScope : 'block'
         if (sc === 'all') return 'all'
@@ -1564,13 +1575,33 @@
     }
 
     function ensureRecordSeq(rec) {
-        if (rec != null && rec._danmakuSeq == null) {
-            rec._danmakuSeq = ++blockSourceSeq
+        if (rec == null) return 0
+        if (rec.key != null) {
+            var mapped = blockSeqByKey.get(rec.key)
+            if (mapped != null) {
+                if (rec._danmakuSeq == null) rec._danmakuSeq = mapped
+                return mapped
+            }
+            var seq = (rec._danmakuSeq != null) ? rec._danmakuSeq : (++blockSourceSeq)
+            if (blockSeqByKey.size >= 8192) blockSeqByKey.clear()
+            blockSeqByKey.set(rec.key, seq)
+            rec._danmakuSeq = seq
+            return seq
         }
+        if (rec._danmakuSeq == null) rec._danmakuSeq = ++blockSourceSeq
+        return rec._danmakuSeq
     }
 
-    function getBoundBlockRecordsForScope(rec, binding) {
+    function getScopeCacheEntry(rec, binding) {
         var scopeKey = getBlockConflictScopeKey(rec, binding)
+        var cacheKey = String(rec.dim || 'minecraft:overworld') + '|' + scopeKey
+        var cached   = scopeListCache.get(cacheKey)
+        if (cached != null && cached.rev === boundScopeRevision &&
+            danmakuTickCounter >= cached.builtTick &&
+            (danmakuTickCounter - cached.builtTick) < SCOPE_CACHE_TTL_TICKS) {
+            return cached
+        }
+
         var raw = []
         if (danmakuBlockTracker != null && typeof danmakuBlockTracker.getTrackedRecords === 'function') {
             raw = binding.conflictScope === 'block'
@@ -1579,7 +1610,8 @@
         } else {
             fallbackTracked.forEach(function (item) { raw.push(item) })
         }
-        var out = []
+
+        var list = []
         for (var i = 0; i < raw.length; i++) {
             var item = raw[i]
             if (item == null || item.dim !== rec.dim) continue
@@ -1588,10 +1620,36 @@
                 : fallbackBindings.get(item.blockId)
             if (itemBinding == null) continue
             if (getBlockConflictScopeKey(item, itemBinding) !== scopeKey) continue
-            ensureRecordSeq(item)
-            out.push({ rec: item, binding: itemBinding })
+            var seq = ensureRecordSeq(item)
+            var r   = itemBinding.radius
+            list.push({
+                rec:     item,
+                binding: itemBinding,
+                seq:     seq,
+                cx:      item.x + 0.5,
+                cy:      item.y + 0.5,
+                cz:      item.z + 0.5,
+                rSq:     r * r
+            })
         }
-        return out
+        if (list.length > 1) {
+            list.sort(function (a, b) {
+                return a.seq - b.seq
+            })
+        }
+        var idxByKey = new Map()
+        for (var j = 0; j < list.length; j++) {
+            idxByKey.set(list[j].rec.key, j)
+        }
+        if (scopeListCache.size >= 256) scopeListCache.clear()
+        var entry = {
+            rev:       boundScopeRevision,
+            builtTick: danmakuTickCounter,
+            list:      list,
+            idxByKey:  idxByKey
+        }
+        scopeListCache.set(cacheKey, entry)
+        return entry
     }
 
     function shouldEmitForBoundBlockToPlayer(rec, binding, p) {
@@ -1607,38 +1665,63 @@
             var exp = playerSourceCooldown.get(ck)
             if (exp != null && danmakuTickCounter < exp) return false
             var cd = Math.max(1, binding.conflictCooldownTicks || binding.intervalTicks)
+            if (playerSourceCooldown.size >= 2048) {
+                playerSourceCooldown.forEach(function (v, k) {
+                    if (v <= danmakuTickCounter) playerSourceCooldown.delete(k)
+                })
+                if (playerSourceCooldown.size >= 2048) playerSourceCooldown.clear()
+            }
             playerSourceCooldown.set(ck, danmakuTickCounter + cd)
             return true
         }
 
         var pPos = readPlayerPos(p)
         if (pPos == null) return true
-        var list = getBoundBlockRecordsForScope(rec, binding)
+        var scopeEntry = getScopeCacheEntry(rec, binding)
+        var list       = scopeEntry.list
         if (list.length <= 1) return true
 
-        var winner = null
+        var px = pPos.x, py = pPos.y, pz = pPos.z
+        var myIdx = scopeEntry.idxByKey.get(rec.key)
+
+        // list 已按 _danmakuSeq 升序排序：first/latest 只需扫描竞争一侧并可提前命中退出
+        if (mode === 'first') {
+            var limitFirst = (myIdx !== undefined) ? myIdx : list.length
+            for (var fi = 0; fi < limitFirst; fi++) {
+                var fe  = list[fi]
+                var fdx = px - fe.cx, fdy = py - fe.cy, fdz = pz - fe.cz
+                if ((fdx * fdx + fdy * fdy + fdz * fdz) <= fe.rSq) {
+                    return myIdx !== undefined ? false : (fe.rec.key === rec.key)
+                }
+            }
+            return true
+        }
+        if (mode === 'latest') {
+            var stopLatest = (myIdx !== undefined) ? (myIdx + 1) : 0
+            for (var li = list.length - 1; li >= stopLatest; li--) {
+                var le  = list[li]
+                var ldx = px - le.cx, ldy = py - le.cy, ldz = pz - le.cz
+                if ((ldx * ldx + ldy * ldy + ldz * ldz) <= le.rSq) {
+                    return myIdx !== undefined ? false : (le.rec.key === rec.key)
+                }
+            }
+            return true
+        }
+
+        var winner    = null
+        var winSeq    = 0
         var winDistSq = Infinity
         for (var i = 0; i < list.length; i++) {
-            var entry = list[i]
-            var rItem = entry.rec
-            var bItem = entry.binding
-            var dx = pPos.x - (rItem.x + 0.5)
-            var dy = pPos.y - (rItem.y + 0.5)
-            var dz = pPos.z - (rItem.z + 0.5)
+            var eItem = list[i]
+            var dx = px - eItem.cx
+            var dy = py - eItem.cy
+            var dz = pz - eItem.cz
             var dSq = dx * dx + dy * dy + dz * dz
-            if (dSq > bItem.radius * bItem.radius) continue
-            if (winner == null) {
-                winner = rItem
+            if (dSq > eItem.rSq) continue
+            if (winner == null || dSq < winDistSq - 0.25 || (Math.abs(dSq - winDistSq) <= 0.25 && eItem.seq < winSeq)) {
+                winner    = eItem.rec
+                winSeq    = eItem.seq
                 winDistSq = dSq
-            } else if (mode === 'nearest') {
-                if (dSq < winDistSq - 0.25 || (Math.abs(dSq - winDistSq) <= 0.25 && rItem._danmakuSeq < winner._danmakuSeq)) {
-                    winner = rItem
-                    winDistSq = dSq
-                }
-            } else if (mode === 'first') {
-                if (rItem._danmakuSeq < winner._danmakuSeq) winner = rItem
-            } else if (mode === 'latest') {
-                if (rItem._danmakuSeq > winner._danmakuSeq) winner = rItem
             }
         }
         return winner == null || winner.key === rec.key
@@ -1646,16 +1729,12 @@
 
     function shouldEmitStaggerTick(rec, binding, tickNum) {
         ensureRecordSeq(rec)
-        var list = getBoundBlockRecordsForScope(rec, binding)
-        if (list.length <= 1) return (tickNum % binding.intervalTicks) === 0
-        list.sort(function (a, b) {
-            return a.rec._danmakuSeq - b.rec._danmakuSeq
-        })
-        var idx = 0
-        for (var i = 0; i < list.length; i++) {
-            if (list[i].rec.key === rec.key) { idx = i; break }
-        }
-        var phase = Math.floor((idx * binding.intervalTicks) / list.length)
+        var scopeEntry = getScopeCacheEntry(rec, binding)
+        var total      = scopeEntry.list.length
+        if (total <= 1) return (tickNum % binding.intervalTicks) === 0
+        var idx = scopeEntry.idxByKey.get(rec.key)
+        if (idx === undefined) idx = 0
+        var phase = Math.floor((idx * binding.intervalTicks) / total)
         return ((tickNum + phase) % binding.intervalTicks) === 0
     }
 
@@ -1751,6 +1830,7 @@
                     var key = dim + '|' + Math.floor(event.block.x) + ',' + Math.floor(event.block.y) + ',' + Math.floor(event.block.z)
                     var rec = { key: key, blockId: bid, dim: dim, x: Math.floor(event.block.x), y: Math.floor(event.block.y), z: Math.floor(event.block.z) }
                     fallbackTracked.set(key, rec)
+                    invalidateScopeCache(null)
                     emitForBoundBlock(rec, fallbackBindings.get(bid), event.level, event.block)
                 } catch (eP) {
                     reportCatch('fallback:placed', eP)
@@ -1768,6 +1848,7 @@
                             clearNear(rec.dim, rec.x + 0.5, rec.y + 0.5, rec.z + 0.5, b.radius + 6, b.group)
                         }
                         fallbackTracked.delete(key)
+                        invalidateScopeCache(key)
                     }
                 } catch (eB) {
                     reportCatch('fallback:broken', eB)
@@ -1791,9 +1872,11 @@
                     if (rec.blockId === idStr) {
                         if (b != null && b.group) clearNear(rec.dim, rec.x + 0.5, rec.y + 0.5, rec.z + 0.5, b.radius + 6, b.group)
                         fallbackTracked.delete(k)
+                        blockSeqByKey.delete(k)
                         removed++
                     }
                 })
+                invalidateScopeCache(null)
                 return removed
             },
             scanNow: function () { return 0 }
@@ -1821,6 +1904,7 @@
             maintainInterval: 1,
             onFound: function (rec, binding, source) {
                 ensureRecordSeq(rec)
+                invalidateScopeCache(null)
                 // 仅在玩家新放置时立即触发首帧反馈；扫描/迁移命中的存量方块统一由 onTick 按 intervalTicks 发放，避免开服瞬时推包峰值
                 if (source === 'placed') {
                     emitForBoundBlock(rec, binding, null, null)
@@ -1835,6 +1919,7 @@
                 }
             },
             onRemoved: function (rec, binding) {
+                invalidateScopeCache(rec != null ? rec.key : null)
                 if (binding != null && binding.group) {
                     clearNear(rec.dim, rec.x + 0.5, rec.y + 0.5, rec.z + 0.5, binding.radius + 6, binding.group)
                 }
@@ -1890,6 +1975,7 @@
             global.ScreenDanmakuBlockBindings = {}
         }
         global.ScreenDanmakuBlockBindings[idStr] = { specOrFn: specOrFn, extraOpts: meta }
+        invalidateScopeCache(null)
         return true
     }
 
@@ -1901,6 +1987,7 @@
         if (global.ScreenDanmakuBlockBindings && typeof global.ScreenDanmakuBlockBindings === 'object') {
             delete global.ScreenDanmakuBlockBindings[idStr]
         }
+        invalidateScopeCache(null)
         return tracker.unbind(idStr)
     }
 
