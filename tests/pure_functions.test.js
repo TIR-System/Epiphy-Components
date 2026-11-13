@@ -5,9 +5,12 @@ var fs     = require('fs')
 var path   = require('path')
 var vm     = require('vm')
 
-var ROOT_DIR       = path.resolve(__dirname, '..')
-var LOG_PATH       = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-日志.js')
-var TRACKER_PATH   = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-方块追踪组件.js')
+var ROOT_DIR         = path.resolve(__dirname, '..')
+var PROTOCOL_PATH    = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的-协议常量.js')
+var SPEC_PATH        = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的-Spec与通用工具.js')
+var LOG_PATH         = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-日志.js')
+var SERVER_BASE_PATH = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-服务端基础.js')
+var TRACKER_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-方块追踪组件.js')
 var VALVE_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-权限阀.js')
 var DEBUG_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-调试组件.js')
 var DANMAKU_PATH   = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-屏幕弹幕组件.js')
@@ -1733,6 +1736,299 @@ test('renderer: ModernUI TextLayout fast path caches layouts, skips PoseStack/gl
     })
     paintHandlers[0](ev)
     assert.strictEqual(drawCalls.length, 9)
+})
+
+function runScriptIn(sb, scriptPath) {
+    vm.runInContext(fs.readFileSync(scriptPath, 'utf8'), sb, { filename: path.basename(scriptPath) })
+    return sb
+}
+
+function loadStartupBase(sb) {
+    runScriptIn(sb, PROTOCOL_PATH)
+    runScriptIn(sb, SPEC_PATH)
+    return sb
+}
+
+function loadServerBase(sb) {
+    loadStartupBase(sb)
+    runScriptIn(sb, LOG_PATH)
+    runScriptIn(sb, SERVER_BASE_PATH)
+    return sb
+}
+
+test('EpiphySpec: missing EpiphyProtocol throws explicit hard-dependency error', function () {
+    var sb = createKubeSandbox()
+    assert.throws(function () {
+        runScriptIn(sb, SPEC_PATH)
+    }, /EpiphyProtocol/)
+})
+
+test('EpiphySpec: shared math, dim normalization, ticks, color, size and tilt parsers', function () {
+    var sb = createKubeSandbox()
+    loadStartupBase(sb)
+    var S = sb.global.EpiphySpec
+
+    assert.strictEqual(S.min2(3, 7), 3)
+    assert.strictEqual(S.max2(3, 7), 7)
+    assert.strictEqual(S.clampNum(5, 0, 3, 1), 3)
+    assert.strictEqual(S.clampNum('bad', 0, 3, 1), 1)
+    assert.strictEqual(S.clampNum([], 0, 3, 2), 2)
+    assert.strictEqual(S.normalizeDim('the_nether'), 'minecraft:the_nether')
+    assert.strictEqual(S.normalizeDim('ResourceKey[minecraft:dimension / minecraft:overworld]'), 'minecraft:overworld')
+    assert.strictEqual(S.normalizeDim(''), null)
+
+    assert.strictEqual(S.parseBoolStrict('ON'), true)
+    assert.strictEqual(S.parseBoolStrict('0'), false)
+    assert.strictEqual(S.parseBoolStrict('maybe'), null)
+    assert.strictEqual(S.parseBool('maybe', true), true)
+
+    assert.strictEqual(S.parsePriority('urgent', 0), 4)
+    assert.strictEqual(S.parsePriority('interrupt', 0, { map: { normal: 0, urgent: 1, replace: 2, interrupt: 2 }, min: 0, max: 2 }), 2)
+    assert.strictEqual(S.parsePriority(9, 0, { min: 0, max: 10 }), 9)
+    assert.strictEqual(S.parsePriority(99, 0, { min: 0, max: 2 }), 2)
+
+    assert.strictEqual(S.parseTicks('2.5s', false), 50)
+    assert.strictEqual(S.parseTicks('1.5m', false), 1800)
+    assert.strictEqual(S.parseTicks('0', false), null)
+    assert.strictEqual(S.parseTicks('0', true), 0)
+
+    assert.strictEqual(S.parseTicksOrSec('2s'), 40)
+    assert.strictEqual(S.parseTicksOrSec(' 0.25s '), 5)
+    assert.strictEqual(S.parseTicksOrSec('12.6'), 13)
+    assert.strictEqual(S.parseTicksOrSec('0s'), null)
+
+    assert.deepStrictEqual(plain(S.parseColor('#f50', 0)), { color: 0xFF5500, isRandom: false })
+    assert.deepStrictEqual(plain(S.parseColor('0x11223344', 0)), { color: 0x223344, isRandom: false })
+    assert.strictEqual(S.parseColor('random', 0).isRandom, true)
+
+    assert.deepStrictEqual(plain(S.parseSize([1.2, 1.2])), { scale: 1.2, isRandom: false })
+    assert.strictEqual(S.parseSize('small_random').isRandom, true)
+    assert.strictEqual(S.parseTilt('left'), -12)
+    assert.strictEqual(S.parseTilt('none'), 0)
+    var tiltRng = S.parseTilt('-15~15')
+    assert.ok(tiltRng >= -15 && tiltRng <= 15)
+})
+
+test('EpiphySpec: parseCommandSpec supports collectFree/pipe splitting and strict error mode', function () {
+    var sb = createKubeSandbox()
+    loadStartupBase(sb)
+    var S = sb.global.EpiphySpec
+
+    var danmakuSchema = {
+        aliases: { subtitle: 'sub', scale: 'size', fadeout: 'fadeOut' },
+        bareWords: { urgent: { key: 'priority', value: 'urgent' } },
+        fields: {
+            color:   'lowerStr',
+            size:    'str',
+            sub:     'str',
+            text:    'str',
+            priority: 'lowerStr',
+            fadeOut: { type: 'nonneg', max: 200 }
+        },
+        unknownMode:   'collectFree',
+        splitFreePipe: true
+    }
+    var r1 = S.parseCommandSpec('urgent color=gold scale=1.5 Hello \\| A | Sub line', danmakuSchema)
+    assert.strictEqual(r1.ok, true)
+    assert.strictEqual(r1.opts.priority, 'urgent')
+    assert.strictEqual(r1.opts.color, 'gold')
+    assert.strictEqual(r1.opts.size, '1.5')
+    assert.strictEqual(r1.opts.text, 'Hello | A')
+    assert.strictEqual(r1.opts.sub, 'Sub line')
+
+    var audioSchema = {
+        aliases: { vol: 'volume', fadein: 'fadeIn' },
+        bareWords: { loop: { key: 'loop', value: true } },
+        fields: {
+            loop:   'strictBool',
+            volume: { type: 'strictNum', min: 0, max: 4 },
+            fadeIn: 'str'
+        },
+        unknownMode: 'error'
+    }
+    var r2 = S.parseCommandSpec('loop vol=1.2 fadein=10t', audioSchema)
+    assert.strictEqual(r2.ok, true)
+    assert.strictEqual(r2.opts.loop, true)
+    assert.strictEqual(r2.opts.volume, 1.2)
+    assert.strictEqual(r2.opts.fadeIn, '10t')
+
+    var rBadKey = S.parseCommandSpec('unknownKey=1', audioSchema)
+    assert.strictEqual(rBadKey.ok, false)
+    var rBadNum = S.parseCommandSpec('volume=99', audioSchema)
+    assert.strictEqual(rBadNum.ok, false)
+    var rBadBool = S.parseCommandSpec('loop=maybe', audioSchema)
+    assert.strictEqual(rBadBool.ok, false)
+})
+
+test('EpiphySpec: computeSphereMergeClusters connects touching spheres by seq with tight union AABB', function () {
+    var sb = createKubeSandbox()
+    loadStartupBase(sb)
+    var S = sb.global.EpiphySpec
+
+    var clusters = S.computeSphereMergeClusters([
+        { id: 'c', cx: 100, cy: 64, cz: 0, r: 5, seq: 1 },
+        { id: 'b', cx: 12,  cy: 64, cz: 0, r: 6, seq: 3 },
+        { id: 'a', cx: 0,   cy: 64, cz: 0, r: 6, seq: 2 } // touches b (dist=12 == 6+6), earlier seq
+    ])
+    assert.strictEqual(clusters.length, 2)
+    assert.strictEqual(clusters[0].leader.id, 'c')
+    assert.strictEqual(clusters[0].members.length, 1)
+    assert.strictEqual(clusters[1].leader.id, 'a')
+    assert.deepStrictEqual(plain(clusters[1].members.map(function (m) { return m.id })), ['a', 'b'])
+    assert.strictEqual(clusters[1].minX, -6)
+    assert.strictEqual(clusters[1].maxX, 18)
+})
+
+test('EpiphyServerBase: missing hard dependencies throws explicit error', function () {
+    var sb = createKubeSandbox()
+    assert.throws(function () {
+        runScriptIn(sb, SERVER_BASE_PATH)
+    }, /EpiphyProtocol|EpiphySpec|EpiphyLog/)
+})
+
+test('EpiphyServerBase: CommandBuilder enforces bottom-up Brigadier ordering, optional chain tails, and reply helpers', function () {
+    var sb = createKubeSandbox()
+    loadServerBase(sb)
+    var B = sb.global.EpiphyServerBase
+
+    function makeNode(kind, name) {
+        var frozenChildren = []
+        var execFn = null
+        var reqFn = null
+        var suggestsVal = null
+        var node = {
+            kind: kind,
+            name: name,
+            requires: function (fn) { reqFn = fn; return node },
+            executes: function (fn) { execFn = fn; return node },
+            suggests: function (s) { suggestsVal = s; return node },
+            then: function (child) {
+                frozenChildren.push(child._snapshot())
+                return node
+            },
+            _snapshot: function () {
+                return {
+                    kind: kind,
+                    name: name,
+                    hasExec: execFn !== null,
+                    execFn: execFn,
+                    reqFn: reqFn,
+                    suggestsVal: suggestsVal,
+                    children: frozenChildren.slice()
+                }
+            }
+        }
+        return node
+    }
+
+    var Commands = {
+        literal: function (n) { return makeNode('literal', n) },
+        argument: function (n, type) { return makeNode('arg:' + type, n) }
+    }
+    var Arguments = {
+        PLAYERS: { create: function () { return 'PLAYERS' }, getResult: function (ctx, n) { return ctx.args[n] } },
+        WORD:    { create: function () { return 'WORD' },    getResult: function (ctx, n) { return ctx.args[n] } },
+        GREEDY_STRING: { create: function () { return 'GREEDY' }, getResult: function (ctx, n) { return ctx.args[n] } }
+    }
+
+    var b = B.createCommandBuilder({
+        event: {},
+        Commands: Commands,
+        Arguments: Arguments,
+        guardExecution: function (fn) { return fn },
+        canSee: function () { return true }
+    }, { tag: 'UnitTest' })
+
+    var calls = []
+    var sent = []
+    var root = b.literal('demo', {
+        children: [
+            b.literal('stop', {
+                chain: [
+                    [{ name: 'target', type: 'players' }, { name: 'id', type: 'word' }],
+                    function (ctx, args) {
+                        calls.push({ count: args._count, target: args.target, id: args.id })
+                        if (args.id === 'fail') return b.replyErr(ctx, 'missing id')
+                        return b.replyOk(ctx, 'stopped')
+                    },
+                    { minArgs: 0 }
+                ]
+            })
+        ]
+    })
+
+    var snap = root._snapshot()
+    var stopSnap = snap.children[0]
+    assert.strictEqual(stopSnap.hasExec, true, 'minArgs=0 executes on literal')
+    assert.strictEqual(stopSnap.children[0].name, 'target')
+    assert.strictEqual(stopSnap.children[0].hasExec, true, '1-arg executes before frozen into stop')
+    assert.strictEqual(stopSnap.children[0].children[0].name, 'id')
+    assert.strictEqual(stopSnap.children[0].children[0].hasExec, true, '2-arg executes before frozen into target')
+
+    var mockSrc = { sendSuccess: function (msg) { sent.push(String(msg)) } }
+    assert.strictEqual(stopSnap.execFn({ source: mockSrc, args: {} }), 1)
+    assert.strictEqual(stopSnap.children[0].execFn({ source: mockSrc, args: { target: ['P1'] } }), 1)
+    assert.strictEqual(stopSnap.children[0].children[0].execFn({ source: mockSrc, args: { target: ['P1'], id: 'fail' } }), 0)
+
+    assert.strictEqual(calls.length, 3)
+    assert.strictEqual(calls[0]._count || calls[0].count, 0)
+    assert.deepStrictEqual(calls[1].target, ['P1'])
+    assert.strictEqual(calls[2].id, 'fail')
+    assert.ok(sent[0].indexOf('[UnitTest] stopped') >= 0)
+    assert.ok(sent[2].indexOf('[UnitTest 错误] missing id') >= 0)
+})
+
+test('EpiphyServerBase: resolveWorldStorageInfo & centralized acquireBlockTracker fallback work without EpiphyBlockTracker', function () {
+    var sb = createKubeSandbox()
+    var hooks = attachSandboxEventHooks(sb)
+    loadServerBase(sb)
+    var B = sb.global.EpiphyServerBase
+
+    var infoFallback = B.resolveWorldStorageInfo({
+        getWorldData: function () { return { getLevelName: function () { return 'My/Test:World' } } }
+    }, 'kubejs_epiphy_permissions.json', 'kubejs/config/epiphy_permissions')
+    assert.strictEqual(infoFallback.isWorldRoot, false)
+    assert.strictEqual(infoFallback.filePath, 'kubejs/config/epiphy_permissions/My_Test_World.json')
+
+    var tracker = B.acquireBlockTracker({ name: 'demoSub' })
+    assert.strictEqual(tracker.isFallback, true)
+
+    var events = []
+    var tracker2 = B.acquireBlockTracker({
+        name: 'demoSub2',
+        onFound: function (view, meta, reason) {
+            events.push({ type: 'found', key: view.key, reason: reason, r: meta.radius })
+        },
+        onRemoved: function (view, meta, reason) {
+            events.push({ type: 'removed', key: view.key, reason: reason })
+        }
+    })
+    assert.strictEqual(tracker2.bind('mod:bell', { radius: 16 }), true)
+
+    hooks.placed.forEach(function (fn) {
+        fn({
+            level: { dimension: 'minecraft:overworld' },
+            block: { id: 'mod:bell', x: 10, y: 64, z: -5 }
+        })
+    })
+    assert.strictEqual(tracker2.getTrackedRecords('mod:bell').length, 1)
+
+    hooks.broken.forEach(function (fn) {
+        fn({
+            level: { dimension: 'minecraft:overworld' },
+            block: { id: 'mod:bell', x: 10, y: 64, z: -5 }
+        })
+    })
+    assert.strictEqual(tracker2.getTrackedRecords('mod:bell').length, 0)
+    assert.deepStrictEqual(events, [
+        { type: 'found', key: 'minecraft:overworld|10,64,-5', reason: 'fallback_placed', r: 16 },
+        { type: 'removed', key: 'minecraft:overworld|10,64,-5', reason: 'broken' }
+    ])
+
+    assert.strictEqual(B.registerSubcommandSafe({ name: 'test_cmd' }), false)
+    assert.strictEqual(sb.global.EpiphyCommandRegistryQueue.length, 1)
+    assert.strictEqual(B.registerDebugProvider({ name: 'test_mod' }), true)
+    assert.ok(sb.global.EpiphyDebugProviderQueue.some(function (p) { return p && p.name === 'test_mod' }))
 })
 
 var passed = 0
