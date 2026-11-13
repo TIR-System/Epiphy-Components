@@ -177,8 +177,12 @@
         return null
     }
 
-    // 为订阅者按需生成该方块的私有扩展字段并缓存到 rec.extras[subId]
+    // 为订阅者按需生成该方块的私有扩展字段并缓存视图到 rec.views[subId]，消除每 tick 重复分配对象与 for-in 拷贝
     function ensureSubscriberView(rec, sub) {
+        if (rec.views == null) rec.views = {}
+        var cachedView = rec.views[sub.id]
+        if (cachedView != null) return cachedView
+
         if (rec.extras == null) rec.extras = {}
         var extra = rec.extras[sub.id]
         if (extra == null) {
@@ -204,6 +208,7 @@
             z:       rec.z
         }
         for (var ek in extra) view[ek] = extra[ek]
+        rec.views[sub.id] = view
         return view
     }
 
@@ -741,7 +746,7 @@
                 var bMap = bindingsByBlockId.get(rec.blockId)
                 if (bMap == null || bMap.size === 0) return
 
-                // 将 block_changed 实体复核按 VERIFY_WINDOW_TICKS (1/20) 分摊到各 tick，并消除每 tick 数组分配
+                // 将 block_changed 实体复核按 VERIFY_WINDOW_TICKS (1/20) 分摊到各 tick，并配合缓存视图消除每 tick 数组与对象分配
                 var vSlot      = (rec.vSlot != null) ? (rec.vSlot % VERIFY_WINDOW_TICKS) : 0
                 var needVerify = (vSlot === verifyPhase)
                 var lv         = null
@@ -814,6 +819,7 @@
                 if (rec != null && rec.blockId === idStr) {
                     dispatchRemovedToSubscribers(rec, 'unbind', extraArg, subId)
                     if (rec.extras != null) delete rec.extras[subId]
+                    if (rec.views != null) delete rec.views[subId]
                     if (bMap.size <= 1) {
                         trackedBlocks.delete(keys[i])
                     }
