@@ -256,7 +256,7 @@
             return clonePolicy(rawPolicy ? POLICY_PRESETS.authorized : POLICY_PRESETS.public)
         }
         if (typeof rawPolicy === 'number' && isFinite(rawPolicy)) {
-            if (rawPolicy <= 0) return POLICY_PRESETS.public
+            if (rawPolicy <= 0) return clonePolicy(POLICY_PRESETS.public)
             var lv = Math.round(rawPolicy)
             return {
                 mode:                 'op_level_' + lv,

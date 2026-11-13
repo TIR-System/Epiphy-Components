@@ -1987,7 +1987,14 @@
         sendNear:          inDimension,
         sendMinorEdgeNear: sendMinorEdgeNear,
         clearPlayer:       clearPlayer,
-        clearNear:         clearNear
+        clearNear:         clearNear,
+        _pure: Object.freeze({
+            parseSize:       parseSize,
+            parseTilt:       parseTilt,
+            parseColor:      parseColor,
+            parseTicksOrSec: parseTicksOrSec,
+            parseSpecString: parseSpecString
+        })
     }
 
     // ========================================================================
