@@ -1365,7 +1365,7 @@
             var rec = snap.byUuid[u]
             if (rec == null) {
                 removeListener(h, u, null, 'offline')
-            } else if (!isPlayerEligible(h, rec, true) && (!isCluster && !(h.conflictMode === 'merge' && isPlayerInMergedClusterRange(h, rec)))) {
+            } else if (!isPlayerEligible(h, rec, true) && (isCluster || !(h.conflictMode === 'merge' && isPlayerInMergedClusterRange(h, rec)))) {
                 removeListener(h, u, rec, 'out_of_scope')
             } else {
                 if (isCluster) {
