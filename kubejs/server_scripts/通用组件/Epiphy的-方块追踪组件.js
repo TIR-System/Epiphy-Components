@@ -955,8 +955,8 @@
                         rec.chunkLoaded = true
                         try { curBlock = lv.getBlock(rec.x, rec.y, rec.z) } catch (eGet) { logCatch('tick:getBlock', eGet) }
                         if (extractBlockId(curBlock) !== rec.blockId) {
-                            dispatchRemovedToSubscribers(rec, 'block_changed', null, null)
                             trackedBlocks.delete(posKey)
+                            dispatchRemovedToSubscribers(rec, 'block_changed', null, null)
                             dirty = true
                             return
                         }
@@ -1155,8 +1155,8 @@
             var key  = makePosKey(dim, event.block.x, event.block.y, event.block.z)
             var rec  = trackedBlocks.get(key)
             if (rec != null) {
-                dispatchRemovedToSubscribers(rec, 'broken', null, null)
                 trackedBlocks.delete(key)
+                dispatchRemovedToSubscribers(rec, 'broken', null, null)
                 saveTrackedBlocks()
             } else {
                 var bid  = extractBlockId(event.block)

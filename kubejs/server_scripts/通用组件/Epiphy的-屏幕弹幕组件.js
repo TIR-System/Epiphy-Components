@@ -2052,7 +2052,13 @@
                         })
                     }
                 }
+                if (scopeEntry.idxByKey != null && scopeEntry.idxByKey.has(rec.key)) {
+                    invalidateScopeCache(rec.key)
+                }
                 return
+            }
+            if (scopeEntry.idxByKey != null && scopeEntry.idxByKey.has(rec.key)) {
+                invalidateScopeCache(rec.key)
             }
         }
         clearNear(rec.dim, rec.x + 0.5, rec.y + 0.5, rec.z + 0.5, binding.radius + 6, binding.group)
