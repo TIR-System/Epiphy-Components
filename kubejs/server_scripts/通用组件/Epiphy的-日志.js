@@ -31,6 +31,8 @@
         return t.length > 0 ? t : (fallback || '')
     }
 
+    // 【catch 约定】日志设施自身的兜底：console / player.tell 不可用时已无更低层可退，
+    // 玩家键提取仅做属性能力探测，均属预期分支，留空避免递归报错。
     function emitConsole(level, text) {
         try {
             if (level === 'error') {

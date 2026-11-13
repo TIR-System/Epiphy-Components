@@ -41,6 +41,7 @@
 
     var SERVER_REF = null
 
+    // 【catch 约定】日志设施自身的兜底：console / EpiphyLog 不可用时已无更低层可退，留空。
     function logWarn(tag, msg) {
         if (typeof global !== 'undefined' && global.EpiphyLog != null) {
             global.EpiphyLog.warn('EpiphyPermissionValve', tag, msg)
@@ -916,6 +917,12 @@
 
     function runDeclaredCommand(runnerObj, callerId, commandStr, silent) {
         if (runnerObj == null || !commandStr) return 0
+        var looksLikePlayer = (ServerPlayerClass != null && isJavaInstance(ServerPlayerClass, runnerObj))
+            || Boolean(tryCall(function () { return typeof runnerObj.getUuid === 'function' && typeof runnerObj.hasPermissions === 'function' }, false))
+        if (looksLikePlayer) {
+            logWarn('runDeclaredCommand', '出于安全边界禁止将玩家对象作为 runDeclaredCommand 的提权执行代理，已拦截。')
+            return 0
+        }
         var cmd = String(commandStr).replace(/^\//, '')
         var res = withDeclaration(callerId, function () {
             if (silent !== false && typeof runnerObj.runCommandSilent === 'function') {
@@ -930,17 +937,10 @@
     }
 
     // 严格通过 Java Class.isInstance 识别 CommandSourceStack 的底层数据类型（彻底移除类名字符串 indexOf 模糊匹配）
+    // 注意信任优先级：必须先校验玩家 / 命令方块，绝不允许玩家来源借助 declarationStack 绕过玩家权限校验。
     function classifyCommandSource(source) {
         if (source == null) {
             return { kind: 'untrusted_other', player: null, rawSource: null, className: 'null' }
-        }
-
-        // 1. 检查当前调用栈是否处于已注册白名单的 withDeclaration 块内
-        if (declarationStack.length > 0) {
-            var topId = declarationStack[declarationStack.length - 1]
-            if (topId && registeredCallers[topId]) {
-                return { kind: 'declared_function', callerId: topId, player: null, rawSource: source.source, className: 'Declared:' + topId }
-            }
         }
 
         var rawSource = tryCall(function () { return source.source }, null)
@@ -948,7 +948,7 @@
             return (rawSource != null && typeof rawSource.getClass === 'function') ? String(rawSource.getClass().getName()) : ''
         }, '')
 
-        // 2. 严格验证是否为真实玩家直接执行：
+        // 1. 优先严格验证是否为真实玩家直接执行（最不可信物理源优先拦截，防提权伪装）：
         //    注意：CommandSourceStack.getPlayer() 返回的是 ServerPlayer，但 Rhino 可能会对其中一个包装一层 NativeJavaObject / KubeJS 代理，
         //    导致 rawSource === player 引用不相等；因此同时支持 Java Object.equals() 与 UUID 相等比对，并配合 ServerPlayerClass.isInstance 校验。
         var player = tryCall(function () {
@@ -984,10 +984,18 @@
             }
         }
 
-        // 3. 严格验证是否为命令方块 (BaseCommandBlock)
+        // 2. 严格验证是否为命令方块 (BaseCommandBlock)
         if (rawSource != null && BaseCommandBlockClass != null) {
             if (isJavaInstance(BaseCommandBlockClass, rawSource)) {
                 return { kind: 'command_block', player: null, rawSource: rawSource, className: rawCls || 'BaseCommandBlock' }
+            }
+        }
+
+        // 3. 在排除玩家与命令方块后，检查当前调用栈是否处于已注册白名单的 withDeclaration 块内
+        if (declarationStack.length > 0) {
+            var topId = declarationStack[declarationStack.length - 1]
+            if (topId && registeredCallers[topId]) {
+                return { kind: 'declared_function', callerId: topId, player: null, rawSource: rawSource, className: 'Declared:' + topId }
             }
         }
 
@@ -1014,7 +1022,7 @@
         var subSpec = subKey ? subcommands[subKey] : null
         var policy  = normalizePermissionPolicy(
             policyOverride !== undefined ? policyOverride : (subSpec != null ? subSpec.policy : null),
-            POLICY_PRESETS.public
+            POLICY_PRESETS.admin
         )
 
         var srcInfo = classifyCommandSource(source)
