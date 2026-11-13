@@ -138,6 +138,7 @@
     var max2 = (a, b) => (a > b ? a : b)
     var clampNum = (v, lo, hi) => (v < lo ? lo : (v > hi ? hi : v))
 
+    // 【catch 约定】日志设施自身的兜底：console / notifyPlayer.tell 不可用时已无更低层可退，留空避免递归报错。
     var reportWarning = (where, msg, notifyPlayer) => {
         if (typeof global !== 'undefined' && global.EpiphyLog != null) {
             return global.EpiphyLog.warn('EpiphyAudio', where, msg, notifyPlayer, CONFIG.errorLogIntervalMs)
@@ -248,6 +249,7 @@
         return out
     }
 
+    // 【catch 约定】Java 对象属性/方法能力探测：跨映射读取字段或无参 getter，失败属预期分支，留空避免热路径污染。
     var readMember = (obj, name) => {
         if (obj == null) return null
         var v = null
@@ -1217,7 +1219,10 @@
             for (var rec of getCandidateListForHandle(h, snap)) {
                 if (h.listeners[rec.uuid]) continue
                 var readyAt = loginReadyTick.get(rec.uuid)
-                if (readyAt != null && tickCounter < readyAt) continue
+                if (readyAt != null) {
+                    if (tickCounter < readyAt) continue
+                    loginReadyTick.delete(rec.uuid)
+                }
                 if (!isPlayerEligible(h, rec, false)) continue
                 if ((listenCount.get(rec.uuid) || 0) >= CONFIG.maxHandlesPerPlayer) {
                     reportWarning('maxHandlesPerPlayer', `玩家 ${rec.name || rec.uuid} 同时收听句柄数已达上限 (${CONFIG.maxHandlesPerPlayer})，已跳过新增音频 #${h.id}`)
@@ -1259,23 +1264,39 @@
 
     var syncAll = () => {
         if (handles.size === 0) return
-        var snap = snapshotPlayers()
-        for (var h of Array.from(handles.values())) {
-            if (h == null || !handles.has(h.id)) continue
+        var snap             = snapshotPlayers()
+        var noOnlinePlayers  = (snap.list.length === 0)
+        var needsArbitration = false
+        handles.forEach((h) => {
+            if (h == null || !handles.has(h.id)) return
             if (h.endTick > 0 && tickCounter >= h.endTick) {
                 endHandle(h, 'expired', snap)
-                continue
+                return
+            }
+            if (noOnlinePlayers && h.started && h.listenerCount === 0 && (h.loop || h.lateJoin)) {
+                // 无人在线且无活跃监听器时，常规方块/坐标音源降频检查结束条件（每 20 tick 一次），避免空转 queryBlockAt
+                if (h.anchor.kind !== 'entity' && h.stopCond.predicate == null && (tickCounter % 20) !== 0) {
+                    return
+                }
             }
             if (!h.started) {
                 activateHandle(h, snap)
-                continue
+            } else {
+                syncHandle(h, snap)
+                if (handles.has(h.id) && !h.loop && !h.lateJoin && h.listenerCount === 0) {
+                    endHandle(h, 'no_listener', snap)
+                }
             }
-            syncHandle(h, snap)
-            if (handles.has(h.id) && !h.loop && !h.lateJoin && h.listenerCount === 0) {
-                endHandle(h, 'no_listener', snap)
+            if (!needsArbitration && !noOnlinePlayers && handles.has(h.id) && h.started && h.listenerCount > 0) {
+                if ((h.conflictMode && h.conflictMode !== 'none') ||
+                    (h.mutedListeners != null && Object.keys(h.mutedListeners).length > 0)) {
+                    needsArbitration = true
+                }
             }
+        })
+        if (needsArbitration) {
+            arbitrateHandleConflicts(snap)
         }
-        arbitrateHandleConflicts(snap)
     }
 
     var normalizeConflictMode = (raw, fallback) => {
@@ -1603,7 +1624,7 @@
     }
 
     var safePlay = (a, b, c) => {
-        try { return play(a, b, c) } catch (e) { return 0 }
+        try { return play(a, b, c) } catch (e) { reportCatch('safePlay', e); return 0 }
     }
 
     var withFields = (opts, fields) => {
@@ -2083,6 +2104,7 @@
                 if (typeof global !== 'undefined' && global.EpiphyLog != null) {
                     global.EpiphyLog.once('warn', 'audio:missing_block_tracker', msg)
                 } else {
+                    // 【catch 约定】日志设施自身的兜底：console 不可用时已无更低层可退，留空。
                     try { console.warn(msg) } catch (e) {}
                 }
             }
