@@ -562,11 +562,14 @@ test('debug hub: dynamic queue drain, multi-module metrics, checks, actions & ad
     for (var mi = 0; mi < snap.modules.length; mi++) {
         byName[snap.modules[mi].name] = snap.modules[mi]
     }
-    assert.ok(byName.tracker.summaryText.indexOf('scanQueue.length=') >= 0)
-    assert.ok(byName.tracker.summaryText.indexOf('trackedBlocks.size=') >= 0)
-    assert.ok(byName.tracker.summaryText.indexOf('getTrackedRecords=') >= 0)
-    assert.ok(byName.audio.summaryText.indexOf('handles.size=1') >= 0, 'audio summary: ' + byName.audio.summaryText)
-    assert.ok(byName.audio.summaryText.indexOf('syncAll=') >= 0)
+    assert.ok(byName.tracker.summaryText.length > 0 && byName.tracker.detailLines.length > 0)
+    assert.ok(byName.tracker.metrics && typeof byName.tracker.metrics.scanQueueArrayLength === 'number')
+    assert.ok(typeof byName.tracker.metrics.trackedBlocksSize === 'number')
+    assert.ok(typeof byName.tracker.metrics.getTrackedRecordsCalls === 'number')
+    assert.ok(byName.audio.summaryText.length > 0 && byName.audio.detailLines.length > 0)
+    assert.strictEqual(byName.audio.metrics.handlesSize, 1)
+    assert.ok(typeof byName.audio.metrics.lastSyncAllMs === 'number')
+    assert.ok(byName.danmaku.metrics && byName.log.metrics && byName.valve.metrics && byName.debug.metrics)
 
     var chk = Debug.runChecks(null)
     assert.strictEqual(chk.warnCount, 0, 'all checks should pass cleanly: ' + JSON.stringify(chk.items))
@@ -820,7 +823,9 @@ test('block tracker: scan aborts rollback LRU, reports queue-full status & recor
     assert.strictEqual(st2.blockedByQueue, true)
     var rescanRes = Debug.runAction('tracker', 'rescan')
     assert.strictEqual(rescanRes.ok, true)
-    assert.ok(rescanRes.message.includes('已满'))
+    assert.strictEqual(rescanRes.code, 'queue_truncated')
+    assert.strictEqual(rescanRes.data.truncatedByQueue, true)
+    assert.ok(rescanRes.message.length > 0)
 
     // Clear queue cleanly (unload all dummy chunks & remove helper stones) before testing abort rollbacks on chunk (0,0)
     Tracker.configure({ maxScanQueue: 16, scanSectionsPerTick: 1 })
@@ -893,7 +898,8 @@ test('block tracker: scan aborts rollback LRU, reports queue-full status & recor
     assert.ok(stats.tickAllCount > 0 && stats.lastActiveTickAllMs > 0 && stats.scanSliceCount > 0)
     var resetRes = Debug.runAction('tracker', 'resetmetrics')
     assert.strictEqual(resetRes.ok, true)
-    assert.ok(resetRes.message.includes('清零'))
+    assert.strictEqual(resetRes.code, 'metrics_reset')
+    assert.ok(resetRes.message.length > 0)
     assert.strictEqual(Tracker.getStats().tickAllCount, 0)
 })
 
@@ -922,9 +928,8 @@ test('danmaku: onBindingChanged invalidates scope cache & first/latest/nearest/s
     var alice   = world.addPlayer('Alice', '00000000-0000-0000-0000-000000000010', 8, 20, 0)
 
     function getDanmakuRev() {
-        var detail = Debug.collectSnapshot('danmaku').modules[0].detailLines.join('\n')
-        var m = /boundScopeRevision=(\d+)/.exec(detail)
-        return m ? Number(m[1]) : -1
+        var mod = Debug.collectSnapshot('danmaku').modules[0]
+        return (mod && mod.metrics && typeof mod.metrics.boundScopeRevision === 'number') ? mod.metrics.boundScopeRevision : -1
     }
 
     for (var ti = 0; ti < hooks.tick.length; ti++) hooks.tick[ti]({ server: world.server })
@@ -1070,9 +1075,9 @@ test('danmaku: merge cluster honors earliest leader, suppresses followers, expan
     assert.strictEqual(pNearB2.sentPackets.filter(function (e) { return e.pkt.title === 'leader_0' }).length, 1)
 
     // Verify per-cycle timing recorded without counting suppressed followers
-    var dmSnap    = Debug.collectSnapshot('danmaku')
-    var detailStr = dmSnap.modules[0].detailLines.join('\n')
-    assert.ok(detailStr.includes('emitCycleMs:') && !detailStr.includes('cycles=0'))
+    var dmMetrics = Danmaku.getStats()
+    assert.ok(dmMetrics.emitCycleCount > 0 && dmMetrics.lastActiveEmitCycleMs >= 0)
+    assert.strictEqual(Debug.collectSnapshot('danmaku').modules[0].metrics.emitCycleCount, dmMetrics.emitCycleCount)
 
     // 3) Break leader B1 at (0,20,0) -> P1 gets clear packet, P2 (inside surviving B2) is NOT cleared!
     pNearB1.sentPackets.length = 0
@@ -1130,7 +1135,7 @@ test('audio: syncAll skips 0-handle ticks, arbitrates conflicts & merges block c
     // Subpart A: 30 ticks with 0 handles -> syncAllCount MUST stay 0!
     stepTicks(30)
     var audSnap = Debug.collectSnapshot('audio')
-    assert.ok(audSnap.modules[0].detailLines.join('\n').includes('syncAllCount: 0,'))
+    assert.strictEqual(audSnap.modules[0].metrics.syncAllCount, 0)
 
     // Subpart B: standalone play conflict arbitration ('nearest')
     p1.moveTo(8, 20, 0)

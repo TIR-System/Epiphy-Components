@@ -2337,6 +2337,7 @@
         sendMinorEdgeNear: sendMinorEdgeNear,
         clearPlayer:       clearPlayer,
         clearNear:         clearNear,
+        getStats:          getStats,
         _pure: Object.freeze({
             parseSize:       parseSize,
             parseTilt:       parseTilt,
@@ -2845,34 +2846,61 @@
         return 0
     }
 
+    function getStats() {
+        var mode = (danmakuBlockTracker != null && !danmakuBlockTracker.isFallback) ? 'tracker' : 'fallback'
+        return {
+            trackerMode:           mode,
+            fallbackBindings:      fallbackBindings.size,
+            fallbackTracked:       fallbackTracked.size,
+            lastEmitCycleMs:       lastEmitCycleMs,
+            lastActiveEmitCycleMs: lastActiveEmitCycleMs,
+            maxEmitCycleMs:        maxEmitCycleMs,
+            emitCycleCount:        emitCycleCount,
+            lastEmitCycleTick:     lastEmitCycleTick,
+            lastEmitMs:            lastEmitMs,
+            maxEmitMs:             maxEmitMs,
+            emitCallCount:         emitCallCount,
+            scopeCacheSize:        scopeListCache.size,
+            boundScopeRevision:    boundScopeRevision,
+            blockSeqByKeySize:     blockSeqByKey.size,
+            cooldownSize:          playerSourceCooldown.size,
+            trackedRecordsCalls:   getDanmakuTrackerCalls(),
+            valveMissing:          valveMissing,
+            valveRegError:         valveRegError,
+            debug:                 Boolean(CONFIG.debug),
+            tickCounter:           danmakuTickCounter
+        }
+    }
+
     var danmakuDebugProvider = {
         name:    'danmaku',
         label:   '屏幕弹幕组件',
         order:   40,
         summary: function () {
-            var mode = (danmakuBlockTracker != null && !danmakuBlockTracker.isFallback) ? 'tracker' : 'fallback'
-            return 'scopeCache=' + scopeListCache.size +
-                ' (rev=' + boundScopeRevision + ')' +
-                ' | emitCycle=' + lastEmitCycleMs.toFixed(3) + 'ms' +
-                ' (active=' + lastActiveEmitCycleMs.toFixed(3) + 'ms, max=' + maxEmitCycleMs.toFixed(3) + 'ms)' +
-                ' | cooldowns=' + playerSourceCooldown.size +
-                ' | getTrackedRecords=' + getDanmakuTrackerCalls() +
-                ' | mode=' + mode
+            var s = getStats()
+            return 'scopeCache=' + s.scopeCacheSize +
+                ' (rev=' + s.boundScopeRevision + ')' +
+                ' | emitCycle=' + s.lastEmitCycleMs.toFixed(3) + 'ms' +
+                ' (active=' + s.lastActiveEmitCycleMs.toFixed(3) + 'ms, max=' + s.maxEmitCycleMs.toFixed(3) + 'ms)' +
+                ' | cooldowns=' + s.cooldownSize +
+                ' | getTrackedRecords=' + s.trackedRecordsCalls +
+                ' | mode=' + s.trackerMode
         },
         detail: function () {
-            var mode = (danmakuBlockTracker != null && !danmakuBlockTracker.isFallback) ? 'tracker' : 'fallback'
+            var s = getStats()
             return [
-                'trackerMode: ' + mode + ' (fallbackBindings=' + fallbackBindings.size + ', fallbackTracked=' + fallbackTracked.size + ')',
-                'emitCycleMs: last=' + lastEmitCycleMs.toFixed(3) + 'ms, lastActive=' + lastActiveEmitCycleMs.toFixed(3) + 'ms, max=' + maxEmitCycleMs.toFixed(3) + 'ms (cycles=' + emitCycleCount + ', lastCycleTick=' + lastEmitCycleTick + ')',
-                'emitCallMs: last=' + lastEmitMs.toFixed(3) + 'ms, max=' + maxEmitMs.toFixed(3) + 'ms (calls=' + emitCallCount + ')',
-                'scopeListCache.size: ' + scopeListCache.size + ' (boundScopeRevision=' + boundScopeRevision + ')',
-                'blockSeqByKey.size: ' + blockSeqByKey.size,
-                'playerSourceCooldown.size: ' + playerSourceCooldown.size,
-                'getTrackedRecords(danmaku): ' + getDanmakuTrackerCalls(),
-                'valveMissing: ' + valveMissing + ', valveRegError: ' + String(valveRegError),
-                'CONFIG.debug: ' + Boolean(CONFIG.debug) + ', tickCounter: ' + danmakuTickCounter
+                'trackerMode: ' + s.trackerMode + ' (fallbackBindings=' + s.fallbackBindings + ', fallbackTracked=' + s.fallbackTracked + ')',
+                'emitCycleMs: last=' + s.lastEmitCycleMs.toFixed(3) + 'ms, lastActive=' + s.lastActiveEmitCycleMs.toFixed(3) + 'ms, max=' + s.maxEmitCycleMs.toFixed(3) + 'ms (cycles=' + s.emitCycleCount + ', lastCycleTick=' + s.lastEmitCycleTick + ')',
+                'emitCallMs: last=' + s.lastEmitMs.toFixed(3) + 'ms, max=' + s.maxEmitMs.toFixed(3) + 'ms (calls=' + s.emitCallCount + ')',
+                'scopeListCache.size: ' + s.scopeCacheSize + ' (boundScopeRevision=' + s.boundScopeRevision + ')',
+                'blockSeqByKey.size: ' + s.blockSeqByKeySize,
+                'playerSourceCooldown.size: ' + s.cooldownSize,
+                'getTrackedRecords(danmaku): ' + s.trackedRecordsCalls,
+                'valveMissing: ' + s.valveMissing + ', valveRegError: ' + String(s.valveRegError),
+                'CONFIG.debug: ' + s.debug + ', tickCounter: ' + s.tickCounter
             ]
         },
+        metrics: getStats,
         check: function () {
             var hasRealTracker = (danmakuBlockTracker != null && !danmakuBlockTracker.isFallback)
             return [

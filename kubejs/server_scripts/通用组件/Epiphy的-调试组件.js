@@ -90,6 +90,7 @@
             order:   (spec.order != null && isFinite(Number(spec.order))) ? Number(spec.order) : 100,
             summary: typeof spec.summary === 'function' ? spec.summary : null,
             detail:  typeof spec.detail === 'function' ? spec.detail : null,
+            metrics: typeof spec.metrics === 'function' ? spec.metrics : null,
             check:   typeof spec.check === 'function' ? spec.check : null,
             actions: normalizedActions
         })
@@ -223,6 +224,16 @@
                 }
             }
 
+            var metricsData = null
+            if (rec.metrics != null) {
+                try {
+                    metricsData = rec.metrics()
+                } catch (eMet) {
+                    logCatch('metrics:' + k, eMet)
+                    metricsData = null
+                }
+            }
+
             moduleEntries.push({
                 name:        rec.name,
                 label:       rec.label,
@@ -230,6 +241,7 @@
                 summaryData: summaryData,
                 summaryText: summaryText,
                 detailLines: detailLines,
+                metrics:     metricsData,
                 actions:     Object.keys(rec.actions)
             })
         }
@@ -305,21 +317,30 @@
         var aKey = normalizeName(actionName)
         var rec  = providers.get(mKey)
         if (rec == null) {
-            return { ok: false, message: '未找到调试提供者 [' + mKey + ']' }
+            return { ok: false, code: 'provider_not_found', message: '未找到调试提供者 [' + mKey + ']' }
         }
         var act = rec.actions[aKey]
         if (act == null || typeof act.fn !== 'function') {
             return {
                 ok:      false,
+                code:    'action_not_found',
                 message: '模块 [' + mKey + '] 未注册动作 [' + aKey + ']（可用: ' + (Object.keys(rec.actions).join(', ') || '无') + '）'
             }
         }
         try {
             var out = act.fn(args)
-            return { ok: true, message: out != null ? String(out) : ('已执行 ' + mKey + '.' + aKey) }
+            if (out != null && typeof out === 'object' && !Array.isArray(out) && out.message !== undefined) {
+                return {
+                    ok:      out.ok === undefined ? true : Boolean(out.ok),
+                    code:    out.code != null ? String(out.code) : (mKey + '.' + aKey),
+                    data:    out.data !== undefined ? out.data : null,
+                    message: out.message != null ? String(out.message) : ('已执行 ' + mKey + '.' + aKey)
+                }
+            }
+            return { ok: true, code: mKey + '.' + aKey, data: null, message: out != null ? String(out) : ('已执行 ' + mKey + '.' + aKey) }
         } catch (eAct) {
             logCatch('action:' + mKey + ':' + aKey, eAct)
-            return { ok: false, message: '执行动作异常: ' + eAct }
+            return { ok: false, code: 'action_exception', data: null, message: '执行动作异常: ' + eAct }
         }
     }
 
@@ -529,6 +550,13 @@
                 'valveAttached: ' + Boolean(typeof global !== 'undefined' && (global.EpiphyPermissionValve || global.PermissionValve) != null),
                 'logAttached: ' + Boolean(typeof global !== 'undefined' && global.EpiphyLog != null)
             ]
+        },
+        metrics: function () {
+            return {
+                providersCount: providers.size,
+                queuePending:   (typeof global !== 'undefined' && Array.isArray(global.EpiphyDebugProviderQueue)) ? global.EpiphyDebugProviderQueue.length : 0,
+                registered:     sortedProviderKeys()
+            }
         },
         check: function () {
             var qLen = (typeof global !== 'undefined' && Array.isArray(global.EpiphyDebugProviderQueue))

@@ -1607,6 +1607,7 @@
             }
             return lines
         },
+        metrics: getStats,
         check: function () {
             var s = getStats()
             return [{

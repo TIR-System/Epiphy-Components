@@ -1336,6 +1336,7 @@
                 'persistDirty: ' + persistDirty + ', storagePath: ' + (loadedStoragePath || '（未加载世界）')
             ]
         },
+        metrics: getStats,
         check: function () {
             var s = getStats()
             var qOk = s.pendingScanCount < Math.floor(CONFIG.maxScanQueue * 0.85)
@@ -1360,19 +1361,35 @@
                     var n  = rescanAll()
                     var st = getLastScanStatus()
                     if (st.truncatedByQueue) {
-                        return '已重扫并新入队 ' + n + ' 个非空气区块段（扫描队列已满 ' + st.pending + '/' + st.cap + '，剩余区段将在消费空出后按周期补扫）'
+                        return {
+                            code:    'queue_truncated',
+                            data:    st,
+                            message: '已重扫并新入队 ' + n + ' 个非空气区块段（扫描队列已满 ' + st.pending + '/' + st.cap + '，剩余区段将在消费空出后按周期补扫）'
+                        }
                     }
                     if (st.blockedByQueue) {
-                        return '扫描队列已满（' + st.pending + '/' + st.cap + ' 排队中），本次未能入队'
+                        return {
+                            code:    'queue_full',
+                            data:    st,
+                            message: '扫描队列已满（' + st.pending + '/' + st.cap + ' 排队中），本次未能入队'
+                        }
                     }
-                    return '已重扫并新入队 ' + n + ' 个非空气区块段（待扫总数: ' + getPendingScanCount() + '）'
+                    return {
+                        code:    'enqueued',
+                        data:    st,
+                        message: '已重扫并新入队 ' + n + ' 个非空气区块段（待扫总数: ' + getPendingScanCount() + '）'
+                    }
                 }
             },
             flush: {
                 desc: '立即将 trackedBlocks 落盘保存',
                 fn: function () {
                     flushTrackedBlocks()
-                    return '已落盘 savedCount=' + trackedBlocks.size + ' -> ' + String(loadedStoragePath)
+                    return {
+                        code:    'flushed',
+                        data:    { savedCount: trackedBlocks.size, storagePath: loadedStoragePath },
+                        message: '已落盘 savedCount=' + trackedBlocks.size + ' -> ' + String(loadedStoragePath)
+                    }
                 }
             },
             resetmetrics: {
@@ -1385,7 +1402,11 @@
                     lastScanSliceMs     = 0
                     maxScanSliceMs      = 0
                     scanSliceCount      = 0
-                    return '已清零方块追踪器耗时统计'
+                    return {
+                        code:    'metrics_reset',
+                        data:    { tickAllCount: 0, scanSliceCount: 0 },
+                        message: '已清零方块追踪器耗时统计'
+                    }
                 }
             }
         }

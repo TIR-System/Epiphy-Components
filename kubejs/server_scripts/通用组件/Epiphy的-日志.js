@@ -244,6 +244,7 @@
                 'activeDebugModules: ' + (s.activeDebugModules.join(', ') || '（全部关闭）')
             ]
         },
+        metrics: getStats,
         check: function () {
             var s = getStats()
             return [{

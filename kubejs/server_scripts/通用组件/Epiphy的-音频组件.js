@@ -2841,7 +2841,8 @@
         getByKey:         getByKey,
         list:             list,
         listeners:        listeners,
-        on:               on
+        on:               on,
+        getStats:         () => getStats()
     }
 
     // ========================================================================
@@ -3285,28 +3286,51 @@
         }, 0)
     }
 
+    var getStats = () => {
+        var mode = (audioBlockTracker != null && !audioBlockTracker.isFallback) ? 'tracker' : 'fallback'
+        return {
+            handlesSize:         handles.size,
+            maxHandles:          CONFIG.maxHandles,
+            keyIndexSize:        keyIndex.size,
+            listenCountSize:     listenCount.size,
+            trackerMode:         mode,
+            lastSyncAllMs:       lastSyncAllMs,
+            lastActiveSyncAllMs: lastActiveSyncAllMs,
+            maxSyncAllMs:        maxSyncAllMs,
+            syncAllCount:        syncAllCount,
+            lastSyncTick:        lastSyncAllTick,
+            currentTick:         tickCounter,
+            trackedRecordsCalls: getAudioTrackerCalls(),
+            fallbackBindings:    fallbackBindings.size,
+            fallbackTracked:     fallbackTracked.size,
+            valveMissing:        valveMissing,
+            debug:               Boolean(CONFIG.debug)
+        }
+    }
+
     var audioDebugProvider = {
         name:    'audio',
         label:   '空间音频组件',
         order:   50,
         summary: () => {
-            var mode = (audioBlockTracker != null && !audioBlockTracker.isFallback) ? 'tracker' : 'fallback'
-            return `handles.size=${handles.size} | syncAll=${lastSyncAllMs.toFixed(3)}ms` +
-                ` (active=${lastActiveSyncAllMs.toFixed(3)}ms, max=${maxSyncAllMs.toFixed(3)}ms)` +
-                ` | listeners=${listenCount.size} | mode=${mode}`
+            var s = getStats()
+            return `handles.size=${s.handlesSize} | syncAll=${s.lastSyncAllMs.toFixed(3)}ms` +
+                ` (active=${s.lastActiveSyncAllMs.toFixed(3)}ms, max=${s.maxSyncAllMs.toFixed(3)}ms)` +
+                ` | listeners=${s.listenCountSize} | mode=${s.trackerMode}`
         },
         detail: () => {
-            var mode = (audioBlockTracker != null && !audioBlockTracker.isFallback) ? 'tracker' : 'fallback'
+            var s = getStats()
             return [
-                `handles.size: ${handles.size} / max=${CONFIG.maxHandles}, keyIndex.size=${keyIndex.size}`,
-                `listenCount.size: ${listenCount.size}, trackerMode=${mode}`,
-                `syncAllMs: last=${lastSyncAllMs.toFixed(3)}ms, lastActive=${lastActiveSyncAllMs.toFixed(3)}ms, max=${maxSyncAllMs.toFixed(3)}ms`,
-                `syncAllCount: ${syncAllCount}, lastSyncTick=${lastSyncAllTick}, currentTick=${tickCounter}`,
-                `getTrackedRecords(audio): ${getAudioTrackerCalls()}`,
-                `fallbackBindings=${fallbackBindings.size}, fallbackTracked=${fallbackTracked.size}`,
-                `valveMissing=${valveMissing}, CONFIG.debug=${Boolean(CONFIG.debug)}`
+                `handles.size: ${s.handlesSize} / max=${s.maxHandles}, keyIndex.size=${s.keyIndexSize}`,
+                `listenCount.size: ${s.listenCountSize}, trackerMode=${s.trackerMode}`,
+                `syncAllMs: last=${s.lastSyncAllMs.toFixed(3)}ms, lastActive=${s.lastActiveSyncAllMs.toFixed(3)}ms, max=${s.maxSyncAllMs.toFixed(3)}ms`,
+                `syncAllCount: ${s.syncAllCount}, lastSyncTick=${s.lastSyncTick}, currentTick=${s.currentTick}`,
+                `getTrackedRecords(audio): ${s.trackedRecordsCalls}`,
+                `fallbackBindings=${s.fallbackBindings}, fallbackTracked=${s.fallbackTracked}`,
+                `valveMissing=${s.valveMissing}, CONFIG.debug=${s.debug}`
             ]
         },
+        metrics: getStats,
         check: () => {
             var hasRealTracker = (audioBlockTracker != null && !audioBlockTracker.isFallback)
             return [
