@@ -8,11 +8,10 @@
 //    - kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js（服务端调度器）
 //    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀）
 //
-//  依赖与缺失降级行为：
+//  依赖与缺失影响：
+//    - 硬依赖：kubejs/startup_scripts/通用组件/Epiphy的-协议常量.js (EpiphyProtocol, priority: 1200)
+//    - 硬依赖：kubejs/startup_scripts/通用组件/Epiphy的-Spec与通用工具.js (EpiphySpec, priority: 1180)
 //    - 必需配套：kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js（缺失时客户端处于待命状态，无弹幕数据包驱动）
-//    - 协议契约：kubejs/startup_scripts/通用组件/Epiphy的-协议常量.js (EpiphyProtocol, priority: 1200)
-//      缺失时启动输出 console.warn 并回退至内联兜底常量（协议版本 5、HUD_FORBIDDEN_PRESETS）；
-//      收包时始终执行 fail-closed 协议校验，缺 proto 或版本不匹配会输出 console.error 并直接拒收。
 //
 //  功能概述：
 //    1. 屏幕相对坐标 (rx, ry)、旋转角 (angle)、字号缩放 (scale)、RGB/HEX 颜色与阴影；
@@ -38,12 +37,16 @@
 // ============================================================================
 
 ;(function () {
-    var PROTO         = (typeof global !== 'undefined' && global.EpiphyProtocol != null) ? global.EpiphyProtocol : null
-    var CHANNEL       = (PROTO && PROTO.DANMAKU_CHANNEL) || 'epiphy:screen_danmaku'
-    var PROTO_VERSION = (PROTO && PROTO.DANMAKU_PROTO_VERSION) || 5
-    if (PROTO == null) {
-        console.warn('[ScreenDanmakuClient] 未检测到 startup_scripts/通用组件/Epiphy的-协议常量.js (EpiphyProtocol)，将使用内联兜底协议版本 ' + PROTO_VERSION + '；若双端版本不一致将拒收报文。')
+    var PROTO = (typeof global !== 'undefined' && global.EpiphyProtocol != null) ? global.EpiphyProtocol : null
+    var SPEC  = (typeof global !== 'undefined' && global.EpiphySpec != null) ? global.EpiphySpec : null
+    if (!PROTO) {
+        throw new Error('[ScreenDanmakuClient] 缺少硬依赖 global.EpiphyProtocol，请确认 startup_scripts/通用组件/Epiphy的-协议常量.js 已加载')
     }
+    if (!SPEC) {
+        throw new Error('[ScreenDanmakuClient] 缺少硬依赖 global.EpiphySpec，请确认 startup_scripts/通用组件/Epiphy的-Spec与通用工具.js 已加载')
+    }
+    var CHANNEL       = PROTO.DANMAKU_CHANNEL
+    var PROTO_VERSION = PROTO.DANMAKU_PROTO_VERSION
 
     // 统一配置常量表（消除散落魔法数）
     var CONFIG = {
@@ -127,17 +130,39 @@
     // rendertype_text.fsh 会直接丢弃 alpha < 0.1 (~26/255) 的片元；外圈跳过低于 28 的极微弱描边，避免双线性采样在阈值边缘切出硬锯齿
     var OUTLINE_ALPHA_CUTOFF = 28
 
-    try { GL11 = Java.loadClass('org.lwjgl.opengl.GL11') } catch (eGL) { }
-    try { SystemClass = Java.loadClass('java.lang.System') } catch (eSys) { }
-    try { MinecraftClass = Java.loadClass('net.minecraft.client.Minecraft') } catch (eMc) { }
-    try { Matrix4fClass = Java.loadClass('org.joml.Matrix4f') } catch (eMat) { }
+    var WARNED_KEYS = {}
+    function warnOnce(key, msg) {
+        if (WARNED_KEYS[key]) return
+        WARNED_KEYS[key] = true
+        console.warn('[ScreenDanmakuClient] ' + msg)
+    }
+
+    function loadJavaClass(className) {
+        if (typeof Java === 'undefined' || Java == null || typeof Java.loadClass !== 'function') return null
+        try {
+            return Java.loadClass(className)
+        } catch (e) {
+            warnOnce('javaClass:' + className, '加载 Java 类 ' + className + ' 失败: ' + e)
+            return null
+        }
+    }
+
+    GL11           = loadJavaClass('org.lwjgl.opengl.GL11')
+    SystemClass    = loadJavaClass('java.lang.System')
+    MinecraftClass = loadJavaClass('net.minecraft.client.Minecraft')
+    Matrix4fClass  = loadJavaClass('org.joml.Matrix4f')
+
+    var HAS_NANO_TIME = (SystemClass != null && typeof SystemClass.nanoTime === 'function')
 
     // 单调递增毫秒时钟：避免系统时间被 NTP 同步或手动修改时导致动画 age 跳变或变负
     function monotonicNowMs() {
-        if (SystemClass != null) {
+        if (HAS_NANO_TIME) {
             try {
                 return Number(SystemClass.nanoTime()) / 1000000.0
-            } catch (e) { }
+            } catch (e) {
+                HAS_NANO_TIME = false
+                warnOnce('nanoTime', 'System.nanoTime 不可用，回退 Date.now(): ' + e)
+            }
         }
         return Date.now()
     }
@@ -155,33 +180,13 @@
         }
     }
 
-    var PRIORITY_MAP = (PROTO && PROTO.PRIORITY_MAP) || {
-        low: 1, minor: 1, '低': 1, '次要': 1,
-        normal: 2, medium: 2, default: 2, '中': 2, '普通': 2,
-        high: 3, major: 3, important: 3, '高': 3, '重要': 3,
-        critical: 4, fatal: 4, urgent: 4, boss: 4, '极高': 4, '致命': 4,
-        active: 5, sustain: 5, '持续': 5
-    }
-
-    // 纯 JS 比较与范围钳制辅助函数：规避 Rhino 对 Java 数值包装类型或 3+ 参数调用 Math.min/max 退化返回 NaN 的问题
-    function min2(a, b) {
-        return a < b ? a : b
-    }
-    function max2(a, b) {
-        return a > b ? a : b
-    }
-    function clampNum(v, lo, hi) {
-        return v < lo ? lo : (v > hi ? hi : v)
-    }
+    var PRIORITY_MAP = PROTO.PRIORITY_MAP
+    var min2         = SPEC.min2
+    var max2         = SPEC.max2
+    var clampNum     = SPEC.clampNum
 
     function parsePriority(val, defVal) {
-        if (val === undefined || val === null || val === '') return defVal
-        if (typeof val === 'number' && isFinite(val)) return clampNum(Math.round(val), 0, 10)
-        var s = String(val).trim().toLowerCase()
-        if (PRIORITY_MAP[s] != null) return PRIORITY_MAP[s]
-        var n = Number(s)
-        if (isFinite(n)) return clampNum(Math.round(n), 0, 10)
-        return defVal
+        return SPEC.parsePriority(val, defVal, { map: PRIORITY_MAP, min: 0, max: 10, round: true })
     }
 
     function sanitizeMaxWidth(val) {
@@ -191,40 +196,55 @@
         return clampNum(Math.round(n), CONFIG.minWrapLinePx, 4096)
     }
 
+    var FONT_WIDTH_PROBE_FONT = null
+    var FONT_WIDTH_KIND       = null
+
+    function invokeFontWidthWithKind(fontObj, kind, str) {
+        if (kind === 'direct')   return Number(fontObj.width(str))
+        if (kind === 'explicit') return Number(fontObj['width(java.lang.String)'].call(fontObj, str))
+        if (kind === 'text')     return Number(fontObj.width(Text.of(str)))
+        if (kind === 'srg_str')  return Number(fontObj.m_92895_(str))
+        if (kind === 'srg_text') return Number(fontObj.m_92852_(Text.of(str)))
+        return NaN
+    }
+
+    function probeFontWidthKind(fontObj, str) {
+        var candidates = ['direct', 'explicit', 'text', 'srg_str', 'srg_text']
+        for (var i = 0; i < candidates.length; i++) {
+            var k = candidates[i]
+            try {
+                if (k === 'direct'   && typeof fontObj.width !== 'function') continue
+                if (k === 'explicit' && typeof fontObj['width(java.lang.String)'] !== 'function') continue
+                if (k === 'text'     && typeof fontObj.width !== 'function') continue
+                if (k === 'srg_str'  && typeof fontObj.m_92895_ !== 'function') continue
+                if (k === 'srg_text' && typeof fontObj.m_92852_ !== 'function') continue
+                var w = invokeFontWidthWithKind(fontObj, k, str)
+                if (isFinite(w) && w >= 0) {
+                    FONT_WIDTH_PROBE_FONT = fontObj
+                    FONT_WIDTH_KIND       = k
+                    return w
+                }
+            } catch (eProbe) {
+                // 仅在首次遇到 Font 实例时探测可用测宽重载
+            }
+        }
+        FONT_WIDTH_PROBE_FONT = fontObj
+        FONT_WIDTH_KIND       = 'none'
+        return NaN
+    }
+
     function invokeFontWidth(fontObj, str) {
         if (fontObj == null || !str) return NaN
         var s = String(str)
-        try {
-            if (typeof fontObj.width === 'function') {
-                var wd = Number(fontObj.width(s))
-                if (isFinite(wd) && wd >= 0) return wd
-            }
-        } catch (eDirect) { }
-        try {
-            var fnExplicit = fontObj['width(java.lang.String)']
-            if (typeof fnExplicit === 'function') {
-                var w0 = Number(fnExplicit.call(fontObj, s))
-                if (isFinite(w0) && w0 >= 0) return w0
-            }
-        } catch (e0) { }
-        try {
-            var w1 = Number(fontObj.width(Text.of(s)))
-            if (isFinite(w1) && w1 >= 0) return w1
-        } catch (e1) { }
-        try {
-            if (typeof fontObj.m_92895_ === 'function') {
-                var wSrg = Number(fontObj.m_92895_(s))
-                if (isFinite(wSrg) && wSrg >= 0) return wSrg
-            }
-        } catch (eSrg1) { }
-        try {
-            if (typeof fontObj.m_92852_ === 'function') {
-                var wSrg2 = Number(fontObj.m_92852_(Text.of(s)))
-                if (isFinite(wSrg2) && wSrg2 >= 0) return wSrg2
-            }
-        } catch (eSrg2) { }
-        return NaN
+        if (FONT_WIDTH_PROBE_FONT === fontObj && FONT_WIDTH_KIND != null) {
+            if (FONT_WIDTH_KIND === 'none') return NaN
+            var wd = invokeFontWidthWithKind(fontObj, FONT_WIDTH_KIND, s)
+            return (isFinite(wd) && wd >= 0) ? wd : NaN
+        }
+        return probeFontWidthKind(fontObj, s)
     }
+
+    var MC_INSTANCE_FAILED = false
 
     function getClientFont(event, nowMs) {
         var f = null
@@ -236,11 +256,14 @@
             if (Client.font != null) f = Client.font
             else if (Client.minecraft != null && Client.minecraft.font != null) f = Client.minecraft.font
         }
-        if (f == null && MinecraftClass != null) {
+        if (f == null && MinecraftClass != null && !MC_INSTANCE_FAILED) {
             try {
                 var mcInst = MinecraftClass.getInstance()
                 if (mcInst != null && mcInst.font != null) f = mcInst.font
-            } catch (eMcF) { }
+            } catch (eMcF) {
+                MC_INSTANCE_FAILED = true
+                warnOnce('mcFont', '获取 Minecraft.getInstance().font 失败: ' + eMcF)
+            }
         }
         if (f == null) f = CACHED_FONT
         if (f != null) {
@@ -251,14 +274,12 @@
             }
             LAST_FONT_CHECK_MS = tNow
             var sig = 'F'
-            try {
-                var w1 = invokeFontWidth(f, 'iW')
-                var w2 = invokeFontWidth(f, '§lA')
-                var w3 = invokeFontWidth(f, '中')
-                if (isFinite(w1) && isFinite(w2) && isFinite(w3)) {
-                    sig = 'F:' + w1 + ':' + w2 + ':' + w3
-                }
-            } catch (eSig) { }
+            var w1 = invokeFontWidth(f, 'iW')
+            var w2 = invokeFontWidth(f, '§lA')
+            var w3 = invokeFontWidth(f, '中')
+            if (isFinite(w1) && isFinite(w2) && isFinite(w3)) {
+                sig = 'F:' + w1 + ':' + w2 + ':' + w3
+            }
             if (CACHED_FONT !== f || FONT_SIGNATURE !== sig) {
                 CACHED_FONT      = f
                 FONT_SIGNATURE   = sig
@@ -426,13 +447,8 @@
     }
 
     function parseBool(val, defVal) {
-        if (val === undefined || val === null || val === '') return defVal
-        if (typeof val === 'boolean') return val
-        if (typeof val === 'number') return !isNaN(val) && val !== 0
-        var s = String(val).trim().toLowerCase()
-        if (s === 'true' || s === '1' || s === '1b' || s === 'yes' || s === 'on' || s === 'y' || s === '是' || s === '开启' || s === '开') return true
-        if (s === 'false' || s === '0' || s === '0b' || s === 'no' || s === 'off' || s === 'n' || s === 'none' || s === '否' || s === '关闭' || s === '关') return false
-        return defVal
+        var b = SPEC.parseBoolStrict(val)
+        return b !== null ? b : defVal
     }
 
     function readBool(d, key, defVal) {
@@ -937,36 +953,20 @@
     function probeDisplayModeNormal() {
         if (BATCH_MODE_PROBED) return FONT_DISPLAY_NORMAL
         BATCH_MODE_PROBED = true
-        try {
-            var cls = Java.loadClass('net.minecraft.client.gui.Font$DisplayMode')
-            if (cls != null && cls.NORMAL != null) FONT_DISPLAY_NORMAL = cls.NORMAL
-        } catch (eMode) {
-            FONT_DISPLAY_NORMAL = null
-        }
+        var cls = loadJavaClass('net.minecraft.client.gui.Font$DisplayMode')
+        if (cls != null && cls.NORMAL != null) FONT_DISPLAY_NORMAL = cls.NORMAL
         return FONT_DISPLAY_NORMAL
     }
 
     function probeModernUiBridge() {
         if (MUI_PROBED) return MUI_ENGINE != null
         MUI_PROBED = true
-        try {
-            TextLayoutEngineClass = Java.loadClass('icyllis.modernui.mc.text.TextLayoutEngine')
-        } catch (eEngCls) {
-            TextLayoutEngineClass = null
-        }
+        TextLayoutEngineClass = loadJavaClass('icyllis.modernui.mc.text.TextLayoutEngine')
         if (TextLayoutEngineClass == null || typeof TextLayoutEngineClass.getInstance !== 'function') {
             return false
         }
-        try {
-            ModernTextRendererClass = Java.loadClass('icyllis.modernui.mc.text.ModernTextRenderer')
-        } catch (eRndCls) {
-            ModernTextRendererClass = null
-        }
-        try {
-            SheetsClass = Java.loadClass('net.minecraft.client.renderer.Sheets')
-        } catch (eShCls) {
-            SheetsClass = null
-        }
+        ModernTextRendererClass = loadJavaClass('icyllis.modernui.mc.text.ModernTextRenderer')
+        SheetsClass             = loadJavaClass('net.minecraft.client.renderer.Sheets')
         try {
             var eng = TextLayoutEngineClass.getInstance()
             if (eng == null || typeof eng.lookupFormattedLayout !== 'function') return false
@@ -995,13 +995,24 @@
         }
     }
 
+    var EMOJI_SHEET_PROBED = false
+    var CACHED_EMOJI_SHEET = null
+
     function resolveEmojiSheet() {
+        if (EMOJI_SHEET_PROBED) return CACHED_EMOJI_SHEET
+        EMOJI_SHEET_PROBED = true
         if (SheetsClass == null) return null
         try {
-            if (typeof SheetsClass.m_110787_ === 'function') return SheetsClass.m_110787_()
-            if (typeof SheetsClass.translucentCullBlockSheet === 'function') return SheetsClass.translucentCullBlockSheet()
-        } catch (eSh) { }
-        return null
+            if (typeof SheetsClass.m_110787_ === 'function') {
+                CACHED_EMOJI_SHEET = SheetsClass.m_110787_()
+            } else if (typeof SheetsClass.translucentCullBlockSheet === 'function') {
+                CACHED_EMOJI_SHEET = SheetsClass.translucentCullBlockSheet()
+            }
+        } catch (eSh) {
+            warnOnce('emojiSheet', '探测 ModernUI Emoji RenderType 失败: ' + eSh)
+            CACHED_EMOJI_SHEET = null
+        }
+        return CACHED_EMOJI_SHEET
     }
 
     function ensureFrameBatchCtx(event, fontObj, now) {
@@ -1529,23 +1540,32 @@
         return (a << 24) | rgb
     }
 
+    var EVENT_CAP_PROBED      = false
+    var HAS_SET_SHADER_COLOR  = false
+    var HAS_RESET_SHADER      = false
+    var HAS_EVENT_BLEND       = false
+
+    function ensureEventCaps(event) {
+        if (EVENT_CAP_PROBED || event == null) return
+        EVENT_CAP_PROBED     = true
+        HAS_SET_SHADER_COLOR = (typeof event.setShaderColor === 'function')
+        HAS_RESET_SHADER     = (typeof event.resetShaderColor === 'function')
+        HAS_EVENT_BLEND      = (typeof event.blend === 'function')
+    }
+
     function setShaderAlphaSafe(event, alphaUnit) {
-        var a = clampNum(alphaUnit, 0.02, 1.0)
-        try {
-            if (typeof event.setShaderColor === 'function') {
-                event.setShaderColor(1.0, 1.0, 1.0, a)
-            }
-        } catch (e) { }
+        ensureEventCaps(event)
+        if (!HAS_SET_SHADER_COLOR) return
+        event.setShaderColor(1.0, 1.0, 1.0, clampNum(alphaUnit, 0.02, 1.0))
     }
 
     function resetShaderAlphaSafe(event) {
-        try {
-            if (typeof event.resetShaderColor === 'function') {
-                event.resetShaderColor()
-            } else if (typeof event.setShaderColor === 'function') {
-                event.setShaderColor(1.0, 1.0, 1.0, 1.0)
-            }
-        } catch (e) { }
+        ensureEventCaps(event)
+        if (HAS_RESET_SHADER) {
+            event.resetShaderColor()
+        } else if (HAS_SET_SHADER_COLOR) {
+            event.setShaderColor(1.0, 1.0, 1.0, 1.0)
+        }
     }
 
     var ITEM_POSE_SCRATCH = {
@@ -1559,19 +1579,19 @@
     }
 
     function ensureFallbackBlend(event, batchCtx) {
+        ensureEventCaps(event)
+        if (!HAS_EVENT_BLEND) return
         if (batchCtx != null) {
             if (batchCtx.prevBlend === null) {
                 batchCtx.prevBlend = queryGlBlendEnabled()
                 if (batchCtx.prevBlend !== true) {
-                    try {
-                        event.blend(true)
-                        batchCtx.needBlendRestore = true
-                    } catch (eBlendOn) { }
+                    event.blend(true)
+                    batchCtx.needBlendRestore = true
                 }
             }
             return
         }
-        try { event.blend(true) } catch (eB) { }
+        event.blend(true)
     }
 
     function applyItemPoseToEvent(event, px, py, angle, scaleX, scaleY) {
@@ -2521,20 +2541,11 @@
 
     var protoMismatchWarned = false
 
-    function checkProtoCompatible(expectedVer, incomingVer) {
-        if (PROTO != null && typeof PROTO.isProtoCompatible === 'function') {
-            return PROTO.isProtoCompatible(expectedVer, incomingVer)
-        }
-        if (incomingVer === undefined || incomingVer === null) return false
-        var n = Number(incomingVer)
-        return isFinite(n) && n === Number(expectedVer)
-    }
-
     NetworkEvents.dataReceived(CHANNEL, function (event) {
         try {
             var pkt = event.data
             var incomingProto = (pkt != null) ? pkt.proto : null
-            if (!checkProtoCompatible(PROTO_VERSION, incomingProto)) {
+            if (!PROTO.isProtoCompatible(PROTO_VERSION, incomingProto)) {
                 if (!protoMismatchWarned) {
                     protoMismatchWarned = true
                     console.error('[ScreenDanmakuClient] 协议校验失败（已拒收报文）：服务端 proto=' + String(incomingProto) + '，客户端预期 proto=' + PROTO_VERSION + '，请同步双端脚本。')
@@ -2547,183 +2558,187 @@
         }
     })
 
-    try {
-        global.ScreenDanmakuClient = {
-            CONFIG:     CONFIG,
-            setDebug:   function (enabled) { CONFIG.debug = Boolean(enabled); return CONFIG.debug },
-            push:       enqueueDanmaku,
-            deactivate: function (keyOrGroup, fadeOutOrOpts) {
-                if (keyOrGroup != null && typeof keyOrGroup === 'object') {
-                    var copy = {}
-                    for (var k in keyOrGroup) copy[k] = keyOrGroup[k]
-                    copy.action = 'deactivate'
-                    enqueueDanmaku(copy)
-                    return
-                }
-                var target = (keyOrGroup != null && String(keyOrGroup).trim() !== '') ? String(keyOrGroup) : '*'
-                var payload = { action: 'deactivate', key: target, group: target }
-                if (typeof fadeOutOrOpts === 'number' && !isNaN(fadeOutOrOpts)) {
-                    payload.fadeOut = fadeOutOrOpts
-                } else if (fadeOutOrOpts != null && typeof fadeOutOrOpts === 'object') {
-                    if (fadeOutOrOpts.fadeOut != null) payload.fadeOut = fadeOutOrOpts.fadeOut
-                    if (fadeOutOrOpts.maxPriority != null) payload.maxPriority = fadeOutOrOpts.maxPriority
-                    if (fadeOutOrOpts.priority != null) payload.priority = fadeOutOrOpts.priority
-                    if (fadeOutOrOpts.includeOnce != null) payload.includeOnce = fadeOutOrOpts.includeOnce
-                }
-                enqueueDanmaku(payload)
-            },
-            clear:      function (groupOrOpts, maxPriority) {
-                if (groupOrOpts != null && typeof groupOrOpts === 'object') {
-                    var copy = {}
-                    for (var k in groupOrOpts) copy[k] = groupOrOpts[k]
-                    copy.action = 'clear'
-                    if (copy.group == null || copy.group === '') copy.group = '*'
-                    if (maxPriority != null && copy.maxPriority == null) copy.maxPriority = maxPriority
-                    enqueueDanmaku(copy)
-                    return
-                }
-                var payload = { action: 'clear', group: groupOrOpts || '*' }
-                if (maxPriority != null) payload.maxPriority = maxPriority
-                enqueueDanmaku(payload)
-            },
-            count:      function () { return activeOverlays.length + pendingActions.length }
-        }
-    } catch (eGlob) { }
+    global.ScreenDanmakuClient = {
+        CONFIG:     CONFIG,
+        setDebug:   function (enabled) { CONFIG.debug = Boolean(enabled); return CONFIG.debug },
+        push:       enqueueDanmaku,
+        deactivate: function (keyOrGroup, fadeOutOrOpts) {
+            if (keyOrGroup != null && typeof keyOrGroup === 'object') {
+                var copy = {}
+                for (var k in keyOrGroup) copy[k] = keyOrGroup[k]
+                copy.action = 'deactivate'
+                enqueueDanmaku(copy)
+                return
+            }
+            var target = (keyOrGroup != null && String(keyOrGroup).trim() !== '') ? String(keyOrGroup) : '*'
+            var payload = { action: 'deactivate', key: target, group: target }
+            if (typeof fadeOutOrOpts === 'number' && !isNaN(fadeOutOrOpts)) {
+                payload.fadeOut = fadeOutOrOpts
+            } else if (fadeOutOrOpts != null && typeof fadeOutOrOpts === 'object') {
+                if (fadeOutOrOpts.fadeOut != null) payload.fadeOut = fadeOutOrOpts.fadeOut
+                if (fadeOutOrOpts.maxPriority != null) payload.maxPriority = fadeOutOrOpts.maxPriority
+                if (fadeOutOrOpts.priority != null) payload.priority = fadeOutOrOpts.priority
+                if (fadeOutOrOpts.includeOnce != null) payload.includeOnce = fadeOutOrOpts.includeOnce
+            }
+            enqueueDanmaku(payload)
+        },
+        clear:      function (groupOrOpts, maxPriority) {
+            if (groupOrOpts != null && typeof groupOrOpts === 'object') {
+                var copy = {}
+                for (var k in groupOrOpts) copy[k] = groupOrOpts[k]
+                copy.action = 'clear'
+                if (copy.group == null || copy.group === '') copy.group = '*'
+                if (maxPriority != null && copy.maxPriority == null) copy.maxPriority = maxPriority
+                enqueueDanmaku(copy)
+                return
+            }
+            var payload = { action: 'clear', group: groupOrOpts || '*' }
+            if (maxPriority != null) payload.maxPriority = maxPriority
+            enqueueDanmaku(payload)
+        },
+        count:      function () { return activeOverlays.length + pendingActions.length }
+    }
 
-    try {
-        ClientEvents.loggedOut(function () {
-            activeOverlays.length = 0
-            pendingActions.length = 0
-            LAST_LEVEL_KEY = ''
-        })
-        ClientEvents.loggedIn(function () {
-            activeOverlays.length = 0
-            pendingActions.length = 0
-            LAST_LEVEL_KEY = ''
-        })
-    } catch (eLogEvt) { }
+    ClientEvents.loggedOut(function () {
+        activeOverlays.length = 0
+        pendingActions.length = 0
+        LAST_LEVEL_KEY = ''
+    })
+    ClientEvents.loggedIn(function () {
+        activeOverlays.length = 0
+        pendingActions.length = 0
+        LAST_LEVEL_KEY = ''
+    })
 
     // 判定当前是否打开了需要遮挡 HUD 弹幕的交互式 GUI：
     //   注意：HUD 的 PaintScreenEventJS 构造时不传入 Screen（event.screen 恒为 null），
     //   且 Minecraft 类因存在 setScreen(Screen) 而无 getScreen()，mc.screen 在 Rhino 中会被推导为只写 setter；
-    //   必须通过 MinecraftClientKJS 注入的 getCurrentScreen() / currentScreen 读取当前打开的 Screen。
-    function readMcCurrentScreen(mcObj) {
+    //   必须通过 MinecraftClientKJS 注入的 getCurrentScreen() / currentScreen / Forge SRG f_91080_ 读取，且仅探测一次。
+    var SCREEN_CAP_MAP = { obj: null, kind: 'none', name: null }
+    var CLI_SCREEN_CAP = { obj: null, kind: 'none', name: null }
+
+    function probeScreenGetter(mcObj, cap) {
         if (mcObj == null) return null
-        try {
-            if (typeof mcObj.getCurrentScreen === 'function') {
-                var gs = mcObj.getCurrentScreen()
-                if (gs != null) return gs
+        if (cap.obj !== mcObj) {
+            cap.obj  = mcObj
+            cap.kind = 'none'
+            cap.name = null
+            try {
+                if (typeof mcObj.getCurrentScreen === 'function') {
+                    cap.kind = 'fn'
+                    cap.name = 'getCurrentScreen'
+                }
+            } catch (eFn) { }
+            if (cap.kind === 'none') {
+                var props = ['currentScreen', 'f_91080_']
+                for (var i = 0; i < props.length; i++) {
+                    try {
+                        if (mcObj[props[i]] !== undefined) {
+                            cap.kind = 'prop'
+                            cap.name = props[i]
+                            break
+                        }
+                    } catch (eProp) { }
+                }
             }
-        } catch (e0) { }
-        try {
-            if (mcObj.currentScreen != null) return mcObj.currentScreen
-        } catch (e1) { }
-        try {
-            // 注意勿访问 mcObj.screen（Rhino 会因 setScreen 将其识别为只写属性）；Forge SRG 下真实字段为 f_91080_
-            if (mcObj.f_91080_ != null) return mcObj.f_91080_
-        } catch (e2) { }
+        }
+        if (cap.kind === 'fn') return mcObj[cap.name]()
+        if (cap.kind === 'prop') return mcObj[cap.name]
         return null
     }
+
+    var MC_SCR_GET_FAILED = false
 
     function resolveCurrentScreen(event) {
         if (event != null) {
             if (event.screen != null) return event.screen
-            var mc = event.mc
-            var fromEventMc = readMcCurrentScreen(mc)
+            var fromEventMc = probeScreenGetter(event.mc, SCREEN_CAP_MAP)
             if (fromEventMc != null) return fromEventMc
         }
         if (typeof Client !== 'undefined' && Client != null) {
-            var fromClient = readMcCurrentScreen(Client)
+            var fromClient = probeScreenGetter(Client, CLI_SCREEN_CAP)
             if (fromClient != null) return fromClient
         }
-        if (MinecraftClass != null) {
+        if (MinecraftClass != null && !MC_SCR_GET_FAILED) {
             try {
-                var fromStaticMc = readMcCurrentScreen(MinecraftClass.getInstance())
+                var fromStaticMc = probeScreenGetter(MinecraftClass.getInstance(), SCREEN_CAP_MAP)
                 if (fromStaticMc != null) return fromStaticMc
-            } catch (e3) { }
+            } catch (e3) {
+                MC_SCR_GET_FAILED = true
+                warnOnce('mcStaticScreen', 'Minecraft.getInstance() 读取屏幕状态失败: ' + e3)
+            }
         }
         return null
     }
 
     function isBlockingGuiOpen(event) {
-        try {
-            var scr = resolveCurrentScreen(event)
-            if (scr == null) return false
-            var clsName = ''
-            try {
-                if (typeof scr.getClass === 'function') clsName = String(scr.getClass().getName())
-            } catch (eCls) { }
-            // ChatScreen 打开时 chat box 与输入框占据屏幕，必须视为 GUI 遮挡界面触发防覆盖隐藏
-            if (clsName.indexOf('ReceivingLevelScreen') >= 0 || clsName.indexOf('Overlay') >= 0) {
-                return false
-            }
-            return true
-        } catch (e) {
+        var scr = resolveCurrentScreen(event)
+        if (scr == null) return false
+        var clsName = (typeof scr.getClass === 'function') ? String(scr.getClass().getName()) : ''
+        // ChatScreen 打开时 chat box 与输入框占据屏幕，必须视为 GUI 遮挡界面触发防覆盖隐藏
+        if (clsName.indexOf('ReceivingLevelScreen') >= 0 || clsName.indexOf('Overlay') >= 0) {
             return false
         }
+        return true
     }
 
     // 从 Level 对象（ClientEventJS.getLevel()，实现 LevelKJS）提取维度 ResourceLocation 字符串：
     //   主路径直接调用 LevelKJS.getDimension() / lv.dimension；后备支持原版 Level.dimension().location()。
     function extractDimensionIdFromLevel(lv) {
         if (lv == null) return null
-        try {
-            if (typeof lv.getDimension === 'function') {
-                var gd = lv.getDimension()
-                if (gd != null) {
-                    var sGd = String(gd)
-                    if (sGd.length > 0) return sGd
-                }
+        if (typeof lv.getDimension === 'function') {
+            var gd = lv.getDimension()
+            if (gd != null) {
+                var sGd = String(gd)
+                if (sGd.length > 0) return sGd
             }
-        } catch (e0) { }
-        try {
-            var dimProp = lv.dimension
-            if (dimProp != null && typeof dimProp !== 'function') {
-                var sProp = String(dimProp)
-                if (sProp.length > 0) return sProp
+        }
+        var dimProp = lv.dimension
+        if (dimProp != null && typeof dimProp !== 'function') {
+            var sProp = String(dimProp)
+            if (sProp.length > 0) return sProp
+        }
+        if (typeof dimProp === 'function') {
+            var rk = dimProp.call(lv)
+            if (rk != null) {
+                if (typeof rk.location === 'function') return String(rk.location())
+                return String(rk)
             }
-            if (typeof dimProp === 'function') {
-                var rk = dimProp.call(lv)
-                if (rk != null) {
-                    if (typeof rk.location === 'function') return String(rk.location())
-                    return String(rk)
-                }
-            }
-        } catch (e1) { }
+        }
         return null
     }
 
     function resolveCurrentLevelKey(event) {
         if (event == null) return null
-        try {
-            var lv = (typeof event.getLevel === 'function') ? event.getLevel() : event.level
-            if (lv != null) {
-                var lvDim = extractDimensionIdFromLevel(lv)
-                if (lvDim) return lvDim
-            }
-            var p = (typeof event.getPlayer === 'function') ? event.getPlayer() : event.player
-            if (p != null) {
-                var pLv = (typeof p.getLevel === 'function') ? p.getLevel() : p.level
-                if (pLv != null) {
-                    var pDim = extractDimensionIdFromLevel(pLv)
-                    if (pDim) return pDim
-                    return null
-                }
-            }
-            if (lv == null) return ''
-            return null
-        } catch (e) {
-            return null
+        var lv = (typeof event.getLevel === 'function') ? event.getLevel() : event.level
+        if (lv != null) {
+            var lvDim = extractDimensionIdFromLevel(lv)
+            if (lvDim) return lvDim
         }
+        var p = (typeof event.getPlayer === 'function') ? event.getPlayer() : event.player
+        if (p != null) {
+            var pLv = (typeof p.getLevel === 'function') ? p.getLevel() : p.level
+            if (pLv != null) {
+                var pDim = extractDimensionIdFromLevel(pLv)
+                if (pDim) return pDim
+                return null
+            }
+        }
+        if (lv == null) return ''
+        return null
     }
 
+    var HAS_GL_IS_ENABLED = (GL11 != null && typeof GL11.glIsEnabled === 'function')
+
     function queryGlBlendEnabled() {
-        if (GL11 != null) {
-            try {
-                return Boolean(GL11.glIsEnabled(GL11.GL_BLEND))
-            } catch (e) { }
+        if (!HAS_GL_IS_ENABLED) return null
+        try {
+            return Boolean(GL11.glIsEnabled(GL11.GL_BLEND))
+        } catch (e) {
+            HAS_GL_IS_ENABLED = false
+            warnOnce('glIsEnabled', 'GL11.glIsEnabled 探测失败，后续跳过混合态查询: ' + e)
+            return null
         }
-        return null
     }
 
     ClientEvents.paintScreen(function (event) {
@@ -3018,6 +3033,7 @@
                                     }
                                     event.text(frag.comp, Math.round(frag.halfW || 0) || 0, -4, fCol, shShdBool)
                                 } catch (eFD) {
+                                    logErrorThrottled('shatter direct draw error', eFD)
                                 } finally {
                                     if (fpDirect) { try { event.pop() } catch (eFDPop) { } }
                                 }
@@ -3042,6 +3058,7 @@
                                     event.text(frag.comp, fhx, -4, fCol, shShdBool)
                                 }
                             } catch (eFrag) {
+                                logErrorThrottled('shatter frag draw error', eFrag)
                             } finally {
                                 if (fragPushed) {
                                     try { event.pop() } catch (eFragPop) { }
@@ -3231,7 +3248,7 @@
         } finally {
             flushFrameBatchCtx(batchCtx)
             if (batchCtx != null && batchCtx.needBlendRestore) {
-                try { event.blend(false) } catch (eBlendOff) { }
+                if (HAS_EVENT_BLEND) event.blend(false)
                 batchCtx.needBlendRestore = false
             }
         }

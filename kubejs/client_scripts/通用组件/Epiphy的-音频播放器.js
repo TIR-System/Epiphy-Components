@@ -8,11 +8,10 @@
 //    - kubejs/server_scripts/通用组件/Epiphy的-音频组件.js（服务端调度器 EpiphyAudio v5.2）
 //    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀）
 //
-//  依赖与缺失降级行为：
+//  依赖与缺失影响：
+//    - 硬依赖：kubejs/startup_scripts/通用组件/Epiphy的-协议常量.js (EpiphyProtocol, priority: 1200)
+//    - 硬依赖：kubejs/startup_scripts/通用组件/Epiphy的-Spec与通用工具.js (EpiphySpec, priority: 1180)
 //    - 必需配套：kubejs/server_scripts/通用组件/Epiphy的-音频组件.js（缺失时客户端处于待命状态，无音频数据包驱动）
-//    - 协议契约：kubejs/startup_scripts/通用组件/Epiphy的-协议常量.js (EpiphyProtocol, priority: 1200)
-//      缺失时启动输出 console.warn 并回退至内联兜底常量（协议版本 5）；
-//      收包时始终执行 fail-closed 协议校验，缺 proto 或版本不匹配会输出 console.error 并直接拒收。
 //
 //  适用环境：Minecraft 1.20.1 / Forge 47.x / KubeJS 2001.6.x (ES6)
 //
@@ -22,13 +21,17 @@
 // ============================================================================
 
 ;(() => {
-    var PROTO         = (typeof global !== 'undefined' && global.EpiphyProtocol != null) ? global.EpiphyProtocol : null
-    var CHANNEL       = (PROTO && PROTO.AUDIO_CHANNEL) || 'epiphy:audio'
-    var PROTO_VERSION = (PROTO && PROTO.AUDIO_PROTO_VERSION) || 5
-    var VERSION       = (PROTO && PROTO.AUDIO_SEMVER) || '5.2.0'
-    if (PROTO == null) {
-        console.warn(`[EpiphyAudioClient] 未检测到 startup_scripts/通用组件/Epiphy的-协议常量.js (EpiphyProtocol)，将使用内联兜底协议版本 ${PROTO_VERSION}；若双端版本不一致将拒收报文。`)
+    var PROTO = (typeof global !== 'undefined' && global.EpiphyProtocol != null) ? global.EpiphyProtocol : null
+    var SPEC  = (typeof global !== 'undefined' && global.EpiphySpec != null) ? global.EpiphySpec : null
+    if (!PROTO) {
+        throw new Error('[EpiphyAudioClient] 缺少硬依赖 global.EpiphyProtocol，请确认 startup_scripts/通用组件/Epiphy的-协议常量.js 已加载')
     }
+    if (!SPEC) {
+        throw new Error('[EpiphyAudioClient] 缺少硬依赖 global.EpiphySpec，请确认 startup_scripts/通用组件/Epiphy的-Spec与通用工具.js 已加载')
+    }
+    var CHANNEL       = PROTO.AUDIO_CHANNEL
+    var PROTO_VERSION = PROTO.AUDIO_PROTO_VERSION
+    var VERSION       = PROTO.AUDIO_SEMVER
 
     var CONFIG = {
         sweepIntervalTicks:     10,   // 慢速巡检周期（负责死链清理、异常断流重连、超时判定）
@@ -43,26 +46,35 @@
         errorLogIntervalMs:     5000  // 限频错误日志间隔 (ms)
     }
 
-    var Minecraft           = null
-    var ResourceLocation    = null
-    var SoundSource         = null
-    var RandomSource        = null
-    var SimpleSoundInstance = null
-    var Attenuation         = null
-    var SystemClass         = null
+    var warnOnce = (key, msg) => {
+        if (warnedKeys.has(key)) return
+        warnedKeys.add(key)
+        console.warn(`[EpiphyAudioClient] ${msg}`)
+    }
 
-    try { Minecraft           = Java.loadClass('net.minecraft.client.Minecraft') } catch (e) {}
-    try { ResourceLocation    = Java.loadClass('net.minecraft.resources.ResourceLocation') } catch (e) {}
-    try { SoundSource         = Java.loadClass('net.minecraft.sounds.SoundSource') } catch (e) {}
-    try { RandomSource        = Java.loadClass('net.minecraft.util.RandomSource') } catch (e) {}
-    try { SimpleSoundInstance = Java.loadClass('net.minecraft.client.resources.sounds.SimpleSoundInstance') } catch (e) {}
-    try { Attenuation         = Java.loadClass('net.minecraft.client.resources.sounds.SoundInstance$Attenuation') } catch (e) {}
-    try { SystemClass         = Java.loadClass('java.lang.System') } catch (e) {}
+    var warnedKeys = new Set()
+
+    var loadJavaClass = (name) => {
+        if (typeof Java === 'undefined' || Java == null || typeof Java.loadClass !== 'function') return null
+        try {
+            return Java.loadClass(name)
+        } catch (e) {
+            warnOnce(`javaClass:${name}`, `加载 Java 类 ${name} 失败: ${e}`)
+            return null
+        }
+    }
+
+    var Minecraft           = loadJavaClass('net.minecraft.client.Minecraft')
+    var ResourceLocation    = loadJavaClass('net.minecraft.resources.ResourceLocation')
+    var SoundSource         = loadJavaClass('net.minecraft.sounds.SoundSource')
+    var RandomSource        = loadJavaClass('net.minecraft.util.RandomSource')
+    var SimpleSoundInstance = loadJavaClass('net.minecraft.client.resources.sounds.SimpleSoundInstance')
+    var Attenuation         = loadJavaClass('net.minecraft.client.resources.sounds.SoundInstance$Attenuation')
+    var SystemClass         = loadJavaClass('java.lang.System')
 
     var RANDOM          = RandomSource != null ? RandomSource.create() : null
     var entries         = new Map() // handleId (number) -> entry
     var attCache        = new Map() // soundId -> attenuation_distance
-    var warnedKeys      = new Set()
     var pendingActions    = []
     var session              = null
     var clientTicks          = 0
@@ -77,13 +89,19 @@
 
     // ======================================================================== 基础工具
 
-    var min2 = (a, b) => (a < b ? a : b)
-    var max2 = (a, b) => (a > b ? a : b)
-    var clampNum = (v, lo, hi) => (v < lo ? lo : (v > hi ? hi : v))
+    var min2     = SPEC.min2
+    var max2     = SPEC.max2
+    var clampNum = SPEC.clampNum
 
+    var HAS_NANO_TIME = (SystemClass != null && typeof SystemClass.nanoTime === 'function')
     var monotonicNowMs = () => {
-        if (SystemClass != null) {
-            try { return Number(SystemClass.nanoTime()) / 1000000.0 } catch (e) {}
+        if (HAS_NANO_TIME) {
+            try {
+                return Number(SystemClass.nanoTime()) / 1000000.0
+            } catch (e) {
+                HAS_NANO_TIME = false
+                warnOnce('nanoTime', `System.nanoTime 不可用，已回退 Date.now(): ${e}`)
+            }
         }
         return Date.now()
     }
@@ -98,12 +116,6 @@
         } else {
             suppressedErrors++
         }
-    }
-
-    var warnOnce = (key, msg) => {
-        if (warnedKeys.has(key)) return
-        warnedKeys.add(key)
-        console.warn(`[EpiphyAudioClient] ${msg}`)
     }
 
     var RESERVED_TAG_BEANS = new Set(['id', 'type', 'empty', 'allKeys', 'asString', 'class', 'tags'])
@@ -178,147 +190,171 @@
         return (n === null || !isFinite(n)) ? fallback : (n !== 0)
     }
 
-    // ======================================================================== 客户端环境安全读取
+    // ======================================================================== 客户端环境一次探测与安全读取
+
+    var probeMember = (obj, fnNames, propNames, slot) => {
+        if (obj == null) return undefined
+        if (!slot.probed) {
+            slot.probed = true
+            slot.kind   = 'none'
+            slot.name   = null
+            if (fnNames) {
+                for (var i = 0; i < fnNames.length; i++) {
+                    try {
+                        if (typeof obj[fnNames[i]] === 'function') {
+                            slot.kind = 'fn'
+                            slot.name = fnNames[i]
+                            break
+                        }
+                    } catch (eProbeFn) {
+                        // Rhino 探测阶段跳过不可访问/写保护成员
+                    }
+                }
+            }
+            if (slot.kind === 'none' && propNames) {
+                for (var j = 0; j < propNames.length; j++) {
+                    try {
+                        if (obj[propNames[j]] !== undefined) {
+                            slot.kind = 'prop'
+                            slot.name = propNames[j]
+                            break
+                        }
+                    } catch (eProbeProp) {
+                        // Rhino 探测阶段跳过 write-only bean 属性
+                    }
+                }
+            }
+        }
+        if (slot.kind === 'fn') return obj[slot.name]()
+        if (slot.kind === 'prop') return obj[slot.name]
+        return undefined
+    }
+
+    var probeMethodName = (obj, fnNames, slot, key) => {
+        if (slot[key] !== undefined) return slot[key]
+        if (obj == null) return null
+        for (var i = 0; i < fnNames.length; i++) {
+            try {
+                if (typeof obj[fnNames[i]] === 'function') {
+                    slot[key] = fnNames[i]
+                    return slot[key]
+                }
+            } catch (eProbe) {
+                // 探测一次 SRG/Mojmap 方法名
+            }
+        }
+        slot[key] = null
+        return null
+    }
+
+    var MC_PAUSED_CAP   = { probed: false, kind: 'none', name: null }
+    var MC_ACTIVE_CAP   = { probed: false, kind: 'none', name: null }
+    var MC_SCREEN_CAP   = { probed: false, kind: 'none', name: null }
+    var CLI_SCREEN_CAP  = { probed: false, kind: 'none', name: null }
+    var MC_SM_CAP       = { probed: false, kind: 'none', name: null }
+    var MC_MM_CAP       = { probed: false, kind: 'none', name: null }
+    var MC_OPTS_CAP     = { probed: false, kind: 'none', name: null }
+    var CLI_LEVEL_CAP   = { probed: false, kind: 'none', name: null }
+    var CLI_PLAYER_CAP  = { probed: false, kind: 'none', name: null }
+    var CHANNEL_OPS     = {}
+    var MC_GET_FAILED   = false
 
     var getMc = () => {
-        if (Minecraft != null) {
-            try { return Minecraft.getInstance() } catch (e) {}
+        if (Minecraft != null && !MC_GET_FAILED) {
+            try {
+                return Minecraft.getInstance()
+            } catch (e) {
+                MC_GET_FAILED = true
+                warnOnce('mcGet', `Minecraft.getInstance 调用失败，回退 Client: ${e}`)
+            }
         }
-        if (typeof Client !== 'undefined' && Client != null) return Client
-        return null
+        return (typeof Client !== 'undefined' && Client != null) ? Client : null
     }
 
     var isClientPaused = () => {
         var m = getMc()
-        if (m == null) return false
-        try {
-            if (typeof m.isPaused === 'function') return Boolean(m.isPaused())
-            if (m.paused !== undefined) return Boolean(m.paused)
-        } catch (e) {}
-        return false
+        var v = probeMember(m, ['isPaused'], ['paused'], MC_PAUSED_CAP)
+        return v !== undefined ? Boolean(v) : false
     }
 
     var isClientWindowActive = () => {
         var m = getMc()
-        if (m == null) return true
-        try {
-            if (typeof m.isWindowActive === 'function') return Boolean(m.isWindowActive())
-            if (typeof m.m_91294_ === 'function') return Boolean(m.m_91294_())
-            if (m.windowActive !== undefined) return Boolean(m.windowActive)
-        } catch (e) {}
-        return true
+        var v = probeMember(m, ['isWindowActive', 'm_91294_'], ['windowActive'], MC_ACTIVE_CAP)
+        return v !== undefined ? Boolean(v) : true
     }
 
     var hasCurrentScreenOpen = () => {
         var m = getMc()
-        if (m != null) {
-            try {
-                if (typeof m.getCurrentScreen === 'function' && m.getCurrentScreen() != null) return true
-            } catch (e0) {}
-            try {
-                if (m.currentScreen != null) return true
-            } catch (e1) {}
-            try {
-                if (m.f_91080_ != null) return true
-            } catch (e2) {}
-        }
-        if (typeof Client !== 'undefined' && Client != null) {
-            try {
-                if (typeof Client.getCurrentScreen === 'function' && Client.getCurrentScreen() != null) return true
-            } catch (e3) {}
-            try {
-                if (Client.currentScreen != null) return true
-            } catch (e4) {}
+        var ms = probeMember(m, ['getCurrentScreen'], ['currentScreen', 'f_91080_'], MC_SCREEN_CAP)
+        if (ms != null) return true
+        if (typeof Client !== 'undefined' && Client != null && Client !== m) {
+            var cs = probeMember(Client, ['getCurrentScreen'], ['currentScreen'], CLI_SCREEN_CAP)
+            if (cs != null) return true
         }
         return false
     }
 
     var getSoundManager = () => {
         var m = getMc()
-        if (m != null) {
-            try {
-                if (typeof m.getSoundManager === 'function') return m.getSoundManager()
-                if (m.soundManager != null) return m.soundManager
-            } catch (e) {}
-        }
-        return null
+        var sm = probeMember(m, ['getSoundManager'], ['soundManager'], MC_SM_CAP)
+        return sm !== undefined ? sm : null
     }
 
     var resolveClientLevel = (event) => {
         if (event != null) {
-            try {
-                var elv = typeof event.getLevel === 'function' ? event.getLevel() : event.level
-                if (elv != null) return elv
-            } catch (e) {}
+            var elv = typeof event.getLevel === 'function' ? event.getLevel() : event.level
+            if (elv != null) return elv
         }
         if (typeof Client !== 'undefined' && Client != null) {
-            try {
-                if (typeof Client.getCurrentLevel === 'function') {
-                    var clv = Client.getCurrentLevel()
-                    if (clv != null) return clv
-                }
-            } catch (e) {}
-            try {
-                if (Client.level != null) return Client.level
-            } catch (e) {}
+            var clv = probeMember(Client, ['getCurrentLevel'], ['level'], CLI_LEVEL_CAP)
+            if (clv != null) return clv
         }
         var m = getMc()
-        if (m != null) {
-            try {
-                var cam = m.getCameraEntity()
-                if (cam != null) {
-                    var camLv = typeof cam.level === 'function' ? cam.level() : cam.level
-                    if (camLv != null) return camLv
-                }
-            } catch (e) {}
+        if (m != null && typeof m.getCameraEntity === 'function') {
+            var cam = m.getCameraEntity()
+            if (cam != null) {
+                var camLv = typeof cam.level === 'function' ? cam.level() : cam.level
+                if (camLv != null) return camLv
+            }
         }
         return null
     }
 
     var resolveClientPlayer = (event) => {
         if (event != null) {
-            try {
-                var ep = typeof event.getPlayer === 'function' ? event.getPlayer() : event.player
-                if (ep != null) return ep
-            } catch (e) {}
+            var ep = typeof event.getPlayer === 'function' ? event.getPlayer() : event.player
+            if (ep != null) return ep
         }
         if (typeof Client !== 'undefined' && Client != null) {
-            try {
-                if (Client.player != null) return Client.player
-            } catch (e) {}
+            var cp = probeMember(Client, null, ['player'], CLI_PLAYER_CAP)
+            if (cp != null) return cp
         }
         var m = getMc()
-        if (m != null) {
-            try {
-                var cam = m.getCameraEntity()
-                if (cam != null) return cam
-            } catch (e) {}
+        if (m != null && typeof m.getCameraEntity === 'function') {
+            var cam = m.getCameraEntity()
+            if (cam != null) return cam
         }
         return null
     }
 
     var extractDimensionId = (lv) => {
         if (lv == null) return null
-        try {
-            if (typeof lv.getDimension === 'function') {
-                var gd = lv.getDimension()
-                if (gd != null && String(gd).length > 0) return String(gd)
+        if (typeof lv.getDimension === 'function') {
+            var gd = lv.getDimension()
+            if (gd != null && String(gd).length > 0) return String(gd)
+        }
+        var dimProp = lv.dimension
+        if (dimProp != null && typeof dimProp !== 'function') {
+            var sProp = String(dimProp)
+            if (sProp.length > 0) return sProp
+        }
+        if (typeof dimProp === 'function') {
+            var rk = dimProp.call(lv)
+            if (rk != null) {
+                if (typeof rk.location === 'function') return String(rk.location())
+                return String(rk)
             }
-        } catch (e) {}
-        try {
-            var dimProp = lv.dimension
-            if (dimProp != null && typeof dimProp !== 'function') {
-                var sProp = String(dimProp)
-                if (sProp.length > 0) return sProp
-            }
-            if (typeof dimProp === 'function') {
-                var rk = dimProp.call(lv)
-                if (rk != null) {
-                    if (typeof rk.location === 'function') return String(rk.location())
-                    return String(rk)
-                }
-            }
-        } catch (e) {}
+        }
         return null
     }
 
@@ -326,40 +362,31 @@
     // 而 Number(null) === 0 会导致坐标被误判为 (0,0,0)！必须优先调用 getX()/getY()/getZ() 或读取 ent.block。
     var getEntityPos = (ent) => {
         if (ent == null) return null
-        try {
-            if (typeof ent.getX === 'function' && typeof ent.getY === 'function' && typeof ent.getZ === 'function') {
-                var x = Number(ent.getX())
-                var y = Number(ent.getY())
-                var z = Number(ent.getZ())
-                if (isFinite(x) && isFinite(y) && isFinite(z)) return { x: x, y: y, z: z }
-            }
-        } catch (e) {}
-        try {
-            var b = ent.block
-            if (b != null && b.x != null && b.y != null && b.z != null) {
-                var bx = Number(b.x)
-                var by = Number(b.y)
-                var bz = Number(b.z)
-                if (isFinite(bx) && isFinite(by) && isFinite(bz)) return { x: bx, y: by, z: bz }
-            }
-        } catch (e) {}
-        try {
-            if (ent.x != null && ent.y != null && ent.z != null) {
-                var rx = Number(ent.x)
-                var ry = Number(ent.y)
-                var rz = Number(ent.z)
-                if (isFinite(rx) && isFinite(ry) && isFinite(rz)) return { x: rx, y: ry, z: rz }
-            }
-        } catch (e) {}
+        if (typeof ent.getX === 'function' && typeof ent.getY === 'function' && typeof ent.getZ === 'function') {
+            var x = Number(ent.getX())
+            var y = Number(ent.getY())
+            var z = Number(ent.getZ())
+            if (isFinite(x) && isFinite(y) && isFinite(z)) return { x: x, y: y, z: z }
+        }
+        var b = ent.block
+        if (b != null && b.x != null && b.y != null && b.z != null) {
+            var bx = Number(b.x)
+            var by = Number(b.y)
+            var bz = Number(b.z)
+            if (isFinite(bx) && isFinite(by) && isFinite(bz)) return { x: bx, y: by, z: bz }
+        }
+        if (ent.x != null && ent.y != null && ent.z != null) {
+            var rx = Number(ent.x)
+            var ry = Number(ent.y)
+            var rz = Number(ent.z)
+            if (isFinite(rx) && isFinite(ry) && isFinite(rz)) return { x: rx, y: ry, z: rz }
+        }
         return null
     }
 
     var getEntityById = (lv, eid) => {
-        if (lv == null || eid == null) return null
-        try {
-            if (typeof lv.getEntity === 'function') return lv.getEntity(Number(eid))
-        } catch (e) {}
-        return null
+        if (lv == null || eid == null || typeof lv.getEntity !== 'function') return null
+        return lv.getEntity(Number(eid))
     }
 
     var resolveSoundSource = (catName) => {
@@ -367,7 +394,9 @@
         try {
             var c = SoundSource.valueOf(String(catName || 'RECORDS'))
             if (c != null) return c
-        } catch (e) {}
+        } catch (e) {
+            warnOnce(`soundSource:${catName}`, `未知 SoundSource "${catName}"，回退 RECORDS`)
+        }
         return SoundSource.RECORDS
     }
 
@@ -388,6 +417,7 @@
                     }
                 }
             } catch (e) {
+                warnOnce(`att:${soundId}`, `读取音效衰减距离失败 (${soundId})，使用默认值 16: ${e}`)
                 att = 16
             }
         }
@@ -534,16 +564,14 @@
     var getCategoryGainMultiplier = (catObj) => {
         var m = getMc()
         if (m == null) return 1.0
-        try {
-            var opts = typeof m.options === 'object' ? m.options : (typeof m.getOptions === 'function' ? m.getOptions() : null)
-            if (opts != null && typeof opts.getSoundSourceVolume === 'function') {
-                var masterVol = Number(opts.getSoundSourceVolume(SoundSource.MASTER))
-                var catVol    = catObj != null ? Number(opts.getSoundSourceVolume(catObj)) : 1.0
-                if (isFinite(masterVol) && isFinite(catVol)) {
-                    return clampNum(masterVol * catVol, 0.0, 1.0)
-                }
+        var opts = probeMember(m, ['getOptions'], ['options'], MC_OPTS_CAP)
+        if (opts != null && typeof opts.getSoundSourceVolume === 'function') {
+            var masterVol = Number(opts.getSoundSourceVolume(SoundSource.MASTER))
+            var catVol    = catObj != null ? Number(opts.getSoundSourceVolume(catObj)) : 1.0
+            if (isFinite(masterVol) && isFinite(catVol)) {
+                return clampNum(masterVol * catVol, 0.0, 1.0)
             }
-        } catch (e) {}
+        }
         return 1.0
     }
 
@@ -564,35 +592,22 @@
         try {
             chHandle.execute((ch) => {
                 if (ch == null) return
-                try {
-                    if (typeof ch.stopped === 'function' && ch.stopped()) {
-                        entry._channelStopped = true
-                        return
-                    }
-                    if (typeof ch.m_83680_ === 'function' && ch.m_83680_()) {
-                        entry._channelStopped = true
-                        return
-                    }
-                } catch (eStopChk) {}
-                try {
-                    if (typeof ch.setVolume === 'function') {
-                        ch.setVolume(finalGain)
-                    } else if (typeof ch.m_83666_ === 'function') {
-                        ch.m_83666_(finalGain)
-                    }
-                } catch (e0) {}
-                if (shouldUnpause) {
-                    try {
-                        // Channel.unpause() / m_83678_() 仅在源处于 AL_PAUSED(4115) 时执行 alSourcePlay，天然幂等
-                        if (typeof ch.unpause === 'function') {
-                            ch.unpause()
-                        } else if (typeof ch.m_83678_ === 'function') {
-                            ch.m_83678_()
-                        }
-                    } catch (eUnpause) {}
+                var stopFn    = probeMethodName(ch, ['stopped', 'm_83680_'], CHANNEL_OPS, 'stopFn')
+                var volFn     = probeMethodName(ch, ['setVolume', 'm_83666_'], CHANNEL_OPS, 'volFn')
+                var unpauseFn = probeMethodName(ch, ['unpause', 'm_83678_'], CHANNEL_OPS, 'unpauseFn')
+                if (stopFn != null && ch[stopFn]()) {
+                    entry._channelStopped = true
+                    return
+                }
+                if (volFn != null) ch[volFn](finalGain)
+                if (shouldUnpause && unpauseFn != null) {
+                    // Channel.unpause() / m_83678_() 仅在源处于 AL_PAUSED(4115) 时执行 alSourcePlay，天然幂等
+                    ch[unpauseFn]()
                 }
             })
-        } catch (e1) {}
+        } catch (e1) {
+            logErrorThrottled('applyChannelGain error', e1)
+        }
     }
 
     var buildSoundInstance = (entry, lv, localPlayer) => {
@@ -611,10 +626,8 @@
         entry.catObj = catObj
         var resLoc = new ResourceLocation(spec.snd)
 
-        var localId = null
-        if (localPlayer != null) {
-            try { localId = Number(localPlayer.getId()) } catch (e) {}
-        }
+        var localId = (localPlayer != null && typeof localPlayer.getId === 'function')
+            ? Number(localPlayer.getId()) : null
         var isSelfEntity = (spec.anc === 'entity' && spec.eid != null && localId != null && spec.eid === localId)
 
         if (spec.anc === 'entity' && !isSelfEntity) {
@@ -667,7 +680,11 @@
         if (entry == null || entry.inst == null) return
         var sm = getSoundManager()
         if (sm != null) {
-            try { sm.stop(entry.inst) } catch (e) {}
+            try {
+                sm.stop(entry.inst)
+            } catch (e) {
+                logErrorThrottled('sm.stop error', e)
+            }
         }
         entry.inst = null
     }
@@ -767,7 +784,9 @@
                             try {
                                 lsn.onPlaySound(entry.inst, weighed)
                                 notified = true
-                            } catch (eLsn) {}
+                            } catch (eLsn) {
+                                logErrorThrottled('subtitleListener error', eLsn)
+                            }
                         }
                     }
                 }
@@ -782,7 +801,9 @@
                     subOv.onPlaySound(entry.inst, weighed)
                 }
             }
-        } catch (e) {}
+        } catch (e) {
+            logErrorThrottled('refreshSubtitle error', e)
+        }
     }
 
     // 当存在开启了 duckMusic 的自定义 BGM 正在可听范围内播放时，令原版背景音乐自动避让
@@ -792,16 +813,22 @@
         var m = getMc()
         if (m != null) {
             try {
-                var mm = typeof m.getMusicManager === 'function' ? m.getMusicManager() : m.musicManager
+                var mm = probeMember(m, ['getMusicManager'], ['musicManager'], MC_MM_CAP)
                 if (mm != null && typeof mm.stopPlaying === 'function') {
                     mm.stopPlaying()
                 }
-            } catch (e) {}
+            } catch (e) {
+                logErrorThrottled('duckMusic stopPlaying error', e)
+            }
         }
         if (SoundSource != null && SoundSource.MUSIC != null) {
             var sm = getSoundManager()
             if (sm != null) {
-                try { sm.stop(null, SoundSource.MUSIC) } catch (e) {}
+                try {
+                    sm.stop(null, SoundSource.MUSIC)
+                } catch (e) {
+                    logErrorThrottled('duckMusic stopSource error', e)
+                }
             }
         }
     }
@@ -928,7 +955,11 @@
                     var sm = getSoundManager()
                     var stillActive = true
                     if (sm != null) {
-                        try { stillActive = Boolean(sm.isActive(cur.inst)) } catch (e) {}
+                        try {
+                            stillActive = Boolean(sm.isActive(cur.inst))
+                        } catch (e) {
+                            logErrorThrottled('sm.isActive error', e)
+                        }
                     }
                     if (stillActive) {
                         cur.spec      = spec
@@ -996,20 +1027,11 @@
 
     var protoMismatchWarned = false
 
-    var checkProtoCompatible = (expectedVer, incomingVer) => {
-        if (PROTO != null && typeof PROTO.isProtoCompatible === 'function') {
-            return PROTO.isProtoCompatible(expectedVer, incomingVer)
-        }
-        if (incomingVer === undefined || incomingVer === null) return false
-        var n = Number(incomingVer)
-        return isFinite(n) && n === Number(expectedVer)
-    }
-
     NetworkEvents.dataReceived(CHANNEL, (event) => {
         try {
             var pkt = event.data
             var incomingProto = (pkt != null) ? pkt.proto : null
-            if (!checkProtoCompatible(PROTO_VERSION, incomingProto)) {
+            if (!PROTO.isProtoCompatible(PROTO_VERSION, incomingProto)) {
                 if (!protoMismatchWarned) {
                     protoMismatchWarned = true
                     console.error(`[EpiphyAudioClient] 协议校验失败（已拒收报文）：服务端 proto=${String(incomingProto)}，客户端预期 proto=${PROTO_VERSION}，请同步双端脚本。`)
@@ -1111,7 +1133,12 @@
             if (entry._channelStopped === true) {
                 active = false
             } else {
-                try { active = Boolean(sm.isActive(entry.inst)) } catch (e) { active = true }
+                try {
+                    active = Boolean(sm.isActive(entry.inst))
+                } catch (e) {
+                    logErrorThrottled('sweep sm.isActive error', e)
+                    active = true
+                }
             }
             if (active) {
                 if ((clientTicks - entry.startTick) >= CONFIG.stableTicks) {
@@ -1202,56 +1229,52 @@
         }
     })
 
-    try {
-        var resetClientState = () => {
-            clearAllNow()
-            pendingActions.length = 0
-            lastLevelKey          = ''
-            wasPaused             = false
-            wasWindowInactive     = false
-            wasScreenOpen         = false
-            unpauseGraceUntil     = 0
-            postResumeResyncUntil = 0
-        }
-        ClientEvents.loggedOut(() => {
-            resetClientState()
-            session = null
-        })
-        ClientEvents.loggedIn(() => {
-            resetClientState()
-        })
-    } catch (e) {}
+    var resetClientState = () => {
+        clearAllNow()
+        pendingActions.length = 0
+        lastLevelKey          = ''
+        wasPaused             = false
+        wasWindowInactive     = false
+        wasScreenOpen         = false
+        unpauseGraceUntil     = 0
+        postResumeResyncUntil = 0
+    }
+    ClientEvents.loggedOut(() => {
+        resetClientState()
+        session = null
+    })
+    ClientEvents.loggedIn(() => {
+        resetClientState()
+    })
 
-    try {
-        global.EpiphyAudioClient = {
-            VERSION: VERSION,
-            CONFIG:  CONFIG,
-            count: () => entries.size + pendingActions.length,
-            list: () => {
-                var out = []
-                for (var e of entries.values()) {
-                    out.push({
-                        h:         e.h,
-                        sound:     e.spec.snd,
-                        anchor:    e.spec.anc,
-                        mode:      e.spec.mode,
-                        loop:      e.spec.loop,
-                        volume:    e.spec.vol,
-                        gain:      e.currentAlGain,
-                        pitch:     e.spec.pit,
-                        x:         e.curX,
-                        y:         e.curY,
-                        z:         e.curZ,
-                        fadingOut: e.fadingOut,
-                        playing:   e.inst != null
-                    })
-                }
-                return out
-            },
-            stopAll: () => {
-                pendingActions.length = 0
-                clearAllNow()
+    global.EpiphyAudioClient = {
+        VERSION: VERSION,
+        CONFIG:  CONFIG,
+        count: () => entries.size + pendingActions.length,
+        list: () => {
+            var out = []
+            for (var e of entries.values()) {
+                out.push({
+                    h:         e.h,
+                    sound:     e.spec.snd,
+                    anchor:    e.spec.anc,
+                    mode:      e.spec.mode,
+                    loop:      e.spec.loop,
+                    volume:    e.spec.vol,
+                    gain:      e.currentAlGain,
+                    pitch:     e.spec.pit,
+                    x:         e.curX,
+                    y:         e.curY,
+                    z:         e.curZ,
+                    fadingOut: e.fadingOut,
+                    playing:   e.inst != null
+                })
             }
+            return out
+        },
+        stopAll: () => {
+            pendingActions.length = 0
+            clearAllNow()
         }
-    } catch (e) {}
+    }
 })()

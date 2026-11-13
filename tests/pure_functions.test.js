@@ -1306,6 +1306,7 @@ test('renderer: batched glow (8 outer + 4 inner) and stroke (8-angle) emit smoot
     }
     cliSandbox.globalThis = cliSandbox
     vm.createContext(cliSandbox)
+    loadStartupBase(cliSandbox)
     vm.runInContext(fs.readFileSync(RENDERER_PATH, 'utf8'), cliSandbox, { filename: 'Epiphy的-屏幕弹幕渲染器.js' })
 
     var Client = cliSandbox.global.ScreenDanmakuClient
@@ -1429,6 +1430,7 @@ test('renderer: ChatScreen triggers GUI blocking for showInGui=false danmaku and
     }
     cliSandbox.globalThis = cliSandbox
     vm.createContext(cliSandbox)
+    loadStartupBase(cliSandbox)
     vm.runInContext(fs.readFileSync(RENDERER_PATH, 'utf8'), cliSandbox, { filename: 'Epiphy的-屏幕弹幕渲染器.js' })
 
     var Client = cliSandbox.global.ScreenDanmakuClient
@@ -1547,6 +1549,7 @@ test('audio-client: ESC pause and window focus resume resyncs gain, unpauses cha
     }
     cliSandbox.globalThis = cliSandbox
     vm.createContext(cliSandbox)
+    loadStartupBase(cliSandbox)
     vm.runInContext(fs.readFileSync(AUDIO_CLIENT_PATH, 'utf8'), cliSandbox, { filename: 'Epiphy的-音频播放器.js' })
 
     var AudioCli = cliSandbox.global.EpiphyAudioClient
@@ -1683,6 +1686,7 @@ test('renderer: ModernUI TextLayout fast path caches layouts, skips PoseStack/gl
     }
     cliSandbox.globalThis = cliSandbox
     vm.createContext(cliSandbox)
+    loadStartupBase(cliSandbox)
     vm.runInContext(fs.readFileSync(RENDERER_PATH, 'utf8'), cliSandbox, { filename: 'Epiphy的-屏幕弹幕渲染器.js' })
 
     var Client = cliSandbox.global.ScreenDanmakuClient
@@ -2211,6 +2215,30 @@ test('ScreenDanmaku & EpiphyAudio: buildNode builds converged Brigadier trees an
     assert.strictEqual(auKids.stopall.execFn({ source: auSrc, args: {} }), 1)
     assert.ok(audioOut.some(function (l) { return l.indexOf('活动音频句柄') >= 0 }))
     assert.ok(audioOut.some(function (l) { return l.indexOf('0 个活动句柄') >= 0 }))
+})
+
+test('client modules: missing EpiphyProtocol/EpiphySpec throws explicit hard-dependency error', function () {
+    var sb1 = createKubeSandbox()
+    assert.throws(function () {
+        runScriptIn(sb1, AUDIO_CLIENT_PATH)
+    }, /EpiphyProtocol/)
+
+    var sb2 = createKubeSandbox()
+    runScriptIn(sb2, PROTOCOL_PATH)
+    assert.throws(function () {
+        runScriptIn(sb2, AUDIO_CLIENT_PATH)
+    }, /EpiphySpec/)
+
+    var sb3 = createKubeSandbox()
+    assert.throws(function () {
+        runScriptIn(sb3, RENDERER_PATH)
+    }, /EpiphyProtocol/)
+
+    var sb4 = createKubeSandbox()
+    runScriptIn(sb4, PROTOCOL_PATH)
+    assert.throws(function () {
+        runScriptIn(sb4, RENDERER_PATH)
+    }, /EpiphySpec/)
 })
 
 var passed = 0
