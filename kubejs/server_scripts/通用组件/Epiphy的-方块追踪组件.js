@@ -215,6 +215,8 @@
         }
     }
 
+    // 【catch 约定】以下 try/catch 均为 GSON Map/List 与 WorldData API 能力探测：
+    // 失败表示对象不属于对应容器类型或无该方法，走默认值回退属预期分支，故留空。
     function readJsonField(obj, key) {
         if (obj == null) return null
         try {
