@@ -991,26 +991,63 @@
             }
         }
 
-        // 3. 在排除玩家与命令方块后，检查当前调用栈是否处于已注册白名单的 withDeclaration 块内
+        // 3. 在排除玩家与命令方块后，检查当前调用栈是否处于已注册白名单的 withDeclaration 块内；
+        //    同时探测物理底层是否为控制台（MinecraftServer / RconConsoleSource），
+        //    确保即使在声明块内调用 server.runCommand，也不会绕过 policy.allowConsole === false。
+        var consoleCarrierCls = classifyConsoleRawSource(rawSource, rawCls)
         if (declarationStack.length > 0) {
             var topId = declarationStack[declarationStack.length - 1]
             if (topId && registeredCallers[topId]) {
-                return { kind: 'declared_function', callerId: topId, player: null, rawSource: rawSource, className: 'Declared:' + topId }
+                return {
+                    kind: 'declared_function',
+                    callerId: topId,
+                    player: null,
+                    rawSource: rawSource,
+                    isConsoleCarrier: consoleCarrierCls != null,
+                    className: 'Declared:' + topId
+                }
             }
         }
 
         // 4. 严格验证是否为服务器控制台 (MinecraftServer 或 RconConsoleSource)
-        if (rawSource != null) {
-            if (MinecraftServerClass != null && isJavaInstance(MinecraftServerClass, rawSource)) {
-                return { kind: 'console', player: null, rawSource: rawSource, className: rawCls || 'MinecraftServer' }
-            }
-            if (RconConsoleSourceClass != null && isJavaInstance(RconConsoleSourceClass, rawSource)) {
-                return { kind: 'console', player: null, rawSource: rawSource, className: rawCls || 'RconConsoleSource' }
-            }
+        if (consoleCarrierCls != null) {
+            return { kind: 'console', player: null, rawSource: rawSource, className: consoleCarrierCls }
         }
 
         // 5. 其他任何来源（如 CommandSource.NULL 数据包函数、execute as @a 伪装源、第三方伪造 CommandSource）一律归为 untrusted_other
         return { kind: 'untrusted_other', player: null, rawSource: rawSource, className: rawCls || 'UnknownSource' }
+    }
+
+    function classifyConsoleRawSource(rawSource, rawCls) {
+        if (rawSource == null) return null
+        if (MinecraftServerClass != null && isJavaInstance(MinecraftServerClass, rawSource)) {
+            return rawCls || 'MinecraftServer'
+        }
+        if (RconConsoleSourceClass != null && isJavaInstance(RconConsoleSourceClass, rawSource)) {
+            return rawCls || 'RconConsoleSource'
+        }
+        return null
+    }
+
+    function checkConsoleCarrierPermission(source, subKey, policy, viaDeclaration) {
+        if (policy.allowConsole === false) {
+            return {
+                allowed: false,
+                reason: viaDeclaration
+                    ? ('子命令 /epiphy ' + subKey + ' 不允许由控制台调用（禁止通过声明代调块内的 server.runCommand 绕过 allowConsole）。')
+                    : ('子命令 /epiphy ' + subKey + ' 不允许由控制台直接调用。')
+            }
+        }
+        var reqConsoleLv = (policy.requireOp && policy.opLevel > 0) ? policy.opLevel : 0
+        if (reqConsoleLv > 0 && typeof source.hasPermission === 'function' && !source.hasPermission(reqConsoleLv)) {
+            return {
+                allowed: false,
+                reason: viaDeclaration
+                    ? ('声明调用携带的控制台源未达到子命令要求的权限等级 (' + reqConsoleLv + ')。')
+                    : ('控制台源未达到子命令要求的权限等级 (' + reqConsoleLv + ')。')
+            }
+        }
+        return null
     }
 
     // 评估当前 CommandSourceStack 是否有权执行指定子命令
@@ -1035,12 +1072,16 @@
             return { allowed: true, sourceKind: 'command_block', player: null }
         }
 
-        // 分支 2：已声明的内部函数调用 (declared_function) -> 同时校验 caller 自身注册的 scope 与目标子命令 policy 的 allowDeclaredCallers / allowedCallers
+        // 分支 2：已声明的内部函数调用 (declared_function) -> 同时校验 caller scope、allowDeclaredCallers/allowedCallers 与底层控制台策略
         if (srcInfo.kind === 'declared_function') {
             var callerId    = srcInfo.callerId
             var callerGates = registeredCallers[callerId]
             if (!subKey || subKey === 'auth' || policy.allowDeclaredCallers === false) {
                 return { allowed: false, reason: '子命令 /epiphy ' + subKey + ' 禁止通过脚本声明代调。' }
+            }
+            if (srcInfo.isConsoleCarrier) {
+                var declaredConsoleDeny = checkConsoleCarrierPermission(source, subKey, policy, true)
+                if (declaredConsoleDeny) return declaredConsoleDeny
             }
             if (!callerGates || !callerGates[subKey]) {
                 return { allowed: false, reason: '调用方 "' + callerId + '" 未获准调用子命令 /epiphy ' + subKey + '。' }
@@ -1053,13 +1094,8 @@
 
         // 分支 3：服务器控制台数据类型 (MinecraftServer / RconConsoleSource) -> 进入权限查询
         if (srcInfo.kind === 'console') {
-            if (policy.allowConsole === false) {
-                return { allowed: false, reason: '子命令 /epiphy ' + subKey + ' 不允许由控制台直接调用。' }
-            }
-            var reqConsoleLv = (policy.requireOp && policy.opLevel > 0) ? policy.opLevel : 0
-            if (reqConsoleLv > 0 && typeof source.hasPermission === 'function' && !source.hasPermission(reqConsoleLv)) {
-                return { allowed: false, reason: '控制台源未达到子命令要求的权限等级 (' + reqConsoleLv + ')。' }
-            }
+            var consoleDeny = checkConsoleCarrierPermission(source, subKey, policy, false)
+            if (consoleDeny) return consoleDeny
             return { allowed: true, sourceKind: 'console', player: null }
         }
 

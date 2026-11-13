@@ -9,7 +9,7 @@ var ROOT_DIR       = path.resolve(__dirname, '..')
 var DANMAKU_PATH   = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-屏幕弹幕组件.js')
 var VALVE_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-权限阀.js')
 
-function createKubeSandbox() {
+function createKubeSandbox(loadClassFn) {
     var noop = function () {}
     var sandbox = {
         console: {
@@ -34,7 +34,7 @@ function createKubeSandbox() {
             broken: noop
         },
         Java: {
-            loadClass: function () { return null }
+            loadClass: typeof loadClassFn === 'function' ? loadClassFn : function () { return null }
         },
         Text: {
             of: function (s) { return String(s) }
@@ -292,6 +292,73 @@ test('permission valve classifyCommandSource: player source cannot escalate via 
     })
     assert.strictEqual(resultInfo.kind, 'player')
     assert.strictEqual(Valve.classifyCommandSource(null).kind, 'untrusted_other')
+})
+
+test('permission valve evaluateSourceAccess: declared server.runCommand cannot bypass allowConsole=false', function () {
+    function MockMinecraftServer() {}
+    function MockServerPlayer() {}
+    var isoSandbox = createKubeSandbox(function (clsName) {
+        if (clsName === 'net.minecraft.server.MinecraftServer') return MockMinecraftServer
+        if (clsName === 'net.minecraft.server.level.ServerPlayer') return MockServerPlayer
+        return null
+    })
+    vm.runInContext(fs.readFileSync(VALVE_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-权限阀.js' })
+    var IsoValve = isoSandbox.global.EpiphyPermissionValve
+    IsoValve.declareCaller('danmaku_script', ['danmaku'])
+
+    var serverSource = {
+        source: new MockMinecraftServer(),
+        hasPermission: function (lv) { return lv <= 4 }
+    }
+    var lowPermServerSource = {
+        source: new MockMinecraftServer(),
+        hasPermission: function () { return false }
+    }
+
+    // Direct console outside withDeclaration
+    assert.strictEqual(IsoValve.classifyCommandSource(serverSource).kind, 'console')
+    assert.strictEqual(
+        IsoValve.evaluateSourceAccess(serverSource, 'danmaku', {
+            mode: 'custom', allowConsole: false, allowDeclaredCallers: true
+        }).allowed,
+        false
+    )
+
+    // Console carrier inside withDeclaration: respects BOTH allowConsole & allowDeclaredCallers
+    var clsInside = null
+    var resNoConsole = null
+    var resLowPerm = null
+    var resAllowed = null
+    var resNoDeclared = null
+    var resAbstractCarrier = null
+
+    IsoValve.withDeclaration('danmaku_script', function () {
+        clsInside = IsoValve.classifyCommandSource(serverSource)
+        resNoConsole = IsoValve.evaluateSourceAccess(serverSource, 'danmaku', {
+            mode: 'custom', allowConsole: false, allowDeclaredCallers: true
+        })
+        resLowPerm = IsoValve.evaluateSourceAccess(lowPermServerSource, 'danmaku', {
+            mode: 'custom', allowConsole: true, allowDeclaredCallers: true, requireOp: true, opLevel: 4
+        })
+        resAllowed = IsoValve.evaluateSourceAccess(serverSource, 'danmaku', {
+            mode: 'custom', allowConsole: true, allowDeclaredCallers: true
+        })
+        resNoDeclared = IsoValve.evaluateSourceAccess(serverSource, 'danmaku', {
+            mode: 'custom', allowConsole: true, allowDeclaredCallers: false
+        })
+        resAbstractCarrier = IsoValve.evaluateSourceAccess({}, 'danmaku', {
+            mode: 'custom', allowConsole: false, allowDeclaredCallers: true
+        })
+    })
+
+    assert.strictEqual(clsInside.kind, 'declared_function')
+    assert.strictEqual(clsInside.isConsoleCarrier, true)
+    assert.strictEqual(resNoConsole.allowed, false)
+    assert.strictEqual(resLowPerm.allowed, false)
+    assert.strictEqual(resAllowed.allowed, true)
+    assert.strictEqual(resAllowed.sourceKind, 'declared_function')
+    assert.strictEqual(resNoDeclared.allowed, false)
+    assert.strictEqual(resAbstractCarrier.allowed, true)
 })
 
 // Run suite
