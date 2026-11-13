@@ -1,0 +1,6 @@
+﻿# KubeJS generated / backup / cache directories
+_backup_*/
+probe/
+*.log
+*.tmp
+kubejs/config/epiphy_permissions/

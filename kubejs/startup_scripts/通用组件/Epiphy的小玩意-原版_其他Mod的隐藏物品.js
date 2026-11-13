@@ -1,0 +1,421 @@
+// ============================================================================
+//  Epiphy的小玩意 —— 原版与其他 Mod 的隐藏物品收录模块
+//  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
+//  放置位置：kubejs/startup_scripts/通用组件/Epiphy的小玩意-原版_其他Mod的隐藏物品.js
+//  依赖模块：kubejs/startup_scripts/通用组件/创造模式栏-epiphy.js (epiphy:stuff)
+//
+//  收录物品清单：
+//    - 屏障 (minecraft:barrier)
+//    - 凋灵刷怪蛋 (minecraft:wither_spawn_egg)
+//    - 末影龙刷怪蛋 (minecraft:ender_dragon_spawn_egg)
+//    - 光源方块 (minecraft:light)
+//    - 结构方块 (minecraft:structure_block)
+//    - 拼图方块 (minecraft:jigsaw)
+//    - 命令方块及其变体 (command_block / repeating_command_block / chain_command_block / command_block_minecart)
+//    - 下界传送门、末地传送门、末地折跃门
+//    - 混沌晶体 (epiphy:chaos_crystal -> 放置 draconicevolution:chaos_crystal)
+//    - 建筑师的青睐 [神秘遗物] (enigmaticlegacy:cosmic_scroll)
+//    - 终末之环 [诡厄巫法·启示录] (goety_revelation:halo_of_the_end)
+// ============================================================================
+
+;(function () {
+    // 原版下界传送门、末地传送门、末地折跃门，以及龙之研究 1.20.1 的混沌晶体（DEContent 中注释了 ITEM_CHAOS_CRYSTAL）仅有 Block 而无对应 Item：
+    //   注意：原版并不存在名为 `minecraft:block/end_portal` 的方块图集纹理（原版末地传送门使用的是 Special BlockEntity 渲染器与 `entity/end_portal.png`，
+    //   直接写 `.texture('minecraft:block/end_portal')` 会因找不到贴图变成紫黑丢失材质块）。
+    //   因此这里为末地传送门与末地折跃门直接生成引用原版真实存在的方块图集纹理（`end_portal_frame_top` / `obsidian` / `crying_obsidian`）的 3D 模型；
+    //   为 `epiphy:chaos_crystal` 挂载与 DE `RenderTileChaosCrystal` / `RenderItemChaosShard` 同源的 CCL 3D OBJ + Chaos Shader 物品渲染器（直接读取 `draconicevolution:models/block/chaos_crystal.obj` 与 DE 纹理/着色器，不在 kubejs/assets/epiphy 下新增任何资源文件）。
+    StartupEvents.registry('item', function (event) {
+        // 1. 下界传送门（使用原版真实存在的动态流体纹理 minecraft:block/nether_portal）
+        event.create('epiphy:nether_portal')
+            .displayName('下界传送门')
+            .texture('minecraft:block/nether_portal')
+            .rarity('epic')
+
+        // 2. 末地传送门（扁平传送门平面模型，使用原版图集内真实存在的 end_portal_frame_top 与 black_concrete 纹理，消除紫黑块）
+        var endPortalItem = event.create('epiphy:end_portal')
+            .displayName('末地传送门')
+            .rarity('epic')
+        endPortalItem.modelJson({
+            parent: 'minecraft:block/block',
+            textures: {
+                particle: 'minecraft:block/end_portal_frame_top',
+                top:      'minecraft:block/black_concrete',
+                side:     'minecraft:block/end_portal_frame_side',
+                bottom:   'minecraft:block/end_portal_frame_top'
+            },
+            elements: [
+                {
+                    from: [0, 6, 0],
+                    to:   [16, 12, 16],
+                    faces: {
+                        down:  { texture: '#bottom' },
+                        up:    { texture: '#top' },
+                        north: { texture: '#side' },
+                        south: { texture: '#side' },
+                        west:  { texture: '#side' },
+                        east:  { texture: '#side' }
+                    }
+                }
+            ]
+        })
+
+        // 3. 末地折跃门（完整方块立体模型，使用原版图集内真实存在的 crying_obsidian 与 obsidian 纹理，消除紫黑块）
+        var endGatewayItem = event.create('epiphy:end_gateway')
+            .displayName('末地折跃门')
+            .rarity('epic')
+        endGatewayItem.modelJson({
+            parent: 'minecraft:block/cube_bottom_top',
+            textures: {
+                top:      'minecraft:block/crying_obsidian',
+                bottom:   'minecraft:block/crying_obsidian',
+                side:     'minecraft:block/obsidian',
+                particle: 'minecraft:block/crying_obsidian'
+            }
+        })
+
+        // 4. 混沌晶体（方块物品形式：直接复用 draconicevolution 命名空间下的资源与 CCL OBJ + Shader 渲染管线）
+        event.create('epiphy:chaos_crystal')
+            .displayName('混沌晶体')
+            .texture('draconicevolution:item/chaos_crystal')
+            .rarity('epic')
+    })
+
+    // ------------------------------------------------------------------------
+    // 客户端：为 epiphy:chaos_crystal 注册与 DE 原生一致的 3D 混沌晶体方块物品渲染器 (IItemRenderer)
+    //   完全调用 Draconic Evolution 1.20.1 与 BrandonsCore / CodeChickenLib 内部资源：
+    //   - 模型：draconicevolution:models/block/chaos_crystal.obj（与 RenderTileChaosCrystal 相同，5 格高多面体水晶柱）
+    //   - 内层着色器：BCShaders.CHAOS_ENTITY_SHADER + draconicevolution:textures/item/equipment/chaos_shader.png
+    //   - 外层半透明纹理：draconicevolution:textures/block/chaos_crystal.png
+    //   - 视角变换：TransformUtils.DEFAULT_BLOCK（标准 3D 方块物品视角，随游戏时间缓慢自转）
+    // ------------------------------------------------------------------------
+    try {
+        var $FMLEnvironment = Java.loadClass('net.minecraftforge.fml.loading.FMLEnvironment')
+        if ($FMLEnvironment.dist.isClient()) {
+            var $FMLJavaModLoadingContext = Java.loadClass('net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext')
+            var $ModelEventModifyBaking   = Java.loadClass('net.minecraftforge.client.event.ModelEvent$ModifyBakingResult')
+            var $EventPriority            = Java.loadClass('net.minecraftforge.eventbus.api.EventPriority')
+
+            var modBus = $FMLJavaModLoadingContext.get().getModEventBus()
+            modBus.addListener($EventPriority.LOWEST, false, $ModelEventModifyBaking, function (event) {
+                try {
+                    var $ModelResourceLocation = Java.loadClass('net.minecraft.client.resources.model.ModelResourceLocation')
+                    var $ResourceLocation      = Java.loadClass('net.minecraft.resources.ResourceLocation')
+                    var $OBJParser             = Java.loadClass('codechicken.lib.render.model.OBJParser')
+                    var $CCModel               = Java.loadClass('codechicken.lib.render.CCModel')
+                    var $CCRenderState         = Java.loadClass('codechicken.lib.render.CCRenderState')
+                    var $IItemRenderer         = Java.loadClass('codechicken.lib.render.item.IItemRenderer')
+                    var $TransformUtils        = Java.loadClass('codechicken.lib.util.TransformUtils')
+                    var $Matrix4               = Java.loadClass('codechicken.lib.vec.Matrix4')
+                    var $Vector3               = Java.loadClass('codechicken.lib.vec.Vector3')
+                    var $BCShaders             = Java.loadClass('com.brandon3055.brandonscore.client.shader.BCShaders')
+                    var $TimeKeeper            = Java.loadClass('com.brandon3055.brandonscore.api.TimeKeeper')
+                    var $Minecraft             = Java.loadClass('net.minecraft.client.Minecraft')
+                    var $GameRenderer          = Java.loadClass('net.minecraft.client.renderer.GameRenderer')
+                    var $RenderStateShard      = Java.loadClass('net.minecraft.client.renderer.RenderStateShard')
+                    var $RenderType            = Java.loadClass('net.minecraft.client.renderer.RenderType')
+                    var $DefaultVertexFormat   = Java.loadClass('com.mojang.blaze3d.vertex.DefaultVertexFormat')
+                    var $VertexFormatMode      = Java.loadClass('com.mojang.blaze3d.vertex.VertexFormat$Mode')
+
+                    var map = new $OBJParser(new $ResourceLocation('draconicevolution', 'models/block/chaos_crystal.obj'))
+                        .ignoreMtl()
+                        .parse()
+                    var crystalModel = $CCModel.combine(map.values())
+                        .backfacedCopy()
+                        .computeNormals()
+
+                    var innerType = $RenderType.create(
+                        'draconicevolution:chaos_crystal_item_inner',
+                        $DefaultVertexFormat.NEW_ENTITY,
+                        $VertexFormatMode.TRIANGLES,
+                        256,
+                        $RenderType.CompositeState.builder()
+                            .setShaderState(new $RenderStateShard.ShaderStateShard(function () {
+                                return $BCShaders.CHAOS_ENTITY_SHADER.getShaderInstance()
+                            }))
+                            .setTextureState(new $RenderStateShard.TextureStateShard(new $ResourceLocation('draconicevolution', 'textures/item/equipment/chaos_shader.png'), true, false))
+                            .setTransparencyState($RenderStateShard.TRANSLUCENT_TRANSPARENCY)
+                            .setCullState($RenderStateShard.NO_CULL)
+                            .setLightmapState($RenderStateShard.LIGHTMAP)
+                            .setOverlayState($RenderStateShard.OVERLAY)
+                            .createCompositeState(false)
+                    )
+
+                    var outerType = $RenderType.create(
+                        'draconicevolution:chaos_crystal_item_outer',
+                        $DefaultVertexFormat.NEW_ENTITY,
+                        $VertexFormatMode.TRIANGLES,
+                        256,
+                        $RenderType.CompositeState.builder()
+                            .setShaderState(new $RenderStateShard.ShaderStateShard(function () {
+                                return $GameRenderer.getRendertypeCutoutShader()
+                            }))
+                            .setTextureState(new $RenderStateShard.TextureStateShard(new $ResourceLocation('draconicevolution', 'textures/block/chaos_crystal.png'), false, false))
+                            .setTransparencyState($RenderStateShard.TRANSLUCENT_TRANSPARENCY)
+                            .setLightmapState($RenderStateShard.LIGHTMAP)
+                            .setOverlayState($RenderStateShard.OVERLAY)
+                            .createCompositeState(false)
+                    )
+
+                    var renderer = new JavaAdapter($IItemRenderer, {
+                        renderItem: function (stack, displayContext, mStack, getter, packedLight, packedOverlay) {
+                            var mat = new $Matrix4(mStack)
+                            var ccrs = $CCRenderState.instance()
+                            ccrs.reset()
+                            ccrs.brightness = packedLight
+                            ccrs.overlay = packedOverlay
+
+                            var mc = $Minecraft.getInstance()
+                            var rot = ($TimeKeeper.getClientTick() + mc.getFrameTime()) / 40.0
+                            mat.translate(0.5, 0.5, 0.5)
+                            mat.rotate(rot, $Vector3.Y_POS)
+                            // chaos_crystal.obj 高度跨度为 [-3.55, 3.29]（约 6.84 格），缩放到 0.22 使其刚好饱满呈现在物品栏与手持方块视角中
+                            mat.scale(0.22)
+
+                            $BCShaders.CHAOS_ENTITY_SHADER.getModelMatUniform().glUniformMatrix4f(new $Matrix4())
+                            $BCShaders.CHAOS_ENTITY_SHADER.getSimpleLightUniform().glUniform1b(true)
+                            $BCShaders.CHAOS_ENTITY_SHADER.getDisableLightUniform().glUniform1b(false)
+                            $BCShaders.CHAOS_ENTITY_SHADER.getDisableOverlayUniform().glUniform1b(false)
+
+                            ccrs.bind(innerType, getter)
+                            crystalModel.render(ccrs, mat)
+
+                            ccrs.baseColour = -16 // 0xFFFFFFF0
+                            ccrs.bind(outerType, getter)
+                            crystalModel.render(ccrs, mat)
+                        },
+                        getModelState: function () {
+                            return $TransformUtils.DEFAULT_BLOCK
+                        },
+                        useAmbientOcclusion: function () {
+                            return false
+                        },
+                        isGui3d: function () {
+                            return true
+                        },
+                        usesBlockLight: function () {
+                            return false
+                        }
+                    })
+
+                    var mrl = new $ModelResourceLocation(new $ResourceLocation('epiphy', 'chaos_crystal'), '')
+                    event.getModels().put(mrl, renderer)
+                } catch (eBake) {
+                    console.warn('[Epiphy] 挂载混沌晶体 3D 物品模型失败：' + eBake)
+                }
+            })
+        }
+    } catch (eClientInit) { }
+
+    // ------------------------------------------------------------------------
+    // 手持 epiphy:nether_portal / epiphy:end_portal / epiphy:end_gateway / epiphy:chaos_crystal 右键方块时，
+    // 直接放置对应方块（在 startup_scripts 内通过 ForgeEvents 闭环）
+    // ------------------------------------------------------------------------
+    var $Blocks            = Java.loadClass('net.minecraft.world.level.block.Blocks')
+    var $NetherPortalBlock = Java.loadClass('net.minecraft.world.level.block.NetherPortalBlock')
+    var $DirectionAxis     = Java.loadClass('net.minecraft.core.Direction$Axis')
+    var $SoundEvents       = Java.loadClass('net.minecraft.sounds.SoundEvents')
+    var $SoundSource       = Java.loadClass('net.minecraft.sounds.SoundSource')
+    var $InteractionResult = Java.loadClass('net.minecraft.world.InteractionResult')
+    var $DEContent         = null
+    var $DEDamage          = null
+    var $TileChaosCrystal  = null
+    try {
+        $DEContent        = Java.loadClass('com.brandon3055.draconicevolution.init.DEContent')
+        $DEDamage         = Java.loadClass('com.brandon3055.draconicevolution.init.DEDamage')
+        $TileChaosCrystal = Java.loadClass('com.brandon3055.draconicevolution.blocks.tileentity.TileChaosCrystal')
+    } catch (eDE) { }
+
+    var PORTAL_ITEM_MAP = {
+        'epiphy:end_portal':    'end_portal',
+        'epiphy:end_gateway':   'end_gateway',
+        'epiphy:nether_portal': 'nether_portal',
+        'epiphy:chaos_crystal': 'chaos_crystal'
+    }
+
+    ForgeEvents.onEvent('net.minecraftforge.event.entity.player.PlayerInteractEvent$RightClickBlock', function (event) {
+        var stack = event.getItemStack()
+        if (stack == null || stack.isEmpty()) return
+
+        var itemId = String(stack.getId())
+        var portalType = PORTAL_ITEM_MAP[itemId]
+        if (!portalType) return
+
+        var level = event.getLevel()
+        var player = event.getEntity()
+        var clickedPos = event.getPos()
+        var face = event.getFace()
+        var clickedState = level.getBlockState(clickedPos)
+
+        // 若被点击的方块本身可被替换（如草、雪层、蕨等）则原地替换，否则放置在点击面的相邻格
+        var targetPos = clickedState.canBeReplaced()
+            ? clickedPos
+            : (face != null ? clickedPos.relative(face) : clickedPos)
+
+        // ---- 混沌晶体专属放置与惩罚逻辑（对照 DE 1.20.1 ChaosCrystal.java:71-80 & TileChaosCrystal.java:51-63）----
+        // 1. 空间校验（5 格高：placeCenter 及上下各 2 格）：
+        //    - 若贴地面上表面点击且下方 2 格非空，自动将中心点上抬 2 格，使 5 格高水晶底座刚好落在地面上；
+        //    - 校验 [placeCenter - 2, placeCenter + 2] 共 5 格垂直空间是否全部为空气或可替换方块；
+        //    - 若高度不足 5 格，则默认不可放置（直接静默返回，不放置方块、不触发惩罚、也没有任何提示）。
+        // 2. 5 格空间充足时：
+        //    - 生存/冒险模式：放置无效，并使用新版 ChaosCrystal.java:79 的伤害源 DEDamage.chaosImplosion(level) 触发 Float.MAX_VALUE 惩罚；
+        //    - 创造模式：放置中心方块并设为无保护模式（guardianDefeated = true）且调用 onValidPlacement() 自动生成上下各 2 格 chaos_crystal_part。
+        if (portalType === 'chaos_crystal') {
+            if ($DEContent == null || $TileChaosCrystal == null) return
+
+            var placeCenter = targetPos
+            if (face != null && String(face.getName()) === 'up') {
+                var below1 = level.getBlockState(placeCenter.below(1))
+                var below2 = level.getBlockState(placeCenter.below(2))
+                if ((!below1.isAir() && !below1.canBeReplaced()) || (!below2.isAir() && !below2.canBeReplaced())) {
+                    placeCenter = placeCenter.above(2)
+                }
+            }
+
+            // 严格检查垂直 5 格（placeCenter - 2 到 placeCenter + 2）是否全部可放置；不足 5 格直接静默退出（不触发惩罚、无提示）
+            for (var dy = -2; dy <= 2; dy++) {
+                var checkPos = (dy === 0) ? placeCenter : (dy > 0 ? placeCenter.above(dy) : placeCenter.below(-dy))
+                var checkState = level.getBlockState(checkPos)
+                if (!checkState.isAir() && !checkState.canBeReplaced()) {
+                    return
+                }
+            }
+
+            var isCreative = (player != null && typeof player.isCreative === 'function')
+                ? player.isCreative()
+                : (player != null && player.getAbilities != null && player.getAbilities().instabuild)
+
+            if (!isCreative) {
+                if (!level.isClientSide() && player != null) {
+                    try {
+                        var dmgSource = ($DEDamage != null)
+                            ? $DEDamage.chaosImplosion(level)
+                            : level.damageSources().fellOutOfWorld()
+                        player.hurt(dmgSource, 3.4028235e38) // Float.MAX_VALUE，严格对齐 1.20.1 ChaosCrystal.java:79
+                    } catch (eHurt) { }
+                }
+                event.setCancellationResult($InteractionResult.sidedSuccess(level.isClientSide()))
+                event.setCanceled(true)
+                return
+            }
+
+            if (!level.isClientSide()) {
+                var crystalState = $DEContent.CHAOS_CRYSTAL.get().defaultBlockState()
+                level.setBlock(placeCenter, crystalState, 3)
+                var be = level.getBlockEntity(placeCenter)
+                if (be instanceof $TileChaosCrystal) {
+                    be.onValidPlacement()
+                    be.guardianDefeated.set(true) // 无保护模式（解除红色护盾与无敌锁）
+                }
+                level.playSound(
+                    null,
+                    placeCenter,
+                    $SoundEvents.END_PORTAL_FRAME_FILL,
+                    $SoundSource.BLOCKS,
+                    1.0,
+                    0.75
+                )
+            }
+
+            event.setCancellationResult($InteractionResult.sidedSuccess(level.isClientSide()))
+            event.setCanceled(true)
+            return
+        }
+
+        var targetState = level.getBlockState(targetPos)
+        if (!targetState.isAir() && !targetState.canBeReplaced()) return
+
+        if (!level.isClientSide()) {
+            var newState = null
+            if (portalType === 'end_portal') {
+                newState = $Blocks.END_PORTAL.defaultBlockState()
+            } else if (portalType === 'end_gateway') {
+                newState = $Blocks.END_GATEWAY.defaultBlockState()
+            } else if (portalType === 'nether_portal') {
+                // 注意：KubeJS 的 EntityKJS 混入将 Entity.getDirection() 重命名为了 getFacing() / getHorizontalFacing()，
+                // 直接调用 player.getDirection() 会因找不到方法抛出 TypeError 中断放置！
+                var axis = $DirectionAxis.X
+                try {
+                    if (player != null) {
+                        var dir = (typeof player.getHorizontalFacing === 'function')
+                            ? player.getHorizontalFacing()
+                            : player.facing
+                        if (dir != null && dir.getAxis() === $DirectionAxis.X) {
+                            axis = $DirectionAxis.Z
+                        }
+                    }
+                } catch (eAxis) { }
+                newState = $Blocks.NETHER_PORTAL.defaultBlockState().setValue($NetherPortalBlock.AXIS, axis)
+            }
+
+            if (newState != null) {
+                // 下界传送门（minecraft:nether_portal）在 updateShape 收到邻居状态更新时会校验周围是否有完整黑曜石框架，
+                // 若直接用 flag=3 (UPDATE_ALL = BLOCK_UPDATE | SEND_TO_CLIENTS) 放置单个下界传送门方块，
+                // 触发邻居形状更新后会立刻因“无黑曜石外框”自毁消失！
+                // 因此使用 flag = 2 | 16 (SEND_TO_CLIENTS | KNOWN_SHAPE = 18) 同步客户端并跳过 updateShape 自检，使其可以像 /setblock ... keep 一样独立稳定存在。
+                var placeFlags = (portalType === 'nether_portal') ? 18 : 3
+                level.setBlock(targetPos, newState, placeFlags)
+                level.playSound(
+                    null,
+                    targetPos,
+                    (portalType === 'nether_portal') ? $SoundEvents.GLASS_PLACE : $SoundEvents.END_PORTAL_FRAME_FILL,
+                    $SoundSource.BLOCKS,
+                    1.0,
+                    1.0
+                )
+                if (player == null || !player.isCreative()) {
+                    stack.shrink(1)
+                }
+            }
+        }
+
+        event.setCancellationResult($InteractionResult.sidedSuccess(level.isClientSide()))
+        event.setCanceled(true)
+    })
+
+    var HIDDEN_ITEMS = [
+        // 1. 屏障
+        'minecraft:barrier',
+
+        // 2. 凋灵刷怪蛋与末影龙刷怪蛋
+        'minecraft:wither_spawn_egg',
+        'minecraft:ender_dragon_spawn_egg',
+
+        // 3. 光源方块（仅保留 1 个标准光源方块）
+        'minecraft:light',
+
+        // 4. 结构方块与拼图方块
+        'minecraft:structure_block',
+        'minecraft:jigsaw',
+
+        // 5. 命令方块及其全部变体
+        'minecraft:command_block',
+        'minecraft:repeating_command_block',
+        'minecraft:chain_command_block',
+        'minecraft:command_block_minecart',
+
+        // 6. 下界传送门、末地传送门、末地折跃门（不含非隐藏物品末地传送门框架）
+        'epiphy:nether_portal',
+        'epiphy:end_portal',
+        'epiphy:end_gateway',
+
+        // 7. 混沌晶体 [龙之研究]
+        'epiphy:chaos_crystal',
+
+        // 8. 建筑师的青睐 [神秘遗物] & 终末之环 [启示录]
+        'enigmaticlegacy:cosmic_scroll',
+        'goety_revelation:halo_of_the_end'
+    ]
+
+    if (typeof global !== 'undefined' && global != null) {
+        if (global.EpiphyCreativeTab != null && typeof global.EpiphyCreativeTab.register === 'function') {
+            global.EpiphyCreativeTab.register(HIDDEN_ITEMS)
+        } else {
+            if (!Array.isArray(global.EpiphyCreativeTabQueue)) {
+                global.EpiphyCreativeTabQueue = []
+            }
+            for (var i = 0; i < HIDDEN_ITEMS.length; i++) {
+                global.EpiphyCreativeTabQueue.push(HIDDEN_ITEMS[i])
+            }
+        }
+    }
+})()

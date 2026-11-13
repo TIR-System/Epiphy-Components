@@ -1,0 +1,46 @@
+{
+  "atomic_bomb_explosion": {
+    "category": "master",
+    "subtitle": "subtitles.epiphy.atomic_bomb_explosion",
+    "sounds": [
+      {
+        "name": "epiphy:atomic_bomb_explosion",
+        "stream": true,
+        "attenuation_distance": 380
+      }
+    ]
+  },
+  "air_raid_siren": {
+    "category": "master",
+    "subtitle": "subtitles.epiphy.air_raid_siren",
+    "sounds": [
+      {
+        "name": "epiphy:air_raid_siren",
+        "stream": true,
+        "attenuation_distance": 260
+      }
+    ]
+  },
+  "hardware_error": {
+    "category": "master",
+    "subtitle": "subtitles.epiphy.hardware_error",
+    "sounds": [
+      {
+        "name": "epiphy:hardware_error",
+        "stream": false,
+        "attenuation_distance": 200
+      }
+    ]
+  },
+  "children_of_the_city": {
+    "category": "record",
+    "subtitle": "subtitles.epiphy.children_of_the_city",
+    "sounds": [
+      {
+        "name": "epiphy:children_of_the_city",
+        "stream": true,
+        "attenuation_distance": 64
+      }
+    ]
+  }
+}
