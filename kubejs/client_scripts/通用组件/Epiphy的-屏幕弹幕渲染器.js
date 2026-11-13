@@ -83,13 +83,18 @@
     var GL11             = null
     var SystemClass      = null
     var MinecraftClass   = null
-    var CACHED_FONT      = null
-    var FONT_SIGNATURE   = ''
-    var GLYPH_WIDTH_MAP  = {}
-    var GLYPH_CACHE_SIZE = 0
-    var LAST_LEVEL_KEY   = ''
-    var lastErrorLogAt   = 0
-    var suppressedErrors = 0
+    var CACHED_FONT         = null
+    var FONT_SIGNATURE      = ''
+    var LAST_FONT_CHECK_MS  = -99999
+    var GLYPH_WIDTH_MAP     = {}
+    var GLYPH_CACHE_SIZE    = 0
+    var LAST_LEVEL_KEY      = ''
+    var lastErrorLogAt      = 0
+    var suppressedErrors    = 0
+    var BATCH_FAILED        = false
+    var BATCH_MODE_PROBED   = false
+    var FONT_DISPLAY_NORMAL = null
+    var CHAR_OFFSET_SCRATCH = { dx: 0.0, dy: 0.0, rotDeg: 0.0 }
 
     try { GL11 = Java.loadClass('org.lwjgl.opengl.GL11') } catch (eGL) { }
     try { SystemClass = Java.loadClass('java.lang.System') } catch (eSys) { }
@@ -189,7 +194,7 @@
         return NaN
     }
 
-    function getClientFont(event) {
+    function getClientFont(event, nowMs) {
         var f = null
         if (event != null) {
             if (event.font != null) f = event.font
@@ -207,6 +212,12 @@
         }
         if (f == null) f = CACHED_FONT
         if (f != null) {
+            var tNow = (nowMs != null && isFinite(nowMs)) ? nowMs : monotonicNowMs()
+            // 同一个 Font 实例 1500ms 内复用签名，避免每帧 3 次 JNI Font.width 探针
+            if (CACHED_FONT === f && (tNow - LAST_FONT_CHECK_MS) < 1500) {
+                return f
+            }
+            LAST_FONT_CHECK_MS = tNow
             var sig = 'F'
             try {
                 var w1 = invokeFontWidth(f, 'iW')
@@ -878,6 +889,93 @@
         return frags
     }
 
+    function resolveVisualSeq(comp) {
+        if (comp == null) return null
+        try {
+            if (typeof comp.getVisualOrderText === 'function') {
+                return comp.getVisualOrderText()
+            }
+            if (typeof comp.m_7532_ === 'function') {
+                return comp.m_7532_()
+            }
+        } catch (eSeq) { }
+        return null
+    }
+
+    function probeDisplayModeNormal() {
+        if (BATCH_MODE_PROBED) return FONT_DISPLAY_NORMAL
+        BATCH_MODE_PROBED = true
+        try {
+            var cls = Java.loadClass('net.minecraft.client.gui.Font$DisplayMode')
+            if (cls != null && cls.NORMAL != null) FONT_DISPLAY_NORMAL = cls.NORMAL
+        } catch (eMode) {
+            FONT_DISPLAY_NORMAL = null
+        }
+        return FONT_DISPLAY_NORMAL
+    }
+
+    function createFrameBatchCtx(event, fontObj) {
+        if (BATCH_FAILED || fontObj == null || event == null) return null
+        var modeNormal = probeDisplayModeNormal()
+        if (modeNormal == null) {
+            BATCH_FAILED = true
+            return null
+        }
+        var gfx = event.graphics
+        if (gfx == null || typeof gfx.bufferSource !== 'function' || typeof gfx.flush !== 'function') return null
+        if (typeof event.getMatrix !== 'function' && event.matrix == null) return null
+        if (typeof fontObj.drawInBatch !== 'function') return null
+        var bufSrc = null
+        try {
+            bufSrc = gfx.bufferSource()
+        } catch (eBuf) {
+            bufSrc = null
+        }
+        if (bufSrc == null) return null
+        var drawFn = null
+        try {
+            var explicit = fontObj['drawInBatch(net.minecraft.util.FormattedCharSequence,float,float,int,boolean,org.joml.Matrix4f,net.minecraft.client.renderer.MultiBufferSource,net.minecraft.client.gui.Font$DisplayMode,int,int)']
+            if (typeof explicit === 'function') drawFn = explicit
+        } catch (eExp) { }
+        return {
+            font:        fontObj,
+            drawFn:      drawFn,
+            graphics:    gfx,
+            bufSrc:      bufSrc,
+            displayMode: modeNormal,
+            itemMat:     null,
+            drawn:       0
+        }
+    }
+
+    function flushFrameBatchCtx(batchCtx) {
+        if (batchCtx != null && batchCtx.drawn > 0) {
+            try {
+                batchCtx.graphics.flush()
+            } catch (eFlush) {
+                logErrorThrottled('batch flush error', eFlush)
+            }
+            batchCtx.drawn = 0
+        }
+    }
+
+    function drawBatchedGlyph(batchCtx, seq, x, y, argb, shadow, mat) {
+        if (batchCtx == null || BATCH_FAILED || seq == null || mat == null) return false
+        try {
+            if (batchCtx.drawFn != null) {
+                batchCtx.drawFn.call(batchCtx.font, seq, x, y, argb, shadow, mat, batchCtx.bufSrc, batchCtx.displayMode, 0, 15728880)
+            } else {
+                batchCtx.font.drawInBatch(seq, x, y, argb, shadow, mat, batchCtx.bufSrc, batchCtx.displayMode, 0, 15728880)
+            }
+            batchCtx.drawn++
+            return true
+        } catch (eDrawBatch) {
+            BATCH_FAILED = true
+            logErrorThrottled('drawInBatch fallback', eDrawBatch)
+            return false
+        }
+    }
+
     function getOrBuildShatterCache(item, renderTitleLines, renderSubLines, titleLineCount, startY, lineStep, shownVis, fontObj) {
         var cacheKey = item.wrapKey + '|vis:' + shownVis
         if (item.shatterCacheKey === cacheKey && item.shatterFrags != null) {
@@ -907,8 +1005,10 @@
                     var dirRad   = hashUnit(fSeed + 2.3) * PI * 2.0
                     var spd      = 10.0 + hashUnit(fSeed + 3.7) * 24.0
                     var rotMax   = (hashUnit(fSeed + 5.9) - 0.5) * 95.0
+                    var rfComp = Text.of(rf.text)
                     list.push({
-                        comp:       Text.of(rf.text),
+                        comp:       rfComp,
+                        seq:        resolveVisualSeq(rfComp),
                         color:      grp.color,
                         cx:         rf.x + rf.w * 0.5,
                         cy:         baseY + 4.5,
@@ -962,8 +1062,10 @@
                         : (minMs + hashUnit(cSeed + 0.7) * max2(1, maxMs - minMs))
                     // 当 minMs === maxMs（如 [rnfmabj-测试] 要求统一 0.8s 震动一次）时，统一相位 0，使所有字同步触发抖动但方向各异
                     var phaseOff = isUnifiedFreq ? 0.0 : (hashUnit(cSeed + 1.9) * 10.0)
+                    var cfComp = Text.of(rf.text)
                     list.push({
-                        comp:         Text.of(rf.text),
+                        comp:         cfComp,
+                        seq:          resolveVisualSeq(cfComp),
                         rawText:      rf.text,
                         color:        grp.color,
                         baseX:        rf.x,
@@ -976,7 +1078,11 @@
                         outlineColor: rf.outlineColor != null ? rf.outlineColor : -1,
                         cSeed:        cSeed,
                         periodMs:     periodMs,
-                        phaseOff:     phaseOff
+                        phaseOff:     phaseOff,
+                        _hStepIdx:    NaN,
+                        _hSeed:       NaN,
+                        _oStepIdx:    NaN,
+                        _oSeed:       NaN
                     })
                     visSeq++
                 }
@@ -991,9 +1097,15 @@
     //   - 'horizontal_step'：每 periodMs 触发 1 次轻微随机落点位移 (charShakeShift) + 初段水平/垂直阻尼晃动 (charShakeSwayX/Y, charShakeWin)
     //   - 'smooth'         ：按 periodMs 做连续双谐波平滑漂移
     //   - 'omni' (默认)    ：全向随机脉冲轻颤 + 极微弱残余偏移
-    function sampleCharShakeOffset(cf, ageMs, curAmp, item) {
+    function sampleCharShakeOffset(cf, ageMs, curAmp, item, outObj) {
+        var dst  = outObj || CHAR_OFFSET_SCRATCH
         var ampN = Number(curAmp)
-        if (!isFinite(ampN) || ampN <= 0) return { dx: 0.0, dy: 0.0, rotDeg: 0.0 }
+        if (!isFinite(ampN) || ampN <= 0) {
+            dst.dx     = 0.0
+            dst.dy     = 0.0
+            dst.rotDeg = 0.0
+            return dst
+        }
         var effAmp  = clampNum(ampN, 0.05, 2.5)
         var period  = max2(60, Number(cf && cf.periodMs) || 800)
         var ageN    = Number(ageMs)
@@ -1002,7 +1114,13 @@
         var stepIdx = Math.floor(cyc)
         var frac    = cyc - stepIdx
         var seed    = Number(cf && cf.cSeed) || 1.0
-        var style   = String((item && item.charShakeStyle) ? item.charShakeStyle : 'omni').toLowerCase()
+        var style   = 'omni'
+        if (item != null) {
+            if (item.charShakeStyleLower === undefined) {
+                item.charShakeStyleLower = String(item.charShakeStyle ? item.charShakeStyle : 'omni').toLowerCase()
+            }
+            style = item.charShakeStyleLower
+        }
 
         var rawDx     = 0.0
         var rawDy     = 0.0
@@ -1017,11 +1135,50 @@
             var rotDegAmp   = clampNum((item && item.charShakeRotDeg != null && isFinite(Number(item.charShakeRotDeg))) ? Number(item.charShakeRotDeg) : 0.0, 0.0, 45.0)
             var swayWin     = clampNum((item && item.charShakeWin != null && isFinite(Number(item.charShakeWin))) ? Number(item.charShakeWin) : 0.38, 0.05, 1.0)
 
-            var prevDx = (hashUnit((stepIdx - 1) * 17.13 + seed) * 2.0 - 1.0) * shiftXScale * effAmp
-            var prevDy = (hashUnit((stepIdx - 1) * 29.71 + seed + 5.3) * 2.0 - 1.0) * shiftYScale * effAmp
-            var nextDx = (hashUnit(stepIdx * 17.13 + seed) * 2.0 - 1.0) * shiftXScale * effAmp
-            var nextDy = (hashUnit(stepIdx * 29.71 + seed + 5.3) * 2.0 - 1.0) * shiftYScale * effAmp
-            var transMode = (item && item.charShakeTransition != null) ? String(item.charShakeTransition).toLowerCase() : 'smooth'
+            var hPrevX, hPrevY, hNextX, hNextY, hPrevR, hNextR, dirSignX, dirSignY
+            if (cf != null) {
+                if (cf._hStepIdx !== stepIdx || cf._hSeed !== seed) {
+                    cf._hStepIdx  = stepIdx
+                    cf._hSeed     = seed
+                    cf._hPrevX    = hashUnit((stepIdx - 1) * 17.13 + seed) * 2.0 - 1.0
+                    cf._hPrevY    = hashUnit((stepIdx - 1) * 29.71 + seed + 5.3) * 2.0 - 1.0
+                    cf._hNextX    = hashUnit(stepIdx * 17.13 + seed) * 2.0 - 1.0
+                    cf._hNextY    = hashUnit(stepIdx * 29.71 + seed + 5.3) * 2.0 - 1.0
+                    cf._hPrevR    = hashUnit((stepIdx - 1) * 61.37 + seed + 13.7) * 2.0 - 1.0
+                    cf._hNextR    = hashUnit(stepIdx * 61.37 + seed + 13.7) * 2.0 - 1.0
+                    cf._hDirSignX = (hashUnit(stepIdx * 43.17 + seed + 9.1) >= 0.5) ? 1.0 : -1.0
+                    cf._hDirSignY = (hashUnit(stepIdx * 53.29 + seed + 3.7) >= 0.5) ? 1.0 : -1.0
+                }
+                hPrevX   = cf._hPrevX
+                hPrevY   = cf._hPrevY
+                hNextX   = cf._hNextX
+                hNextY   = cf._hNextY
+                hPrevR   = cf._hPrevR
+                hNextR   = cf._hNextR
+                dirSignX = cf._hDirSignX
+                dirSignY = cf._hDirSignY
+            } else {
+                hPrevX   = hashUnit((stepIdx - 1) * 17.13 + seed) * 2.0 - 1.0
+                hPrevY   = hashUnit((stepIdx - 1) * 29.71 + seed + 5.3) * 2.0 - 1.0
+                hNextX   = hashUnit(stepIdx * 17.13 + seed) * 2.0 - 1.0
+                hNextY   = hashUnit(stepIdx * 29.71 + seed + 5.3) * 2.0 - 1.0
+                hPrevR   = hashUnit((stepIdx - 1) * 61.37 + seed + 13.7) * 2.0 - 1.0
+                hNextR   = hashUnit(stepIdx * 61.37 + seed + 13.7) * 2.0 - 1.0
+                dirSignX = (hashUnit(stepIdx * 43.17 + seed + 9.1) >= 0.5) ? 1.0 : -1.0
+                dirSignY = (hashUnit(stepIdx * 53.29 + seed + 3.7) >= 0.5) ? 1.0 : -1.0
+            }
+
+            var prevDx = hPrevX * shiftXScale * effAmp
+            var prevDy = hPrevY * shiftYScale * effAmp
+            var nextDx = hNextX * shiftXScale * effAmp
+            var nextDy = hNextY * shiftYScale * effAmp
+            var transMode = 'smooth'
+            if (item != null) {
+                if (item.charShakeTransLower === undefined) {
+                    item.charShakeTransLower = (item.charShakeTransition != null) ? String(item.charShakeTransition).toLowerCase() : 'smooth'
+                }
+                transMode = item.charShakeTransLower
+            }
             var isSnap    = Boolean(item && item.charShakeSnap) || transMode === 'snap' || transMode === 'instant' || transMode === 'step' || transMode === '0'
             var shiftT    = 1.0
             if (!isSnap) {
@@ -1040,15 +1197,13 @@
             rawDy = prevDy + (nextDy - prevDy) * shiftT
 
             if (rotDegAmp > 0) {
-                var prevRot = (hashUnit((stepIdx - 1) * 61.37 + seed + 13.7) * 2.0 - 1.0) * rotDegAmp * 0.65
-                var nextRot = (hashUnit(stepIdx * 61.37 + seed + 13.7) * 2.0 - 1.0) * rotDegAmp * 0.65
+                var prevRot = hPrevR * rotDegAmp * 0.65
+                var nextRot = hNextR * rotDegAmp * 0.65
                 rawRotDeg = prevRot + (nextRot - prevRot) * shiftT
             }
 
             if (frac < swayWin) {
-                var u = frac / swayWin
-                var dirSignX = (hashUnit(stepIdx * 43.17 + seed + 9.1) >= 0.5) ? 1.0 : -1.0
-                var dirSignY = (hashUnit(stepIdx * 53.29 + seed + 3.7) >= 0.5) ? 1.0 : -1.0
+                var u    = frac / swayWin
                 var wave = Math.sin(u * PI * 2.5) * (1.0 - u)
                 rawDx += dirSignX * wave * effAmp * swayXScale
                 rawDy += dirSignY * wave * effAmp * swayYScale
@@ -1065,7 +1220,17 @@
             rawDx = nx * effAmp * 0.95
             rawDy = ny * effAmp * 1.15
         } else {
-            var theta     = hashUnit(stepIdx * 19.37 + seed) * PI * 2.0
+            var theta
+            if (cf != null) {
+                if (cf._oStepIdx !== stepIdx || cf._oSeed !== seed) {
+                    cf._oStepIdx = stepIdx
+                    cf._oSeed    = seed
+                    cf._oTheta   = hashUnit(stepIdx * 19.37 + seed) * PI * 2.0
+                }
+                theta = cf._oTheta
+            } else {
+                theta = hashUnit(stepIdx * 19.37 + seed) * PI * 2.0
+            }
             var jitterWin = clampNum((item && item.charShakeWin != null) ? item.charShakeWin : 0.26, 0.05, 1.0)
             var pulse     = 0.0
             if (frac < jitterWin) {
@@ -1079,11 +1244,10 @@
 
         var outDx = clampNum(rawDx, -CONFIG.charShakeMaxDxPx, CONFIG.charShakeMaxDxPx)
         var outDy = clampNum(rawDy, -CONFIG.charShakeMaxDyPx, CONFIG.charShakeMaxDyPx)
-        return {
-            dx:     isFinite(outDx) ? outDx : 0.0,
-            dy:     isFinite(outDy) ? outDy : 0.0,
-            rotDeg: isFinite(rawRotDeg) ? rawRotDeg : 0.0
-        }
+        dst.dx     = isFinite(outDx) ? outDx : 0.0
+        dst.dy     = isFinite(outDy) ? outDy : 0.0
+        dst.rotDeg = isFinite(rawRotDeg) ? rawRotDeg : 0.0
+        return dst
     }
 
     // 颜色打包辅助：原版 Font.adjustColor 对 alpha < 4 的颜色值会强制回退为 255 不透明，故钳制在 [5, 255]
@@ -1112,8 +1276,108 @@
         } catch (e) { }
     }
 
-    // 统一绘制函数：支持浮点坐标平移、单字缩放、外圈描边/发光 (stroke / glow)、柔焦虚化淡出 (blur) 与裂解淡出 (split)
-    function drawRichUnit(event, comp, floatX, floatY, halfW, rgbColor, shadow, outMode, outColor, outWidth, charScale, fadeStyle, inFade, fadeProgress, unitRotDeg) {
+    function tryDrawUnitBatched(event, comp, seq, floatX, floatY, halfW, rgbColor, shadow, outMode, outColor, outWidth, charScale, inFade, isBlurFade, isSplitFade, fadeProgress, hasUnitRot, baseA, invP, batchCtx) {
+        if (batchCtx == null || BATCH_FAILED) return false
+        var effSeq = seq || resolveVisualSeq(comp)
+        if (effSeq == null) return false
+
+        var sc = (charScale != null && isFinite(charScale) && charScale > 0.2) ? charScale : 1.0
+        var needUnitTransform = (Math.abs(sc - 1.0) > 0.01 || hasUnitRot)
+
+        if (isSplitFade) {
+            var haloBellS      = Math.sin(clampNum(fadeProgress, 0.05, 0.95) * PI)
+            var haloAlphaS     = clampNum(Math.round((invP * 0.72 + haloBellS * 0.28) * 72), 5, 96)
+            var coreAlphaS     = clampNum(Math.round(baseA * 245 + 6), 5, 255)
+            var haloUnitS      = haloAlphaS / 255.0
+            var coreUnitS      = coreAlphaS / 255.0
+            var haloEffByteS   = Math.round(haloUnitS * haloUnitS * 255)
+            var coreEffByteS   = clampNum(Math.round(coreUnitS * coreUnitS * 255), 5, 255)
+            var spreadPxS      = 0.65 + fadeProgress * 2.85
+            var sMat           = batchCtx.itemMat || ((typeof event.getMatrix === 'function') ? event.getMatrix() : event.matrix)
+            if (haloEffByteS >= 5) {
+                var hColB = packArgb(rgbColor, haloEffByteS)
+                if (!drawBatchedGlyph(batchCtx, effSeq, floatX - spreadPxS, floatY, hColB, false, sMat)) return false
+                drawBatchedGlyph(batchCtx, effSeq, floatX + spreadPxS, floatY, hColB, false, sMat)
+                drawBatchedGlyph(batchCtx, effSeq, floatX, floatY - spreadPxS * 0.78, hColB, false, sMat)
+                drawBatchedGlyph(batchCtx, effSeq, floatX, floatY + spreadPxS * 0.78, hColB, false, sMat)
+            }
+            return drawBatchedGlyph(batchCtx, effSeq, floatX, floatY, packArgb(rgbColor, coreEffByteS), Boolean(shadow) && fadeProgress < 0.42, sMat)
+        }
+
+        var unitPushed = false
+        try {
+            var mat, gx, gy
+            if (needUnitTransform) {
+                event.push()
+                unitPushed = true
+                var cx = floatX + (halfW || 0)
+                var cy = floatY + 4.0
+                event.translate(cx, cy)
+                if (hasUnitRot && typeof event.rotateDeg === 'function') {
+                    event.rotateDeg(unitRotDegSafeValue)
+                }
+                if (Math.abs(sc - 1.0) > 0.01) {
+                    if (typeof event['scale(float,float)'] === 'function') {
+                        event['scale(float,float)'](sc, sc)
+                    } else {
+                        event.scale(sc, sc, 1.0)
+                    }
+                }
+                event.translate(-(halfW || 0), -4.0)
+                mat = (typeof event.getMatrix === 'function') ? event.getMatrix() : event.matrix
+                gx  = 0.0
+                gy  = 0.0
+            } else {
+                mat = batchCtx.itemMat || ((typeof event.getMatrix === 'function') ? event.getMatrix() : event.matrix)
+                gx  = floatX
+                gy  = floatY
+            }
+
+            if (outMode === 'stroke' || outMode === 'glow') {
+                var oColRgb      = (outColor != null && outColor >= 0) ? outColor : (outMode === 'glow' ? rgbColor : 0x050A10)
+                var oRad         = clampNum(outWidth || (outMode === 'glow' ? 0.85 : 0.72), 0.25, 2.5)
+                var outAlphaUnit = (outMode === 'glow' ? 0.46 : 0.92) * baseA
+                var effOutByte   = Math.round(outAlphaUnit * outAlphaUnit * 255)
+                if (effOutByte >= 5) {
+                    var packedOutCol = packArgb(oColRgb, effOutByte)
+                    if (!drawBatchedGlyph(batchCtx, effSeq, gx - oRad, gy, packedOutCol, false, mat)) return false
+                    drawBatchedGlyph(batchCtx, effSeq, gx + oRad, gy, packedOutCol, false, mat)
+                    drawBatchedGlyph(batchCtx, effSeq, gx, gy - oRad, packedOutCol, false, mat)
+                    drawBatchedGlyph(batchCtx, effSeq, gx, gy + oRad, packedOutCol, false, mat)
+                }
+            }
+
+            if (isBlurFade) {
+                var blurRad   = 0.35 + fadeProgress * 0.48
+                var mistAlpha = clampNum(invP * (0.28 + 0.24 * Math.sin(fadeProgress * PI)), 0.03, 0.45)
+                var mistEffB  = Math.round(mistAlpha * mistAlpha * 255)
+                if (mistEffB >= 5) {
+                    var mistCol = packArgb(rgbColor, mistEffB)
+                    var blurY   = blurRad * 0.6
+                    if (!drawBatchedGlyph(batchCtx, effSeq, gx - blurRad, gy - blurY, mistCol, false, mat)) return false
+                    drawBatchedGlyph(batchCtx, effSeq, gx + blurRad, gy - blurY, mistCol, false, mat)
+                    drawBatchedGlyph(batchCtx, effSeq, gx - blurRad, gy + blurY, mistCol, false, mat)
+                    drawBatchedGlyph(batchCtx, effSeq, gx + blurRad, gy + blurY, mistCol, false, mat)
+                }
+                var coreBlurUnit = clampNum(invP * invP * (1.0 - fadeProgress * 0.35), 0.03, 1.0)
+                var coreEffB     = clampNum(Math.round(coreBlurUnit * coreBlurUnit * 255), 5, 255)
+                return drawBatchedGlyph(batchCtx, effSeq, gx, gy, packArgb(rgbColor, coreEffB), Boolean(shadow) && outMode === 'none' && fadeProgress < 0.35, mat)
+            }
+
+            var mainCol   = packArgb(rgbColor, 255)
+            var useShadow = Boolean(shadow) && (outMode !== 'stroke')
+            return drawBatchedGlyph(batchCtx, effSeq, gx, gy, mainCol, useShadow, mat)
+        } finally {
+            if (unitPushed) {
+                try { event.pop() } catch (eUPop) { }
+            }
+        }
+    }
+
+    var unitRotDegSafeValue = 0.0
+
+    // 统一绘制函数：支持 Font.drawInBatch 帧内合批、浮点坐标平移、单字缩放、外圈描边/发光 (stroke / glow)、柔焦虚化淡出 (blur) 与裂解淡出 (split)
+    function drawRichUnit(event, comp, floatX, floatY, halfW, rgbColor, shadow, outMode, outColor, outWidth, charScale, fadeStyle, inFade, fadeProgress, unitRotDeg, batchCtx, seqOpt) {
         var isBlurFade  = (inFade && fadeStyle === 'blur')
         var isSplitFade = (inFade && fadeStyle === 'split')
         if ((isBlurFade || isSplitFade) && fadeProgress >= 0.97) return
@@ -1124,6 +1388,14 @@
 
         if (!isFinite(floatX) || !isFinite(floatY)) return
         var hasUnitRot = (unitRotDeg != null && isFinite(unitRotDeg) && Math.abs(unitRotDeg) > 0.05)
+        if (hasUnitRot) unitRotDegSafeValue = unitRotDeg
+
+        if (batchCtx != null && !BATCH_FAILED) {
+            if (tryDrawUnitBatched(event, comp, seqOpt, floatX, floatY, halfW, rgbColor, shadow, outMode, outColor, outWidth, charScale, inFade, isBlurFade, isSplitFade, fadeProgress, hasUnitRot, baseA, invP, batchCtx)) {
+                return
+            }
+        }
+
         var needMatrix = (Math.abs(floatX - Math.round(floatX)) > 0.01) ||
                          (Math.abs(floatY - Math.round(floatY)) > 0.01) ||
                          (charScale != null && Math.abs(charScale - 1.0) > 0.01) ||
@@ -1183,7 +1455,7 @@
                 event.translate(floatX, floatY)
             }
 
-            // 1. 外圈绘制（stroke 实心描边 如黑底绿字 / glow 柔光发光外圈，未启用时不执行）
+            // 1. 外圈绘制（回退路径使用增量平移，消除内层 push/pop 与数组分配）
             if (outMode === 'stroke' || outMode === 'glow') {
                 var oColRgb = (outColor != null && outColor >= 0)
                     ? outColor
@@ -1194,51 +1466,35 @@
                 var packedOutCol = packArgb(oColRgb, outAlphaByte)
                 setShaderAlphaSafe(event, outAlphaUnit)
 
-                var dirs = [
-                    [-oRad, 0], [oRad, 0], [0, -oRad], [0, oRad]
-                ]
-                for (var dIdx = 0; dIdx < dirs.length; dIdx++) {
-                    var dPush = false
-                    try {
-                        event.push()
-                        dPush = true
-                        event.translate(dirs[dIdx][0], dirs[dIdx][1])
-                        event.text(comp, 0, 0, packedOutCol, false)
-                    } finally {
-                        if (dPush) {
-                            try { event.pop() } catch (eDPop) { }
-                        }
-                    }
-                }
+                event.translate(-oRad, 0)
+                event.text(comp, 0, 0, packedOutCol, false)
+                event.translate(oRad * 2.0, 0)
+                event.text(comp, 0, 0, packedOutCol, false)
+                event.translate(-oRad, -oRad)
+                event.text(comp, 0, 0, packedOutCol, false)
+                event.translate(0, oRad * 2.0)
+                event.text(comp, 0, 0, packedOutCol, false)
+                event.translate(0, -oRad)
             }
 
-            // 2. 淡出虚化 (blur)：使用亚像素 (< 0.82px) 柔焦羽化核与 Shader 透明度平滑消融，笔画融合不分裂、字号不放大
+            // 2. 淡出虚化 (blur)：回退路径同样采用增量平移消除内层 push/pop
             if (isBlurFade) {
                 var blurRad   = 0.35 + fadeProgress * 0.48
+                var blurY2    = blurRad * 0.6
                 var mistAlpha = clampNum(invP * (0.28 + 0.24 * Math.sin(fadeProgress * PI)), 0.03, 0.45)
                 var mistByte  = clampNum(Math.round(mistAlpha * 255), 5, 120)
                 var mistCol   = packArgb(rgbColor, mistByte)
                 setShaderAlphaSafe(event, mistAlpha)
 
-                var bOffsets = [
-                    [-blurRad, -blurRad * 0.6],
-                    [ blurRad, -blurRad * 0.6],
-                    [-blurRad,  blurRad * 0.6],
-                    [ blurRad,  blurRad * 0.6]
-                ]
-                for (var bIdx = 0; bIdx < bOffsets.length; bIdx++) {
-                    var bPush = false
-                    try {
-                        event.push()
-                        bPush = true
-                        event.translate(bOffsets[bIdx][0], bOffsets[bIdx][1])
-                        event.text(comp, 0, 0, mistCol, false)
-                    } finally {
-                        if (bPush) {
-                            try { event.pop() } catch (eBPop) { }
-                        }
-                    }
-                }
+                event.translate(-blurRad, -blurY2)
+                event.text(comp, 0, 0, mistCol, false)
+                event.translate(blurRad * 2.0, 0)
+                event.text(comp, 0, 0, mistCol, false)
+                event.translate(-blurRad * 2.0, blurY2 * 2.0)
+                event.text(comp, 0, 0, mistCol, false)
+                event.translate(blurRad * 2.0, 0)
+                event.text(comp, 0, 0, mistCol, false)
+                event.translate(-blurRad, -blurY2)
 
                 var coreBlurUnit = clampNum(invP * invP * (1.0 - fadeProgress * 0.35), 0.03, 1.0)
                 var coreBlurByte = clampNum(Math.round(coreBlurUnit * 255), 5, 255)
@@ -2032,11 +2288,16 @@
 
         var sw         = Number(event.width) || 854
         var sh         = Number(event.height) || 480
-        var fontObj    = getClientFont(event)
+        var fontObj    = getClientFont(event, now)
         var guiBlocked = isBlockingGuiOpen(event)
         var prevBlend  = queryGlBlendEnabled()
+        var batchCtx   = createFrameBatchCtx(event, fontObj)
 
-        for (var i = 0; i < activeOverlays.length; i++) {
+        try {
+            if (prevBlend !== true) {
+                try { event.blend(true) } catch (eBlendOn) { }
+            }
+            for (var i = 0; i < activeOverlays.length; i++) {
             var item = activeOverlays[i]
             if (now >= item.expire) {
                 activeOverlays.splice(i, 1)
@@ -2202,7 +2463,9 @@
                         event.scale(scaleX, scaleY, 1.0)
                     }
                 }
-                event.blend(true)
+                if (batchCtx != null && !BATCH_FAILED) {
+                    batchCtx.itemMat = (typeof event.getMatrix === 'function') ? event.getMatrix() : event.matrix
+                }
 
                 if (isShatterFade) {
                     var titleSkipS   = min2(item.titleVis, startSkipVis)
@@ -2224,12 +2487,14 @@
                         var dy     = frag.vy * burstP + (14.0 * burstP * localP)
                         var rotDeg = frag.rotMax * burstP
                         var fScale = max2(0.12, 1.0 - localP * 0.78)
+                        var fCol   = ((frag.color != null && isFinite(frag.color)) ? Math.round(frag.color) : 0xFF5555) | 0xFF000000
 
                         if (fastMode || (Math.abs(rotDeg) < 2.0 && fScale > 0.92)) {
-                            var fx   = Math.round((frag.cx || 0) + (dx || 0) + (frag.halfW || 0)) || 0
-                            var fy   = Math.round((frag.cy || 0) + (dy || 0) - 4.5) || 0
-                            var fCol = ((frag.color != null && isFinite(frag.color)) ? Math.round(frag.color) : 0xFF5555) | 0xFF000000
-                            event.text(frag.comp, fx, fy, fCol, Boolean(item.shadow))
+                            var fxRaw = (frag.cx || 0) + (dx || 0) + (frag.halfW || 0)
+                            var fyRaw = (frag.cy || 0) + (dy || 0) - 4.5
+                            if (!(batchCtx != null && !BATCH_FAILED && drawBatchedGlyph(batchCtx, frag.seq || (frag.seq = resolveVisualSeq(frag.comp)), fxRaw, fyRaw, fCol, Boolean(item.shadow), batchCtx.itemMat))) {
+                                event.text(frag.comp, Math.round(fxRaw) || 0, Math.round(fyRaw) || 0, fCol, Boolean(item.shadow))
+                            }
                         } else {
                             var fragPushed = false
                             try {
@@ -2242,9 +2507,11 @@
                                         ? event['scale(float,float)'](fScale, fScale)
                                         : event.scale(fScale, fScale)
                                 }
-                                var fhx   = Math.round(frag.halfW || 0) || 0
-                                var fCol2 = ((frag.color != null && isFinite(frag.color)) ? Math.round(frag.color) : 0xFF5555) | 0xFF000000
-                                event.text(frag.comp, fhx, -4, fCol2, Boolean(item.shadow))
+                                var fhx = Math.round(frag.halfW || 0) || 0
+                                var fMat = (batchCtx != null && !BATCH_FAILED) ? ((typeof event.getMatrix === 'function') ? event.getMatrix() : event.matrix) : null
+                                if (!(fMat != null && drawBatchedGlyph(batchCtx, frag.seq || (frag.seq = resolveVisualSeq(frag.comp)), frag.halfW || 0, -4.5, fCol, Boolean(item.shadow), fMat))) {
+                                    event.text(frag.comp, fhx, -4, fCol, Boolean(item.shadow))
+                                }
                             } catch (eFrag) {
                             } finally {
                                 if (fragPushed) {
@@ -2263,7 +2530,7 @@
                     if ((item.debug || CONFIG.debug) && !item._debugLogged && charFrags.length > 0) {
                         item._debugLogged = true
                         var dbg0 = charFrags[0]
-                        var dbgOff = sampleCharShakeOffset(dbg0, age, item.shakeAmp || 0.65, item)
+                        var dbgOff = sampleCharShakeOffset(dbg0, age, item.shakeAmp || 0.65, item, { dx: 0.0, dy: 0.0, rotDeg: 0.0 })
                         console.info('[ScreenDanmakuClient DEBUG] frags=' + charFrags.length +
                             ' shownVis=' + shownVis +
                             ' age=' + age +
@@ -2280,22 +2547,31 @@
                             ' outMode=' + defOutMod + ' col=' + dbg0.color)
                     }
 
+                    var baseShakeAmp = item.shakeAmp || 0.65
+                    var activeShake  = curShake > 0 ? curShake : baseShakeAmp
                     for (var cIdx = 0; cIdx < charFrags.length; cIdx++) {
                         var cf = charFrags[cIdx]
                         if (cf.visIndex < startSkipVis || cf.visIndex >= keepEndVis) continue
                         lastVisCf = cf
 
                         var shouldShakeChar = (cf.shakeFlag === 1) || (isPerCharShake && cf.shakeFlag !== -1)
-                        var effCharAmp      = shouldShakeChar ? (curShake > 0 ? curShake : (item.shakeAmp || 0.65)) : 0.0
-                        var cOffset         = shouldShakeChar ? sampleCharShakeOffset(cf, age, effCharAmp, item) : { dx: 0.0, dy: 0.0, rotDeg: 0.0 }
-                        var cOutMode        = (cf.outlineMode && cf.outlineMode.length > 0) ? cf.outlineMode : defOutMod
-                        var cOutColor       = (cf.outlineColor != null && cf.outlineColor >= 0) ? cf.outlineColor : defOutCol
+                        var offDx  = 0.0
+                        var offDy  = 0.0
+                        var offRot = 0.0
+                        if (shouldShakeChar) {
+                            sampleCharShakeOffset(cf, age, activeShake, item, CHAR_OFFSET_SCRATCH)
+                            offDx  = CHAR_OFFSET_SCRATCH.dx
+                            offDy  = CHAR_OFFSET_SCRATCH.dy
+                            offRot = CHAR_OFFSET_SCRATCH.rotDeg
+                        }
+                        var cOutMode  = (cf.outlineMode && cf.outlineMode.length > 0) ? cf.outlineMode : defOutMod
+                        var cOutColor = (cf.outlineColor != null && cf.outlineColor >= 0) ? cf.outlineColor : defOutCol
 
                         drawRichUnit(
                             event,
                             cf.comp,
-                            cf.baseX + cOffset.dx,
-                            cf.baseY + cOffset.dy,
+                            cf.baseX + offDx,
+                            cf.baseY + offDy,
                             cf.w * 0.5,
                             cf.color,
                             cShdBool,
@@ -2306,14 +2582,21 @@
                             item.fadeStyle,
                             inFade,
                             fadeProgress,
-                            cOffset.rotDeg
+                            offRot,
+                            batchCtx,
+                            cf.seq
                         )
                     }
 
                     if (blinkCursor.length > 0 && lastVisCf != null) {
+                        if (item._cursorText !== blinkCursor || item._cursorComp == null) {
+                            item._cursorText = blinkCursor
+                            item._cursorComp = Text.of(blinkCursor)
+                            item._cursorSeq  = resolveVisualSeq(item._cursorComp)
+                        }
                         drawRichUnit(
                             event,
-                            Text.of(blinkCursor),
+                            item._cursorComp,
                             lastVisCf.baseX + lastVisCf.w + (itemSpacing || 0),
                             lastVisCf.baseY,
                             3.0,
@@ -2325,20 +2608,54 @@
                             1.0,
                             item.fadeStyle,
                             inFade,
-                            fadeProgress
+                            fadeProgress,
+                            0.0,
+                            batchCtx,
+                            item._cursorSeq
                         )
                     }
                 } else {
-                    var titleSkip = min2(item.titleVis, startSkipVis)
-                    var titleKeep = min2(item.titleVis, keepEndVis)
-                    var subSkip   = max2(0, startSkipVis - item.titleVis)
-                    var subKeep   = max2(0, keepEndVis - item.titleVis)
+                    var lineCacheKey = curWrapKey + '|s:' + startSkipVis + '|k:' + keepEndVis + '|c:' + blinkCursor + '|y:' + startY
+                    var lCache       = item._lineRenderCache
+                    if (lCache == null || lCache.key !== lineCacheKey) {
+                        var titleSkip = min2(item.titleVis, startSkipVis)
+                        var titleKeep = min2(item.titleVis, keepEndVis)
+                        var subSkip   = max2(0, startSkipVis - item.titleVis)
+                        var subKeep   = max2(0, keepEndVis - item.titleVis)
 
-                    var cursorOnTitle = (blinkCursor.length > 0 && shownVis <= item.titleVis)
-                    var cursorOnSub   = (blinkCursor.length > 0 && shownVis > item.titleVis)
+                        var cursorOnTitle = (blinkCursor.length > 0 && shownVis <= item.titleVis)
+                        var cursorOnSub   = (blinkCursor.length > 0 && shownVis > item.titleVis)
 
-                    var renderTitleLines = buildRenderedLines(item.titleLines, titleSkip, titleKeep, cursorOnTitle ? blinkCursor : '', fontObj, itemSpacing, itemSpacingMode)
-                    var renderSubLines   = buildRenderedLines(item.subLines, subSkip, subKeep, cursorOnSub ? blinkCursor : '', fontObj, itemSpacing, itemSpacingMode)
+                        var renderTitleLines = buildRenderedLines(item.titleLines, titleSkip, titleKeep, cursorOnTitle ? blinkCursor : '', fontObj, itemSpacing, itemSpacingMode)
+                        var renderSubLines   = buildRenderedLines(item.subLines, subSkip, subKeep, cursorOnSub ? blinkCursor : '', fontObj, itemSpacing, itemSpacingMode)
+
+                        var tItems = []
+                        for (var tIdx = 0; tIdx < renderTitleLines.length; tIdx++) {
+                            var rLine1 = renderTitleLines[tIdx]
+                            var tComp  = Text.of(rLine1.text)
+                            tItems.push({
+                                comp:  tComp,
+                                seq:   resolveVisualSeq(tComp),
+                                x:     -Math.floor((rLine1.fullW || 0) * 0.5) + (rLine1.offsetPx || 0),
+                                y:     startY + (rLine1.lineIndex || 0) * lineStep,
+                                halfW: (rLine1.fullW || 0) * 0.5
+                            })
+                        }
+                        var sItems = []
+                        for (var sIdx = 0; sIdx < renderSubLines.length; sIdx++) {
+                            var rLine2 = renderSubLines[sIdx]
+                            var sComp  = Text.of(rLine2.text)
+                            sItems.push({
+                                comp:  sComp,
+                                seq:   resolveVisualSeq(sComp),
+                                x:     -Math.floor((rLine2.fullW || 0) * 0.5) + (rLine2.offsetPx || 0),
+                                y:     startY + (titleLineCount + (rLine2.lineIndex || 0)) * lineStep,
+                                halfW: (rLine2.fullW || 0) * 0.5
+                            })
+                        }
+                        lCache = { key: lineCacheKey, tItems: tItems, sItems: sItems }
+                        item._lineRenderCache = lCache
+                    }
 
                     var rawMainCol = (item.color != null && isFinite(item.color)) ? Math.round(item.color) : 0xFF5555
                     var rawSubCol  = (item.subColor != null && isFinite(item.subColor)) ? Math.round(item.subColor) : 0xFFCC44
@@ -2347,17 +2664,13 @@
                     var lOutCol    = item.outlineColor != null ? item.outlineColor : -1
                     var lOutWid    = item.outlineWidth || 0.75
 
-                    for (var tIdx = 0; tIdx < renderTitleLines.length; tIdx++) {
-                        var rLine1 = renderTitleLines[tIdx]
-                        var x1     = -Math.floor((rLine1.fullW || 0) * 0.5) + (rLine1.offsetPx || 0)
-                        var y1     = startY + (rLine1.lineIndex || 0) * lineStep
-                        drawRichUnit(event, Text.of(rLine1.text), x1, y1, (rLine1.fullW || 0) * 0.5, rawMainCol, shdBool, lOutMode, lOutCol, lOutWid, 1.0, item.fadeStyle, inFade, fadeProgress)
+                    for (var ti = 0; ti < lCache.tItems.length; ti++) {
+                        var tEntry = lCache.tItems[ti]
+                        drawRichUnit(event, tEntry.comp, tEntry.x, tEntry.y, tEntry.halfW, rawMainCol, shdBool, lOutMode, lOutCol, lOutWid, 1.0, item.fadeStyle, inFade, fadeProgress, 0.0, batchCtx, tEntry.seq)
                     }
-                    for (var sIdx = 0; sIdx < renderSubLines.length; sIdx++) {
-                        var rLine2 = renderSubLines[sIdx]
-                        var x2     = -Math.floor((rLine2.fullW || 0) * 0.5) + (rLine2.offsetPx || 0)
-                        var y2     = startY + (titleLineCount + (rLine2.lineIndex || 0)) * lineStep
-                        drawRichUnit(event, Text.of(rLine2.text), x2, y2, (rLine2.fullW || 0) * 0.5, rawSubCol, shdBool, lOutMode, lOutCol, lOutWid, 1.0, item.fadeStyle, inFade, fadeProgress)
+                    for (var si = 0; si < lCache.sItems.length; si++) {
+                        var sEntry = lCache.sItems[si]
+                        drawRichUnit(event, sEntry.comp, sEntry.x, sEntry.y, sEntry.halfW, rawSubCol, shdBool, lOutMode, lOutCol, lOutWid, 1.0, item.fadeStyle, inFade, fadeProgress, 0.0, batchCtx, sEntry.seq)
                     }
                 }
                 item.drawErrors = 0
@@ -2369,12 +2682,15 @@
                     i--
                 }
             } finally {
-                if (prevBlend !== true) {
-                    try { event.blend(false) } catch (eBlend) { }
-                }
                 if (pushed) {
                     try { event.pop() } catch (ePop) { }
                 }
+            }
+            }
+        } finally {
+            flushFrameBatchCtx(batchCtx)
+            if (prevBlend !== true) {
+                try { event.blend(false) } catch (eBlendOff) { }
             }
         }
     })
