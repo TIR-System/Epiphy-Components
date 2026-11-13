@@ -1482,9 +1482,10 @@
     }
 
     var syncAll = () => {
+        if (handles.size === 0) return
+        var hadHandles = true
         var t0Ns = nowNano()
         try {
-            if (handles.size === 0) return
             var snap             = snapshotPlayers()
             var noOnlinePlayers  = (snap.list.length === 0)
             var needsArbitration = false
@@ -1524,7 +1525,7 @@
                 lastSyncAllMs   = dtMs
                 syncAllCount++
                 lastSyncAllTick = tickCounter
-                if (handles.size > 0) lastActiveSyncAllMs = dtMs
+                if (hadHandles || handles.size > 0) lastActiveSyncAllMs = dtMs
                 if (dtMs > maxSyncAllMs) maxSyncAllMs = dtMs
             }
         }

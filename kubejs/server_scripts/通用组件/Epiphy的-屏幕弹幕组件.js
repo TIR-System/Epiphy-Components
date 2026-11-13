@@ -315,6 +315,49 @@
     var blockSourceSeq       = 0
     var playerSourceCooldown = new Map() // '<playerUuid>|<scopeKey>' -> expireTick
 
+    // 【catch 约定】System.nanoTime 探测失败时回退 Date.now()*1e6，不影响弹幕调度逻辑。
+    var DanmakuSystemClass = null
+    try { DanmakuSystemClass = Java.loadClass('java.lang.System') } catch (eSys) { }
+
+    function nowNano() {
+        if (DanmakuSystemClass != null) {
+            try { return Number(DanmakuSystemClass.nanoTime()) } catch (eNs) { }
+        }
+        return Date.now() * 1000000
+    }
+
+    var lastEmitMs            = 0
+    var maxEmitMs             = 0
+    var emitCallCount         = 0
+    var curEmitCycleTick      = -1
+    var curEmitCycleAccumMs   = 0
+    var curEmitCycleActive    = false
+    var lastEmitCycleMs       = 0
+    var lastActiveEmitCycleMs = 0
+    var maxEmitCycleMs        = 0
+    var emitCycleCount        = 0
+    var lastEmitCycleTick     = 0
+
+    function recordEmitTelemetry(dtMs, dispatchedCount) {
+        if (dtMs < 0 || !isFinite(dtMs)) return
+        lastEmitMs = dtMs
+        if (dtMs > maxEmitMs) maxEmitMs = dtMs
+        emitCallCount++
+
+        if (danmakuTickCounter !== curEmitCycleTick) {
+            curEmitCycleTick    = danmakuTickCounter
+            curEmitCycleAccumMs = 0
+            curEmitCycleActive  = false
+            emitCycleCount++
+            lastEmitCycleTick = danmakuTickCounter
+        }
+        curEmitCycleAccumMs += dtMs
+        if (dispatchedCount > 0) curEmitCycleActive = true
+        lastEmitCycleMs = curEmitCycleAccumMs
+        if (curEmitCycleActive) lastActiveEmitCycleMs = curEmitCycleAccumMs
+        if (curEmitCycleAccumMs > maxEmitCycleMs) maxEmitCycleMs = curEmitCycleAccumMs
+    }
+
     ServerEvents.tick(function (event) {
         if (SERVER_REF == null) SERVER_REF = event.server
         danmakuTickCounter++
@@ -1886,85 +1929,92 @@
         }
         if (lv == null) lv = resolveLevel(rec.dim, null)
         if (lv == null) return 0
-        if (curBlock == null) {
-            try { curBlock = lv.getBlock(rec.x, rec.y, rec.z) } catch (e0) { reportCatch('boundBlockGet', e0) }
-        }
-        var extractId = (typeof global !== 'undefined' && global.EpiphyBlockTracker) ? global.EpiphyBlockTracker.extractBlockId : null
-        if (extractId != null && extractId(curBlock) !== rec.blockId) return 0
 
-        var cx = rec.x + 0.5, cy = rec.y + 0.5, cz = rec.z + 0.5
-        var r  = binding.radius
-        var visitTargets = function (cb) {
-            return cluster != null
-                ? forEachPlayerInMergeCluster(lv, cluster, cb)
-                : forEachPlayerInRadius(lv, cx, cy, cz, r, cb)
-        }
+        var t0Ns    = nowNano()
+        var sentOut = 0
+        try {
+            if (curBlock == null) {
+                try { curBlock = lv.getBlock(rec.x, rec.y, rec.z) } catch (e0) { reportCatch('boundBlockGet', e0) }
+            }
+            var extractId = (typeof global !== 'undefined' && global.EpiphyBlockTracker) ? global.EpiphyBlockTracker.extractBlockId : null
+            if (extractId != null && extractId(curBlock) !== rec.blockId) return 0
 
-        // 模式 1（共享模式 perPlayer === false，默认）：仅当至少有一名玩家通过作用域准入后才延迟生成并打包一次，避免 merge/竞争落选方块空耗构包
-        if (!binding.perPlayer) {
-            var sharedBuilt = false
-            var sharedPkt   = null
-            var sharedSent  = 0
-            visitTargets(function (p) {
-                if (!shouldEmitForBoundBlockToPlayer(rec, binding, p)) return
-                if (!sharedBuilt) {
-                    sharedBuilt = true
-                    var sharedSpec = null
+            var cx = rec.x + 0.5, cy = rec.y + 0.5, cz = rec.z + 0.5
+            var r  = binding.radius
+            var visitTargets = function (cb) {
+                return cluster != null
+                    ? forEachPlayerInMergeCluster(lv, cluster, cb)
+                    : forEachPlayerInRadius(lv, cx, cy, cz, r, cb)
+            }
+
+            // 模式 1（共享模式 perPlayer === false，默认）：仅当至少有一名玩家通过作用域准入后才延迟生成并打包一次，避免 merge/竞争落选方块空耗构包
+            if (!binding.perPlayer) {
+                var sharedBuilt = false
+                var sharedPkt   = null
+                visitTargets(function (p) {
+                    if (!shouldEmitForBoundBlockToPlayer(rec, binding, p)) return
+                    if (!sharedBuilt) {
+                        sharedBuilt = true
+                        var sharedSpec = null
+                        try {
+                            sharedSpec = typeof binding.specOrFn === 'function'
+                                ? binding.specOrFn({
+                                    block:  curBlock,
+                                    level:  lv,
+                                    server: SERVER_REF,
+                                    dim:    rec.dim,
+                                    x:      rec.x,
+                                    y:      rec.y,
+                                    z:      rec.z,
+                                    player: null
+                                })
+                                : binding.specOrFn
+                        } catch (eSharedSpec) {
+                            reportCatch('emitForBoundBlock:shared_spec', eSharedSpec)
+                            sharedSpec = null
+                        }
+                        if (sharedSpec != null) {
+                            sharedPkt = buildValidatedPacket(sharedSpec, null)
+                        }
+                    }
+                    if (sharedPkt == null) return
                     try {
-                        sharedSpec = typeof binding.specOrFn === 'function'
-                            ? binding.specOrFn({
-                                block:  curBlock,
-                                level:  lv,
-                                server: SERVER_REF,
-                                dim:    rec.dim,
-                                x:      rec.x,
-                                y:      rec.y,
-                                z:      rec.z,
-                                player: null
-                            })
-                            : binding.specOrFn
-                    } catch (eSharedSpec) {
-                        reportCatch('emitForBoundBlock:shared_spec', eSharedSpec)
-                        sharedSpec = null
+                        p.sendData(CHANNEL, sharedPkt)
+                        sentOut++
+                    } catch (eSend) {
+                        reportCatch('emitForBoundBlock:shared_send', eSend)
                     }
-                    if (sharedSpec != null) {
-                        sharedPkt = buildValidatedPacket(sharedSpec, null)
-                    }
-                }
-                if (sharedPkt == null) return
+                })
+                return sentOut
+            }
+
+            // 模式 2（独立模式 perPlayer === true）：对生效范围内每名玩家各自调用一次 specOrFn（传入 player: p）
+            sentOut = visitTargets(function (p) {
+                if (!shouldEmitForBoundBlockToPlayer(rec, binding, p)) return
                 try {
-                    p.sendData(CHANNEL, sharedPkt)
-                    sharedSent++
-                } catch (eSend) {
-                    reportCatch('emitForBoundBlock:shared_send', eSend)
+                    var rawSpec = typeof binding.specOrFn === 'function'
+                        ? binding.specOrFn({
+                            block:  curBlock,
+                            level:  lv,
+                            server: SERVER_REF,
+                            dim:    rec.dim,
+                            x:      rec.x,
+                            y:      rec.y,
+                            z:      rec.z,
+                            player: p
+                        })
+                        : binding.specOrFn
+                    if (rawSpec != null) {
+                        toPlayer(p, rawSpec)
+                    }
+                } catch (eEmit) {
+                    reportCatch('emitForBoundBlock:per_player', eEmit)
                 }
             })
-            return sharedSent
+            return sentOut
+        } finally {
+            recordEmitTelemetry((nowNano() - t0Ns) / 1000000.0, sentOut)
         }
-
-        // 模式 2（独立模式 perPlayer === true）：对生效范围内每名玩家各自调用一次 specOrFn（传入 player: p）
-        return visitTargets(function (p) {
-            if (!shouldEmitForBoundBlockToPlayer(rec, binding, p)) return
-            try {
-                var rawSpec = typeof binding.specOrFn === 'function'
-                    ? binding.specOrFn({
-                        block:  curBlock,
-                        level:  lv,
-                        server: SERVER_REF,
-                        dim:    rec.dim,
-                        x:      rec.x,
-                        y:      rec.y,
-                        z:      rec.z,
-                        player: p
-                    })
-                    : binding.specOrFn
-                if (rawSpec != null) {
-                    toPlayer(p, rawSpec)
-                }
-            } catch (eEmit) {
-                reportCatch('emitForBoundBlock:per_player', eEmit)
-            }
-        })
     }
 
     function handleBoundBlockRemoved(rec, binding) {
@@ -2797,6 +2847,8 @@
             var mode = (danmakuBlockTracker != null && !danmakuBlockTracker.isFallback) ? 'tracker' : 'fallback'
             return 'scopeCache=' + scopeListCache.size +
                 ' (rev=' + boundScopeRevision + ')' +
+                ' | emitCycle=' + lastEmitCycleMs.toFixed(3) + 'ms' +
+                ' (active=' + lastActiveEmitCycleMs.toFixed(3) + 'ms, max=' + maxEmitCycleMs.toFixed(3) + 'ms)' +
                 ' | cooldowns=' + playerSourceCooldown.size +
                 ' | getTrackedRecords=' + getDanmakuTrackerCalls() +
                 ' | mode=' + mode
@@ -2805,6 +2857,8 @@
             var mode = (danmakuBlockTracker != null && !danmakuBlockTracker.isFallback) ? 'tracker' : 'fallback'
             return [
                 'trackerMode: ' + mode + ' (fallbackBindings=' + fallbackBindings.size + ', fallbackTracked=' + fallbackTracked.size + ')',
+                'emitCycleMs: last=' + lastEmitCycleMs.toFixed(3) + 'ms, lastActive=' + lastActiveEmitCycleMs.toFixed(3) + 'ms, max=' + maxEmitCycleMs.toFixed(3) + 'ms (cycles=' + emitCycleCount + ', lastCycleTick=' + lastEmitCycleTick + ')',
+                'emitCallMs: last=' + lastEmitMs.toFixed(3) + 'ms, max=' + maxEmitMs.toFixed(3) + 'ms (calls=' + emitCallCount + ')',
                 'scopeListCache.size: ' + scopeListCache.size + ' (boundScopeRevision=' + boundScopeRevision + ')',
                 'blockSeqByKey.size: ' + blockSeqByKey.size,
                 'playerSourceCooldown.size: ' + playerSourceCooldown.size,
@@ -2851,6 +2905,23 @@
                         return '弹幕绑定方块已入队扫描 ' + n + ' 个区块段（队列已接近上限 ' + st.maxQueue + '，剩余区段将在消费后继续）'
                     }
                     return '弹幕绑定方块已入队扫描 ' + n + ' 个区块段'
+                }
+            },
+            resetmetrics: {
+                desc: '重置弹幕发射峰值与累计耗时计数',
+                fn: function () {
+                    lastEmitMs            = 0
+                    maxEmitMs             = 0
+                    emitCallCount         = 0
+                    curEmitCycleTick      = -1
+                    curEmitCycleAccumMs   = 0
+                    curEmitCycleActive    = false
+                    lastEmitCycleMs       = 0
+                    lastActiveEmitCycleMs = 0
+                    maxEmitCycleMs        = 0
+                    emitCycleCount        = 0
+                    lastEmitCycleTick     = 0
+                    return '已清零弹幕发射耗时统计'
                 }
             }
         }

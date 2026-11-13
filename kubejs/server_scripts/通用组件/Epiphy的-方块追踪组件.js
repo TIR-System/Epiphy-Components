@@ -47,6 +47,26 @@
     var migratedLegacyFlag = false
     var nextVerifySlot     = 0
 
+    // 【catch 约定】System.nanoTime 探测失败时回退 Date.now()*1e6，不影响逻辑正确性。
+    var SystemClass = null
+    try { SystemClass = Java.loadClass('java.lang.System') } catch (eSys) { }
+
+    function nowNano() {
+        if (SystemClass != null) {
+            try { return Number(SystemClass.nanoTime()) } catch (eNs) { }
+        }
+        return Date.now() * 1000000
+    }
+
+    var lastTickAllMs       = 0
+    var lastActiveTickAllMs = 0
+    var maxTickAllMs        = 0
+    var tickAllCount        = 0
+    var lastTickAllTick     = 0
+    var lastScanSliceMs     = 0
+    var maxScanSliceMs      = 0
+    var scanSliceCount      = 0
+
     // 共享物理方块池与扫描状态（全局唯一份）
     // bindingsByBlockId: Map<blockId, Map<subId, bindingMeta>>
     // subscribers:       Map<subId, subscriberObj>
@@ -795,9 +815,11 @@
 
     function processScanSlice() {
         if (scanQueueHead >= scanQueue.length || bindingsByBlockId.size === 0) return
+        var t0Ns      = nowNano()
         var processed = 0
         var dirty     = false
-        while (scanQueueHead < scanQueue.length && processed < CONFIG.scanSectionsPerTick) {
+        try {
+            while (scanQueueHead < scanQueue.length && processed < CONFIG.scanSectionsPerTick) {
             var task = scanQueue[scanQueueHead]
             scanQueue[scanQueueHead] = null
             scanQueueHead++
@@ -882,6 +904,14 @@
             }
         }
         if (dirty) saveTrackedBlocks(false)
+        } finally {
+            var dtSliceMs = (nowNano() - t0Ns) / 1000000.0
+            if (processed > 0 && dtSliceMs >= 0 && isFinite(dtSliceMs)) {
+                lastScanSliceMs = dtSliceMs
+                scanSliceCount++
+                if (dtSliceMs > maxScanSliceMs) maxScanSliceMs = dtSliceMs
+            }
+        }
     }
 
     function tickAllTrackedBlocks() {
@@ -890,58 +920,75 @@
         absorbGlobalMigrations()
         if (bindingsByBlockId.size === 0) return
 
-        if ((tickCounter % CONFIG.scanEnqInterval) === 1) {
-            enqueueNearbySections()
-        }
-        processScanSlice()
+        var willEnqueue = (tickCounter % CONFIG.scanEnqInterval) === 1
+        var hasQueued   = scanQueueHead < scanQueue.length
+        var hadTracked  = trackedBlocks.size > 0
+        if (!willEnqueue && !hasQueued && !hadTracked) return
 
-        var dirty       = false
-        var verifyPhase = tickCounter % CONFIG.verifyWindowTicks
-        trackedBlocks.forEach(function (rec, posKey) {
-            try {
-                if (rec == null) return
-                var bMap = bindingsByBlockId.get(rec.blockId)
-                if (bMap == null || bMap.size === 0) return
-
-                // 将 block_changed 实体复核按 CONFIG.verifyWindowTicks (1/20) 分摊到各 tick，并配合缓存视图消除每 tick 数组与对象分配
-                var vSlot      = (rec.vSlot != null) ? (rec.vSlot % CONFIG.verifyWindowTicks) : 0
-                var needVerify = (vSlot === verifyPhase)
-                var lv         = null
-                var curBlock   = null
-
-                if (needVerify) {
-                    lv = resolveLevel(rec.dim, null)
-                    if (lv == null || !isChunkLoaded(lv, rec.x, rec.z)) {
-                        rec.chunkLoaded = false
-                        return
-                    }
-                    rec.chunkLoaded = true
-                    try { curBlock = lv.getBlock(rec.x, rec.y, rec.z) } catch (eGet) { logCatch('tick:getBlock', eGet) }
-                    if (extractBlockId(curBlock) !== rec.blockId) {
-                        dispatchRemovedToSubscribers(rec, 'block_changed', null, null)
-                        trackedBlocks.delete(posKey)
-                        dirty = true
-                        return
-                    }
-                } else if (rec.chunkLoaded === false) {
-                    return
-                }
-
-                bMap.forEach(function (binding, subId) {
-                    var sub = subscribers.get(subId)
-                    if (sub == null || sub.onTick == null) return
-                    if (sub.maintainInterval > 1 && (tickCounter % sub.maintainInterval) !== sub.maintainOffset) return
-                    try {
-                        sub.onTick(ensureSubscriberView(rec, sub), binding, tickCounter, lv, curBlock)
-                    } catch (eSubTick) {
-                        logCatch(sub.id + ':onTick', eSubTick)
-                    }
-                })
-            } catch (eItem) {
-                logCatch('tickItem', eItem)
+        var t0Ns  = nowNano()
+        var dirty = false
+        try {
+            if (willEnqueue) {
+                enqueueNearbySections()
             }
-        })
-        if (dirty) saveTrackedBlocks(false)
+            processScanSlice()
+
+            var verifyPhase = tickCounter % CONFIG.verifyWindowTicks
+            trackedBlocks.forEach(function (rec, posKey) {
+                try {
+                    if (rec == null) return
+                    var bMap = bindingsByBlockId.get(rec.blockId)
+                    if (bMap == null || bMap.size === 0) return
+
+                    // 将 block_changed 实体复核按 CONFIG.verifyWindowTicks (1/20) 分摊到各 tick，并配合缓存视图消除每 tick 数组与对象分配
+                    var vSlot      = (rec.vSlot != null) ? (rec.vSlot % CONFIG.verifyWindowTicks) : 0
+                    var needVerify = (vSlot === verifyPhase)
+                    var lv         = null
+                    var curBlock   = null
+
+                    if (needVerify) {
+                        lv = resolveLevel(rec.dim, null)
+                        if (lv == null || !isChunkLoaded(lv, rec.x, rec.z)) {
+                            rec.chunkLoaded = false
+                            return
+                        }
+                        rec.chunkLoaded = true
+                        try { curBlock = lv.getBlock(rec.x, rec.y, rec.z) } catch (eGet) { logCatch('tick:getBlock', eGet) }
+                        if (extractBlockId(curBlock) !== rec.blockId) {
+                            dispatchRemovedToSubscribers(rec, 'block_changed', null, null)
+                            trackedBlocks.delete(posKey)
+                            dirty = true
+                            return
+                        }
+                    } else if (rec.chunkLoaded === false) {
+                        return
+                    }
+
+                    bMap.forEach(function (binding, subId) {
+                        var sub = subscribers.get(subId)
+                        if (sub == null || sub.onTick == null) return
+                        if (sub.maintainInterval > 1 && (tickCounter % sub.maintainInterval) !== sub.maintainOffset) return
+                        try {
+                            sub.onTick(ensureSubscriberView(rec, sub), binding, tickCounter, lv, curBlock)
+                        } catch (eSubTick) {
+                            logCatch(sub.id + ':onTick', eSubTick)
+                        }
+                    })
+                } catch (eItem) {
+                    logCatch('tickItem', eItem)
+                }
+            })
+            if (dirty) saveTrackedBlocks(false)
+        } finally {
+            var dtMs = (nowNano() - t0Ns) / 1000000.0
+            if (dtMs >= 0 && isFinite(dtMs)) {
+                lastTickAllMs   = dtMs
+                tickAllCount++
+                lastTickAllTick = tickCounter
+                if (hadTracked || trackedBlocks.size > 0) lastActiveTickAllMs = dtMs
+                if (dtMs > maxTickAllMs) maxTickAllMs = dtMs
+            }
+        }
     }
 
     function createTracker(cfg) {
@@ -1231,7 +1278,15 @@
             stateIdCacheSize:       stateIdCache.size,
             getTrackedRecordsCalls: trackedRecordsTotalCalls,
             subscriberCalls:        subCalls,
-            lastEnqueueStatus:      getLastScanStatus()
+            lastEnqueueStatus:      getLastScanStatus(),
+            lastTickAllMs:          lastTickAllMs,
+            lastActiveTickAllMs:    lastActiveTickAllMs,
+            maxTickAllMs:           maxTickAllMs,
+            tickAllCount:           tickAllCount,
+            lastTickAllTick:        lastTickAllTick,
+            lastScanSliceMs:        lastScanSliceMs,
+            maxScanSliceMs:         maxScanSliceMs,
+            scanSliceCount:         scanSliceCount
         }
     }
 
@@ -1251,7 +1306,7 @@
         resolveLevel:      resolveLevel
     }
 
-    // 动态上报扫描队列、已追踪池、getTrackedRecords 调用频次等到 EpiphyDebug
+    // 动态上报扫描队列、已追踪池、getTrackedRecords 调用频次与耗时统计到 EpiphyDebug
     var trackerDebugProvider = {
         name:    'tracker',
         label:   '方块追踪组件',
@@ -1261,7 +1316,8 @@
             return 'scanQueue.length=' + s.scanQueueArrayLength +
                 ' (pending=' + s.pendingScanCount + ')' +
                 ' | trackedBlocks.size=' + s.trackedBlocksSize +
-                ' | scannedSections=' + s.scannedSectionsSize +
+                ' | tickAll=' + s.lastTickAllMs.toFixed(3) + 'ms' +
+                ' (active=' + s.lastActiveTickAllMs.toFixed(3) + 'ms, max=' + s.maxTickAllMs.toFixed(3) + 'ms)' +
                 ' | getTrackedRecords=' + s.getTrackedRecordsCalls
         },
         detail: function () {
@@ -1270,6 +1326,8 @@
                 'bindingsCount: ' + s.bindingsCount + ' (version=' + s.bindingsVersion + ')',
                 'subscribersCount: ' + s.subscribersCount,
                 'trackedBlocks.size: ' + s.trackedBlocksSize,
+                'tickAllMs: last=' + s.lastTickAllMs.toFixed(3) + 'ms, lastActive=' + s.lastActiveTickAllMs.toFixed(3) + 'ms, max=' + s.maxTickAllMs.toFixed(3) + 'ms (count=' + s.tickAllCount + ', lastTick=' + s.lastTickAllTick + ')',
+                'scanSliceMs: last=' + s.lastScanSliceMs.toFixed(3) + 'ms, max=' + s.maxScanSliceMs.toFixed(3) + 'ms (count=' + s.scanSliceCount + ')',
                 'scannedSections.size: ' + s.scannedSectionsSize + ' / max=' + CONFIG.maxScannedSections,
                 'scanQueue.length: ' + s.scanQueueArrayLength + ' (head=' + s.scanQueueHead + ', pending=' + s.pendingScanCount + ', max=' + CONFIG.maxScanQueue + ')',
                 'CONFIG: enqInterval=' + CONFIG.scanEnqInterval + ', perTick=' + CONFIG.scanSectionsPerTick + ', verifyWin=' + CONFIG.verifyWindowTicks + ', debounce=' + CONFIG.saveDebounceTicks,
@@ -1315,6 +1373,19 @@
                 fn: function () {
                     flushTrackedBlocks()
                     return '已落盘 savedCount=' + trackedBlocks.size + ' -> ' + String(loadedStoragePath)
+                }
+            },
+            resetmetrics: {
+                desc: '重置 tickAll / scanSlice 峰值与累计耗时计数',
+                fn: function () {
+                    lastTickAllMs       = 0
+                    lastActiveTickAllMs = 0
+                    maxTickAllMs        = 0
+                    tickAllCount        = 0
+                    lastScanSliceMs     = 0
+                    maxScanSliceMs      = 0
+                    scanSliceCount      = 0
+                    return '已清零方块追踪器耗时统计'
                 }
             }
         }
