@@ -186,7 +186,7 @@
         fadeIn:           '1s',
         fadeOut:          '1s',
         outOfRangeMode:   'mute',        // 出界后静音保活，再进入接续当前进度
-        conflictMode:     'merge',       // 多测试方块合并：范围取并集、不分别计为多声源，仅播放当前最优声源
+        conflictMode:     'merge',       // 多块相邻合并：以最先放置的方块为准、其余静默不单独建句柄，范围取并集并在敲掉时重算
         conflictScope:    'sound',
         stopOnBlockBreak: true
     }
@@ -235,7 +235,7 @@
         radius:        EFFECT_RADIUS,
         intervalTicks: EMIT_STEP_TICK,
         group:         DANMAKU_GROUP,
-        conflictMode:  'merge',          // 同组多方块合并为单次触发、不分别计数，生效范围取并集
+        conflictMode:  'merge',          // 同组相邻方块合并：以最先放置方块为主控运行，其余静默合并、范围取并集并在敲掉时重算
         conflictScope: 'block'           // 'block'(同类方块) | 'group'(同组) | 'all'(全局)
     }
 

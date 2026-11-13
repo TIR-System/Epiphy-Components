@@ -1563,7 +1563,7 @@
 
     var SCOPE_CACHE_TTL_TICKS = 20
     var boundScopeRevision    = 0
-    var scopeListCache        = new Map() // '<dim>|<scopeKey>' -> { rev, builtTick, list: [{ rec, binding, seq, cx, cy, cz, rSq }], idxByKey: Map }
+    var scopeListCache        = new Map() // '<dim>|<scopeKey>' -> { rev, builtTick, list: [{ rec, binding, seq, cx, cy, cz, r, rSq }], idxByKey: Map, mergeClustersByKey: Map }
     var blockSeqByKey         = new Map() // '<posKey>' -> seq
 
     function invalidateScopeCache(removedKey) {
@@ -1595,6 +1595,123 @@
         }
         if (rec._danmakuSeq == null) rec._danmakuSeq = ++blockSourceSeq
         return rec._danmakuSeq
+    }
+
+    // 合并聚类连通分量构建：list 已按 _danmakuSeq 升序排序；
+    // 任意两块球体相交或相切 (d <= rA + rB) 即归入同一集群，seq 最小者为唯一主控 leader。
+    function buildMergeClusterMap(list) {
+        var byKey = new Map()
+        var mergeNodes = []
+        for (var i = 0; i < list.length; i++) {
+            var it = list[i]
+            if (it != null && it.binding != null && (it.binding.conflictMode || 'overlap') === 'merge') {
+                mergeNodes.push(it)
+            }
+        }
+        if (mergeNodes.length === 0) return byKey
+
+        var n = mergeNodes.length
+        var visited = new Array(n)
+        for (var vi = 0; vi < n; vi++) visited[vi] = false
+
+        for (var s = 0; s < n; s++) {
+            if (visited[s]) continue
+            visited[s] = true
+            var queue   = [s]
+            var members = []
+            for (var qi = 0; qi < queue.length; qi++) {
+                var idx = queue[qi]
+                var a = mergeNodes[idx]
+                members.push(a)
+                for (var nb = 0; nb < n; nb++) {
+                    if (visited[nb]) continue
+                    var b = mergeNodes[nb]
+                    var touch = a.r + b.r
+                    var dx = a.cx - b.cx, dy = a.cy - b.cy, dz = a.cz - b.cz
+                    if ((dx * dx + dy * dy + dz * dz) <= (touch * touch + 1e-6)) {
+                        visited[nb] = true
+                        queue.push(nb)
+                    }
+                }
+            }
+            if (members.length > 1) {
+                members.sort(function (ma, mb) { return ma.seq - mb.seq })
+            }
+            var minX = Infinity, maxX = -Infinity
+            var minY = Infinity, maxY = -Infinity
+            var minZ = Infinity, maxZ = -Infinity
+            for (var mi = 0; mi < members.length; mi++) {
+                var m = members[mi]
+                if (m.cx - m.r < minX) minX = m.cx - m.r
+                if (m.cx + m.r > maxX) maxX = m.cx + m.r
+                if (m.cy - m.r < minY) minY = m.cy - m.r
+                if (m.cy + m.r > maxY) maxY = m.cy + m.r
+                if (m.cz - m.r < minZ) minZ = m.cz - m.r
+                if (m.cz + m.r > maxZ) maxZ = m.cz + m.r
+            }
+            var clusterObj = {
+                leaderKey: members[0].rec.key,
+                leaderSeq: members[0].seq,
+                members:   members,
+                minX:      minX,
+                maxX:      maxX,
+                minY:      minY,
+                maxY:      maxY,
+                minZ:      minZ,
+                maxZ:      maxZ
+            }
+            for (var ki = 0; ki < members.length; ki++) {
+                byKey.set(members[ki].rec.key, clusterObj)
+            }
+        }
+        return byKey
+    }
+
+    function isPointInMergeCluster(cluster, px, py, pz) {
+        if (cluster == null || cluster.members == null) return false
+        if (px < cluster.minX || px > cluster.maxX ||
+            py < cluster.minY || py > cluster.maxY ||
+            pz < cluster.minZ || pz > cluster.maxZ) {
+            return false
+        }
+        var members = cluster.members
+        for (var i = 0; i < members.length; i++) {
+            var m = members[i]
+            var dx = px - m.cx, dy = py - m.cy, dz = pz - m.cz
+            if ((dx * dx + dy * dy + dz * dz) <= m.rSq) return true
+        }
+        return false
+    }
+
+    function forEachPlayerInLevel(level, fn) {
+        if (level == null || typeof fn !== 'function') return 0
+        var list = level.players
+        if (list == null) return 0
+        var isJavaList = (typeof list.size === 'function' && typeof list.get === 'function')
+        var len = isJavaList ? list.size() : (typeof list.length === 'number' ? list.length : 0)
+        var count = 0
+        for (var i = 0; i < len; i++) {
+            var p = isJavaList ? list.get(i) : list[i]
+            if (p != null) {
+                count++
+                fn(p)
+            }
+        }
+        return count
+    }
+
+    function forEachPlayerInMergeCluster(level, cluster, fn) {
+        if (level == null || cluster == null) return 0
+        var hitCount = 0
+        forEachPlayerInLevel(level, function (p) {
+            var pPos = readPlayerPos(p)
+            if (pPos == null) return
+            if (isPointInMergeCluster(cluster, pPos.x, pPos.y, pPos.z)) {
+                hitCount++
+                fn(p)
+            }
+        })
+        return hitCount
     }
 
     function getScopeCacheEntry(rec, binding) {
@@ -1634,6 +1751,7 @@
                 cx:      item.x + 0.5,
                 cy:      item.y + 0.5,
                 cz:      item.z + 0.5,
+                r:       r,
                 rSq:     r * r
             })
         }
@@ -1646,15 +1764,29 @@
         for (var j = 0; j < list.length; j++) {
             idxByKey.set(list[j].rec.key, j)
         }
+        var mergeClustersByKey = buildMergeClusterMap(list)
         if (scopeListCache.size >= 256) scopeListCache.clear()
         var entry = {
-            rev:       boundScopeRevision,
-            builtTick: danmakuTickCounter,
-            list:      list,
-            idxByKey:  idxByKey
+            rev:                boundScopeRevision,
+            builtTick:          danmakuTickCounter,
+            list:               list,
+            idxByKey:           idxByKey,
+            mergeClustersByKey: mergeClustersByKey
         }
         scopeListCache.set(cacheKey, entry)
         return entry
+    }
+
+    function getMergeClusterForRecord(rec, binding) {
+        if (rec == null || binding == null || (binding.conflictMode || 'overlap') !== 'merge') return null
+        ensureRecordSeq(rec)
+        var scopeEntry = getScopeCacheEntry(rec, binding)
+        return scopeEntry.mergeClustersByKey != null ? (scopeEntry.mergeClustersByKey.get(rec.key) || null) : null
+    }
+
+    function isMergeClusterLeader(rec, binding) {
+        var cluster = getMergeClusterForRecord(rec, binding)
+        return cluster == null || cluster.leaderKey === rec.key
     }
 
     function shouldEmitForBoundBlockToPlayer(rec, binding, p) {
@@ -1666,6 +1798,7 @@
         var pUuid = getPlayerUuidSafe(p)
 
         if (mode === 'merge') {
+            if (!isMergeClusterLeader(rec, binding)) return false
             var ck = pUuid + '|blk:' + scopeKey
             var exp = playerSourceCooldown.get(ck)
             if (exp != null && danmakuTickCounter < exp) return false
@@ -1745,6 +1878,12 @@
 
     function emitForBoundBlock(rec, binding, lv, curBlock) {
         if (binding == null) return 0
+        var isMergeMode = ((binding.conflictMode || 'overlap') === 'merge')
+        var cluster = null
+        if (isMergeMode) {
+            cluster = getMergeClusterForRecord(rec, binding)
+            if (cluster != null && cluster.leaderKey !== rec.key) return 0
+        }
         if (lv == null) lv = resolveLevel(rec.dim, null)
         if (lv == null) return 0
         if (curBlock == null) {
@@ -1755,13 +1894,18 @@
 
         var cx = rec.x + 0.5, cy = rec.y + 0.5, cz = rec.z + 0.5
         var r  = binding.radius
+        var visitTargets = function (cb) {
+            return cluster != null
+                ? forEachPlayerInMergeCluster(lv, cluster, cb)
+                : forEachPlayerInRadius(lv, cx, cy, cz, r, cb)
+        }
 
         // 模式 1（共享模式 perPlayer === false，默认）：仅当至少有一名玩家通过作用域准入后才延迟生成并打包一次，避免 merge/竞争落选方块空耗构包
         if (!binding.perPlayer) {
             var sharedBuilt = false
             var sharedPkt   = null
             var sharedSent  = 0
-            forEachPlayerInRadius(lv, cx, cy, cz, r, function (p) {
+            visitTargets(function (p) {
                 if (!shouldEmitForBoundBlockToPlayer(rec, binding, p)) return
                 if (!sharedBuilt) {
                     sharedBuilt = true
@@ -1798,8 +1942,8 @@
             return sharedSent
         }
 
-        // 模式 2（独立模式 perPlayer === true）：对半径内每名玩家各自调用一次 specOrFn（传入 player: p），支持按玩家定制文案或独立随机落点
-        return forEachPlayerInRadius(lv, cx, cy, cz, r, function (p) {
+        // 模式 2（独立模式 perPlayer === true）：对生效范围内每名玩家各自调用一次 specOrFn（传入 player: p）
+        return visitTargets(function (p) {
             if (!shouldEmitForBoundBlockToPlayer(rec, binding, p)) return
             try {
                 var rawSpec = typeof binding.specOrFn === 'function'
@@ -1823,6 +1967,47 @@
         })
     }
 
+    function handleBoundBlockRemoved(rec, binding) {
+        invalidateScopeCache(rec != null ? rec.key : null)
+        if (rec == null || binding == null || !binding.group) return
+        if ((binding.conflictMode || 'overlap') === 'merge') {
+            var scopeEntry = getScopeCacheEntry(rec, binding)
+            var remaining  = []
+            for (var i = 0; i < scopeEntry.list.length; i++) {
+                if (scopeEntry.list[i].rec.key !== rec.key) {
+                    remaining.push(scopeEntry.list[i])
+                }
+            }
+            if (remaining.length > 0) {
+                var lv = resolveLevel(rec.dim, null)
+                if (lv != null) {
+                    var pkt = buildValidatedPacket(buildClearOptions(binding.group, null), null)
+                    if (pkt != null) {
+                        var clearRad   = binding.radius + 6
+                        var clearRadSq = clearRad * clearRad
+                        var rcx = rec.x + 0.5, rcy = rec.y + 0.5, rcz = rec.z + 0.5
+                        forEachPlayerInLevel(lv, function (p) {
+                            var pPos = readPlayerPos(p)
+                            if (pPos == null) return
+                            var cdx = pPos.x - rcx, cdy = pPos.y - rcy, cdz = pPos.z - rcz
+                            if ((cdx * cdx + cdy * cdy + cdz * cdz) > clearRadSq) return
+                            for (var j = 0; j < remaining.length; j++) {
+                                var rem = remaining[j]
+                                var dx  = pPos.x - rem.cx, dy = pPos.y - rem.cy, dz = pPos.z - rem.cz
+                                if ((dx * dx + dy * dy + dz * dz) <= rem.rSq) {
+                                    return
+                                }
+                            }
+                            try { p.sendData(CHANNEL, pkt) } catch (eClr) { reportCatch('clearNearSend', eClr) }
+                        })
+                    }
+                }
+                return
+            }
+        }
+        clearNear(rec.dim, rec.x + 0.5, rec.y + 0.5, rec.z + 0.5, binding.radius + 6, binding.group)
+    }
+
     var danmakuBlockTracker  = null
     var missingTrackerWarned = false
 
@@ -1844,8 +2029,12 @@
                     var key = dim + '|' + Math.floor(event.block.x) + ',' + Math.floor(event.block.y) + ',' + Math.floor(event.block.z)
                     var rec = { key: key, blockId: bid, dim: dim, x: Math.floor(event.block.x), y: Math.floor(event.block.y), z: Math.floor(event.block.z) }
                     fallbackTracked.set(key, rec)
+                    ensureRecordSeq(rec)
                     invalidateScopeCache(null)
-                    emitForBoundBlock(rec, fallbackBindings.get(bid), event.level, event.block)
+                    var fbBinding = fallbackBindings.get(bid)
+                    if (fbBinding != null && (!((fbBinding.conflictMode || 'overlap') === 'merge') || isMergeClusterLeader(rec, fbBinding))) {
+                        emitForBoundBlock(rec, fbBinding, event.level, event.block)
+                    }
                 } catch (eP) {
                     reportCatch('fallback:placed', eP)
                 }
@@ -1858,11 +2047,8 @@
                     var rec = fallbackTracked.get(key)
                     if (rec != null) {
                         var b = fallbackBindings.get(rec.blockId)
-                        if (b != null && b.group) {
-                            clearNear(rec.dim, rec.x + 0.5, rec.y + 0.5, rec.z + 0.5, b.radius + 6, b.group)
-                        }
                         fallbackTracked.delete(key)
-                        invalidateScopeCache(key)
+                        handleBoundBlockRemoved(rec, b)
                     }
                 } catch (eB) {
                     reportCatch('fallback:broken', eB)
@@ -1916,15 +2102,24 @@
         danmakuBlockTracker = trackerApi.createTracker({
             name:             'danmaku',
             maintainInterval: 1,
+            onBindingChanged: function () {
+                invalidateScopeCache(null)
+            },
             onFound: function (rec, binding, source) {
                 ensureRecordSeq(rec)
                 invalidateScopeCache(null)
-                // 仅在玩家新放置时立即触发首帧反馈；扫描/迁移命中的存量方块统一由 onTick 按 intervalTicks 发放，避免开服瞬时推包峰值
+                // 仅在玩家新放置时立即触发首帧反馈；若归属于已存在合并集群的从属方块则静默合并，不额外运行
                 if (source === 'placed') {
+                    if ((binding.conflictMode || 'overlap') === 'merge' && !isMergeClusterLeader(rec, binding)) {
+                        return
+                    }
                     emitForBoundBlock(rec, binding, null, null)
                 }
             },
             onTick: function (rec, binding, tickNum, lv, curBlock) {
+                if ((binding.conflictMode || 'overlap') === 'merge' && !isMergeClusterLeader(rec, binding)) {
+                    return
+                }
                 var due = binding.conflictMode === 'stagger'
                     ? shouldEmitStaggerTick(rec, binding, tickNum)
                     : ((tickNum % binding.intervalTicks) === 0)
@@ -1933,42 +2128,7 @@
                 }
             },
             onRemoved: function (rec, binding) {
-                var remaining = null
-                if (rec != null && binding != null && binding.group && binding.conflictMode === 'merge') {
-                    // 合并模式：在清空 cache 前取出同组其它合并方块，移除一块时仅清退离开合并并集范围的玩家
-                    var scopeEntry = getScopeCacheEntry(rec, binding)
-                    remaining = []
-                    for (var i = 0; i < scopeEntry.list.length; i++) {
-                        if (scopeEntry.list[i].rec.key !== rec.key) {
-                            remaining.push(scopeEntry.list[i])
-                        }
-                    }
-                }
-                invalidateScopeCache(rec != null ? rec.key : null)
-                if (rec == null || binding == null || !binding.group) return
-                if (remaining != null && remaining.length > 0) {
-                    var lv = resolveLevel(rec.dim, null)
-                    if (lv != null) {
-                        var pkt = buildValidatedPacket(buildClearOptions(binding.group, null), null)
-                        if (pkt != null) {
-                            forEachPlayerInRadius(lv, rec.x + 0.5, rec.y + 0.5, rec.z + 0.5, binding.radius + 6, function (p) {
-                                var pPos = readPlayerPos(p)
-                                if (pPos != null) {
-                                    for (var j = 0; j < remaining.length; j++) {
-                                        var rem = remaining[j]
-                                        var dx  = pPos.x - rem.cx, dy = pPos.y - rem.cy, dz = pPos.z - rem.cz
-                                        if ((dx * dx + dy * dy + dz * dz) <= rem.rSq) {
-                                            return
-                                        }
-                                    }
-                                }
-                                try { p.sendData(CHANNEL, pkt) } catch (eClr) { reportCatch('clearNearSend', eClr) }
-                            })
-                        }
-                    }
-                    return
-                }
-                clearNear(rec.dim, rec.x + 0.5, rec.y + 0.5, rec.z + 0.5, binding.radius + 6, binding.group)
+                handleBoundBlockRemoved(rec, binding)
             }
         })
         return danmakuBlockTracker
@@ -2680,6 +2840,16 @@
                 desc: '触发弹幕绑定方块附近区段扫描',
                 fn: function () {
                     var n = scanBlocksNow()
+                    var trackerApi = (typeof global !== 'undefined') ? global.EpiphyBlockTracker : null
+                    var st = (trackerApi != null && typeof trackerApi.getLastScanStatus === 'function')
+                        ? trackerApi.getLastScanStatus()
+                        : null
+                    if (st != null && st.blockedByQueue) {
+                        return '当前扫描队列已满（' + st.queuePending + '/' + st.maxQueue + '，正在排队消化中），请稍后重试'
+                    }
+                    if (st != null && st.truncatedByQueue && n > 0) {
+                        return '弹幕绑定方块已入队扫描 ' + n + ' 个区块段（队列已接近上限 ' + st.maxQueue + '，剩余区段将在消费后继续）'
+                    }
                     return '弹幕绑定方块已入队扫描 ' + n + ' 个区块段'
                 }
             }

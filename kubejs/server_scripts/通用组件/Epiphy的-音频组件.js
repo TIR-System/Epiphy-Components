@@ -963,6 +963,46 @@
         return true
     }
 
+    var getClusterSourceLim = (h, src, alreadyListening) => {
+        if (!alreadyListening) return src.range
+        return h.outOfRangeMode === 'mute'
+            ? max2(src.range + CONFIG.rangeHysteresis, h.keepAliveRange)
+            : (src.range + CONFIG.rangeHysteresis)
+    }
+
+    var pickClusterSourceForPlayer = (h, rec, alreadyListening) => {
+        var sources = h.clusterSources
+        if (!Array.isArray(sources) || sources.length === 0) return null
+        var inRange = false
+        var best = null
+        var bestDistSq = Infinity
+        var curKey = (h.listenerAnchorKey && rec.uuid != null) ? h.listenerAnchorKey[rec.uuid] : null
+        var curSrc = null
+        var curDistSq = Infinity
+        for (var i = 0; i < sources.length; i++) {
+            var s = sources[i]
+            if (s == null || s.dim !== rec.dim) continue
+            var dx = rec.x - s.cx, dy = rec.y - s.cy, dz = rec.z - s.cz
+            var dSq = dx * dx + dy * dy + dz * dz
+            var lim = getClusterSourceLim(h, s, alreadyListening)
+            if (dSq <= lim * lim) inRange = true
+            if (best == null || dSq < bestDistSq - 0.01 || (Math.abs(dSq - bestDistSq) <= 0.01 && s.seq < best.seq)) {
+                best = s
+                bestDistSq = dSq
+            }
+            if (curKey != null && s.audioKey === curKey) {
+                curSrc = s
+                curDistSq = dSq
+            }
+        }
+        // 迟滞防抖：若当前跟随方块仍存活在集群内，仅当另一方块显著更近 (>1.0 格²) 时才切换更新包，避免边界微步来回跳变
+        var chosen = best
+        if (curSrc != null && best != null && best.audioKey !== curSrc.audioKey && (bestDistSq + 1.0) >= curDistSq) {
+            chosen = curSrc
+        }
+        return { inRange: inRange, best: best, bestDistSq: bestDistSq, chosen: chosen }
+    }
+
     var isPlayerEligible = (h, rec, alreadyListening) => {
         if (h.excluded[rec.uuid]) return false
         var a   = h.anchor
@@ -976,11 +1016,15 @@
         if (a.kind !== 'none' && aud.kind !== 'all') {
             if (rec.dim !== a.dim) return false
             if (aud.kind !== 'dim') {
-                var lim = alreadyListening
-                    ? (h.outOfRangeMode === 'mute' ? max2(h.range + CONFIG.rangeHysteresis, h.keepAliveRange) : (h.range + CONFIG.rangeHysteresis))
-                    : h.range
-                var dx = rec.x - a.x, dy = rec.y - a.y, dz = rec.z - a.z
-                if ((dx * dx + dy * dy + dz * dz) > (lim * lim)) return false
+                if (h.isMergedCluster && Array.isArray(h.clusterSources) && h.clusterSources.length > 0) {
+                    if (!pickClusterSourceForPlayer(h, rec, alreadyListening).inRange) return false
+                } else {
+                    var lim = alreadyListening
+                        ? (h.outOfRangeMode === 'mute' ? max2(h.range + CONFIG.rangeHysteresis, h.keepAliveRange) : (h.range + CONFIG.rangeHysteresis))
+                        : h.range
+                    var dx = rec.x - a.x, dy = rec.y - a.y, dz = rec.z - a.z
+                    if ((dx * dx + dy * dy + dz * dz) > (lim * lim)) return false
+                }
             }
         }
 
@@ -1029,10 +1073,33 @@
 
         if (a.kind === 'block') {
             if (tc.stopOnBlockBreak && a.blockId) {
-                var curBlock = queryBlockAt(a.dim, a.bx, a.by, a.bz)
-                var curId    = extractBlockId(curBlock)
-                if (curId != null && curId !== a.blockId) {
-                    return 'block_broken'
+                if (h.isMergedCluster && Array.isArray(h.clusterSources) && h.clusterSources.length > 0) {
+                    var brokenKeys = []
+                    var aliveCount = 0
+                    for (var ci = 0; ci < h.clusterSources.length; ci++) {
+                        var cs = h.clusterSources[ci]
+                        var cb = queryBlockAt(cs.dim, cs.bx, cs.by, cs.bz)
+                        var cid = extractBlockId(cb)
+                        if (cid != null && cid !== cs.blockId) {
+                            brokenKeys.push(cs.audioKey)
+                        } else {
+                            aliveCount++
+                        }
+                    }
+                    if (brokenKeys.length > 0) {
+                        for (var bi = 0; bi < brokenKeys.length; bi++) {
+                            removeBoundMergeSource(brokenKeys[bi])
+                        }
+                        if (aliveCount === 0) return 'block_broken'
+                        reconcileAudioMergeScope(h.mergeScopeKey, null, h.fadeOut, h.id)
+                        return null
+                    }
+                } else {
+                    var curBlock = queryBlockAt(a.dim, a.bx, a.by, a.bz)
+                    var curId    = extractBlockId(curBlock)
+                    if (curId != null && curId !== a.blockId) {
+                        return 'block_broken'
+                    }
                 }
             }
             if (tc.stopOnRedstoneOff && !isBlockPoweredAt(a.dim, a.bx, a.by, a.bz)) {
@@ -1051,7 +1118,7 @@
         return null
     }
 
-    var buildPlayPacket = (h, restartClient) => {
+    var buildPlayPacket = (h, restartClient, srcOverride) => {
         var a = h.anchor
         var pkt = {
             proto:  PROTO_VERSION,
@@ -1072,7 +1139,13 @@
             rst:    restartClient === false ? 0 : 1,
             anc:    a.kind === 'block' ? 'pos' : a.kind
         }
-        if (a.kind !== 'none') {
+        if (srcOverride != null) {
+            pkt.x   = srcOverride.cx
+            pkt.y   = srcOverride.cy
+            pkt.z   = srcOverride.cz
+            pkt.rng = srcOverride.range
+            if (srcOverride.dim != null) pkt.dim = srcOverride.dim
+        } else if (a.kind !== 'none') {
             pkt.x   = a.x
             pkt.y   = a.y
             pkt.z   = a.z
@@ -1085,7 +1158,7 @@
         return pkt
     }
 
-    var buildUpdatePacket = (h) => {
+    var buildUpdatePacket = (h, srcOverride) => {
         var a = h.anchor
         var pkt = {
             proto: PROTO_VERSION,
@@ -1094,16 +1167,35 @@
             h:    h.id,
             vol:  h.volume,
             pit:  h.pitch,
-            rng:  h.range,
+            rng:  srcOverride != null ? srcOverride.range : h.range,
             fout: h.fadeOut
         }
-        if (a.kind !== 'none') {
+        if (srcOverride != null) {
+            pkt.x = srcOverride.cx
+            pkt.y = srcOverride.cy
+            pkt.z = srcOverride.cz
+        } else if (a.kind !== 'none') {
             pkt.x = a.x
             pkt.y = a.y
             pkt.z = a.z
             if (a.kind === 'entity' && a.eid != null) pkt.eid = a.eid
         }
         return pkt
+    }
+
+    var setClusterListenerTarget = (h, uuid, src) => {
+        if (src == null) return
+        if (!h.listenerAnchorKey) h.listenerAnchorKey = {}
+        if (!h.listenerSentPos) h.listenerSentPos = {}
+        h.listenerAnchorKey[uuid] = src.audioKey
+        h.listenerSentPos[uuid]   = { x: src.cx, y: src.cy, z: src.cz, r: src.range }
+    }
+
+    var needsClusterAnchorUpdate = (h, uuid, src) => {
+        if (src == null) return false
+        var prev = h.listenerSentPos ? h.listenerSentPos[uuid] : null
+        if (prev == null) return true
+        return prev.x !== src.cx || prev.y !== src.cy || prev.z !== src.cz || prev.r !== src.range
     }
 
     var buildStopPacket = (h, customFadeOutTicks) => {
@@ -1145,7 +1237,15 @@
         if (!h.listenerInRangeSeq) h.listenerInRangeSeq = {}
         if (!h.countedListeners) h.countedListeners = {}
         h.listenerEnteredSeq[rec.uuid] = seq
-        var inOwnRange = (h.anchor.kind === 'none') || (distSqToHandle(rec, h) <= h.range * h.range)
+        var inOwnRange = false
+        if (h.anchor.kind === 'none') {
+            inOwnRange = true
+        } else if (h.isMergedCluster && Array.isArray(h.clusterSources) && h.clusterSources.length > 0) {
+            var initPick = pickClusterSourceForPlayer(h, rec, false)
+            inOwnRange = (initPick != null && initPick.best != null && initPick.bestDistSq <= initPick.best.range * initPick.best.range)
+        } else {
+            inOwnRange = (distSqToHandle(rec, h) <= h.range * h.range)
+        }
         h.listenerInRange[rec.uuid] = inOwnRange
         if (inOwnRange) h.listenerInRangeSeq[rec.uuid] = seq
         h.listenerCount++
@@ -1174,6 +1274,8 @@
         if (h.listenerInRange) delete h.listenerInRange[uuid]
         if (h.listenerInRangeSeq) delete h.listenerInRangeSeq[uuid]
         if (h.countedListeners) delete h.countedListeners[uuid]
+        if (h.listenerAnchorKey) delete h.listenerAnchorKey[uuid]
+        if (h.listenerSentPos) delete h.listenerSentPos[uuid]
         h.listenerCount = max2(0, h.listenerCount - 1)
         if (wasCounted) {
             var nextOwner = (h.conflictMode === 'merge') ? findOtherActiveMergeSibling(h, uuid) : null
@@ -1192,20 +1294,42 @@
     var broadcastUpdateToListeners = (h, snap) => {
         var uuids = Object.keys(h.listeners)
         if (uuids.length === 0) return
+        if (h.isMergedCluster && Array.isArray(h.clusterSources) && h.clusterSources.length > 0) {
+            for (var u of uuids) {
+                var rec = snap.byUuid[u]
+                if (rec == null) continue
+                var pick = pickClusterSourceForPlayer(h, rec, true)
+                var src  = (pick && pick.chosen) ? pick.chosen : h.clusterSources[0]
+                setClusterListenerTarget(h, u, src)
+                sendPacket(rec.p, buildUpdatePacket(h, src))
+            }
+            return
+        }
         var pkt = buildUpdatePacket(h)
-        for (var u of uuids) {
-            var rec = snap.byUuid[u]
-            if (rec != null) sendPacket(rec.p, pkt)
+        for (var u2 of uuids) {
+            var rec2 = snap.byUuid[u2]
+            if (rec2 != null) sendPacket(rec2.p, pkt)
         }
     }
 
     var resendPlayToListeners = (h, snap, restartFlag) => {
         var uuids = Object.keys(h.listeners)
         if (uuids.length === 0) return
+        if (h.isMergedCluster && Array.isArray(h.clusterSources) && h.clusterSources.length > 0) {
+            for (var u of uuids) {
+                var rec = snap.byUuid[u]
+                if (rec == null) continue
+                var pick = pickClusterSourceForPlayer(h, rec, true)
+                var src  = (pick && pick.chosen) ? pick.chosen : h.clusterSources[0]
+                setClusterListenerTarget(h, u, src)
+                sendPacket(rec.p, buildPlayPacket(h, restartFlag, src))
+            }
+            return
+        }
         var pkt = buildPlayPacket(h, restartFlag)
-        for (var u of uuids) {
-            var rec = snap.byUuid[u]
-            if (rec != null) sendPacket(rec.p, pkt)
+        for (var u2 of uuids) {
+            var rec2 = snap.byUuid[u2]
+            if (rec2 != null) sendPacket(rec2.p, pkt)
         }
     }
 
@@ -1231,37 +1355,67 @@
             endHandle(h, stopReason, snap)
             return
         }
+        if (!handles.has(h.id)) return
 
         var dimChanged = (a.kind === 'entity' && h.started && a.dim !== h.sentDim)
         var eidChanged = (a.kind === 'entity' && h.started && !dimChanged && a.eid !== h.sentEid)
+        var isCluster  = Boolean(h.isMergedCluster && Array.isArray(h.clusterSources) && h.clusterSources.length > 0)
 
         for (var u of Object.keys(h.listeners)) {
             var rec = snap.byUuid[u]
             if (rec == null) {
                 removeListener(h, u, null, 'offline')
-            } else if (!isPlayerEligible(h, rec, true) && !(h.conflictMode === 'merge' && isPlayerInMergedClusterRange(h, rec))) {
+            } else if (!isPlayerEligible(h, rec, true) && (!isCluster && !(h.conflictMode === 'merge' && isPlayerInMergedClusterRange(h, rec)))) {
                 removeListener(h, u, rec, 'out_of_scope')
             } else {
-                if (h.anchor.kind !== 'none') {
-                    var dSq = distSqToHandle(rec, h)
-                    if (dSq <= h.range * h.range) {
-                        if (!h.listenerInRange) h.listenerInRange = {}
-                        if (!h.listenerInRangeSeq) h.listenerInRangeSeq = {}
-                        if (!h.listenerInRange[u]) {
-                            h.listenerInRange[u] = true
-                            h.listenerInRangeSeq[u] = ++listenerTriggerSeq
-                        }
-                    } else {
-                        var hys = h.range + CONFIG.rangeHysteresis
-                        if (dSq > hys * hys && h.listenerInRange) {
-                            h.listenerInRange[u] = false
+                if (isCluster) {
+                    var clPick = pickClusterSourceForPlayer(h, rec, true)
+                    var best   = clPick != null ? clPick.best : null
+                    var chosen = clPick != null ? clPick.chosen : null
+                    if (best != null) {
+                        if (clPick.bestDistSq <= best.range * best.range) {
+                            if (!h.listenerInRange) h.listenerInRange = {}
+                            if (!h.listenerInRangeSeq) h.listenerInRangeSeq = {}
+                            if (!h.listenerInRange[u]) {
+                                h.listenerInRange[u] = true
+                                h.listenerInRangeSeq[u] = ++listenerTriggerSeq
+                            }
+                        } else {
+                            var clHys = best.range + CONFIG.rangeHysteresis
+                            if (clPick.bestDistSq > clHys * clHys && h.listenerInRange) {
+                                h.listenerInRange[u] = false
+                            }
                         }
                     }
-                }
-                if (dimChanged) {
-                    sendPacket(rec.p, buildPlayPacket(h, true))
-                } else if (eidChanged) {
-                    sendPacket(rec.p, buildUpdatePacket(h))
+                    if (dimChanged && chosen != null) {
+                        setClusterListenerTarget(h, u, chosen)
+                        sendPacket(rec.p, buildPlayPacket(h, true, chosen))
+                    } else if (chosen != null && (eidChanged || needsClusterAnchorUpdate(h, u, chosen))) {
+                        setClusterListenerTarget(h, u, chosen)
+                        sendPacket(rec.p, buildUpdatePacket(h, chosen))
+                    }
+                } else {
+                    if (h.anchor.kind !== 'none') {
+                        var dSq = distSqToHandle(rec, h)
+                        if (dSq <= h.range * h.range) {
+                            if (!h.listenerInRange) h.listenerInRange = {}
+                            if (!h.listenerInRangeSeq) h.listenerInRangeSeq = {}
+                            if (!h.listenerInRange[u]) {
+                                h.listenerInRange[u] = true
+                                h.listenerInRangeSeq[u] = ++listenerTriggerSeq
+                            }
+                        } else {
+                            var hys = h.range + CONFIG.rangeHysteresis
+                            if (dSq > hys * hys && h.listenerInRange) {
+                                h.listenerInRange[u] = false
+                            }
+                        }
+                    }
+                    if (dimChanged) {
+                        sendPacket(rec.p, buildPlayPacket(h, true))
+                    } else if (eidChanged) {
+                        sendPacket(rec.p, buildUpdatePacket(h))
+                    }
                 }
             }
         }
@@ -1281,8 +1435,20 @@
                     reportWarning('maxHandlesPerPlayer', `玩家 ${rec.name || rec.uuid} 同时收听句柄数已达上限 (${CONFIG.maxHandlesPerPlayer})，已跳过新增音频 #${h.id}`)
                     continue
                 }
-                if (pkt == null) pkt = buildPlayPacket(h, true)
-                if (sendPacket(rec.p, pkt)) {
+                var joinPkt = null
+                var joinSrc = null
+                if (isCluster) {
+                    var jPick = pickClusterSourceForPlayer(h, rec, false)
+                    joinSrc = (jPick && jPick.chosen) ? jPick.chosen : h.clusterSources[0]
+                    joinPkt = buildPlayPacket(h, true, joinSrc)
+                } else {
+                    if (pkt == null) pkt = buildPlayPacket(h, true)
+                    joinPkt = pkt
+                }
+                if (sendPacket(rec.p, joinPkt)) {
+                    if (isCluster && joinSrc != null) {
+                        setClusterListenerTarget(h, rec.uuid, joinSrc)
+                    }
                     addListener(h, rec)
                     if (h.stopCond.maxTriggers > 0 && h.triggerCount >= h.stopCond.maxTriggers) break
                 }
@@ -1552,8 +1718,10 @@
                 else listenCount.set(u, next)
             }
         }
-        h.listeners     = {}
-        h.listenerCount = 0
+        h.listeners         = {}
+        h.listenerAnchorKey = {}
+        h.listenerSentPos   = {}
+        h.listenerCount     = 0
         handles.delete(h.id)
         if (h.key != null && keyIndex.get(h.key) === h.id) {
             keyIndex.delete(h.key)
@@ -2069,6 +2237,241 @@
 
     var makeBoundAudioKey = (blockId, dim, x, y, z) => `bound_block@${blockId}@${dim}:${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`
 
+    var boundAudioSeqCounter = 0
+    var boundAudioSeqByKey   = new Map() // posKey -> monotonic seq
+    var mergeBoundSources    = new Map() // audioKey -> { audioKey, key, blockId, dim, bx, by, bz, cx, cy, cz, range, scopeKey, seq, playSpec }
+
+    var ensureBoundAudioSeq = (rec) => {
+        if (rec == null) return 0
+        if (rec.key != null) {
+            var existing = boundAudioSeqByKey.get(rec.key)
+            if (existing != null) return existing
+            if (boundAudioSeqByKey.size >= 8192) boundAudioSeqByKey.clear()
+            var nextSeq = ++boundAudioSeqCounter
+            boundAudioSeqByKey.set(rec.key, nextSeq)
+            return nextSeq
+        }
+        return ++boundAudioSeqCounter
+    }
+
+    var getBoundMergeScopeKey = (dim, effSound, rawSpec) => {
+        var sc = String(rawSpec.conflictScope != null ? rawSpec.conflictScope : 'sound').trim().toLowerCase()
+        if (sc === 'all') return `${dim}|all`
+        if (sc === 'group') return `${dim}|group:${rawSpec.group || rawSpec.tag || 'default'}`
+        if (sc === 'tag') return `${dim}|tag:${rawSpec.tag || rawSpec.group || 'default'}`
+        return `${dim}|sound:${effSound}`
+    }
+
+    var findActiveClusterHandleForKey = (audioKey) => {
+        if (!audioKey) return null
+        if (keyIndex.has(audioKey)) {
+            var hDirect = handles.get(keyIndex.get(audioKey))
+            if (hDirect != null) return hDirect
+        }
+        for (var h of handles.values()) {
+            if (h != null && h.isMergedCluster && h.clusterMemberKeys != null && h.clusterMemberKeys.has(audioKey)) {
+                return h
+            }
+        }
+        return null
+    }
+
+    var computeMergedComponents = (scopeKey) => {
+        var list = []
+        for (var src of mergeBoundSources.values()) {
+            if (src != null && src.scopeKey === scopeKey) list.push(src)
+        }
+        if (list.length === 0) return []
+        list.sort((a, b) => a.seq - b.seq)
+        var n = list.length
+        var visited = new Array(n)
+        for (var vi = 0; vi < n; vi++) visited[vi] = false
+        var comps = []
+        for (var s = 0; s < n; s++) {
+            if (visited[s]) continue
+            visited[s] = true
+            var queue = [s]
+            var members = []
+            for (var qi = 0; qi < queue.length; qi++) {
+                var a = list[queue[qi]]
+                members.push(a)
+                for (var nb = 0; nb < n; nb++) {
+                    if (visited[nb]) continue
+                    var b = list[nb]
+                    var touch = a.range + b.range
+                    var dx = a.cx - b.cx, dy = a.cy - b.cy, dz = a.cz - b.cz
+                    if ((dx * dx + dy * dy + dz * dz) <= (touch * touch + 1e-6)) {
+                        visited[nb] = true
+                        queue.push(nb)
+                    }
+                }
+            }
+            if (members.length > 1) members.sort((ma, mb) => ma.seq - mb.seq)
+            comps.push(members)
+        }
+        return comps
+    }
+
+    var startMergedClusterHandle = (comp, scopeKey, snap) => {
+        var leader = comp[0]
+        var curBlock = queryBlockAt(leader.dim, leader.bx, leader.by, leader.bz)
+        var spec = withFields(leader.playSpec, {
+            key: leader.audioKey,
+            x:   leader.bx,
+            y:   leader.by,
+            z:   leader.bz,
+            dim: leader.dim,
+            blockCenter: true
+        })
+        if (curBlock != null && extractBlockId(curBlock) === leader.blockId) {
+            spec.block = curBlock
+            delete spec.x; delete spec.y; delete spec.z; delete spec.blockCenter
+        }
+        var built = buildHandle(spec)
+        if (built.error) {
+            reportWarning('mergeCluster', built.error)
+            return false
+        }
+        var h = built.handle
+        var memberKeys = new Set()
+        for (var i = 0; i < comp.length; i++) memberKeys.add(comp[i].audioKey)
+        h.isMergedCluster   = true
+        h.mergeScopeKey     = scopeKey
+        h.clusterSources    = comp
+        h.clusterMemberKeys = memberKeys
+        h.listenerAnchorKey = {}
+        h.listenerSentPos   = {}
+
+        if (handles.size >= CONFIG.maxHandles && !evictLowestPriorityHandle(h.priority)) {
+            reportWarning('play', `全服句柄已达上限 (${CONFIG.maxHandles}) 且无可淘汰低优先级句柄，已忽略: ${h.sound}`)
+            return false
+        }
+        registerHandle(h)
+        if (snap != null && !activateHandle(h, snap)) {
+            return false
+        }
+        return true
+    }
+
+    var reconcileAudioMergeScope = (scopeKey, snapOpt, customFadeOut, skipSyncHandleId) => {
+        if (!scopeKey) return false
+        var components = computeMergedComponents(scopeKey)
+        var existingHandles = []
+        for (var eh of handles.values()) {
+            if (eh != null && eh.isMergedCluster && eh.mergeScopeKey === scopeKey) {
+                existingHandles.push(eh)
+            }
+        }
+        var snap = snapOpt != null ? snapOpt : (serverRef != null ? snapshotPlayers() : null)
+
+        if (components.length === 0) {
+            for (var r = 0; r < existingHandles.length; r++) {
+                endHandle(existingHandles[r], 'block_broken', snap, customFadeOut)
+            }
+            return true
+        }
+
+        var usedHandles = new Set()
+        var compHandle  = new Array(components.length)
+
+        // 第一轮：优先匹配 leaderKey 未变的既有句柄（放新块扩展并集时直接沿用原句柄，零额外创建）
+        for (var ci = 0; ci < components.length; ci++) {
+            var leaderKey = components[ci][0].audioKey
+            for (var hi = 0; hi < existingHandles.length; hi++) {
+                var hCand = existingHandles[hi]
+                if (!usedHandles.has(hCand.id) && hCand.key === leaderKey) {
+                    compHandle[ci] = hCand
+                    usedHandles.add(hCand.id)
+                    break
+                }
+            }
+        }
+        // 第二轮：若原 leader 方块被敲掉，由同一存活连通簇继承该句柄（平滑移交新 leader，不中断收听）
+        for (var ci2 = 0; ci2 < components.length; ci2++) {
+            if (compHandle[ci2] != null) continue
+            var comp = components[ci2]
+            for (var hi2 = 0; hi2 < existingHandles.length; hi2++) {
+                var hCand2 = existingHandles[hi2]
+                if (usedHandles.has(hCand2.id) || hCand2.clusterMemberKeys == null) continue
+                var intersects = false
+                for (var mi = 0; mi < comp.length; mi++) {
+                    if (hCand2.clusterMemberKeys.has(comp[mi].audioKey)) {
+                        intersects = true
+                        break
+                    }
+                }
+                if (intersects) {
+                    compHandle[ci2] = hCand2
+                    usedHandles.add(hCand2.id)
+                    break
+                }
+            }
+        }
+
+        // 先结束不再对应任何连通分量（或已被合并进更大连通分量）的旧句柄
+        for (var hi3 = 0; hi3 < existingHandles.length; hi3++) {
+            var orphan = existingHandles[hi3]
+            if (!usedHandles.has(orphan.id)) {
+                endHandle(orphan, 'merged', snap, customFadeOut)
+            }
+        }
+
+        // 同步继承句柄的新成员表与新范围并集，并为分裂出的新连通簇启动独立句柄
+        for (var ci3 = 0; ci3 < components.length; ci3++) {
+            var curComp   = components[ci3]
+            var curLeader = curComp[0]
+            var curH      = compHandle[ci3]
+            if (curH == null) {
+                startMergedClusterHandle(curComp, scopeKey, snap)
+                continue
+            }
+            var newKeys = new Set()
+            for (var kIdx = 0; kIdx < curComp.length; kIdx++) newKeys.add(curComp[kIdx].audioKey)
+            if (curH.key !== curLeader.audioKey) {
+                if (curH.key != null && keyIndex.get(curH.key) === curH.id) {
+                    keyIndex.delete(curH.key)
+                }
+                curH.key = curLeader.audioKey
+                keyIndex.set(curH.key, curH.id)
+                curH.anchor.bx      = curLeader.bx
+                curH.anchor.by      = curLeader.by
+                curH.anchor.bz      = curLeader.bz
+                curH.anchor.x       = curLeader.cx
+                curH.anchor.y       = curLeader.cy
+                curH.anchor.z       = curLeader.cz
+                curH.anchor.blockId = curLeader.blockId
+                curH.range          = curLeader.range
+            }
+            curH.clusterSources    = curComp
+            curH.clusterMemberKeys = newKeys
+            if (snap != null && curH.id !== skipSyncHandleId) {
+                if (!curH.started) activateHandle(curH, snap)
+                else syncHandle(curH, snap)
+            }
+        }
+        return true
+    }
+
+    var removeBoundMergeSource = (audioKey, fadeOut, doReconcile) => {
+        if (!audioKey) return false
+        var src = mergeBoundSources.get(audioKey)
+        if (src == null) return false
+        mergeBoundSources.delete(audioKey)
+        if (doReconcile) {
+            reconcileAudioMergeScope(src.scopeKey, null, fadeOut)
+        }
+        return true
+    }
+
+    var handleBoundBlockRemoved = (audioKey, key, fadeOut) => {
+        if (key != null) boundAudioSeqByKey.delete(key)
+        if (mergeBoundSources.has(audioKey)) {
+            removeBoundMergeSource(audioKey, fadeOut, true)
+            return
+        }
+        stopKey(audioKey, fadeOut)
+    }
+
     var startBoundBlockAudio = (rec, binding, lv, curBlock) => {
         if (binding == null) binding = audioBlockTracker != null ? audioBlockTracker.getBinding(rec.blockId) : null
         if (binding == null) return false
@@ -2082,16 +2485,48 @@
             : binding.specOrFn
         if (rawSpec == null || typeof rawSpec !== 'object') return false
 
+        var effMode = normalizeConflictMode(rawSpec.conflictMode !== undefined ? rawSpec.conflictMode : 'nearest', 'nearest')
         var playSpec = withFields(rawSpec, {
             key:              rec.audioKey,
             block:            curBlock,
             dim:              rec.dim,
             loop:             rawSpec.loop !== undefined ? rawSpec.loop : true,
             outOfRangeMode:   rawSpec.outOfRangeMode !== undefined ? rawSpec.outOfRangeMode : 'mute',
-            conflictMode:     rawSpec.conflictMode !== undefined ? rawSpec.conflictMode : 'nearest',
+            conflictMode:     effMode,
             conflictScope:    rawSpec.conflictScope !== undefined ? rawSpec.conflictScope : 'sound',
             stopOnBlockBreak: rawSpec.stopOnBlockBreak !== undefined ? rawSpec.stopOnBlockBreak : true
         })
+
+        if (effMode === 'merge') {
+            var rawSound = rawSpec.sound != null ? rawSpec.sound : (rawSpec.soundId != null ? rawSpec.soundId : rawSpec.id)
+            var effSound = normalizeSoundId(rawSound)
+            if (effSound != null) {
+                var bx = Math.floor(rec.x), by = Math.floor(rec.y), bz = Math.floor(rec.z)
+                var effRange = clampNum(parseFiniteNum(rawSpec.range != null ? rawSpec.range : rawSpec.radius, CONFIG.defaultRange), CONFIG.minRange, CONFIG.maxRange)
+                var scopeKey = getBoundMergeScopeKey(rec.dim, effSound, playSpec)
+                var seq = ensureBoundAudioSeq(rec)
+                mergeBoundSources.set(rec.audioKey, {
+                    audioKey: rec.audioKey,
+                    key:      rec.key,
+                    blockId:  rec.blockId,
+                    dim:      rec.dim,
+                    bx:       bx,
+                    by:       by,
+                    bz:       bz,
+                    cx:       bx + 0.5,
+                    cy:       by + 0.5,
+                    cz:       bz + 0.5,
+                    range:    effRange,
+                    scopeKey: scopeKey,
+                    seq:      seq,
+                    playSpec: playSpec
+                })
+                return reconcileAudioMergeScope(scopeKey, null, null)
+            }
+        } else if (mergeBoundSources.has(rec.audioKey)) {
+            removeBoundMergeSource(rec.audioKey, null, true)
+        }
+
         return play(playSpec) > 0
     }
 
@@ -2117,7 +2552,8 @@
                     var key = `${dim}|${ix},${iy},${iz}`
                     var rec = { key: key, blockId: bid, dim: dim, x: ix, y: iy, z: iz, audioKey: makeBoundAudioKey(bid, dim, ix, iy, iz) }
                     fallbackTracked.set(key, rec)
-                    if (!keyIndex.has(rec.audioKey)) {
+                    ensureBoundAudioSeq(rec)
+                    if (findActiveClusterHandleForKey(rec.audioKey) == null) {
                         startBoundBlockAudio(rec, fallbackBindings.get(bid), event.level, event.block)
                     }
                 } catch (eP) {
@@ -2132,12 +2568,12 @@
                     var key = `${dim}|${ix},${iy},${iz}`
                     var rec = fallbackTracked.get(key)
                     if (rec != null) {
-                        stopKey(rec.audioKey)
                         fallbackTracked.delete(key)
+                        handleBoundBlockRemoved(rec.audioKey, key, null)
                     } else {
                         var bid = extractBlockId(event.block)
                         if (bid != null && fallbackBindings.has(bid)) {
-                            stopKey(makeBoundAudioKey(bid, dim, ix, iy, iz))
+                            handleBoundBlockRemoved(makeBoundAudioKey(bid, dim, ix, iy, iz), key, null)
                         }
                     }
                 } catch (eB) {
@@ -2159,8 +2595,9 @@
                 var stopped = 0
                 for (var [k, rec] of Array.from(fallbackTracked.entries())) {
                     if (rec.blockId === idStr) {
-                        stopped += stopKey(rec.audioKey, fadeOut)
+                        handleBoundBlockRemoved(rec.audioKey, k, fadeOut)
                         fallbackTracked.delete(k)
+                        stopped++
                     }
                 }
                 return stopped
@@ -2193,20 +2630,21 @@
                 return { audioKey: makeBoundAudioKey(blockId, dim, ix, iy, iz) }
             },
             onFound: function (rec, binding) {
-                if (!keyIndex.has(rec.audioKey)) {
+                ensureBoundAudioSeq(rec)
+                if (findActiveClusterHandleForKey(rec.audioKey) == null) {
                     startBoundBlockAudio(rec, binding, null, null)
                 }
             },
             onTick: function (rec, binding, tickNum, lv, curBlock) {
-                if (!keyIndex.has(rec.audioKey)) {
+                if (findActiveClusterHandleForKey(rec.audioKey) == null) {
                     startBoundBlockAudio(rec, binding, lv, curBlock)
                 }
             },
             onRemoved: function (rec, binding, reason, fadeOut) {
-                stopKey(rec.audioKey, fadeOut)
+                handleBoundBlockRemoved(rec.audioKey, rec.key, fadeOut)
             },
             onBrokenUnregistered: function (dim, x, y, z, bid) {
-                stopKey(makeBoundAudioKey(bid, dim, x, y, z))
+                handleBoundBlockRemoved(makeBoundAudioKey(bid, dim, x, y, z), `${dim}|${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`, null)
             }
         })
         return audioBlockTracker
@@ -2238,7 +2676,19 @@
         if (global.EpiphyAudioBlockBindings && typeof global.EpiphyAudioBlockBindings === 'object') {
             delete global.EpiphyAudioBlockBindings[idStr]
         }
-        return tracker.unbind(idStr, fadeOut)
+        var stopped = tracker.unbind(idStr, fadeOut)
+        var affectedScopes = new Set()
+        for (var [ak, src] of Array.from(mergeBoundSources.entries())) {
+            if (src != null && src.blockId === idStr) {
+                affectedScopes.add(src.scopeKey)
+                mergeBoundSources.delete(ak)
+                if (src.key != null) boundAudioSeqByKey.delete(src.key)
+            }
+        }
+        for (var sk of affectedScopes) {
+            reconcileAudioMergeScope(sk, null, fadeOut)
+        }
+        return stopped
     }
 
     var scanBlocksNow = () => {
@@ -2881,6 +3331,16 @@
                 desc: '重扫在线玩家周边音频绑定方块',
                 fn: () => {
                     var n = scanBlocksNow()
+                    var trackerApi = (typeof global !== 'undefined') ? global.EpiphyBlockTracker : null
+                    var st = (trackerApi != null && typeof trackerApi.getLastScanStatus === 'function')
+                        ? trackerApi.getLastScanStatus()
+                        : null
+                    if (st != null && st.blockedByQueue) {
+                        return `当前扫描队列已满（${st.queuePending}/${st.maxQueue}，排队消化中），本次跳过入队，请稍后重试`
+                    }
+                    if (st != null && st.truncatedByQueue && n > 0) {
+                        return `音频绑定方块已入队扫描 ${n} 个区块段（队列已接近上限 ${st.maxQueue}，剩余区段将在消费后继续）`
+                    }
                     return `音频绑定方块已入队扫描 ${n} 个区块段`
                 }
             },
