@@ -44,14 +44,18 @@
     // bindingsByBlockId: Map<blockId, Map<subId, bindingMeta>>
     // subscribers:       Map<subId, subscriberObj>
     // trackedBlocks:     Map<posKey, { key, blockId, dim, x, y, z, vSlot, extras: { [subId]: obj } }>
-    var bindingsByBlockId = new Map()
-    var subscribers       = new Map()
-    var trackedBlocks     = new Map()
-    var scannedSections   = new Set()
-    var scanQueue         = []
-    var scanQueueHead     = 0
-    var migratedKeys      = new Set()
-    var pendingMigrations = []
+    var bindingsByBlockId        = new Map()
+    var subscribers              = new Map()
+    var trackedBlocks            = new Map()
+    var AIR_SECTION_VER          = -1
+    var bindingsVersion          = 1
+    var scannedSections          = new Map() // skey -> bindingsVersion | AIR_SECTION_VER(-1)
+    var scanQueue                = []
+    var scanQueueHead            = 0
+    var pendingScanKeys          = new Set() // 与 scanQueue 未消费条目同步，防止重复入队
+    var migratedKeys             = new Set()
+    var pendingMigrations        = []
+    var trackedRecordsTotalCalls = 0
 
     // 【catch 约定】日志设施自身的兜底：console 不可用时已无更低层可退，留空。
     function logCatch(tag, err) {
@@ -609,20 +613,21 @@
         }
     }
 
-    // 真 LRU 缓存维护：命中时 delete + add 迁至 Set 尾部，防止玩家脚下已扫描区块段被 FIFO 淘汰引发重扫正反馈
-    function touchScannedSection(skey) {
+    // 真 LRU 缓存维护：命中时 delete + set 迁至 Map 尾部，保留 bindingsVersion / AIR_SECTION_VER(-1) 状态，防止重扫正反馈
+    function touchScannedSection(skey, ver) {
         if (scannedSections.has(skey)) {
             scannedSections.delete(skey)
         } else if (scannedSections.size >= MAX_SCANNED_SECTIONS) {
-            var oldestSkey = scannedSections.values().next().value
+            var oldestSkey = scannedSections.keys().next().value
             if (oldestSkey !== undefined) scannedSections.delete(oldestSkey)
         }
-        scannedSections.add(skey)
+        scannedSections.set(skey, ver)
     }
 
     function resetScanQueue() {
         scanQueue.length = 0
         scanQueueHead    = 0
+        pendingScanKeys.clear()
     }
 
     function getPendingScanCount() {
@@ -639,18 +644,25 @@
         return { loaded: true, sections: sections, minBuildY: minBuildY }
     }
 
-    function enqueueNearbySections() {
-        if (bindingsByBlockId.size === 0 || SERVER_REF == null) return
-        if (getPendingScanCount() >= MAX_SCAN_QUEUE_SIZE) return
-        var maxRadius = 32
-        bindingsByBlockId.forEach(function (bMap) {
-            bMap.forEach(function (b) {
-                if (b.scanRadius > maxRadius) maxRadius = b.scanRadius
+    function enqueueNearbySections(opts) {
+        if (bindingsByBlockId.size === 0 || SERVER_REF == null) return 0
+        if (getPendingScanCount() >= MAX_SCAN_QUEUE_SIZE) return 0
+        var forceNearby = Boolean(opts != null && opts.forceNearby)
+        var maxRadius   = (opts != null && opts.maxRadius != null && isFinite(Number(opts.maxRadius)))
+            ? Number(opts.maxRadius)
+            : 0
+        if (maxRadius <= 0) {
+            maxRadius = 32
+            bindingsByBlockId.forEach(function (bMap) {
+                bMap.forEach(function (b) {
+                    if (b != null && b.scanRadius > maxRadius) maxRadius = b.scanRadius
+                })
             })
-        })
+        }
         var pList = null
-        try { pList = SERVER_REF.getPlayerList().getPlayers() } catch (e0) { return }
-        if (pList == null) return
+        try { pList = SERVER_REF.getPlayerList().getPlayers() } catch (e0) { return 0 }
+        if (pList == null) return 0
+        var enqueued = 0
         var n = (typeof pList.size === 'function') ? Number(pList.size()) : (pList.length || 0)
         for (var i = 0; i < n; i++) {
             var p   = typeof pList.get === 'function' ? pList.get(i) : pList[i]
@@ -685,8 +697,14 @@
                     if (!col.loaded) continue
                     for (var sy = minSY; sy <= maxSY; sy++) {
                         var skey = dim + '|' + sx + ',' + sy + ',' + sz
-                        if (scannedSections.has(skey)) {
-                            touchScannedSection(skey)
+                        if (pendingScanKeys.has(skey)) continue
+                        var cachedVer = scannedSections.get(skey)
+                        if (cachedVer === AIR_SECTION_VER) {
+                            touchScannedSection(skey, AIR_SECTION_VER)
+                            continue
+                        }
+                        if (!forceNearby && cachedVer === bindingsVersion) {
+                            touchScannedSection(skey, bindingsVersion)
                             continue
                         }
                         if (col.sections != null) {
@@ -694,18 +712,21 @@
                             if (secIdx < 0 || secIdx >= col.sections.length) continue
                             var sec = col.sections[secIdx]
                             if (sec == null || sec.hasOnlyAir()) {
-                                // 纯空气段直接记入 LRU 缓存，不占用扫描队列预算（新放置方块由 BlockEvents.placed 实时捕获）
-                                touchScannedSection(skey)
+                                // 纯空气段记为 AIR_SECTION_VER(-1) 直接入 LRU，不占用扫描队列预算且不随 bindingsVersion 失效（新放置方块由 BlockEvents.placed 捕获）
+                                touchScannedSection(skey, AIR_SECTION_VER)
                                 continue
                             }
                         }
-                        if (getPendingScanCount() >= MAX_SCAN_QUEUE_SIZE) return
-                        touchScannedSection(skey)
+                        if (getPendingScanCount() >= MAX_SCAN_QUEUE_SIZE) return enqueued
+                        touchScannedSection(skey, bindingsVersion)
+                        pendingScanKeys.add(skey)
                         scanQueue.push({ dim: dim, sx: sx, sy: sy, sz: sz, skey: skey })
+                        enqueued++
                     }
                 }
             }
         }
+        return enqueued
     }
 
     var stateIdCache       = new Map()
@@ -729,8 +750,10 @@
             var task = scanQueue[scanQueueHead]
             scanQueue[scanQueueHead] = null
             scanQueueHead++
+            if (task != null) pendingScanKeys.delete(task.skey)
             if (scanQueueHead >= scanQueue.length) {
-                resetScanQueue()
+                scanQueue.length = 0
+                scanQueueHead    = 0
             } else if (scanQueueHead >= 256 && scanQueueHead * 2 >= scanQueue.length) {
                 scanQueue = scanQueue.slice(scanQueueHead)
                 scanQueueHead = 0
@@ -749,7 +772,10 @@
                 var secIdx   = (task.sy * 16 - col.minBuildY) >> 4
                 if (sections == null || secIdx < 0 || secIdx >= sections.length) continue
                 var section = sections[secIdx]
-                if (section == null || section.hasOnlyAir()) continue
+                if (section == null || section.hasOnlyAir()) {
+                    touchScannedSection(task.skey, AIR_SECTION_VER)
+                    continue
+                }
 
                 // 先探测区块段调色板 (O(palette))：若整段完全不包含任何已绑定方块，直接跳过 4096 格遍历
                 var shouldScanSection = true
@@ -872,6 +898,7 @@
             onTick:               (cfg && typeof cfg.onTick === 'function') ? cfg.onTick : null,
             onRemoved:            (cfg && typeof cfg.onRemoved === 'function') ? cfg.onRemoved : null,
             onBrokenUnregistered: (cfg && typeof cfg.onBrokenUnregistered === 'function') ? cfg.onBrokenUnregistered : null,
+            getTrackedRecordsCalls: 0,
             destroyed:            false
         }
 
@@ -921,24 +948,38 @@
             name: subId,
             bind: function (blockId, meta) {
                 if (sub.destroyed || !blockId || meta == null) return false
-                var idStr = String(blockId).trim()
-                var bMap  = bindingsByBlockId.get(idStr)
+                var idStr        = String(blockId).trim()
+                var bMap         = bindingsByBlockId.get(idStr)
+                var isNewBlockId = (bMap == null || bMap.size === 0)
                 if (bMap == null) {
                     bMap = new Map()
                     bindingsByBlockId.set(idStr, bMap)
                 }
                 bMap.set(subId, meta)
-                scannedSections.clear()
-                resetScanQueue()
+                // 仅当新增未知方块类型且已有扫描状态时推进版本号，使已缓存非空气段按需重检，而不清空全局 LRU / 待扫队列
+                if (isNewBlockId && (scannedSections.size > 0 || getPendingScanCount() > 0)) {
+                    bindingsVersion++
+                }
                 return true
             },
             unbind: unbindBlockForSub,
             scanNow: function () {
                 if (sub.destroyed) return 0
-                scannedSections.clear()
-                resetScanQueue()
-                enqueueNearbySections()
-                return getPendingScanCount()
+                var hasAnyBinding = false
+                var subMaxRadius  = 0
+                bindingsByBlockId.forEach(function (bMap) {
+                    var meta = bMap.get(subId)
+                    if (meta != null) {
+                        hasAnyBinding = true
+                        var r = (meta.scanRadius != null && isFinite(Number(meta.scanRadius))) ? Number(meta.scanRadius) : 32
+                        if (r > subMaxRadius) subMaxRadius = r
+                    }
+                })
+                if (!hasAnyBinding) return 0
+                return enqueueNearbySections({
+                    forceNearby: true,
+                    maxRadius:   subMaxRadius > 0 ? subMaxRadius : 32
+                })
             },
             hasBinding: function (blockId) {
                 var bMap = bindingsByBlockId.get(String(blockId || '').trim())
@@ -956,6 +997,8 @@
                 return cnt
             },
             getTrackedRecords: function (blockIdOpt) {
+                trackedRecordsTotalCalls++
+                sub.getTrackedRecordsCalls++
                 var out = []
                 var filterBid = blockIdOpt != null ? String(blockIdOpt).trim() : null
                 trackedBlocks.forEach(function (rec) {
@@ -1071,10 +1114,38 @@
         }
     }
 
+    function rescanAll() {
+        scannedSections.clear()
+        resetScanQueue()
+        return enqueueNearbySections({ forceNearby: true })
+    }
+
+    function getStats() {
+        var subCalls = {}
+        subscribers.forEach(function (sub, id) {
+            subCalls[id] = sub.getTrackedRecordsCalls || 0
+        })
+        return {
+            bindingsCount:          bindingsByBlockId.size,
+            bindingsVersion:        bindingsVersion,
+            subscribersCount:       subscribers.size,
+            trackedBlocksSize:      trackedBlocks.size,
+            scannedSectionsSize:    scannedSections.size,
+            scanQueueArrayLength:   scanQueue.length,
+            scanQueueHead:          scanQueueHead,
+            pendingScanCount:       getPendingScanCount(),
+            stateIdCacheSize:       stateIdCache.size,
+            getTrackedRecordsCalls: trackedRecordsTotalCalls,
+            subscriberCalls:        subCalls
+        }
+    }
+
     global.EpiphyBlockTracker = {
         configure:         configure,
         createTracker:     createTracker,
         migrateLegacyOnce: migrateLegacyOnce,
+        rescanAll:         rescanAll,
+        getStats:          getStats,
         extractBlockId:    extractBlockId,
         isChunkLoaded:     isChunkLoaded,
         makePosKey:        makePosKey,

@@ -8,6 +8,7 @@ var vm     = require('vm')
 var ROOT_DIR       = path.resolve(__dirname, '..')
 var DANMAKU_PATH   = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-屏幕弹幕组件.js')
 var VALVE_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-权限阀.js')
+var TRACKER_PATH   = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-方块追踪组件.js')
 
 function createKubeSandbox(loadClassFn) {
     var noop = function () {}
@@ -359,6 +360,110 @@ test('permission valve evaluateSourceAccess: declared server.runCommand cannot b
     assert.strictEqual(resAllowed.sourceKind, 'declared_function')
     assert.strictEqual(resNoDeclared.allowed, false)
     assert.strictEqual(resAbstractCarrier.allowed, true)
+})
+
+// ----------------------------------------------------------------------------
+// 7. block tracker scan scoping (bind/scanNow do not clear global state)
+// ----------------------------------------------------------------------------
+test('block tracker: bind() & scanNow() preserve pure-air LRU, queued work and tracked records', function () {
+    var tickHandlers = []
+    var isoSandbox = createKubeSandbox()
+    isoSandbox.ServerEvents.tick = function (fn) { tickHandlers.push(fn) }
+
+    vm.runInContext(fs.readFileSync(TRACKER_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-方块追踪组件.js' })
+    var Tracker = isoSandbox.global.EpiphyBlockTracker
+    assert.ok(Tracker && typeof Tracker.createTracker === 'function', 'EpiphyBlockTracker must export createTracker')
+
+    // Build mock 16x16x16 section arrays spanning y=[0..63] (sy = 0..3) with sy=0 non-air and sy=1..3 air
+    function makeChunk(hasSolidBlock) {
+        var solidSection = {
+            hasOnlyAir: function () { return false },
+            maybeHas: function () { return true },
+            getBlockState: function (lx, ly, lz) {
+                if (hasSolidBlock && lx === 2 && ly === 0 && lz === 3) {
+                    return { id: 'epiphy:block_a', isAir: function () { return false } }
+                }
+                return { id: 'minecraft:air', isAir: function () { return true } }
+            }
+        }
+        var airSection = {
+            hasOnlyAir: function () { return true },
+            maybeHas: function () { return false },
+            getBlockState: function () { return { id: 'minecraft:air', isAir: function () { return true } } }
+        }
+        return {
+            getMinBuildHeight: function () { return 0 },
+            getSections: function () { return [solidSection, airSection, airSection, airSection] }
+        }
+    }
+
+    var chunk00 = makeChunk(true)
+    var mockLevel = {
+        dimension: 'minecraft:overworld',
+        getMinBuildHeight: function () { return 0 },
+        getMaxBuildHeight: function () { return 64 },
+        getChunkSource: function () {
+            return {
+                getChunkNow: function (cx, cz) {
+                    return (cx === 0 && cz === 0) ? chunk00 : null
+                }
+            }
+        },
+        getBlock: function () { return { id: 'epiphy:block_a' } }
+    }
+    var mockServer = {
+        getLevel: function (d) { return d === 'minecraft:overworld' ? mockLevel : null },
+        getAllLevels: function () { return [mockLevel] },
+        getPlayerList: function () {
+            return {
+                getPlayers: function () {
+                    return [{ level: mockLevel, x: 8, y: 8, z: 8 }]
+                }
+            }
+        }
+    }
+
+    var subA = Tracker.createTracker({ name: 'sub_a' })
+    var subB = Tracker.createTracker({ name: 'sub_b' })
+    subA.bind('epiphy:block_a', { scanRadius: 8 })
+
+    // Tick 1: enqueues non-air sy=0 (1 section), caches sy=1 (air) with AIR_SECTION_VER, and scans sy=0 finding 1 block
+    assert.strictEqual(tickHandlers.length, 1)
+    tickHandlers[0]({ server: mockServer })
+
+    var s1 = Tracker.getStats()
+    assert.strictEqual(s1.trackedBlocksSize, 1)
+    assert.strictEqual(s1.bindingsVersion, 1)
+    assert.ok(s1.scannedSectionsSize >= 2, 'scannedSections should retain solid + air sections')
+
+    // Re-binding the SAME blockId for subB must NOT clear scannedSections or bump bindingsVersion
+    subB.bind('epiphy:block_a', { scanRadius: 16 })
+    var s2 = Tracker.getStats()
+    assert.strictEqual(s2.bindingsVersion, 1)
+    assert.strictEqual(s2.scannedSectionsSize, s1.scannedSectionsSize)
+
+    // Binding a BRAND NEW blockId bumps bindingsVersion lazily without wiping scannedSections
+    subB.bind('epiphy:block_b', { scanRadius: 12 })
+    var s3 = Tracker.getStats()
+    assert.strictEqual(s3.bindingsVersion, 2)
+    assert.strictEqual(s3.scannedSectionsSize, s1.scannedSectionsSize, 'bind() must preserve cached air & non-air entries')
+
+    // subA.scanNow() only enqueues non-air sections within subA radius without wiping global cache or duplicating queue
+    var queued = subA.scanNow()
+    var s4 = Tracker.getStats()
+    assert.strictEqual(queued, 1, 'only non-air section (sy=0) within subA radius should re-enqueue; air stays skipped')
+    assert.strictEqual(s4.pendingScanCount, 1)
+
+    // Second scanNow() while still pending must not duplicate queue entries
+    var queuedAgain = subA.scanNow()
+    assert.strictEqual(queuedAgain, 0)
+    assert.strictEqual(Tracker.getStats().pendingScanCount, 1)
+
+    // getTrackedRecords() increments call counters cleanly
+    var recs = subA.getTrackedRecords(null)
+    assert.strictEqual(recs.length, 1)
+    assert.strictEqual(Tracker.getStats().getTrackedRecordsCalls, 1)
+    assert.strictEqual(Tracker.getStats().subscriberCalls.sub_a, 1)
 })
 
 // Run suite

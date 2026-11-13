@@ -120,12 +120,6 @@
     var loginReadyTick = new Map() // uuid -> tickCounter
     var listenersGlobal = { start: [], join: [], leave: [], end: [] }
 
-    // 方块类型自动声源绑定与渐进式区块段扫描状态表
-    var blockBindings   = new Map() // blockId -> { blockId, specOrFn, scanRadius }
-    var trackedBlocks   = new Map() // posKey (dim|x,y,z) -> { key, blockId, dim, x, y, z, audioKey }
-    var scannedSections = new Set() // dim|sx,sy,sz
-    var scanQueue       = []
-
     var serverRef       = null
     var loadedPersistSrv = null
     var tickCounter     = 0
