@@ -25,15 +25,18 @@
 // ============================================================================
 
 ;(function () {
-    var PERSIST_KEY            = 'epiphy_tracked_blocks_v2'
-    var WORLD_FILE_NAME        = 'kubejs_epiphy_tracked_blocks.json'
-    var FALLBACK_DIR           = 'kubejs/config/epiphy_tracked_blocks'
-    var SAVE_DEBOUNCE_TICKS    = 40
-    var VERIFY_WINDOW_TICKS    = 20
-    var SCAN_ENQ_INTERVAL      = 20
-    var SCAN_SECTIONS_PER_TICK = 1
-    var MAX_SCANNED_SECTIONS   = 8192
-    var MAX_SCAN_QUEUE_SIZE    = 512
+    var PERSIST_KEY     = 'epiphy_tracked_blocks_v2'
+    var WORLD_FILE_NAME = 'kubejs_epiphy_tracked_blocks.json'
+    var FALLBACK_DIR    = 'kubejs/config/epiphy_tracked_blocks'
+
+    var CONFIG = {
+        saveDebounceTicks:   40,
+        verifyWindowTicks:   20,
+        scanEnqInterval:     20,
+        scanSectionsPerTick: 1,
+        maxScannedSections:  8192,
+        maxScanQueue:        512
+    }
 
     var SERVER_REF         = null
     var loadedPersistSrv   = null
@@ -60,6 +63,14 @@
     var migratedKeys             = new Set()
     var pendingMigrations        = []
     var trackedRecordsTotalCalls = 0
+    var lastEnqueueStatus        = {
+        enqueued:         0,
+        blockedByQueue:   false,
+        truncatedByQueue: false,
+        pending:          0,
+        cap:              CONFIG.maxScanQueue,
+        forceNearby:      false
+    }
 
     // 【catch 约定】日志设施自身的兜底：console 不可用时已无更低层可退，留空。
     function logCatch(tag, err) {
@@ -340,7 +351,7 @@
     function saveTrackedBlocks(immediate) {
         if (SERVER_REF == null) return
         persistDirty = true
-        if (immediate === true || (tickCounter - lastFlushTick) >= SAVE_DEBOUNCE_TICKS) {
+        if (immediate === true || (tickCounter - lastFlushTick) >= CONFIG.saveDebounceTicks) {
             flushTrackedBlocks()
         }
     }
@@ -379,7 +390,7 @@
 
     function allocVerifySlot() {
         var s = nextVerifySlot
-        nextVerifySlot = (nextVerifySlot + 1) % VERIFY_WINDOW_TICKS
+        nextVerifySlot = (nextVerifySlot + 1) % CONFIG.verifyWindowTicks
         return s
     }
 
@@ -617,11 +628,19 @@
         }
     }
 
+    // 【重新发现机制边界约定】本组件区分三种触发重扫的语义路径，后续扩展请严格按场景选用：
+    //   1) bindingsVersion++（全图增量失效，保留 AIR_SECTION_VER）：
+    //      用于新增未知 blockId 或既有绑定扩大 scanRadius 时；仅令已缓存的非空气区段在下一次玩家靠近时重检，
+    //      刻意保留纯空气区段 (AIR_SECTION_VER = -1) 缓存，避免重扫大量纯空气（新放置方块由 BlockEvents.placed 捕获）。
+    //   2) enqueueNearbySections({ forceNearby: true })（即 sub.scanNow() 局部强制入队）：
+    //      用于单模块/单区域按需立即补扫玩家周边（绕过 cachedVer === bindingsVersion 判断），不递增全局版本号也不清纯空气。
+    //   3) rescanAll()（全量重置，含纯空气与队列）：
+    //      仅用于管理员 /epiphy debug 显式重扫或兜底恢复；会清空 scannedSections 与 scanQueue 后以 forceNearby 重新入队。
     // 真 LRU 缓存维护：命中时 delete + set 迁至 Map 尾部，保留 bindingsVersion / AIR_SECTION_VER(-1) 状态，防止重扫正反馈
     function touchScannedSection(skey, ver) {
         if (scannedSections.has(skey)) {
             scannedSections.delete(skey)
-        } else if (scannedSections.size >= MAX_SCANNED_SECTIONS) {
+        } else if (scannedSections.size >= CONFIG.maxScannedSections) {
             var oldestSkey = scannedSections.keys().next().value
             if (oldestSkey !== undefined) scannedSections.delete(oldestSkey)
         }
@@ -648,10 +667,27 @@
         return { loaded: true, sections: sections, minBuildY: minBuildY }
     }
 
+    function recordEnqueueStatus(enqueued, blocked, truncated, forceNearby) {
+        lastEnqueueStatus = {
+            enqueued:         enqueued,
+            blockedByQueue:   Boolean(blocked),
+            truncatedByQueue: Boolean(truncated),
+            pending:          getPendingScanCount(),
+            cap:              CONFIG.maxScanQueue,
+            forceNearby:      Boolean(forceNearby)
+        }
+    }
+
     function enqueueNearbySections(opts) {
-        if (bindingsByBlockId.size === 0 || SERVER_REF == null) return 0
-        if (getPendingScanCount() >= MAX_SCAN_QUEUE_SIZE) return 0
         var forceNearby = Boolean(opts != null && opts.forceNearby)
+        if (bindingsByBlockId.size === 0 || SERVER_REF == null) {
+            recordEnqueueStatus(0, false, false, forceNearby)
+            return 0
+        }
+        if (getPendingScanCount() >= CONFIG.maxScanQueue) {
+            recordEnqueueStatus(0, true, false, forceNearby)
+            return 0
+        }
         var maxRadius   = (opts != null && opts.maxRadius != null && isFinite(Number(opts.maxRadius)))
             ? Number(opts.maxRadius)
             : 0
@@ -664,8 +700,14 @@
             })
         }
         var pList = null
-        try { pList = SERVER_REF.getPlayerList().getPlayers() } catch (e0) { return 0 }
-        if (pList == null) return 0
+        try { pList = SERVER_REF.getPlayerList().getPlayers() } catch (e0) {
+            recordEnqueueStatus(0, false, false, forceNearby)
+            return 0
+        }
+        if (pList == null) {
+            recordEnqueueStatus(0, false, false, forceNearby)
+            return 0
+        }
         var enqueued = 0
         var n = (typeof pList.size === 'function') ? Number(pList.size()) : (pList.length || 0)
         for (var i = 0; i < n; i++) {
@@ -721,7 +763,11 @@
                                 continue
                             }
                         }
-                        if (getPendingScanCount() >= MAX_SCAN_QUEUE_SIZE) return enqueued
+                        if (getPendingScanCount() >= CONFIG.maxScanQueue) {
+                            recordEnqueueStatus(enqueued, false, true, forceNearby)
+                            return enqueued
+                        }
+                        // 先记入版本号；若消费阶段因维度卸载/未加载/越界/异常中止，必须 delete 回滚以防“假已扫”永久跳过
                         touchScannedSection(skey, bindingsVersion)
                         pendingScanKeys.add(skey)
                         scanQueue.push({ dim: dim, sx: sx, sy: sy, sz: sz, skey: skey })
@@ -730,6 +776,7 @@
                 }
             }
         }
+        recordEnqueueStatus(enqueued, false, false, forceNearby)
         return enqueued
     }
 
@@ -750,7 +797,7 @@
         if (scanQueueHead >= scanQueue.length || bindingsByBlockId.size === 0) return
         var processed = 0
         var dirty     = false
-        while (scanQueueHead < scanQueue.length && processed < SCAN_SECTIONS_PER_TICK) {
+        while (scanQueueHead < scanQueue.length && processed < CONFIG.scanSectionsPerTick) {
             var task = scanQueue[scanQueueHead]
             scanQueue[scanQueueHead] = null
             scanQueueHead++
@@ -765,7 +812,10 @@
             if (task == null) continue
             processed++
             var lv = resolveLevel(task.dim, null)
-            if (lv == null) continue
+            if (lv == null) {
+                scannedSections.delete(task.skey)
+                continue
+            }
             try {
                 var col = getLoadedChunkSections(lv, task.sx, task.sz)
                 if (!col.loaded) {
@@ -774,7 +824,10 @@
                 }
                 var sections = col.sections
                 var secIdx   = (task.sy * 16 - col.minBuildY) >> 4
-                if (sections == null || secIdx < 0 || secIdx >= sections.length) continue
+                if (sections == null || secIdx < 0 || secIdx >= sections.length) {
+                    scannedSections.delete(task.skey)
+                    continue
+                }
                 var section = sections[secIdx]
                 if (section == null || section.hasOnlyAir()) {
                     touchScannedSection(task.skey, AIR_SECTION_VER)
@@ -796,7 +849,10 @@
                         shouldScanSection = true
                     }
                 }
-                if (!shouldScanSection) continue
+                if (!shouldScanSection) {
+                    touchScannedSection(task.skey, bindingsVersion)
+                    continue
+                }
 
                 var baseX = task.sx << 4, baseY = task.sy << 4, baseZ = task.sz << 4
                 for (var ly = 0; ly < 16; ly++) {
@@ -819,7 +875,9 @@
                         }
                     }
                 }
+                touchScannedSection(task.skey, bindingsVersion)
             } catch (eScan) {
+                scannedSections.delete(task.skey)
                 logCatch('scanSection', eScan)
             }
         }
@@ -832,21 +890,21 @@
         absorbGlobalMigrations()
         if (bindingsByBlockId.size === 0) return
 
-        if ((tickCounter % SCAN_ENQ_INTERVAL) === 1) {
+        if ((tickCounter % CONFIG.scanEnqInterval) === 1) {
             enqueueNearbySections()
         }
         processScanSlice()
 
         var dirty       = false
-        var verifyPhase = tickCounter % VERIFY_WINDOW_TICKS
+        var verifyPhase = tickCounter % CONFIG.verifyWindowTicks
         trackedBlocks.forEach(function (rec, posKey) {
             try {
                 if (rec == null) return
                 var bMap = bindingsByBlockId.get(rec.blockId)
                 if (bMap == null || bMap.size === 0) return
 
-                // 将 block_changed 实体复核按 VERIFY_WINDOW_TICKS (1/20) 分摊到各 tick，并配合缓存视图消除每 tick 数组与对象分配
-                var vSlot      = (rec.vSlot != null) ? (rec.vSlot % VERIFY_WINDOW_TICKS) : 0
+                // 将 block_changed 实体复核按 CONFIG.verifyWindowTicks (1/20) 分摊到各 tick，并配合缓存视图消除每 tick 数组与对象分配
+                var vSlot      = (rec.vSlot != null) ? (rec.vSlot % CONFIG.verifyWindowTicks) : 0
                 var needVerify = (vSlot === verifyPhase)
                 var lv         = null
                 var curBlock   = null
@@ -902,6 +960,7 @@
             onTick:               (cfg && typeof cfg.onTick === 'function') ? cfg.onTick : null,
             onRemoved:            (cfg && typeof cfg.onRemoved === 'function') ? cfg.onRemoved : null,
             onBrokenUnregistered: (cfg && typeof cfg.onBrokenUnregistered === 'function') ? cfg.onBrokenUnregistered : null,
+            onBindingChanged:     (cfg && typeof cfg.onBindingChanged === 'function') ? cfg.onBindingChanged : null,
             getTrackedRecordsCalls: 0,
             destroyed:            false
         }
@@ -912,8 +971,9 @@
             var bMap  = bindingsByBlockId.get(idStr)
             if (bMap == null || !bMap.has(subId)) return 0
 
-            var removed = 0
-            var keys    = Array.from(trackedBlocks.keys())
+            var prevMeta = bMap.get(subId)
+            var removed  = 0
+            var keys     = Array.from(trackedBlocks.keys())
             for (var i = 0; i < keys.length; i++) {
                 var rec = trackedBlocks.get(keys[i])
                 if (rec != null && rec.blockId === idStr) {
@@ -928,6 +988,9 @@
             }
             bMap.delete(subId)
             if (bMap.size === 0) bindingsByBlockId.delete(idStr)
+            if (sub.onBindingChanged != null) {
+                try { sub.onBindingChanged(idStr, null, prevMeta) } catch (eChg) { logCatch(sub.id + ':onBindingChanged', eChg) }
+            }
             saveTrackedBlocks(true)
             return removed
         }
@@ -955,14 +1018,19 @@
                 var idStr        = String(blockId).trim()
                 var bMap         = bindingsByBlockId.get(idStr)
                 var isNewBlockId = (bMap == null || bMap.size === 0)
+                var prevMeta     = bMap != null ? bMap.get(subId) : null
                 if (bMap == null) {
                     bMap = new Map()
                     bindingsByBlockId.set(idStr, bMap)
                 }
                 bMap.set(subId, meta)
-                // 仅当新增未知方块类型且已有扫描状态时推进版本号，使已缓存非空气段按需重检，而不清空全局 LRU / 待扫队列
+                // 仅当新增未知方块类型且已有扫描状态时推进版本号，使已缓存非空气段按需重检，
+                // 而不清空全局 LRU / 待扫队列；同 blockId 扩大 scanRadius 会直接扩大后续入队遍历半径，无需重扫已检段
                 if (isNewBlockId && (scannedSections.size > 0 || getPendingScanCount() > 0)) {
                     bindingsVersion++
+                }
+                if (sub.onBindingChanged != null) {
+                    try { sub.onBindingChanged(idStr, meta, prevMeta) } catch (eChg) { logCatch(sub.id + ':onBindingChanged', eChg) }
                 }
                 return true
             },
@@ -979,7 +1047,10 @@
                         if (r > subMaxRadius) subMaxRadius = r
                     }
                 })
-                if (!hasAnyBinding) return 0
+                if (!hasAnyBinding) {
+                    recordEnqueueStatus(0, false, false, true)
+                    return 0
+                }
                 return enqueueNearbySections({
                     forceNearby: true,
                     maxRadius:   subMaxRadius > 0 ? subMaxRadius : 32
@@ -1067,7 +1138,7 @@
             tickCounter++
             if (SERVER_REF == null) return
             tickAllTrackedBlocks()
-            if (persistDirty && (tickCounter - lastFlushTick) >= SAVE_DEBOUNCE_TICKS) {
+            if (persistDirty && (tickCounter - lastFlushTick) >= CONFIG.saveDebounceTicks) {
                 flushTrackedBlocks()
             }
         } catch (eTick) {
@@ -1090,38 +1161,55 @@
     function configure(patch) {
         if (patch != null && typeof patch === 'object') {
             if (patch.scanEnqInterval != null && isFinite(Number(patch.scanEnqInterval))) {
-                SCAN_ENQ_INTERVAL = Math.max(1, Math.floor(Number(patch.scanEnqInterval)))
+                CONFIG.scanEnqInterval = Math.max(1, Math.floor(Number(patch.scanEnqInterval)))
             }
             if (patch.scanSectionsPerTick != null && isFinite(Number(patch.scanSectionsPerTick))) {
-                SCAN_SECTIONS_PER_TICK = Math.max(1, Math.floor(Number(patch.scanSectionsPerTick)))
+                CONFIG.scanSectionsPerTick = Math.max(1, Math.floor(Number(patch.scanSectionsPerTick)))
             }
             if (patch.verifyWindowTicks != null && isFinite(Number(patch.verifyWindowTicks))) {
-                VERIFY_WINDOW_TICKS = Math.max(1, Math.floor(Number(patch.verifyWindowTicks)))
+                CONFIG.verifyWindowTicks = Math.max(1, Math.floor(Number(patch.verifyWindowTicks)))
             }
             if (patch.saveDebounceTicks != null && isFinite(Number(patch.saveDebounceTicks))) {
-                SAVE_DEBOUNCE_TICKS = Math.max(1, Math.floor(Number(patch.saveDebounceTicks)))
+                CONFIG.saveDebounceTicks = Math.max(1, Math.floor(Number(patch.saveDebounceTicks)))
             }
             if (patch.maxScannedSections != null && isFinite(Number(patch.maxScannedSections))) {
-                MAX_SCANNED_SECTIONS = Math.max(256, Math.floor(Number(patch.maxScannedSections)))
+                CONFIG.maxScannedSections = Math.max(256, Math.floor(Number(patch.maxScannedSections)))
+                while (scannedSections.size > CONFIG.maxScannedSections) {
+                    var oldestKey = scannedSections.keys().next().value
+                    if (oldestKey === undefined) break
+                    scannedSections.delete(oldestKey)
+                }
             }
             if (patch.maxScanQueue != null && isFinite(Number(patch.maxScanQueue))) {
-                MAX_SCAN_QUEUE_SIZE = Math.max(16, Math.floor(Number(patch.maxScanQueue)))
+                CONFIG.maxScanQueue = Math.max(16, Math.floor(Number(patch.maxScanQueue)))
             }
         }
         return {
-            scanEnqInterval:     SCAN_ENQ_INTERVAL,
-            scanSectionsPerTick: SCAN_SECTIONS_PER_TICK,
-            verifyWindowTicks:   VERIFY_WINDOW_TICKS,
-            saveDebounceTicks:   SAVE_DEBOUNCE_TICKS,
-            maxScannedSections:  MAX_SCANNED_SECTIONS,
-            maxScanQueue:        MAX_SCAN_QUEUE_SIZE
+            scanEnqInterval:     CONFIG.scanEnqInterval,
+            scanSectionsPerTick: CONFIG.scanSectionsPerTick,
+            verifyWindowTicks:   CONFIG.verifyWindowTicks,
+            saveDebounceTicks:   CONFIG.saveDebounceTicks,
+            maxScannedSections:  CONFIG.maxScannedSections,
+            maxScanQueue:        CONFIG.maxScanQueue
         }
     }
 
+    // 显式全量重置（参见【重新发现机制边界约定】策略 3）
     function rescanAll() {
         scannedSections.clear()
         resetScanQueue()
         return enqueueNearbySections({ forceNearby: true })
+    }
+
+    function getLastScanStatus() {
+        return {
+            enqueued:         lastEnqueueStatus.enqueued,
+            blockedByQueue:   lastEnqueueStatus.blockedByQueue,
+            truncatedByQueue: lastEnqueueStatus.truncatedByQueue,
+            pending:          getPendingScanCount(),
+            cap:              CONFIG.maxScanQueue,
+            forceNearby:      lastEnqueueStatus.forceNearby
+        }
     }
 
     function getStats() {
@@ -1135,21 +1223,26 @@
             subscribersCount:       subscribers.size,
             trackedBlocksSize:      trackedBlocks.size,
             scannedSectionsSize:    scannedSections.size,
+            maxScannedSections:     CONFIG.maxScannedSections,
             scanQueueArrayLength:   scanQueue.length,
             scanQueueHead:          scanQueueHead,
             pendingScanCount:       getPendingScanCount(),
+            maxScanQueue:           CONFIG.maxScanQueue,
             stateIdCacheSize:       stateIdCache.size,
             getTrackedRecordsCalls: trackedRecordsTotalCalls,
-            subscriberCalls:        subCalls
+            subscriberCalls:        subCalls,
+            lastEnqueueStatus:      getLastScanStatus()
         }
     }
 
     global.EpiphyBlockTracker = {
+        CONFIG:            CONFIG,
         configure:         configure,
         createTracker:     createTracker,
         migrateLegacyOnce: migrateLegacyOnce,
         rescanAll:         rescanAll,
         getStats:          getStats,
+        getLastScanStatus: getLastScanStatus,
         extractBlockId:    extractBlockId,
         isChunkLoaded:     isChunkLoaded,
         makePosKey:        makePosKey,
@@ -1177,8 +1270,9 @@
                 'bindingsCount: ' + s.bindingsCount + ' (version=' + s.bindingsVersion + ')',
                 'subscribersCount: ' + s.subscribersCount,
                 'trackedBlocks.size: ' + s.trackedBlocksSize,
-                'scannedSections.size: ' + s.scannedSectionsSize + ' / max=' + MAX_SCANNED_SECTIONS,
-                'scanQueue.length: ' + s.scanQueueArrayLength + ' (head=' + s.scanQueueHead + ', pending=' + s.pendingScanCount + ', max=' + MAX_SCAN_QUEUE_SIZE + ')',
+                'scannedSections.size: ' + s.scannedSectionsSize + ' / max=' + CONFIG.maxScannedSections,
+                'scanQueue.length: ' + s.scanQueueArrayLength + ' (head=' + s.scanQueueHead + ', pending=' + s.pendingScanCount + ', max=' + CONFIG.maxScanQueue + ')',
+                'CONFIG: enqInterval=' + CONFIG.scanEnqInterval + ', perTick=' + CONFIG.scanSectionsPerTick + ', verifyWin=' + CONFIG.verifyWindowTicks + ', debounce=' + CONFIG.saveDebounceTicks,
                 'stateIdCache.size: ' + s.stateIdCacheSize,
                 'getTrackedRecordsCalls: ' + s.getTrackedRecordsCalls + ' (perSub=' + JSON.stringify(s.subscriberCalls) + ')',
                 'persistDirty: ' + persistDirty + ', storagePath: ' + (loadedStoragePath || '（未加载世界）')
@@ -1186,13 +1280,13 @@
         },
         check: function () {
             var s = getStats()
-            var qOk = s.pendingScanCount < Math.floor(MAX_SCAN_QUEUE_SIZE * 0.85)
+            var qOk = s.pendingScanCount < Math.floor(CONFIG.maxScanQueue * 0.85)
             var pOk = (SERVER_REF == null || loadedStoragePath != null)
             return [
                 {
                     name:   'scan_queue_headroom',
                     ok:     qOk,
-                    detail: 'pending=' + s.pendingScanCount + '/' + MAX_SCAN_QUEUE_SIZE + ' (arrayLen=' + s.scanQueueArrayLength + ')'
+                    detail: 'pending=' + s.pendingScanCount + '/' + CONFIG.maxScanQueue + ' (arrayLen=' + s.scanQueueArrayLength + ')'
                 },
                 {
                     name:   'storage_initialized',
@@ -1205,7 +1299,14 @@
             rescan: {
                 desc: '重扫在线玩家周边非空气区块段',
                 fn: function () {
-                    var n = rescanAll()
+                    var n  = rescanAll()
+                    var st = getLastScanStatus()
+                    if (st.truncatedByQueue) {
+                        return '已重扫并新入队 ' + n + ' 个非空气区块段（扫描队列已满 ' + st.pending + '/' + st.cap + '，剩余区段将在消费空出后按周期补扫）'
+                    }
+                    if (st.blockedByQueue) {
+                        return '扫描队列已满（' + st.pending + '/' + st.cap + ' 排队中），本次未能入队'
+                    }
                     return '已重扫并新入队 ' + n + ' 个非空气区块段（待扫总数: ' + getPendingScanCount() + '）'
                 }
             },
