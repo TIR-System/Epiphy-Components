@@ -1,0 +1,9 @@
+{
+  "name": "epiphy-kubejs-components",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Epiphy KubeJS server/client common components pure & harness tests",
+  "scripts": {
+    "test": "node tests/pure_functions.test.js"
+  }
+}

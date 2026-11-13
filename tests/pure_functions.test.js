@@ -12,6 +12,7 @@ var VALVE_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组�
 var DEBUG_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-调试组件.js')
 var DANMAKU_PATH   = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-屏幕弹幕组件.js')
 var AUDIO_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-音频组件.js')
+var RENDERER_PATH  = path.join(ROOT_DIR, 'kubejs', 'client_scripts', '通用组件', 'Epiphy的-屏幕弹幕渲染器.js')
 
 function createKubeSandbox(loadClassFn) {
     var noop = function () {}
@@ -587,6 +588,762 @@ test('debug hub: dynamic queue drain, multi-module metrics, checks, actions & ad
 })
 
 // Run suite
+// ----------------------------------------------------------------------------
+// Shared mock world builders for integration-style module tests (14-18)
+// ----------------------------------------------------------------------------
+function makeMockWorld(opts) {
+    var dim = (opts && opts.dim) || 'minecraft:overworld'
+    var blockMap = new Map() // "x,y,z" -> blockId
+    var unloadedChunks = new Set() // "cx,cz"
+    var throwingChunks = new Set() // "cx,cz"
+    var oobChunks      = new Set() // "cx,cz"
+    var players = []
+
+    function coordKey(x, y, z) {
+        return Math.floor(x) + ',' + Math.floor(y) + ',' + Math.floor(z)
+    }
+
+    function makeBlockContainer(x, y, z, forcedId) {
+        var ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z)
+        var id = forcedId !== undefined ? forcedId : (blockMap.get(coordKey(ix, iy, iz)) || 'minecraft:air')
+        return {
+            x: ix,
+            y: iy,
+            z: iz,
+            id: id,
+            level: level,
+            getId: function () { return id },
+            getBlockState: function () {
+                return {
+                    id: id,
+                    isAir: function () { return id === 'minecraft:air' }
+                }
+            }
+        }
+    }
+
+    function buildChunkAt(cx, cz) {
+        if (unloadedChunks.has(cx + ',' + cz)) return null
+        if (throwingChunks.has(cx + ',' + cz)) {
+            return {
+                getMinBuildHeight: function () { return 0 },
+                getSections: function () { throw new Error('synthetic chunk read error') }
+            }
+        }
+        var sectionCount = oobChunks.has(cx + ',' + cz) ? 1 : 6
+        var sections = []
+        for (var sy = 0; sy < sectionCount; sy++) {
+            (function (secY) {
+                sections.push({
+                    hasOnlyAir: function () {
+                        var match = false
+                        blockMap.forEach(function (bid, k) {
+                            if (bid === 'minecraft:air') return
+                            var parts = k.split(',')
+                            var bx = Number(parts[0]), by = Number(parts[1]), bz = Number(parts[2])
+                            if ((bx >> 4) === cx && (bz >> 4) === cz && (by >> 4) === secY) match = true
+                        })
+                        return !match
+                    },
+                    maybeHas: function (pred) {
+                        var hit = false
+                        blockMap.forEach(function (bid, k) {
+                            var parts = k.split(',')
+                            var bx = Number(parts[0]), by = Number(parts[1]), bz = Number(parts[2])
+                            if ((bx >> 4) === cx && (bz >> 4) === cz && (by >> 4) === secY) {
+                                if (pred({ id: bid, isAir: function () { return bid === 'minecraft:air' } })) hit = true
+                            }
+                        })
+                        return hit
+                    },
+                    getBlockState: function (lx, ly, lz) {
+                        var wx = (cx << 4) + lx
+                        var wy = (secY << 4) + ly
+                        var wz = (cz << 4) + lz
+                        var bid = blockMap.get(coordKey(wx, wy, wz)) || 'minecraft:air'
+                        return { id: bid, isAir: function () { return bid === 'minecraft:air' } }
+                    }
+                })
+            })(sy)
+        }
+        return {
+            getMinBuildHeight: function () { return 0 },
+            getSections: function () { return sections }
+        }
+    }
+
+    var level = {
+        dimension: dim,
+        getMinBuildHeight: function () { return 0 },
+        getMaxBuildHeight: function () { return 96 },
+        getBlock: function (x, y, z) { return makeBlockContainer(x, y, z) },
+        getChunkSource: function () {
+            return {
+                getChunkNow: function (cx, cz) { return buildChunkAt(cx, cz) }
+            }
+        },
+        hasChunk: function (cx, cz) { return !unloadedChunks.has(cx + ',' + cz) },
+        getChunk: function (cx, cz) { return buildChunkAt(cx, cz) },
+        players: {
+            size: function () { return players.length },
+            get: function (i) { return players[i] }
+        }
+    }
+
+    function addPlayer(name, uuid, x, y, z) {
+        var sentPackets = []
+        var p = {
+            username: name,
+            uuid: uuid,
+            level: level,
+            _pos: { x: x, y: y, z: z },
+            block: null,
+            getStringUUID: function () { return uuid },
+            getId: function () { return players.indexOf(p) + 1 },
+            getX: function () { return p._pos.x },
+            getY: function () { return p._pos.y },
+            getZ: function () { return p._pos.z },
+            sendData: function (ch, pkt) { sentPackets.push({ channel: ch, pkt: pkt }) },
+            tell: function () {},
+            sentPackets: sentPackets,
+            moveTo: function (nx, ny, nz) { p._pos.x = nx; p._pos.y = ny; p._pos.z = nz }
+        }
+        players.push(p)
+        return p
+    }
+
+    var levelsEnabled = true
+    var server = {
+        getAllLevels: function () { return levelsEnabled ? [level] : [] },
+        getLevel: function (d) { return (levelsEnabled && String(d) === dim) ? level : null },
+        getPlayerList: function () {
+            return {
+                getPlayers: function () { return players }
+            }
+        },
+        persistentData: {}
+    }
+
+    return {
+        dim: dim,
+        level: level,
+        server: server,
+        players: players,
+        unloadedChunks: unloadedChunks,
+        throwingChunks: throwingChunks,
+        oobChunks: oobChunks,
+        setLevelsEnabled: function (v) { levelsEnabled = Boolean(v) },
+        setBlock: function (x, y, z, id) {
+            var k = coordKey(x, y, z)
+            if (id === 'minecraft:air' || id == null) blockMap.delete(k)
+            else blockMap.set(k, id)
+        },
+        makeBlock: makeBlockContainer,
+        addPlayer: addPlayer
+    }
+}
+
+function attachSandboxEventHooks(isoSandbox) {
+    var hooks = {
+        tick: [],
+        placed: [],
+        broken: [],
+        loggedIn: [],
+        loggedOut: []
+    }
+    isoSandbox.ServerEvents.tick      = function (fn) { hooks.tick.push(fn) }
+    isoSandbox.BlockEvents.placed     = function (fn) { hooks.placed.push(fn) }
+    isoSandbox.BlockEvents.broken     = function (fn) { hooks.broken.push(fn) }
+    isoSandbox.PlayerEvents.loggedIn  = function (fn) { hooks.loggedIn.push(fn) }
+    isoSandbox.PlayerEvents.loggedOut = function (fn) { hooks.loggedOut.push(fn) }
+    return hooks
+}
+
+// ----------------------------------------------------------------------------
+// 14. block tracker abort rollbacks, queue-full status & timing telemetry
+// ----------------------------------------------------------------------------
+test('block tracker: scan aborts rollback LRU, reports queue-full status & records active-only timing', function () {
+    var nsNow = 1000000
+    var isoSandbox = createKubeSandbox(function (cls) {
+        if (cls === 'java.lang.System') return { nanoTime: function () { return (nsNow += 250000) } }
+        return null
+    })
+    var hooks = attachSandboxEventHooks(isoSandbox)
+    vm.runInContext(fs.readFileSync(TRACKER_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-方块追踪组件.js' })
+    vm.runInContext(fs.readFileSync(DEBUG_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-调试组件.js' })
+
+    var Tracker = isoSandbox.global.EpiphyBlockTracker
+    var Debug   = isoSandbox.global.EpiphyDebug
+    var world   = makeMockWorld()
+    world.addPlayer('Tester', '00000000-0000-0000-0000-000000000001', 8, 24, 8)
+    world.setBlock(2, 20, 3, 'epiphy:probe_a')
+    // Populate 17 additional sections within radius 48 using stone (18 non-air sections total > min maxScanQueue=16)
+    var dummyStones = []
+    for (var cx = -2; cx <= 2 && dummyStones.length < 17; cx++) {
+        for (var cz = -2; cz <= 2 && dummyStones.length < 17; cz++) {
+            if (cx === 0 && cz === 0) continue
+            var sx = (cx << 4) + 2
+            var sz = (cz << 4) + 3
+            dummyStones.push([sx, 20, sz])
+            world.setBlock(sx, 20, sz, 'minecraft:stone')
+        }
+    }
+
+    Tracker.configure({ maxScanQueue: 16, scanSectionsPerTick: 1, scanEnqInterval: 999 })
+    // Advance once BEFORE binding so SERVER_REF is initialized without pre-filling scanQueue
+    for (var ti = 0; ti < hooks.tick.length; ti++) hooks.tick[ti]({ server: world.server })
+
+    var bindingChangedCalls = []
+    var sub = Tracker.createTracker({
+        name: 'probe_sub',
+        onBindingChanged: function (idStr, meta, prevMeta) {
+            bindingChangedCalls.push({ id: idStr, r: meta && meta.scanRadius, prevR: prevMeta && prevMeta.scanRadius })
+        }
+    })
+    sub.bind('epiphy:probe_a', { scanRadius: 48 })
+    sub.bind('epiphy:probe_a', { scanRadius: 64 })
+    assert.strictEqual(bindingChangedCalls.length, 2)
+    assert.strictEqual(bindingChangedCalls[1].prevR, 48)
+    assert.strictEqual(bindingChangedCalls[1].r, 64)
+
+    // Saturate scan queue cleanly and verify blockedByQueue status via sub.scanNow()
+    var nFirst = sub.scanNow()
+    var st1 = Tracker.getLastScanStatus()
+    assert.strictEqual(nFirst, 16)
+    assert.strictEqual(st1.truncatedByQueue, true)
+    assert.strictEqual(st1.blockedByQueue, false)
+
+    var nBlocked = sub.scanNow()
+    var st2 = Tracker.getLastScanStatus()
+    assert.strictEqual(nBlocked, 0)
+    assert.strictEqual(st2.blockedByQueue, true)
+    var rescanRes = Debug.runAction('tracker', 'rescan')
+    assert.strictEqual(rescanRes.ok, true)
+    assert.ok(rescanRes.message.includes('已满'))
+
+    // Clear queue cleanly (unload all dummy chunks & remove helper stones) before testing abort rollbacks on chunk (0,0)
+    Tracker.configure({ maxScanQueue: 16, scanSectionsPerTick: 1 })
+    for (var ucx = -2; ucx <= 2; ucx++) {
+        for (var ucz = -2; ucz <= 2; ucz++) {
+            world.unloadedChunks.add(ucx + ',' + ucz)
+        }
+    }
+    for (var d = 0; d < 18; d++) {
+        for (var ti2 = 0; ti2 < hooks.tick.length; ti2++) hooks.tick[ti2]({ server: world.server })
+    }
+    world.unloadedChunks.clear()
+    for (var sj = 0; sj < dummyStones.length; sj++) {
+        world.setBlock(dummyStones[sj][0], dummyStones[sj][1], dummyStones[sj][2], 'minecraft:air')
+    }
+    assert.strictEqual(Tracker.getStats().trackedBlocksSize, 0)
+
+    // Test 1: lv == null abort rollback
+    world.unloadedChunks.delete('0,0')
+    world.setLevelsEnabled(false)
+    Tracker.configure({ maxScanQueue: 32 })
+    world.players[0].moveTo(8, 20, 8)
+    sub.bind('epiphy:probe_a', { scanRadius: 16 })
+    // Enqueue with levels disabled -> re-enable -> queue has tasks but if level goes null during consume:
+    world.setLevelsEnabled(true)
+    assert.ok(Tracker.rescanAll() > 0)
+    var scannedBeforeNull = Tracker.getStats().scannedSectionsSize
+    assert.ok(scannedBeforeNull > 0)
+    world.setLevelsEnabled(false)
+    for (var k = 0; k < 2; k++) {
+        for (var ti3 = 0; ti3 < hooks.tick.length; ti3++) hooks.tick[ti3]({ server: world.server })
+    }
+    // At least one consumed task rolled back its scannedSections mark!
+    assert.ok(Tracker.getStats().scannedSectionsSize < scannedBeforeNull)
+
+    // Test 2: throwing chunk scan rolls back LRU cleanly instead of poisoning section
+    world.setLevelsEnabled(true)
+    world.throwingChunks.add('0,0')
+    // Drain queue while chunk (0,0) throws
+    for (var d2 = 0; d2 < 20; d2++) {
+        for (var ti4 = 0; ti4 < hooks.tick.length; ti4++) hooks.tick[ti4]({ server: world.server })
+    }
+    assert.strictEqual(Tracker.getStats().trackedBlocksSize, 0)
+    // Fix chunk (0,0) and rescan WITHOUT needing bindingsVersion bump -> rolls back worked!
+    world.throwingChunks.delete('0,0')
+    var reEnqueued = Tracker.rescanAll()
+    assert.ok(reEnqueued > 0)
+    for (var d3 = 0; d3 < 20; d3++) {
+        for (var ti5 = 0; ti5 < hooks.tick.length; ti5++) hooks.tick[ti5]({ server: world.server })
+    }
+    assert.strictEqual(Tracker.getStats().trackedBlocksSize, 1)
+
+    // Test 3: secIdx OOB rolls back LRU when sections array grows later
+    world.setBlock(2, 40, 3, 'epiphy:probe_a') // sy=2 (y=32..47)
+    world.oobChunks.add('0,0')
+    Tracker.rescanAll()
+    for (var d4 = 0; d4 < 25; d4++) {
+        for (var ti6 = 0; ti6 < hooks.tick.length; ti6++) hooks.tick[ti6]({ server: world.server })
+    }
+    assert.strictEqual(Tracker.getStats().trackedBlocksSize, 1)
+    world.oobChunks.delete('0,0')
+    assert.ok(Tracker.rescanAll() > 0)
+    for (var d5 = 0; d5 < 25; d5++) {
+        for (var ti7 = 0; ti7 < hooks.tick.length; ti7++) hooks.tick[ti7]({ server: world.server })
+    }
+    assert.strictEqual(Tracker.getStats().trackedBlocksSize, 2)
+
+    // Timing metrics check
+    var stats = Tracker.getStats()
+    assert.ok(stats.tickAllCount > 0 && stats.lastActiveTickAllMs > 0 && stats.scanSliceCount > 0)
+    var resetRes = Debug.runAction('tracker', 'resetmetrics')
+    assert.strictEqual(resetRes.ok, true)
+    assert.ok(resetRes.message.includes('清零'))
+    assert.strictEqual(Tracker.getStats().tickAllCount, 0)
+})
+
+// ----------------------------------------------------------------------------
+// 15. danmaku: onBindingChanged cache invalidation & first/latest/nearest/stagger arbitration
+// ----------------------------------------------------------------------------
+test('danmaku: onBindingChanged invalidates scope cache & first/latest/nearest/stagger conflict arbitration', function () {
+    var isoSandbox = createKubeSandbox()
+    var hooks = attachSandboxEventHooks(isoSandbox)
+    vm.runInContext(fs.readFileSync(TRACKER_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-方块追踪组件.js' })
+    vm.runInContext(fs.readFileSync(DEBUG_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-调试组件.js' })
+
+    var capturedDanmakuSub = null
+    var origCreateTracker = isoSandbox.global.EpiphyBlockTracker.createTracker
+    isoSandbox.global.EpiphyBlockTracker.createTracker = function (cfg) {
+        var sub = origCreateTracker(cfg)
+        if (cfg && cfg.name === 'danmaku') capturedDanmakuSub = sub
+        return sub
+    }
+    vm.runInContext(fs.readFileSync(DANMAKU_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-屏幕弹幕组件.js' })
+
+    var Tracker = isoSandbox.global.EpiphyBlockTracker
+    var Debug   = isoSandbox.global.EpiphyDebug
+    var Danmaku = isoSandbox.global.ScreenDanmaku
+    var world   = makeMockWorld()
+    var alice   = world.addPlayer('Alice', '00000000-0000-0000-0000-000000000010', 8, 20, 0)
+
+    function getDanmakuRev() {
+        var detail = Debug.collectSnapshot('danmaku').modules[0].detailLines.join('\n')
+        var m = /boundScopeRevision=(\d+)/.exec(detail)
+        return m ? Number(m[1]) : -1
+    }
+
+    for (var ti = 0; ti < hooks.tick.length; ti++) hooks.tick[ti]({ server: world.server })
+
+    function stepTick() {
+        for (var ti2 = 0; ti2 < hooks.tick.length; ti2++) hooks.tick[ti2]({ server: world.server })
+    }
+    function placeBlock(x, y, z, id) {
+        world.setBlock(x, y, z, id)
+        var b = world.makeBlock(x, y, z, id)
+        for (var pi = 0; pi < hooks.placed.length; pi++) {
+            hooks.placed[pi]({ block: b, level: world.level, player: alice })
+        }
+    }
+
+    // Bind 'first' mode (lazily creates danmaku tracker subscriber) and place A(0,20,0) then B(10,20,0)
+    Danmaku.bindBlock('epiphy:node_x', function (ctx) {
+        return { text: 'from_' + ctx.x, group: 'g_arb', radius: 15 }
+    }, { radius: 15, intervalTicks: 4, conflictMode: 'first', conflictScope: 'block' })
+    assert.ok(capturedDanmakuSub != null, 'must capture danmaku subscriber for direct tracker rebind check')
+
+    placeBlock(0, 20, 0, 'epiphy:node_x')
+    placeBlock(10, 20, 0, 'epiphy:node_x')
+    alice.sentPackets.length = 0
+    while ((Tracker.getStats().lastTickAllTick % 4) !== 3) stepTick()
+    stepTick()
+    assert.strictEqual(alice.sentPackets.length, 1)
+    assert.strictEqual(alice.sentPackets[0].pkt.title, 'from_0')
+
+    // Rebind to 'latest' -> picks B(10)
+    Danmaku.bindBlock('epiphy:node_x', function (ctx) {
+        return { text: 'from_' + ctx.x, group: 'g_arb' }
+    }, { radius: 15, intervalTicks: 4, conflictMode: 'latest', conflictScope: 'block' })
+    alice.sentPackets.length = 0
+    for (var k = 0; k < 4; k++) stepTick()
+    assert.strictEqual(alice.sentPackets.length, 1)
+    assert.strictEqual(alice.sentPackets[0].pkt.title, 'from_10')
+
+    // Test 'nearest': Alice at x=8 chooses B(10); moving Alice to x=1 chooses A(0)
+    Danmaku.bindBlock('epiphy:node_x', function (ctx) {
+        return { text: 'from_' + ctx.x, group: 'g_arb' }
+    }, { radius: 15, intervalTicks: 4, conflictMode: 'nearest', conflictScope: 'block' })
+    alice.sentPackets.length = 0
+    for (var k2 = 0; k2 < 4; k2++) stepTick()
+    assert.strictEqual(alice.sentPackets[0].pkt.title, 'from_10')
+
+    alice.moveTo(1, 20, 0)
+    alice.sentPackets.length = 0
+    for (var k3 = 0; k3 < 4; k3++) stepTick()
+    assert.strictEqual(alice.sentPackets[0].pkt.title, 'from_0')
+
+    // Test 'stagger': bind radius=20 so scopeListCache caches rSq=400, and verify staggered firing across 4 ticks
+    Danmaku.bindBlock('epiphy:node_x', function (ctx) {
+        return { text: 'from_' + ctx.x, group: 'g_arb' }
+    }, { radius: 20, intervalTicks: 4, conflictMode: 'stagger', conflictScope: 'block' })
+    alice.sentPackets.length = 0
+    var seenByTick = []
+    for (var st = 0; st < 4; st++) {
+        var beforeLen = alice.sentPackets.length
+        stepTick()
+        if (alice.sentPackets.length > beforeLen) {
+            seenByTick.push(alice.sentPackets[alice.sentPackets.length - 1].pkt.title)
+        }
+    }
+    assert.strictEqual(seenByTick.length, 2)
+    assert.notStrictEqual(seenByTick[0], seenByTick[1])
+
+    // Verify tracker onBindingChanged hook immediately bumps boundScopeRevision even when sub.bind bypasses ScreenDanmaku
+    var revBefore = getDanmakuRev()
+    assert.ok(revBefore >= 0)
+    capturedDanmakuSub.bind('epiphy:node_x', { scanRadius: 20 })
+    assert.strictEqual(getDanmakuRev(), revBefore + 1)
+
+    // Move Alice to x=4 (d=3.5 to A@0.5, d=6.5 to B@10.5) and shrink radius from 20 -> 2 within TTL:
+    // scopeListCache MUST rebuild immediately with rSq=4, yielding 0 packets!
+    alice.moveTo(4, 20, 0)
+    Danmaku.bindBlock('epiphy:node_x', function (ctx) {
+        return { text: 'from_' + ctx.x, group: 'g_arb' }
+    }, { radius: 2, intervalTicks: 4, conflictMode: 'nearest', conflictScope: 'block' })
+    alice.sentPackets.length = 0
+    for (var k4 = 0; k4 < 4; k4++) stepTick()
+    assert.strictEqual(alice.sentPackets.length, 0)
+})
+
+// ----------------------------------------------------------------------------
+// 16. danmaku: merge cluster honors min-seq leader, silences followers, expands union & recalculates on break
+// ----------------------------------------------------------------------------
+test('danmaku: merge cluster honors earliest leader, suppresses followers, expands union & recalculates on break', function () {
+    var isoSandbox = createKubeSandbox(function (cls) {
+        if (cls === 'java.lang.System') return { nanoTime: function () { return Date.now() * 1000000 } }
+        return null
+    })
+    var hooks = attachSandboxEventHooks(isoSandbox)
+    vm.runInContext(fs.readFileSync(TRACKER_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-方块追踪组件.js' })
+    vm.runInContext(fs.readFileSync(DEBUG_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-调试组件.js' })
+    vm.runInContext(fs.readFileSync(DANMAKU_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-屏幕弹幕组件.js' })
+
+    var Danmaku = isoSandbox.global.ScreenDanmaku
+    var Debug   = isoSandbox.global.EpiphyDebug
+    var world   = makeMockWorld()
+    var pNearB1 = world.addPlayer('P1', '00000000-0000-0000-0000-000000000021', 0, 20, 0)
+    var pNearB2 = world.addPlayer('P2', '00000000-0000-0000-0000-000000000022', 35, 20, 0)
+
+    function stepTick() {
+        for (var ti = 0; ti < hooks.tick.length; ti++) hooks.tick[ti]({ server: world.server })
+    }
+    function placeBlock(x, y, z, id, actor) {
+        world.setBlock(x, y, z, id)
+        var b = world.makeBlock(x, y, z, id)
+        for (var pi = 0; pi < hooks.placed.length; pi++) hooks.placed[pi]({ block: b, level: world.level, player: actor })
+    }
+    function breakBlock(x, y, z, id, actor) {
+        var oldB = world.makeBlock(x, y, z, id)
+        world.setBlock(x, y, z, 'minecraft:air')
+        for (var bi = 0; bi < hooks.broken.length; bi++) hooks.broken[bi]({ block: oldB, level: world.level, player: actor })
+    }
+
+    stepTick()
+    var specCalls = []
+    Danmaku.bindBlock('epiphy:merge_blk', function (ctx) {
+        specCalls.push(ctx.x + ',' + ctx.y + ',' + ctx.z)
+        return { text: 'leader_' + ctx.x, group: 'grp_merge' }
+    }, { radius: 20, intervalTicks: 5, conflictCooldownTicks: 1, group: 'grp_merge', conflictMode: 'merge', conflictScope: 'block' })
+
+    // 1) Place first block B1 at (0,20,0) -> leader emits once; P1 receives, P2 at x=35 does not
+    placeBlock(0, 20, 0, 'epiphy:merge_blk', pNearB1)
+    assert.strictEqual(specCalls.length, 1)
+    assert.strictEqual(specCalls[0], '0,20,0')
+    assert.strictEqual(pNearB1.sentPackets.filter(function (e) { return e.pkt.action === 'push' }).length, 1)
+    assert.strictEqual(pNearB2.sentPackets.filter(function (e) { return e.pkt.action === 'push' }).length, 0)
+
+    // 2) Place follower B2 at (30,20,0) (touches B1: d=30 <= 40) -> follower MUST NOT run specOrFn!
+    placeBlock(30, 20, 0, 'epiphy:merge_blk', pNearB2)
+    assert.strictEqual(specCalls.length, 1)
+
+    // Advance 5 ticks -> ONLY B1 runs (specCalls grows by 1, NOT 2!), AND both P1 & P2 receive B1's packet!
+    pNearB1.sentPackets.length = 0
+    pNearB2.sentPackets.length = 0
+    for (var t = 0; t < 5; t++) stepTick()
+    assert.strictEqual(specCalls.length, 2)
+    assert.strictEqual(specCalls[1], '0,20,0')
+    assert.strictEqual(pNearB1.sentPackets.filter(function (e) { return e.pkt.title === 'leader_0' }).length, 1)
+    assert.strictEqual(pNearB2.sentPackets.filter(function (e) { return e.pkt.title === 'leader_0' }).length, 1)
+
+    // Verify per-cycle timing recorded without counting suppressed followers
+    var dmSnap    = Debug.collectSnapshot('danmaku')
+    var detailStr = dmSnap.modules[0].detailLines.join('\n')
+    assert.ok(detailStr.includes('emitCycleMs:') && !detailStr.includes('cycles=0'))
+
+    // 3) Break leader B1 at (0,20,0) -> P1 gets clear packet, P2 (inside surviving B2) is NOT cleared!
+    pNearB1.sentPackets.length = 0
+    pNearB2.sentPackets.length = 0
+    breakBlock(0, 20, 0, 'epiphy:merge_blk', pNearB1)
+    assert.strictEqual(pNearB1.sentPackets.some(function (e) { return e.pkt.action === 'clear' }), true)
+    assert.strictEqual(pNearB2.sentPackets.some(function (e) { return e.pkt.action === 'clear' }), false)
+
+    // Next 5 ticks -> B2 automatically promoted to leader and emits at x=30 for P2 only!
+    pNearB1.sentPackets.length = 0
+    pNearB2.sentPackets.length = 0
+    for (var t2 = 0; t2 < 5; t2++) stepTick()
+    assert.strictEqual(specCalls.length, 3)
+    assert.strictEqual(specCalls[2], '30,20,0')
+    assert.strictEqual(pNearB1.sentPackets.length, 0)
+    assert.strictEqual(pNearB2.sentPackets.filter(function (e) { return e.pkt.title === 'leader_30' }).length, 1)
+})
+
+// ----------------------------------------------------------------------------
+// 17. audio: syncAll idle skip, conflict arbitration & merged connected block clusters
+// ----------------------------------------------------------------------------
+test('audio: syncAll skips 0-handle ticks, arbitrates conflicts & merges block clusters with union + seamless break', function () {
+    var nsNow = 1000000
+    var isoSandbox = createKubeSandbox(function (cls) {
+        if (cls === 'java.lang.System') return { nanoTime: function () { return (nsNow += 150000) } }
+        return null
+    })
+    var hooks = attachSandboxEventHooks(isoSandbox)
+    vm.runInContext(fs.readFileSync(TRACKER_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-方块追踪组件.js' })
+    vm.runInContext(fs.readFileSync(DEBUG_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-调试组件.js' })
+    vm.runInContext(fs.readFileSync(AUDIO_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-音频组件.js' })
+
+    var Audio = isoSandbox.global.EpiphyAudio
+    var Debug = isoSandbox.global.EpiphyDebug
+    var world = makeMockWorld()
+    var p1    = world.addPlayer('Listener1', '00000000-0000-0000-0000-000000000031', 0, 20, 0)
+    var p2    = world.addPlayer('Listener2', '00000000-0000-0000-0000-000000000032', 35, 20, 0)
+
+    function stepTicks(n) {
+        for (var i = 0; i < n; i++) {
+            for (var ti = 0; ti < hooks.tick.length; ti++) hooks.tick[ti]({ server: world.server })
+        }
+    }
+    function placeBlock(x, y, z, id, actor) {
+        world.setBlock(x, y, z, id)
+        var b = world.makeBlock(x, y, z, id)
+        for (var pi = 0; pi < hooks.placed.length; pi++) hooks.placed[pi]({ block: b, level: world.level, player: actor })
+    }
+    function breakBlock(x, y, z, id, actor) {
+        var oldB = world.makeBlock(x, y, z, id)
+        world.setBlock(x, y, z, 'minecraft:air')
+        for (var bi = 0; bi < hooks.broken.length; bi++) hooks.broken[bi]({ block: oldB, level: world.level, player: actor })
+    }
+
+    // Subpart A: 30 ticks with 0 handles -> syncAllCount MUST stay 0!
+    stepTicks(30)
+    var audSnap = Debug.collectSnapshot('audio')
+    assert.ok(audSnap.modules[0].detailLines.join('\n').includes('syncAllCount: 0,'))
+
+    // Subpart B: standalone play conflict arbitration ('nearest')
+    p1.moveTo(8, 20, 0)
+    var hNearFar = Audio.play({ at: [0, 20, 0], dim: world.dim, sound: 'minecraft:test.arb', range: 25, loop: true, conflictMode: 'nearest' })
+    var hNearCls = Audio.play({ at: [10, 20, 0], dim: world.dim, sound: 'minecraft:test.arb', range: 25, loop: true, conflictMode: 'nearest' })
+    assert.ok(hNearFar > 0 && hNearCls > 0)
+    stepTicks(5)
+    var muteForFar = p1.sentPackets.filter(function (e) { return e.pkt.act === 'mute' && e.pkt.h === hNearFar })
+    assert.ok(muteForFar.length > 0 && muteForFar[muteForFar.length - 1].pkt.muted === 1)
+    Audio.stopAll()
+    assert.strictEqual(Audio.list().length, 0)
+
+    // Subpart C: merge block cluster Rules 1/2/3 + leader handoff + bridge split
+    Debug.runAction('audio', 'resetmetrics')
+    p1.moveTo(0, 20, 0)
+    p2.moveTo(35, 20, 0)
+    p1.sentPackets.length = 0
+    p2.sentPackets.length = 0
+
+    Audio.bindBlock('epiphy:aud_blk', {
+        sound: 'minecraft:test.bgm',
+        range: 20,
+        loop: true,
+        outOfRangeMode: 'stop',
+        conflictMode: 'merge',
+        conflictScope: 'sound',
+        stopOnBlockBreak: true
+    })
+
+    // Place B1(0,20,0) -> 1 handle created, P1 plays, P2 silent
+    placeBlock(0, 20, 0, 'epiphy:aud_blk', p1)
+    assert.strictEqual(Audio.list().length, 1)
+    var leaderHId = Audio.list()[0].id
+    assert.strictEqual(p1.sentPackets.filter(function (e) { return e.pkt.act === 'play' }).length, 1)
+    assert.strictEqual(p2.sentPackets.filter(function (e) { return e.pkt.act === 'play' }).length, 0)
+
+    // Place B2(30,20,0) -> merges into SAME handle (handles.size stays 1!), P2 joins SAME handle with anchor x=30.5
+    placeBlock(30, 20, 0, 'epiphy:aud_blk', p2)
+    assert.strictEqual(Audio.list().length, 1)
+    var p2Play = p2.sentPackets.filter(function (e) { return e.pkt.act === 'play' })
+    assert.strictEqual(p2Play.length, 1)
+    assert.strictEqual(p2Play[0].pkt.h, leaderHId)
+    assert.strictEqual(p2Play[0].pkt.x, 30.5)
+
+    // Move P1 to (28,20,0) (closer to B2 than B1) -> receives seamless act:'update' to x=30.5 on same handle!
+    p1.sentPackets.length = 0
+    p1.moveTo(28, 20, 0)
+    stepTicks(5)
+    var p1Upd = p1.sentPackets.filter(function (e) { return e.pkt.act === 'update' })
+    assert.strictEqual(p1Upd.length, 1)
+    assert.strictEqual(p1Upd[0].pkt.h, leaderHId)
+    assert.strictEqual(p1Upd[0].pkt.x, 30.5)
+
+    // Move P1 back to (0,20,0), break Leader B1 -> handle ID stays SAME re-keyed to B2(30.5), P1 stops, P2 undisturbed!
+    p1.moveTo(0, 20, 0)
+    stepTicks(5) // re-anchor P1 to B1(0.5) before breaking B1
+    p1.sentPackets.length = 0
+    p2.sentPackets.length = 0
+    breakBlock(0, 20, 0, 'epiphy:aud_blk', p1)
+    assert.strictEqual(Audio.list().length, 1)
+    assert.strictEqual(Audio.list()[0].id, leaderHId)
+    assert.strictEqual(Audio.list()[0].x, 30.5)
+    assert.strictEqual(p1.sentPackets.some(function (e) { return e.pkt.act === 'stop' && e.pkt.h === leaderHId }), true)
+    assert.strictEqual(p2.sentPackets.some(function (e) { return e.pkt.act === 'stop' }), false)
+
+    // Bridge split: place B3(60,20,0) and B4(90,20,0) -> still 1 merged cluster [B2(30), B3(60), B4(90)]; break B3 -> splits into 2 handles!
+    placeBlock(60, 20, 0, 'epiphy:aud_blk', p2)
+    placeBlock(90, 20, 0, 'epiphy:aud_blk', p2)
+    assert.strictEqual(Audio.list().length, 1)
+    breakBlock(60, 20, 0, 'epiphy:aud_blk', p2)
+    assert.strictEqual(Audio.list().length, 2)
+
+    // Break remaining B2 and B4 -> 0 handles
+    breakBlock(30, 20, 0, 'epiphy:aud_blk', p2)
+    breakBlock(90, 20, 0, 'epiphy:aud_blk', p2)
+    assert.strictEqual(Audio.list().length, 0)
+})
+
+// ----------------------------------------------------------------------------
+// 18. client renderer: batched glow (16-angle) & stroke (8-angle) outline passes and negative Z ordering
+// ----------------------------------------------------------------------------
+test('renderer: batched glow (16-angle) and stroke (8-angle) emit smooth circular passes with negative monotonic Z', function () {
+    function MockMatrix4f() {
+        this.z = 0
+    }
+    MockMatrix4f.prototype.set = function (other) {
+        this.z = other && typeof other.z === 'number' ? other.z : 0
+        return this
+    }
+    MockMatrix4f.prototype.translate = function (dx, dy, dz) {
+        this.z += (dz || 0)
+        return this
+    }
+
+    var paintHandlers = []
+    var draws = []
+    var mockFont = {
+        width: function (s) { return String(s || '').length * 6 },
+        drawInBatch: function (seq, x, y, argb, shadow, mat) {
+            draws.push({
+                seq: String(seq),
+                x: Number(x),
+                y: Number(y),
+                argb: argb >>> 0,
+                alpha: (argb >>> 24) & 0xFF,
+                rgb: argb & 0x00FFFFFF,
+                shadow: Boolean(shadow),
+                z: mat && typeof mat.z === 'number' ? mat.z : 0
+            })
+            return 0
+        }
+    }
+    var baseMat = new MockMatrix4f()
+    var cliSandbox = {
+        console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+        ClientEvents: {
+            loggedOut: function () {},
+            loggedIn: function () {},
+            paintScreen: function (fn) { paintHandlers.push(fn) }
+        },
+        NetworkEvents: { dataReceived: function () {} },
+        Java: {
+            loadClass: function (cls) {
+                if (cls === 'net.minecraft.client.gui.Font$DisplayMode') return { NORMAL: 'NORMAL' }
+                if (cls === 'org.joml.Matrix4f') return MockMatrix4f
+                return null
+            }
+        },
+        Text: {
+            of: function (s) {
+                return {
+                    string: String(s),
+                    getVisualOrderText: function () { return String(s) }
+                }
+            }
+        },
+        global: {}
+    }
+    cliSandbox.globalThis = cliSandbox
+    vm.createContext(cliSandbox)
+    vm.runInContext(fs.readFileSync(RENDERER_PATH, 'utf8'), cliSandbox, { filename: 'Epiphy的-屏幕弹幕渲染器.js' })
+
+    var Client = cliSandbox.global.ScreenDanmakuClient
+    assert.ok(Client && typeof Client.push === 'function')
+    assert.strictEqual(paintHandlers.length, 1)
+
+    var mockEvent = {
+        width: 854,
+        height: 480,
+        level: 'minecraft:overworld',
+        font: mockFont,
+        graphics: { bufferSource: function () { return {} }, flush: function () {} },
+        getMatrix: function () { return baseMat },
+        push: function () {},
+        pop: function () {},
+        translate: function () {},
+        scale: function () {},
+        rotateDeg: function () {},
+        blend: function () {}
+    }
+
+    // Push a tilted single-char glow danmaku matching screenshot configuration
+    Client.push({
+        title: 'A',
+        typewriter: false,
+        color: 0x8CE6FF,
+        outlineMode: 'glow',
+        outlineColor: 0xD82038,
+        outlineWidth: 1.05,
+        shadow: false,
+        angle: 18,
+        stay: 100
+    })
+    paintHandlers[0](mockEvent)
+
+    // Expect 16 outline draws (8 outer @ 22.5deg + 8 inner @ 45deg) + 1 foreground core = 17 draws
+    assert.strictEqual(draws.length, 17)
+    var glowOutlines = draws.slice(0, 16)
+    var glowCore     = draws[16]
+    assert.strictEqual(glowCore.rgb, 0x8CE6FF)
+    assert.strictEqual(glowCore.alpha, 255)
+    assert.strictEqual(glowCore.z, 0)
+    for (var gi = 0; gi < glowOutlines.length; gi++) {
+        assert.strictEqual(glowOutlines[gi].rgb, 0xD82038)
+        assert.ok(glowOutlines[gi].alpha >= 28, 'outline alpha must stay safely above MC 0.1 alpha cutoff')
+        assert.ok(glowOutlines[gi].z < 0, 'outline z must be strictly negative behind core')
+        if (gi > 0) {
+            assert.ok(glowOutlines[gi].z > glowOutlines[gi - 1].z, 'outline z must increase monotonically toward core')
+        }
+    }
+
+    // Clear and test 'stroke' mode (outlineWidth=1.05 > 0.82 -> 8 outer + 4 mid bridge + 1 core = 13 draws)
+    draws.length = 0
+    Client.clear('*')
+    Client.push({
+        title: 'A',
+        typewriter: false,
+        color: 0x55FF55,
+        outlineMode: 'stroke',
+        outlineColor: 0x050A10,
+        outlineWidth: 1.05,
+        stay: 100
+    })
+    paintHandlers[0](mockEvent)
+    assert.strictEqual(draws.length, 13)
+    assert.strictEqual(draws[12].rgb, 0x55FF55)
+    assert.strictEqual(draws[12].z, 0)
+    for (var si = 0; si < 12; si++) {
+        assert.strictEqual(draws[si].rgb, 0x050A10)
+        assert.ok(draws[si].alpha >= 230)
+        assert.ok(draws[si].z < 0)
+    }
+})
+
 var passed = 0
 for (var i = 0; i < tests.length; i++) {
     var t = tests[i]
