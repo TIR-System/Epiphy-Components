@@ -81,6 +81,38 @@
         randSizeRange:      [0.58, 1.70]
     }
 
+    // ------------------------------------------------------------------------
+    // DEFAULTS 字段规范与双端契约对照表：
+    //   规范字段名          | @deprecated 别名                    | 类型/范围             | 默认值    | 双端一致
+    //   text               | title                               | string                | 必填      | ✓ 报文字段 title
+    //   sub                | subtitle                            | string                | ''        | ✓
+    //   pos                | position / preset                   | preset/edge/spread/random | 'center' | ✓ posTag
+    //   rx, ry             | -                                   | number [0, 1]         | 0.5, 0.32 | ✓
+    //   size               | @deprecated scale                   | number|range [0.2..4] | 1.0     | ✓
+    //   tilt               | @deprecated angle                   | number|range [-180..180]| 0.0   | ✓ angle
+    //   color, subColor    | -                                   | hex|rgb|'random'      | 0xFF5555/0xFFCC44 | ✓
+    //   mode               | @deprecated typewriter              | 'all'|'char'          | 'all'     | ✓ typewriter (boolean)
+    //   charMs             | -                                   | int >= 8 (ms)         | 30        | ✓
+    //   cursor             | -                                   | string                | '▌'       | ✓
+    //   shake              | @deprecated shakeMode / jitter      | string                | 'none'    | ✓
+    //   shakeAmp           | -                                   | number >= 0           | 2.5       | ✓
+    //   charShakeStyle     | @deprecated shakeStyle              | 'omni'|'horizontal_step'|'smooth' | 'omni' | ✓
+    //   charShakeFreq      | shakeFreq                           | [800, 800] ms         | 800       | ✓ (client charShakeDefaultMin/Max=800)
+    //   fade               | @deprecated fadeStyle               | string                | 'shrink'  | ✓ fadeStyle
+    //   fadeOut            | -                                   | ticks >= 0            | 10        | ✓
+    //   letterSpacing      | @deprecated charSpacing / spacing   | number [-2, 24]       | 0         | ✓
+    //   outline            | @deprecated outlineMode             | 'none'|'stroke'|'glow'| 'none'    | ✓
+    //   lifeMode           | -                                   | 'once'|'active'       | 'once'    | ✓
+    //   priority           | @deprecated importance              | 0..10                 | 2 / 5     | ✓ (client fallback 2 / 5)
+    //   group / namespace  | @deprecated ns                      | string                | 'default'/''| ✓
+    //   id                 | @deprecated slot                    | string                | ''        | ✓ slotId
+    //   key                | -                                   | string                | ''        | ✓
+    //   movable            | @deprecated move / updatePos        | boolean               | false     | ✓
+    //   restart            | @deprecated resetAnimation          | boolean               | false     | ✓
+    //   maxGroup           | @deprecated maxGroupSize/groupLimit/maxConcurrent | int >= 0 | 0     | ✓
+    //   maxWidth / wrap / clamp / shadow / showInGui / avoidOverlap / normalizeKey | - | boolean/num | 见下表 | ✓
+    //   conflictMode       | @deprecated sourceConflict/overlapMode| 'overlap'|'merge'|'nearest'|'first'|'latest'|'stagger'|'overlap'| 服务端独占
+    // ------------------------------------------------------------------------
     var DEFAULTS = {
         group:          'default',
         sub:            '',
@@ -221,7 +253,40 @@
         rand:       'random'
     }
 
+    function pick(obj, keys, defVal) {
+        if (obj == null || typeof obj !== 'object') return defVal
+        for (var i = 0; i < keys.length; i++) {
+            var v = obj[keys[i]]
+            if (v !== undefined && v !== null) return v
+        }
+        return defVal
+    }
+
+    function pickNonEmpty(obj, keys, defVal) {
+        if (obj == null || typeof obj !== 'object') return defVal
+        for (var i = 0; i < keys.length; i++) {
+            var v = obj[keys[i]]
+            if (v !== undefined && v !== null && String(v).trim() !== '') return v
+        }
+        return defVal
+    }
+
+    // 【catch 约定】以下 try/catch 均为 Java Vec3 / BlockPos 坐标字段与方法能力探测：
+    // 读取失败说明传入对象并非有效三维坐标容器，直接返回 null 属于预期分支，留空避免高频误报。
+    function readVec3(vec) {
+        if (vec == null) return null
+        try {
+            var vx = (typeof vec.x === 'function') ? vec.x() : vec.x
+            var vy = (typeof vec.y === 'function') ? vec.y() : vec.y
+            var vz = (typeof vec.z === 'function') ? vec.z() : vec.z
+            var nx = Number(vx), ny = Number(vy), nz = Number(vz)
+            if (isFinite(nx) && isFinite(ny) && isFinite(nz)) return { x: nx, y: ny, z: nz }
+        } catch (e) { }
+        return null
+    }
+
     // 统一路由至 EpiphyLog（Epiphy的-日志.js）限频日志层：库函数遇到无效参数或已捕获异常时仅记 warn，不抛异常中断调用方 tick
+    // 【catch 约定】以下日志设施自身的兜底：console / notifyPlayer.tell 不可用时已无更低层可退，留空避免递归报错。
     function reportConfigWarning(msg, notifyPlayer) {
         if (typeof global !== 'undefined' && global.EpiphyLog != null) {
             return global.EpiphyLog.warn('ScreenDanmaku', '参数警告', msg, notifyPlayer, CONFIG.errorLogIntervalMs)
@@ -248,6 +313,11 @@
     ServerEvents.tick(function (event) {
         if (SERVER_REF == null) SERVER_REF = event.server
         danmakuTickCounter++
+        if ((danmakuTickCounter % 600) === 0 && playerSourceCooldown.size > 0) {
+            playerSourceCooldown.forEach(function (exp, k) {
+                if (exp <= danmakuTickCounter) playerSourceCooldown.delete(k)
+            })
+        }
     })
 
     function normalizeDanmakuConflictMode(raw, fallback) {
@@ -262,6 +332,8 @@
         return fallback || 'overlap'
     }
 
+    // 【catch 约定】以下 try/catch 均为 Java API 能力探测：不同 MC/Rhino 映射下字段名可能不一致，
+    // 访问异常属于预期分支，且在高频调用路径中留空可避免污染限频桶与拖慢热路径。
     function resolveEventSourceScope(event, opts) {
         if (opts != null && typeof opts === 'object') {
             if (opts.sourceScope != null) return String(opts.sourceScope)
@@ -296,7 +368,7 @@
     function prepareSourceConflictOpts(opts) {
         if (opts == null || typeof opts !== 'object') return opts
         var mode = normalizeDanmakuConflictMode(
-            opts.sourceConflict !== undefined ? opts.sourceConflict : (opts.conflictMode !== undefined ? opts.conflictMode : opts.overlapMode),
+            pick(opts, ['sourceConflict', 'conflictMode', 'overlapMode'], undefined),
             'overlap'
         )
         if (mode === 'latest' && opts.key == null) {
@@ -312,16 +384,22 @@
     function allowSourceConflictForPlayer(p, opts) {
         if (opts == null || typeof opts !== 'object') return true
         var mode = normalizeDanmakuConflictMode(
-            opts.sourceConflict !== undefined ? opts.sourceConflict : (opts.conflictMode !== undefined ? opts.conflictMode : opts.overlapMode),
+            pick(opts, ['sourceConflict', 'conflictMode', 'overlapMode'], undefined),
             'overlap'
         )
         if (mode === 'overlap' || mode === 'latest') return true
-        var cooldown = Number(opts.sourceCooldownTicks != null ? opts.sourceCooldownTicks : (opts.conflictCooldownTicks != null ? opts.conflictCooldownTicks : 40))
+        var cooldown = Number(pick(opts, ['sourceCooldownTicks', 'conflictCooldownTicks'], 40))
         if (!isFinite(cooldown) || cooldown < 1) cooldown = 40
         var scopeKey = resolveEventSourceScope(null, opts)
         var ck = getPlayerUuidSafe(p) + '|' + scopeKey
         var exp = playerSourceCooldown.get(ck)
         if (exp != null && danmakuTickCounter < exp) return false
+        if (playerSourceCooldown.size >= 2048) {
+            playerSourceCooldown.forEach(function (v, k) {
+                if (v <= danmakuTickCounter) playerSourceCooldown.delete(k)
+            })
+            if (playerSourceCooldown.size >= 2048) playerSourceCooldown.clear()
+        }
         playerSourceCooldown.set(ck, danmakuTickCounter + Math.floor(cooldown))
         return true
     }
@@ -986,46 +1064,34 @@
             var cPacket = {
                 proto:     PROTO_VERSION,
                 action:    'clear',
-                group:     String(opts.group != null && opts.group !== '' ? opts.group : '*'),
-                namespace: String(opts.namespace != null ? opts.namespace : (opts.ns != null ? opts.ns : ''))
+                group:     String(pickNonEmpty(opts, ['group'], '*')),
+                namespace: String(pick(opts, ['namespace', 'ns'], ''))
             }
-            if (opts.maxPriority != null || opts.priority != null) {
-                cPacket.maxPriority = parsePriority(opts.maxPriority != null ? opts.maxPriority : opts.priority, 10)
-            }
+            var cPri = pick(opts, ['maxPriority', 'priority'], null)
+            if (cPri != null) cPacket.maxPriority = parsePriority(cPri, 10)
             return cPacket
         }
         if (opts.action === 'deactivate' || opts.action === 'stop') {
-            var dKeyRaw = opts.key != null && String(opts.key).trim() !== ''
-                ? opts.key
-                : (opts.id != null && String(opts.id).trim() !== '' ? opts.id : opts.slot)
+            var dKeyRaw = pickNonEmpty(opts, ['key', 'id', 'slot'], '')
             var dPacket = {
                 proto:     PROTO_VERSION,
                 action:    'deactivate',
-                key:       String(dKeyRaw != null ? dKeyRaw : ''),
-                group:     String(opts.group != null ? opts.group : ''),
-                namespace: String(opts.namespace != null ? opts.namespace : (opts.ns != null ? opts.ns : ''))
+                key:       String(dKeyRaw),
+                group:     String(pick(opts, ['group'], '')),
+                namespace: String(pick(opts, ['namespace', 'ns'], ''))
             }
             var dFadeOut = parseTicksOrSec(opts.fadeOut)
-            if (dFadeOut !== null) {
-                dPacket.fadeOut = dFadeOut
-            }
-            if (opts.maxPriority != null || opts.priority != null) {
-                dPacket.maxPriority = parsePriority(opts.maxPriority != null ? opts.maxPriority : opts.priority, 10)
-            }
-            if (parseBool(opts.includeOnce, false)) {
-                dPacket.includeOnce = true
-            }
+            if (dFadeOut !== null) dPacket.fadeOut = dFadeOut
+            var dPri = pick(opts, ['maxPriority', 'priority'], null)
+            if (dPri != null) dPacket.maxPriority = parsePriority(dPri, 10)
+            if (parseBool(opts.includeOnce, false)) dPacket.includeOnce = true
             return dPacket
         }
 
-        var rawTitle = (opts.text !== undefined && opts.text !== null && String(opts.text).trim() !== '')
-            ? opts.text
-            : opts.title
-        var rawSub   = (opts.sub !== undefined && opts.sub !== null)
-            ? opts.sub
-            : (opts.subtitle !== undefined && opts.subtitle !== null ? opts.subtitle : DEFAULTS.sub)
+        var rawTitle = pickNonEmpty(opts, ['text', 'title'], null)
+        var rawSub   = pick(opts, ['sub', 'subtitle'], DEFAULTS.sub)
 
-        if (rawTitle == null || String(rawTitle).trim().length === 0) {
+        if (rawTitle == null) {
             return reportConfigWarning('缺少必填参数 `text`（或 `title`）：弹幕主文本不能为空！', notifyPlayer)
         }
 
@@ -1044,98 +1110,96 @@
         var colorInfo    = parseColor(opts.color, DEFAULTS.color)
         var subColInfo   = parseColor(opts.subColor, DEFAULTS.subColor)
         var outlineInfo  = resolveOutline(opts, colorInfo.color)
-        var rawSpacing   = opts.letterSpacing != null ? opts.letterSpacing : (opts.charSpacing != null ? opts.charSpacing : opts.spacing)
-        var spacingVal   = Math.max(-2.0, Math.min(24.0, parseFiniteNum(rawSpacing, DEFAULTS.letterSpacing)))
+        var spacingVal   = Math.max(-2.0, Math.min(24.0, parseFiniteNum(pick(opts, ['letterSpacing', 'charSpacing', 'spacing'], null), DEFAULTS.letterSpacing)))
         var isChar       = resolveTypewriterMode(opts)
         var charMsVal    = Math.round(parseNonNegNum(opts.charMs, DEFAULTS.charMs, 8))
         var shakeInfo    = resolveShake(opts)
         var fadeStyle    = resolveFadeStyle(opts)
         var lifeInfo     = resolveLifetime(opts)
         var defPri       = (lifeInfo.lifeMode === 'active') ? DEFAULTS.activePriority : DEFAULTS.priority
-        var priority     = parsePriority(opts.priority != null ? opts.priority : opts.importance, defPri)
-        var groupStr     = String(opts.group != null && opts.group !== '' ? opts.group : DEFAULTS.group)
-        var nsStr        = String(opts.namespace != null && opts.namespace !== '' ? opts.namespace : (opts.ns != null && opts.ns !== '' ? opts.ns : ''))
-        var slotIdStr    = String(opts.id != null && opts.id !== '' ? opts.id : (opts.slot != null && opts.slot !== '' ? opts.slot : ''))
-        var keyStr       = String(opts.key != null && opts.key !== '' ? opts.key : '')
-        var rawRestart   = opts.restart != null ? opts.restart : opts.resetAnimation
-        var resetAnim    = parseBool(rawRestart, false)
-        var rawMove      = opts.movable != null ? opts.movable : (opts.move != null ? opts.move : opts.updatePos)
-        var allowMove    = parseBool(rawMove, DEFAULTS.movable)
+        var priority     = parsePriority(pick(opts, ['priority', 'importance'], null), defPri)
+        var groupStr     = String(pickNonEmpty(opts, ['group'], DEFAULTS.group))
+        var nsStr        = String(pickNonEmpty(opts, ['namespace', 'ns'], ''))
+        var slotIdStr    = String(pickNonEmpty(opts, ['id', 'slot'], ''))
+        var keyStr       = String(pickNonEmpty(opts, ['key'], ''))
+        var resetAnim    = parseBool(pick(opts, ['restart', 'resetAnimation'], null), false)
+        var allowMove    = parseBool(pick(opts, ['movable', 'move', 'updatePos'], null), DEFAULTS.movable)
         var normalizeKey = parseBool(opts.normalizeKey, DEFAULTS.normalizeKey)
-        var maxWidth     = sanitizeMaxWidth(opts.maxWidth != null ? opts.maxWidth : DEFAULTS.maxWidth)
+        var maxWidth     = sanitizeMaxWidth(pick(opts, ['maxWidth'], DEFAULTS.maxWidth))
         var wrapVal      = parseBool(opts.wrap, DEFAULTS.wrap)
         var clampVal     = parseBool(opts.clamp, DEFAULTS.clamp)
         var shadowVal    = parseBool(opts.shadow, DEFAULTS.shadow)
         var showGuiVal   = parseBool(opts.showInGui, DEFAULTS.showInGui)
-        var rawMaxGroup  = opts.maxGroup != null
-            ? opts.maxGroup
-            : (opts.maxGroupSize != null ? opts.maxGroupSize : (opts.groupLimit != null ? opts.groupLimit : opts.maxConcurrent))
-        var maxGroupVal  = Math.round(parseNonNegNum(rawMaxGroup, DEFAULTS.maxGroup, 0))
+        var maxGroupVal  = Math.round(parseNonNegNum(pick(opts, ['maxGroup', 'maxGroupSize', 'groupLimit', 'maxConcurrent'], null), DEFAULTS.maxGroup, 0))
         var fadeOutVal   = parseTicksOrSec(opts.fadeOut)
         if (fadeOutVal === null) fadeOutVal = DEFAULTS.fadeOut
+        var baseShift    = parseNonNegNum(opts.charShakeShift, DEFAULTS.charShakeShift, 0.0)
 
         return {
-            proto:        PROTO_VERSION,
-            action:       'push',
-            key:          keyStr,
-            slotId:       slotIdStr,
-            namespace:    nsStr,
-            group:        groupStr,
-            posTag:       posInfo.posTag,
-            normalizeKey: normalizeKey,
-            lifeMode:     lifeInfo.lifeMode,
-            priority:     priority,
-            title:        titleStr,
-            sub:          subStr,
-            rx:           posInfo.rx,
-            ry:           posInfo.ry,
-            movable:      allowMove,
-            angle:        angleVal,
-            scale:        sizeInfo.scale,
-            randomScale:  Boolean(sizeInfo.isRandom),
-            color:        colorInfo.color,
-            randomColor:  Boolean(colorInfo.isRandom),
-            subColor:     subColInfo.color,
-            stay:         lifeInfo.stay,
-            activeHold:   lifeInfo.activeHold,
-            fadeStyle:    fadeStyle,
-            fadeOut:      fadeOutVal,
-            typewriter:   isChar,
-            charMs:       charMsVal,
-            cursor:        String(opts.cursor != null && opts.cursor !== '' ? opts.cursor : DEFAULTS.cursor),
-            shadow:            shadowVal,
-            letterSpacing:     Number(spacingVal.toFixed(2)),
-            letterSpacingMode: String(opts.letterSpacingMode || DEFAULTS.letterSpacingMode).toLowerCase() === 'fixed' ? 'fixed' : 'relative',
-            outlineMode:       outlineInfo.mode,
-            outlineColor:  outlineInfo.color,
-            outlineWidth:  outlineInfo.width,
-            jitter:         shakeInfo.jitter,
-            perCharShake:   Boolean(shakeInfo.perCharShake),
-            shakeMode:      shakeInfo.shakeMode,
-            charShakeStyle:  String(opts.charShakeStyle != null ? opts.charShakeStyle : (opts.shakeStyle != null ? opts.shakeStyle : DEFAULTS.charShakeStyle)).toLowerCase(),
-            charShakeShift:  parseNonNegNum(opts.charShakeShift, DEFAULTS.charShakeShift, 0.0),
-            charShakeShiftX: parseNonNegNum(opts.charShakeShiftX, opts.charShakeShift != null ? parseNonNegNum(opts.charShakeShift, DEFAULTS.charShakeShift, 0.0) : DEFAULTS.charShakeShift, 0.0),
-            charShakeShiftY: parseNonNegNum(opts.charShakeShiftY, opts.charShakeShift != null ? parseNonNegNum(opts.charShakeShift, DEFAULTS.charShakeShift, 0.0) * 0.75 : DEFAULTS.charShakeShift * 0.75, 0.0),
-            charShakeSwayX:  parseNonNegNum(opts.charShakeSwayX, DEFAULTS.charShakeSwayX, 0.0),
-            charShakeSwayY:  parseNonNegNum(opts.charShakeSwayY, DEFAULTS.charShakeSwayY, 0.0),
+            proto:               PROTO_VERSION,
+            action:              'push',
+            key:                 keyStr,
+            slotId:              slotIdStr,
+            namespace:           nsStr,
+            group:               groupStr,
+            posTag:              posInfo.posTag,
+            normalizeKey:        normalizeKey,
+            lifeMode:            lifeInfo.lifeMode,
+            priority:            priority,
+            title:               titleStr,
+            sub:                 subStr,
+            rx:                  posInfo.rx,
+            ry:                  posInfo.ry,
+            movable:             allowMove,
+            angle:               angleVal,
+            scale:               sizeInfo.scale,
+            randomScale:         Boolean(sizeInfo.isRandom),
+            color:               colorInfo.color,
+            randomColor:         Boolean(colorInfo.isRandom),
+            subColor:            subColInfo.color,
+            stay:                lifeInfo.stay,
+            activeHold:          lifeInfo.activeHold,
+            fadeStyle:           fadeStyle,
+            fadeOut:             fadeOutVal,
+            typewriter:          isChar,
+            charMs:              charMsVal,
+            cursor:              String(pickNonEmpty(opts, ['cursor'], DEFAULTS.cursor)),
+            shadow:              shadowVal,
+            letterSpacing:       Number(spacingVal.toFixed(2)),
+            letterSpacingMode:   String(opts.letterSpacingMode || DEFAULTS.letterSpacingMode).toLowerCase() === 'fixed' ? 'fixed' : 'relative',
+            outlineMode:         outlineInfo.mode,
+            outlineColor:        outlineInfo.color,
+            outlineWidth:        outlineInfo.width,
+            jitter:              shakeInfo.jitter,
+            perCharShake:        Boolean(shakeInfo.perCharShake),
+            shakeMode:           shakeInfo.shakeMode,
+            charShakeStyle:      String(pick(opts, ['charShakeStyle', 'shakeStyle'], DEFAULTS.charShakeStyle)).toLowerCase(),
+            charShakeShift:      baseShift,
+            charShakeShiftX:     parseNonNegNum(opts.charShakeShiftX, baseShift, 0.0),
+            charShakeShiftY:     parseNonNegNum(opts.charShakeShiftY, baseShift * 0.75, 0.0),
+            charShakeSwayX:      parseNonNegNum(opts.charShakeSwayX, DEFAULTS.charShakeSwayX, 0.0),
+            charShakeSwayY:      parseNonNegNum(opts.charShakeSwayY, DEFAULTS.charShakeSwayY, 0.0),
             charShakeRotDeg:     Math.min(45.0, parseNonNegNum(opts.charShakeRotDeg, DEFAULTS.charShakeRotDeg, 0.0)),
             charShakeWin:        Math.max(0.05, Math.min(1.0, parseNonNegNum(opts.charShakeWin, DEFAULTS.charShakeWin, 0.05))),
             charShakeSnap:       parseBool(opts.charShakeSnap, DEFAULTS.charShakeSnap),
-            charShakeTransition: String(opts.charShakeTransition != null ? opts.charShakeTransition : DEFAULTS.charShakeTransition).toLowerCase(),
-            shakeAmp:       shakeInfo.shakeAmp,
-            shakeFreqMin: shakeInfo.shakeFreqMin,
-            shakeFreqMax: shakeInfo.shakeFreqMax,
-            randomShake:  Boolean(shakeInfo.isRandom),
-            maxWidth:     maxWidth,
-            wrap:         wrapVal,
-            clamp:        clampVal,
-            showInGui:    showGuiVal,
-            maxGroup:     maxGroupVal,
-            restart:      resetAnim,
-            debug:        parseBool(opts.debug, false)
+            charShakeTransition: String(pick(opts, ['charShakeTransition'], DEFAULTS.charShakeTransition)).toLowerCase(),
+            shakeAmp:            shakeInfo.shakeAmp,
+            shakeFreqMin:        shakeInfo.shakeFreqMin,
+            shakeFreqMax:        shakeInfo.shakeFreqMax,
+            randomShake:         Boolean(shakeInfo.isRandom),
+            maxWidth:            maxWidth,
+            wrap:                wrapVal,
+            clamp:               clampVal,
+            showInGui:           showGuiVal,
+            maxGroup:            maxGroupVal,
+            restart:             resetAnim,
+            debug:               parseBool(opts.debug, false)
         }
     }
 
+    // 【catch 约定】以下 try/catch 均为 Java API 能力探测：先 typeof 判函数再调，
+    // 失败表示该 API 在本次加载的 MC/Rhino 版本中不存在，属于预期分支，故留空。
+    // 这些路径每次调用都会经过，写日志会污染限频桶并拖慢热路径。
     // 读取玩家实体坐标（优先读取 KubeJS BlockContainerJS 的明文坐标）
     function readPlayerPos(p) {
         if (p == null) return null
@@ -1181,6 +1245,8 @@
         return hitCount
     }
 
+    // 【catch 约定】以下两个函数内的 try/catch 为维度/玩家查找能力探测：失败属于未找到目标的正常分支，留空；
+    // 真正的数据包发送 (target.sendData) 异常通过 reportCatch 上报，避免静默丢包。
     function resolveLevel(levelOrDim, serverFallback) {
         if (levelOrDim == null) return null
         if (typeof levelOrDim === 'object' && levelOrDim.players != null) {
@@ -1199,21 +1265,21 @@
 
     function sendSinglePlayerPacket(target, pkt) {
         if (target == null || pkt == null) return 0
+        var player = target
         if (typeof target === 'string') {
             if (SERVER_REF == null) return 0
             try {
-                var pByName = SERVER_REF.getPlayer(target)
-                if (pByName != null) {
-                    pByName.sendData(CHANNEL, pkt)
-                    return 1
-                }
-            } catch (e0) { }
-            return 0
+                player = SERVER_REF.getPlayer(target)
+            } catch (e0) {
+                return 0
+            }
+            if (player == null) return 0
         }
         try {
-            target.sendData(CHANNEL, pkt)
+            player.sendData(CHANNEL, pkt)
             return 1
         } catch (e) {
+            reportCatch('sendData', e)
             return 0
         }
     }
@@ -1302,7 +1368,7 @@
         if (pkt == null) return 0
         return forEachPlayerInRadius(lv, cx, cy, cz, r, function (p) {
             if (!allowSourceConflictForPlayer(p, effOpts)) return
-            try { p.sendData(CHANNEL, pkt) } catch (e) { }
+            try { p.sendData(CHANNEL, pkt) } catch (e) { reportCatch('radiusSend', e) }
         })
     }
 
@@ -1388,6 +1454,7 @@
             }
             return send(targetOrOpts)
         } catch (e) {
+            reportCatch('safeSend', e)
             return 0
         }
     }
@@ -1451,7 +1518,7 @@
         var pkt = buildValidatedPacket(buildDeactivateOptions(keyOrGroup, fadeOutOrOpts, maybeMaxPriority), null)
         if (pkt == null) return 0
         return forEachPlayerInRadius(lv, x, y, z, r, function (p) {
-            try { p.sendData(CHANNEL, pkt) } catch (e) { }
+            try { p.sendData(CHANNEL, pkt) } catch (e) { reportCatch('deactivateNearSend', e) }
         })
     }
 
@@ -1482,7 +1549,7 @@
         var pkt = buildValidatedPacket(buildClearOptions(groupOrOpts, maxPriority), null)
         if (pkt == null) return 0
         return forEachPlayerInRadius(lv, x, y, z, r, function (p) {
-            try { p.sendData(CHANNEL, pkt) } catch (e) { }
+            try { p.sendData(CHANNEL, pkt) } catch (e) { reportCatch('clearNearSend', e) }
         })
     }
 
@@ -1597,7 +1664,7 @@
         if (lv == null) lv = resolveLevel(rec.dim, null)
         if (lv == null) return 0
         if (curBlock == null) {
-            try { curBlock = lv.getBlock(rec.x, rec.y, rec.z) } catch (e0) { }
+            try { curBlock = lv.getBlock(rec.x, rec.y, rec.z) } catch (e0) { reportCatch('boundBlockGet', e0) }
         }
         var extractId = (typeof global !== 'undefined' && global.EpiphyBlockTracker) ? global.EpiphyBlockTracker.extractBlockId : null
         if (extractId != null && extractId(curBlock) !== rec.blockId) return 0
@@ -1743,6 +1810,7 @@
                 if (typeof global !== 'undefined' && global.EpiphyLog != null) {
                     global.EpiphyLog.once('warn', 'danmaku:missing_block_tracker', msg)
                 } else {
+                    // 【catch 约定】日志设施自身的兜底：console 不可用时已无更低层可退，留空。
                     try { console.warn(msg) } catch (e) { }
                 }
             }
@@ -1781,24 +1849,30 @@
         if (tracker == null) return false
         var idStr    = String(blockId).trim()
         var meta     = (extraOpts != null && typeof extraOpts === 'object') ? extraOpts : (typeof specOrFn === 'object' ? specOrFn : {})
-        var radius   = Number(meta.radius != null ? meta.radius : (meta.range != null ? meta.range : 30))
+        var radius   = Number(pick(meta, ['radius', 'range'], 30))
         if (!isFinite(radius) || radius <= 0) radius = 30
-        var interval = Number(meta.intervalTicks != null ? meta.intervalTicks : (meta.interval != null ? meta.interval : 48))
+        var interval = Number(pick(meta, ['intervalTicks', 'interval'], 48))
         if (!isFinite(interval) || interval < 1) interval = 48
         var grp      = meta.group != null ? String(meta.group) : null
         // 物理默认采用共享模式 (perPlayer: false)：同一世界方块对周围玩家应呈现一致广播；
-        // 仅当显式传入 perPlayer: true 或 shared: false 时，才按玩家逐一独立计算。
-        var perPlayer = (meta.shared === true) ? false
-            : (meta.perPlayer !== undefined ? Boolean(meta.perPlayer) : (meta.shared === false))
+        // 显式传 shared: true 始终共享；否则优先读取 perPlayer，其次接受 shared: false 开启按玩家独立计算。
+        var perPlayer = false
+        if (meta.shared === true) {
+            perPlayer = false
+        } else if (meta.perPlayer !== undefined) {
+            perPlayer = Boolean(meta.perPlayer)
+        } else if (meta.shared === false) {
+            perPlayer = true
+        }
         var conflictMode = normalizeDanmakuConflictMode(
-            meta.conflictMode !== undefined ? meta.conflictMode : (meta.sourceConflict !== undefined ? meta.sourceConflict : meta.overlapMode),
+            pick(meta, ['conflictMode', 'sourceConflict', 'overlapMode'], undefined),
             'overlap'
         )
         var conflictScope = meta.conflictScope != null ? String(meta.conflictScope).trim().toLowerCase() : 'block'
         if (conflictScope !== 'block' && conflictScope !== 'group' && conflictScope !== 'all') {
             conflictScope = 'block'
         }
-        var conflictCooldown = Number(meta.conflictCooldownTicks != null ? meta.conflictCooldownTicks : (meta.sourceCooldownTicks != null ? meta.sourceCooldownTicks : interval))
+        var conflictCooldown = Number(pick(meta, ['conflictCooldownTicks', 'sourceCooldownTicks'], interval))
         if (!isFinite(conflictCooldown) || conflictCooldown < 1) conflictCooldown = interval
         tracker.bind(idStr, {
             blockId:               idStr,
@@ -1963,7 +2037,9 @@
         for (var i = 0; i < DANMAKU_HELP_LINES.length; i++) {
             try {
                 source.sendSuccess(Text.of(DANMAKU_HELP_LINES[i]), false)
-            } catch (e) { }
+            } catch (e) {
+                reportCatch('helpSend', e)
+            }
         }
         return 1
     }
@@ -2076,7 +2152,9 @@
     function sendSourceError(source, msg) {
         try {
             source.sendSuccess(Text.of('§c[Epiphy Danmaku 错误] ' + msg + ' §7(输入 §f/epiphy danmaku help §7查看语法)'), false)
-        } catch (e) { }
+        } catch (e) {
+            reportCatch('sourceErrorSend', e)
+        }
     }
 
     // 构建 danmaku 子命令节点，所有 executes 分支统一由权限阀 guardExecution 包裹
@@ -2232,9 +2310,13 @@
                                             sendSourceError(ctx.source, '缺少必填的弹幕主文本！')
                                             return 0
                                         }
-                                        var pos   = ctx.source.position
+                                        var pos   = readVec3(ctx.source.position)
                                         var level = ctx.source.level
-                                        var cnt   = inDimension(level, pos.x(), pos.y(), pos.z(), radius, opts)
+                                        if (pos == null) {
+                                            sendSourceError(ctx.source, '无法读取当前指令执行位置！')
+                                            return 0
+                                        }
+                                        var cnt   = inDimension(level, pos.x, pos.y, pos.z, radius, opts)
                                         ctx.source.sendSuccess(
                                             Text.of('§a[Epiphy Danmaku] 已在当前维度半径 ' + radius + 'm 内触发弹幕（命中 ' + cnt + ' 名玩家）。'),
                                             false
@@ -2256,9 +2338,13 @@
                                                 Commands.argument('spec', Arguments.GREEDY_STRING.create(event))
                                                     .executes(guardExecution(function (ctx) {
                                                         var targetLevel = Arguments.DIMENSION.getResult(ctx, 'dim')
-                                                        var center      = Arguments.VEC3.getResult(ctx, 'center')
+                                                        var center      = readVec3(Arguments.VEC3.getResult(ctx, 'center'))
                                                         var radius      = Arguments.DOUBLE.getResult(ctx, 'radius')
                                                         var specStr     = Arguments.GREEDY_STRING.getResult(ctx, 'spec')
+                                                        if (center == null) {
+                                                            sendSourceError(ctx.source, '无法解析目标坐标！')
+                                                            return 0
+                                                        }
                                                         var opts        = parseSpecString(specStr)
                                                         if (!opts.text && !opts.title) {
                                                             sendSourceError(ctx.source, '缺少必填的弹幕主文本！')
@@ -2344,6 +2430,29 @@
         })
     } catch (eRegLogin) {
         reportCatch('registerLoggedIn:valveNotify', eRegLogin)
+    }
+
+    try {
+        PlayerEvents.loggedOut(function (event) {
+            try {
+                var p = event != null ? event.player : null
+                if (p == null) return
+                var uuid = getPlayerUuidSafe(p)
+                if (uuid && uuid !== 'unknown') {
+                    notifiedValveOps.delete(uuid)
+                    var prefix = uuid + '|'
+                    playerSourceCooldown.forEach(function (_exp, k) {
+                        if (String(k).indexOf(prefix) === 0) {
+                            playerSourceCooldown.delete(k)
+                        }
+                    })
+                }
+            } catch (eOut) {
+                reportCatch('PlayerEvents.loggedOut:cleanup', eOut)
+            }
+        })
+    } catch (eRegLogout) {
+        reportCatch('registerLoggedOut:cleanup', eRegLogout)
     }
 
     try {
