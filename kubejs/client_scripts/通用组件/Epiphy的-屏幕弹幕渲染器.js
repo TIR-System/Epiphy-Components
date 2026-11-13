@@ -87,6 +87,7 @@
     var GL11             = null
     var SystemClass      = null
     var MinecraftClass   = null
+    var Matrix4fClass    = null
     var CACHED_FONT         = null
     var FONT_SIGNATURE      = ''
     var LAST_FONT_CHECK_MS  = -99999
@@ -100,9 +101,19 @@
     var FONT_DISPLAY_NORMAL = null
     var CHAR_OFFSET_SCRATCH = { dx: 0.0, dy: 0.0, rotDeg: 0.0 }
 
+    // 环形外圈预计算采样表：0° 步进 45° 的 8 向主环 + 错相 22.5° 的 8 向外环（合计 16 向圆周，零运行时三角函数分配）
+    var DIAG_INV_SQRT2 = 0.7071067811865476
+    var OUTLINE_8_DX   = [1.0, DIAG_INV_SQRT2, 0.0, -DIAG_INV_SQRT2, -1.0, -DIAG_INV_SQRT2, 0.0, DIAG_INV_SQRT2]
+    var OUTLINE_8_DY   = [0.0, DIAG_INV_SQRT2, 1.0, DIAG_INV_SQRT2, 0.0, -DIAG_INV_SQRT2, -1.0, -DIAG_INV_SQRT2]
+    var GLOW_OUTER_DX  = [0.9238795325, 0.3826834324, -0.3826834324, -0.9238795325, -0.9238795325, -0.3826834324, 0.3826834324, 0.9238795325]
+    var GLOW_OUTER_DY  = [0.3826834324, 0.9238795325, 0.9238795325, 0.3826834324, -0.3826834324, -0.9238795325, -0.9238795325, -0.3826834324]
+    // rendertype_text.fsh 会直接丢弃 alpha < 0.1 (~26/255) 的片元；外圈跳过低于 28 的极微弱描边，避免双线性采样在阈值边缘切出硬锯齿
+    var OUTLINE_ALPHA_CUTOFF = 28
+
     try { GL11 = Java.loadClass('org.lwjgl.opengl.GL11') } catch (eGL) { }
     try { SystemClass = Java.loadClass('java.lang.System') } catch (eSys) { }
     try { MinecraftClass = Java.loadClass('net.minecraft.client.Minecraft') } catch (eMc) { }
+    try { Matrix4fClass = Java.loadClass('org.joml.Matrix4f') } catch (eMat) { }
 
     // 单调递增毫秒时钟：避免系统时间被 NTP 同步或手动修改时导致动画 age 跳变或变负
     function monotonicNowMs() {
@@ -941,6 +952,10 @@
             var explicit = fontObj['drawInBatch(net.minecraft.util.FormattedCharSequence,float,float,int,boolean,org.joml.Matrix4f,net.minecraft.client.renderer.MultiBufferSource,net.minecraft.client.gui.Font$DisplayMode,int,int)']
             if (typeof explicit === 'function') drawFn = explicit
         } catch (eExp) { }
+        var scratchOutMat = null
+        if (Matrix4fClass != null) {
+            try { scratchOutMat = new Matrix4fClass() } catch (eM) { scratchOutMat = null }
+        }
         return {
             font:        fontObj,
             drawFn:      drawFn,
@@ -948,6 +963,7 @@
             bufSrc:      bufSrc,
             displayMode: modeNormal,
             itemMat:     null,
+            outMat:      scratchOutMat,
             drawn:       0
         }
     }
@@ -1280,6 +1296,69 @@
         } catch (e) { }
     }
 
+    function prepareOutlineZMat(batchCtx, baseMat, zOffset) {
+        if (batchCtx != null && batchCtx.outMat != null && baseMat != null) {
+            try {
+                if (typeof batchCtx.outMat.set === 'function') {
+                    batchCtx.outMat.set(baseMat)
+                }
+                batchCtx.outMat.translate(0.0, 0.0, zOffset)
+                return batchCtx.outMat
+            } catch (eZMat) {
+                batchCtx.outMat = null
+            }
+        }
+        return baseMat
+    }
+
+    // 合批路径外圈采样：通过双环 16 向圆周采样 + 单调负 Z 分层消除倾斜字体缺角、中文细笔画空隙与 Z-fighting
+    function drawBatchedOutline(batchCtx, effSeq, gx, gy, mat, outMode, oColRgb, oRad, baseA) {
+        if (outMode === 'glow') {
+            var outerByte = Math.round(0.18 * baseA * 255)
+            if (outerByte >= OUTLINE_ALPHA_CUTOFF) {
+                var outerCol = packArgb(oColRgb, outerByte)
+                for (var oi = 0; oi < 8; oi++) {
+                    var oMat = prepareOutlineZMat(batchCtx, mat, -0.090 + oi * 0.003)
+                    if (!drawBatchedGlyph(batchCtx, effSeq, gx + GLOW_OUTER_DX[oi] * oRad, gy + GLOW_OUTER_DY[oi] * oRad, outerCol, false, oMat)) {
+                        return false
+                    }
+                }
+            }
+            var innerByte = Math.round(0.34 * baseA * 255)
+            if (innerByte >= OUTLINE_ALPHA_CUTOFF) {
+                var innerCol = packArgb(oColRgb, innerByte)
+                var innerRad = oRad * 0.48
+                for (var ii = 0; ii < 8; ii++) {
+                    var iMat = prepareOutlineZMat(batchCtx, mat, -0.050 + ii * 0.003)
+                    if (!drawBatchedGlyph(batchCtx, effSeq, gx + OUTLINE_8_DX[ii] * innerRad, gy + OUTLINE_8_DY[ii] * innerRad, innerCol, false, iMat)) {
+                        return false
+                    }
+                }
+            }
+            return true
+        }
+
+        // stroke 实心描边：8 向圆周轮廓 + 较大半径时的 4 向内环桥接（消除 Unifont 0.5px 细笔画镂空）
+        var strokeByte = Math.round(0.92 * baseA * 255)
+        if (strokeByte < OUTLINE_ALPHA_CUTOFF) return true
+        var strokeCol = packArgb(oColRgb, strokeByte)
+        for (var si = 0; si < 8; si++) {
+            var sMat = prepareOutlineZMat(batchCtx, mat, -0.045 + si * 0.003)
+            if (!drawBatchedGlyph(batchCtx, effSeq, gx + OUTLINE_8_DX[si] * oRad, gy + OUTLINE_8_DY[si] * oRad, strokeCol, false, sMat)) {
+                return false
+            }
+        }
+        if (oRad > 0.82) {
+            var midRad = oRad * 0.48
+            for (var bi = 0; bi < 4; bi++) {
+                var idx = bi * 2
+                var bMat = prepareOutlineZMat(batchCtx, mat, -0.018 + bi * 0.003)
+                drawBatchedGlyph(batchCtx, effSeq, gx + OUTLINE_8_DX[idx] * midRad, gy + OUTLINE_8_DY[idx] * midRad, strokeCol, false, bMat)
+            }
+        }
+        return true
+    }
+
     function tryDrawUnitBatched(event, comp, seq, floatX, floatY, halfW, rgbColor, shadow, outMode, outColor, outWidth, charScale, inFade, isBlurFade, isSplitFade, fadeProgress, hasUnitRot, baseA, invP, batchCtx) {
         if (batchCtx == null || BATCH_FAILED) return false
         var effSeq = seq || resolveVisualSeq(comp)
@@ -1292,18 +1371,16 @@
             var haloBellS      = Math.sin(clampNum(fadeProgress, 0.05, 0.95) * PI)
             var haloAlphaS     = clampNum(Math.round((invP * 0.72 + haloBellS * 0.28) * 72), 5, 96)
             var coreAlphaS     = clampNum(Math.round(baseA * 245 + 6), 5, 255)
-            var haloUnitS      = haloAlphaS / 255.0
-            var coreUnitS      = coreAlphaS / 255.0
-            var haloEffByteS   = Math.round(haloUnitS * haloUnitS * 255)
-            var coreEffByteS   = clampNum(Math.round(coreUnitS * coreUnitS * 255), 5, 255)
+            var haloEffByteS   = Math.round(haloAlphaS)
+            var coreEffByteS   = clampNum(Math.round(coreAlphaS), 5, 255)
             var spreadPxS      = 0.65 + fadeProgress * 2.85
             var sMat           = batchCtx.itemMat || ((typeof event.getMatrix === 'function') ? event.getMatrix() : event.matrix)
-            if (haloEffByteS >= 5) {
+            if (haloEffByteS >= OUTLINE_ALPHA_CUTOFF) {
                 var hColB = packArgb(rgbColor, haloEffByteS)
-                if (!drawBatchedGlyph(batchCtx, effSeq, floatX - spreadPxS, floatY, hColB, false, sMat)) return false
-                drawBatchedGlyph(batchCtx, effSeq, floatX + spreadPxS, floatY, hColB, false, sMat)
-                drawBatchedGlyph(batchCtx, effSeq, floatX, floatY - spreadPxS * 0.78, hColB, false, sMat)
-                drawBatchedGlyph(batchCtx, effSeq, floatX, floatY + spreadPxS * 0.78, hColB, false, sMat)
+                if (!drawBatchedGlyph(batchCtx, effSeq, floatX - spreadPxS, floatY, hColB, false, prepareOutlineZMat(batchCtx, sMat, -0.024))) return false
+                drawBatchedGlyph(batchCtx, effSeq, floatX + spreadPxS, floatY, hColB, false, prepareOutlineZMat(batchCtx, sMat, -0.021))
+                drawBatchedGlyph(batchCtx, effSeq, floatX, floatY - spreadPxS * 0.78, hColB, false, prepareOutlineZMat(batchCtx, sMat, -0.018))
+                drawBatchedGlyph(batchCtx, effSeq, floatX, floatY + spreadPxS * 0.78, hColB, false, prepareOutlineZMat(batchCtx, sMat, -0.015))
             }
             return drawBatchedGlyph(batchCtx, effSeq, floatX, floatY, packArgb(rgbColor, coreEffByteS), Boolean(shadow) && fadeProgress < 0.42, sMat)
         }
@@ -1338,33 +1415,27 @@
             }
 
             if (outMode === 'stroke' || outMode === 'glow') {
-                var oColRgb      = (outColor != null && outColor >= 0) ? outColor : (outMode === 'glow' ? rgbColor : 0x050A10)
-                var oRad         = clampNum(outWidth || (outMode === 'glow' ? 0.85 : 0.72), 0.25, 2.5)
-                var outAlphaUnit = (outMode === 'glow' ? 0.46 : 0.92) * baseA
-                var effOutByte   = Math.round(outAlphaUnit * outAlphaUnit * 255)
-                if (effOutByte >= 5) {
-                    var packedOutCol = packArgb(oColRgb, effOutByte)
-                    if (!drawBatchedGlyph(batchCtx, effSeq, gx - oRad, gy, packedOutCol, false, mat)) return false
-                    drawBatchedGlyph(batchCtx, effSeq, gx + oRad, gy, packedOutCol, false, mat)
-                    drawBatchedGlyph(batchCtx, effSeq, gx, gy - oRad, packedOutCol, false, mat)
-                    drawBatchedGlyph(batchCtx, effSeq, gx, gy + oRad, packedOutCol, false, mat)
+                var oColRgb = (outColor != null && outColor >= 0) ? outColor : (outMode === 'glow' ? rgbColor : 0x050A10)
+                var oRad    = clampNum(outWidth || (outMode === 'glow' ? 0.85 : 0.72), 0.25, 2.5)
+                if (!drawBatchedOutline(batchCtx, effSeq, gx, gy, mat, outMode, oColRgb, oRad, baseA)) {
+                    return false
                 }
             }
 
             if (isBlurFade) {
                 var blurRad   = 0.35 + fadeProgress * 0.48
                 var mistAlpha = clampNum(invP * (0.28 + 0.24 * Math.sin(fadeProgress * PI)), 0.03, 0.45)
-                var mistEffB  = Math.round(mistAlpha * mistAlpha * 255)
-                if (mistEffB >= 5) {
+                var mistEffB  = Math.round(mistAlpha * 255)
+                if (mistEffB >= OUTLINE_ALPHA_CUTOFF) {
                     var mistCol = packArgb(rgbColor, mistEffB)
                     var blurY   = blurRad * 0.6
-                    if (!drawBatchedGlyph(batchCtx, effSeq, gx - blurRad, gy - blurY, mistCol, false, mat)) return false
-                    drawBatchedGlyph(batchCtx, effSeq, gx + blurRad, gy - blurY, mistCol, false, mat)
-                    drawBatchedGlyph(batchCtx, effSeq, gx - blurRad, gy + blurY, mistCol, false, mat)
-                    drawBatchedGlyph(batchCtx, effSeq, gx + blurRad, gy + blurY, mistCol, false, mat)
+                    if (!drawBatchedGlyph(batchCtx, effSeq, gx - blurRad, gy - blurY, mistCol, false, prepareOutlineZMat(batchCtx, mat, -0.020))) return false
+                    drawBatchedGlyph(batchCtx, effSeq, gx + blurRad, gy - blurY, mistCol, false, prepareOutlineZMat(batchCtx, mat, -0.017))
+                    drawBatchedGlyph(batchCtx, effSeq, gx - blurRad, gy + blurY, mistCol, false, prepareOutlineZMat(batchCtx, mat, -0.014))
+                    drawBatchedGlyph(batchCtx, effSeq, gx + blurRad, gy + blurY, mistCol, false, prepareOutlineZMat(batchCtx, mat, -0.011))
                 }
                 var coreBlurUnit = clampNum(invP * invP * (1.0 - fadeProgress * 0.35), 0.03, 1.0)
-                var coreEffB     = clampNum(Math.round(coreBlurUnit * coreBlurUnit * 255), 5, 255)
+                var coreEffB     = clampNum(Math.round(coreBlurUnit * 255), 5, 255)
                 return drawBatchedGlyph(batchCtx, effSeq, gx, gy, packArgb(rgbColor, coreEffB), Boolean(shadow) && outMode === 'none' && fadeProgress < 0.35, mat)
             }
 
@@ -1459,26 +1530,29 @@
                 event.translate(floatX, floatY)
             }
 
-            // 1. 外圈绘制（回退路径使用增量平移，消除内层 push/pop 与数组分配）
+            // 1. 外圈绘制（回退路径同步采用 8 向圆周轮廓与增量平移，消除内层 push/pop 与数组分配）
             if (outMode === 'stroke' || outMode === 'glow') {
                 var oColRgb = (outColor != null && outColor >= 0)
                     ? outColor
                     : (outMode === 'glow' ? rgbColor : 0x050A10)
                 var oRad = clampNum(outWidth || (outMode === 'glow' ? 0.85 : 0.72), 0.25, 2.5)
-                var outAlphaUnit = (outMode === 'glow' ? 0.46 : 0.92) * baseA
-                var outAlphaByte = clampNum(Math.round(outAlphaUnit * 255), 5, 255)
-                var packedOutCol = packArgb(oColRgb, outAlphaByte)
-                setShaderAlphaSafe(event, outAlphaUnit)
-
-                event.translate(-oRad, 0)
-                event.text(comp, 0, 0, packedOutCol, false)
-                event.translate(oRad * 2.0, 0)
-                event.text(comp, 0, 0, packedOutCol, false)
-                event.translate(-oRad, -oRad)
-                event.text(comp, 0, 0, packedOutCol, false)
-                event.translate(0, oRad * 2.0)
-                event.text(comp, 0, 0, packedOutCol, false)
-                event.translate(0, -oRad)
+                var outAlphaUnit = (outMode === 'glow' ? 0.26 : 0.92) * baseA
+                var outAlphaByte = Math.round(outAlphaUnit * 255)
+                if (outAlphaByte >= OUTLINE_ALPHA_CUTOFF) {
+                    var packedOutCol = packArgb(oColRgb, outAlphaByte)
+                    setShaderAlphaSafe(event, outAlphaUnit)
+                    var curDx = 0.0
+                    var curDy = 0.0
+                    for (var fi = 0; fi < 8; fi++) {
+                        var nx = OUTLINE_8_DX[fi] * oRad
+                        var ny = OUTLINE_8_DY[fi] * oRad
+                        event.translate(nx - curDx, ny - curDy)
+                        curDx = nx
+                        curDy = ny
+                        event.text(comp, 0, 0, packedOutCol, false)
+                    }
+                    event.translate(-curDx, -curDy)
+                }
             }
 
             // 2. 淡出虚化 (blur)：回退路径同样采用增量平移消除内层 push/pop
