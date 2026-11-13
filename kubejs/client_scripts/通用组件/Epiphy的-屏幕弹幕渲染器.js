@@ -76,37 +76,54 @@
         debug:                 false   // 是否输出逐字渲染调试日志（也可通过单条 debug: true 或 setDebug(true) 开启）
     }
 
-    var PI = 3.141592653589793
+    var PI         = 3.141592653589793
+    var DEG_TO_RAD = PI / 180.0
 
     var FADE_POOL  = ['shrink', 'char_first', 'char_last', 'blink', 'shatter', 'blur', 'split']
     // 注意：'per_char' 逐字震动因开销较高，遵循“未显式调用则默认关闭”原则，不放入 SHAKE_POOL 随机池
     var SHAKE_POOL = ['none', 'constant', 'decay', 'fade_in', 'pulse']
 
-    var activeOverlays   = []
-    var pendingActions   = []
-    var GL11             = null
-    var SystemClass      = null
-    var MinecraftClass   = null
-    var Matrix4fClass    = null
-    var CACHED_FONT         = null
-    var FONT_SIGNATURE      = ''
-    var LAST_FONT_CHECK_MS  = -99999
-    var GLYPH_WIDTH_MAP     = {}
-    var GLYPH_CACHE_SIZE    = 0
-    var LAST_LEVEL_KEY      = ''
-    var lastErrorLogAt      = 0
-    var suppressedErrors    = 0
-    var BATCH_FAILED        = false
-    var BATCH_MODE_PROBED   = false
-    var FONT_DISPLAY_NORMAL = null
-    var CHAR_OFFSET_SCRATCH = { dx: 0.0, dy: 0.0, rotDeg: 0.0 }
+    var activeOverlays          = []
+    var pendingActions          = []
+    var GL11                    = null
+    var SystemClass             = null
+    var MinecraftClass          = null
+    var Matrix4fClass           = null
+    var TextLayoutEngineClass   = null
+    var ModernTextRendererClass = null
+    var SheetsClass             = null
+    var CACHED_FONT             = null
+    var FONT_SIGNATURE          = ''
+    var LAST_FONT_CHECK_MS      = -99999
+    var GLYPH_WIDTH_MAP         = {}
+    var GLYPH_CACHE_SIZE        = 0
+    var LAST_LEVEL_KEY          = ''
+    var lastErrorLogAt          = 0
+    var suppressedErrors        = 0
+    var BATCH_FAILED            = false
+    var BATCH_MODE_PROBED       = false
+    var FONT_DISPLAY_NORMAL     = null
+    var MUI_PROBED              = false
+    var MUI_ENGINE              = null
+    var MUI_RENDERER            = null
+    var MUI_CANARY_SEQ          = null
+    var MUI_CANARY_LAYOUT       = null
+    var MUI_EPOCH               = 0
+    var CHAR_OFFSET_SCRATCH     = { dx: 0.0, dy: 0.0, rotDeg: 0.0 }
+    var SHAKE_VEC_SCRATCH       = { x: 0.0, y: 0.0 }
+    var FRAME_BATCH_CTX         = null
 
-    // 环形外圈预计算采样表：0° 步进 45° 的 8 向主环 + 错相 22.5° 的 8 向外环（合计 16 向圆周，零运行时三角函数分配）
+    // 环形外圈预计算采样表：
+    //   - OUTLINE_8：0° 步进 45° 的 8 向主环
+    //   - GLOW_OUTER：错相 22.5° 的 8 向外环
+    //   - CARDINAL_4：glow 内环 4 向正交桥接（避免 0.5px 内环 8 次重叠冗余，视觉柔光效果等价）
     var DIAG_INV_SQRT2 = 0.7071067811865476
     var OUTLINE_8_DX   = [1.0, DIAG_INV_SQRT2, 0.0, -DIAG_INV_SQRT2, -1.0, -DIAG_INV_SQRT2, 0.0, DIAG_INV_SQRT2]
     var OUTLINE_8_DY   = [0.0, DIAG_INV_SQRT2, 1.0, DIAG_INV_SQRT2, 0.0, -DIAG_INV_SQRT2, -1.0, -DIAG_INV_SQRT2]
     var GLOW_OUTER_DX  = [0.9238795325, 0.3826834324, -0.3826834324, -0.9238795325, -0.9238795325, -0.3826834324, 0.3826834324, 0.9238795325]
     var GLOW_OUTER_DY  = [0.3826834324, 0.9238795325, 0.9238795325, 0.3826834324, -0.3826834324, -0.9238795325, -0.9238795325, -0.3826834324]
+    var CARDINAL_4_DX  = [1.0, 0.0, -1.0, 0.0]
+    var CARDINAL_4_DY  = [0.0, 1.0, 0.0, -1.0]
     // rendertype_text.fsh 会直接丢弃 alpha < 0.1 (~26/255) 的片元；外圈跳过低于 28 的极微弱描边，避免双线性采样在阈值边缘切出硬锯齿
     var OUTLINE_ALPHA_CUTOFF = 28
 
@@ -929,17 +946,70 @@
         return FONT_DISPLAY_NORMAL
     }
 
-    function createFrameBatchCtx(event, fontObj) {
-        if (BATCH_FAILED || fontObj == null || event == null) return null
-        var modeNormal = probeDisplayModeNormal()
-        if (modeNormal == null) {
-            BATCH_FAILED = true
-            return null
+    function probeModernUiBridge() {
+        if (MUI_PROBED) return MUI_ENGINE != null
+        MUI_PROBED = true
+        try {
+            TextLayoutEngineClass = Java.loadClass('icyllis.modernui.mc.text.TextLayoutEngine')
+        } catch (eEngCls) {
+            TextLayoutEngineClass = null
         }
+        if (TextLayoutEngineClass == null || typeof TextLayoutEngineClass.getInstance !== 'function') {
+            return false
+        }
+        try {
+            ModernTextRendererClass = Java.loadClass('icyllis.modernui.mc.text.ModernTextRenderer')
+        } catch (eRndCls) {
+            ModernTextRendererClass = null
+        }
+        try {
+            SheetsClass = Java.loadClass('net.minecraft.client.renderer.Sheets')
+        } catch (eShCls) {
+            SheetsClass = null
+        }
+        try {
+            var eng = TextLayoutEngineClass.getInstance()
+            if (eng == null || typeof eng.lookupFormattedLayout !== 'function') return false
+            if (MUI_CANARY_SEQ == null && typeof Text !== 'undefined' && Text != null && typeof Text.of === 'function') {
+                MUI_CANARY_SEQ = resolveVisualSeq(Text.of('A'))
+            }
+            if (MUI_CANARY_SEQ == null) return false
+            // 验证 2 参重载 (FormattedCharSequence, int) 在 Rhino 中无二义性（Style 未注册 TypeWrapper）
+            var probeLayout = eng.lookupFormattedLayout(MUI_CANARY_SEQ, 0)
+            if (probeLayout == null || typeof probeLayout.drawText !== 'function') return false
+            MUI_CANARY_LAYOUT = probeLayout
+            MUI_EPOCH++
+            MUI_ENGINE = eng
+            if (typeof eng.getTextRenderer === 'function') {
+                MUI_RENDERER = eng.getTextRenderer()
+            } else if (ModernTextRendererClass != null) {
+                MUI_RENDERER = new ModernTextRendererClass(eng)
+            }
+            return true
+        } catch (eMuiInit) {
+            MUI_ENGINE        = null
+            MUI_RENDERER      = null
+            MUI_CANARY_LAYOUT = null
+            logErrorThrottled('ModernUI TextLayout probe fallback', eMuiInit)
+            return false
+        }
+    }
+
+    function resolveEmojiSheet() {
+        if (SheetsClass == null) return null
+        try {
+            if (typeof SheetsClass.m_110787_ === 'function') return SheetsClass.m_110787_()
+            if (typeof SheetsClass.translucentCullBlockSheet === 'function') return SheetsClass.translucentCullBlockSheet()
+        } catch (eSh) { }
+        return null
+    }
+
+    function ensureFrameBatchCtx(event, fontObj, now) {
+        if (BATCH_FAILED || fontObj == null || event == null) return null
         var gfx = event.graphics
         if (gfx == null || typeof gfx.bufferSource !== 'function' || typeof gfx.flush !== 'function') return null
         if (typeof event.getMatrix !== 'function' && event.matrix == null) return null
-        if (typeof fontObj.drawInBatch !== 'function' && typeof fontObj.m_272191_ !== 'function') return null
+
         var bufSrc = null
         try {
             bufSrc = gfx.bufferSource()
@@ -947,37 +1017,120 @@
             bufSrc = null
         }
         if (bufSrc == null) return null
-        var drawFn = null
-        var useDirectSrgDraw = false
-        try {
-            var explicitSrg = fontObj['m_272191_(net.minecraft.util.FormattedCharSequence,float,float,int,boolean,org.joml.Matrix4f,net.minecraft.client.renderer.MultiBufferSource,net.minecraft.client.gui.Font$DisplayMode,int,int)']
-            if (typeof explicitSrg === 'function') drawFn = explicitSrg
-        } catch (eSrgExp) { }
-        if (drawFn == null && typeof fontObj.m_272191_ === 'function') {
-            // Forge SRG 下 FormattedCharSequence 重载独立命名为 m_272191_，可直接避开 ModernUI FormattedTextWrapper 与 String/Component 重载二义性
-            useDirectSrgDraw = true
+
+        if (FRAME_BATCH_CTX == null) {
+            var modeNormal = probeDisplayModeNormal()
+            if (modeNormal == null) {
+                BATCH_FAILED = true
+                return null
+            }
+            var matItem = null
+            var matUnit = null
+            var matOut  = null
+            if (Matrix4fClass != null) {
+                try {
+                    matItem = new Matrix4fClass()
+                    matUnit = new Matrix4fClass()
+                    matOut  = new Matrix4fClass()
+                } catch (eM) {
+                    matItem = null
+                    matUnit = null
+                    matOut  = null
+                }
+            }
+            var canDirect = (matItem != null && matUnit != null &&
+                typeof matUnit.set === 'function' &&
+                typeof matUnit.translate === 'function' &&
+                typeof matUnit.rotateZ === 'function' &&
+                typeof matUnit.scale === 'function')
+            probeModernUiBridge()
+            var emojiSheet = resolveEmojiSheet()
+            FRAME_BATCH_CTX = {
+                font:            null,
+                drawFn:          null,
+                useDirectSrgDraw:false,
+                graphics:        gfx,
+                bufSrc:          bufSrc,
+                displayMode:     modeNormal,
+                muiActive:       false,
+                muiEngine:       MUI_ENGINE,
+                muiRenderer:     MUI_RENDERER,
+                muiAllowSdf:     true,
+                muiEmojiSheet:   emojiSheet,
+                muiEndBatchFn:   null,
+                canDirectMatrix: canDirect,
+                baseFrameMat:    null,
+                _itemScratch:    matItem,
+                itemMat:         null,
+                unitMat:         matUnit,
+                outMat:          matOut,
+                drawn:           0,
+                nowMs:           now || 0,
+                needBlendRestore:false,
+                prevBlend:       null
+            }
         }
-        if (drawFn == null && !useDirectSrgDraw) {
+
+        var ctx = FRAME_BATCH_CTX
+        ctx.graphics         = gfx
+        ctx.bufSrc           = bufSrc
+        ctx.drawn            = 0
+        ctx.nowMs            = now || 0
+        ctx.baseFrameMat     = null
+        ctx.itemMat          = null
+        ctx.needBlendRestore = false
+        ctx.prevBlend        = null
+
+        if (ctx.font !== fontObj) {
+            var muiReady = (MUI_ENGINE != null)
+            var drawFn = null
+            var useDirectSrgDraw = false
             try {
-                var explicit = fontObj['drawInBatch(net.minecraft.util.FormattedCharSequence,float,float,int,boolean,org.joml.Matrix4f,net.minecraft.client.renderer.MultiBufferSource,net.minecraft.client.gui.Font$DisplayMode,int,int)']
-                if (typeof explicit === 'function') drawFn = explicit
-            } catch (eExp) { }
+                var explicitSrg = fontObj['m_272191_(net.minecraft.util.FormattedCharSequence,float,float,int,boolean,org.joml.Matrix4f,net.minecraft.client.renderer.MultiBufferSource,net.minecraft.client.gui.Font$DisplayMode,int,int)']
+                if (typeof explicitSrg === 'function') drawFn = explicitSrg
+            } catch (eSrgExp) { }
+            if (drawFn == null && typeof fontObj.m_272191_ === 'function') {
+                // Forge SRG 下 FormattedCharSequence 重载独立命名为 m_272191_，可直接避开 ModernUI FormattedTextWrapper 与 String/Component 重载二义性
+                useDirectSrgDraw = true
+            }
+            if (drawFn == null && !useDirectSrgDraw) {
+                try {
+                    var explicit = fontObj['drawInBatch(net.minecraft.util.FormattedCharSequence,float,float,int,boolean,org.joml.Matrix4f,net.minecraft.client.renderer.MultiBufferSource,net.minecraft.client.gui.Font$DisplayMode,int,int)']
+                    if (typeof explicit === 'function') drawFn = explicit
+                } catch (eExp) { }
+            }
+            if (!muiReady && drawFn == null && !useDirectSrgDraw && typeof fontObj.drawInBatch !== 'function') {
+                return null
+            }
+            ctx.font             = fontObj
+            ctx.drawFn           = drawFn
+            ctx.useDirectSrgDraw = useDirectSrgDraw
+            ctx.muiActive        = muiReady
         }
-        var scratchOutMat = null
-        if (Matrix4fClass != null) {
-            try { scratchOutMat = new Matrix4fClass() } catch (eM) { scratchOutMat = null }
+
+        if (ctx.muiEmojiSheet != null && ctx.muiEndBatchFn == null) {
+            if (typeof bufSrc.m_109912_ === 'function') {
+                ctx.muiEndBatchFn = bufSrc.m_109912_
+            } else if (typeof bufSrc.endBatch === 'function') {
+                ctx.muiEndBatchFn = bufSrc.endBatch
+            }
         }
-        return {
-            font:             fontObj,
-            drawFn:           drawFn,
-            useDirectSrgDraw: useDirectSrgDraw,
-            graphics:         gfx,
-            bufSrc:           bufSrc,
-            displayMode:      modeNormal,
-            itemMat:          null,
-            outMat:           scratchOutMat,
-            drawn:            0
+
+        if (ctx.muiActive && MUI_CANARY_SEQ != null) {
+            try {
+                var curCanary = ctx.muiEngine.lookupFormattedLayout(MUI_CANARY_SEQ, 0)
+                if (curCanary !== MUI_CANARY_LAYOUT) {
+                    MUI_CANARY_LAYOUT = curCanary
+                    MUI_EPOCH++
+                }
+                if (ModernTextRendererClass != null) {
+                    ctx.muiAllowSdf = (ModernTextRendererClass.sAllowSDFTextIn2D !== false)
+                }
+            } catch (eCanary) {
+                ctx.muiActive = false
+            }
         }
+        return ctx
     }
 
     function flushFrameBatchCtx(batchCtx) {
@@ -991,8 +1144,74 @@
         }
     }
 
-    function drawBatchedGlyph(batchCtx, seq, x, y, argb, shadow, mat) {
-        if (batchCtx == null || BATCH_FAILED || seq == null || mat == null) return false
+    function resolveUnitMuiLayout(batchCtx, seq, ownerObj) {
+        if (batchCtx == null || !batchCtx.muiActive || seq == null) return null
+        var now = batchCtx.nowMs
+        if (ownerObj != null && ownerObj._muiLayout != null && ownerObj._muiEpoch === MUI_EPOCH && (now - (ownerObj._muiCheckMs || 0)) < 1000) {
+            return ownerObj._muiLayout
+        }
+        try {
+            var layout = batchCtx.muiEngine.lookupFormattedLayout(seq, 0)
+            if (ownerObj != null && layout != null) {
+                ownerObj._muiLayout = layout
+                ownerObj._muiEpoch  = MUI_EPOCH
+                // 按字符序号错峰刷新，避免多字在同一帧集中到期刷新导致抖动
+                var staggerMs = ((ownerObj.visIndex || 0) & 15) * 60
+                ownerObj._muiCheckMs = now - staggerMs
+            }
+            return layout
+        } catch (eLookup) {
+            batchCtx.muiActive = false
+            logErrorThrottled('ModernUI lookupFormattedLayout fallback', eLookup)
+            return null
+        }
+    }
+
+    function flushEmojiSheetIfNeeded(batchCtx, layout) {
+        if (batchCtx.muiEndBatchFn == null || batchCtx.muiEmojiSheet == null) return
+        try {
+            if (typeof layout.hasColorEmoji === 'function' && layout.hasColorEmoji()) {
+                batchCtx.muiEndBatchFn.call(batchCtx.bufSrc, batchCtx.muiEmojiSheet)
+            }
+        } catch (eEmoji) { }
+    }
+
+    function computeMuiDrawMode(batchCtx, mat, preferSdf) {
+        if (!batchCtx.muiAllowSdf) return 0
+        if (preferSdf) return 1
+        if (batchCtx.muiRenderer != null && typeof batchCtx.muiRenderer.chooseMode === 'function') {
+            var chosen = batchCtx.muiRenderer.chooseMode(mat, batchCtx.displayMode)
+            // mode 4 (UNIFORM_SCALE) 需要配合投影重缩放；在直接传完整 Matrix4f 时改走 SDF(1) 或标准位图(0)
+            return chosen === 4 ? 0 : chosen
+        }
+        return 1
+    }
+
+    function drawMuiLayoutPass(batchCtx, layout, x, y, argb, shadow, mat, drawMode) {
+        if (batchCtx == null || !batchCtx.muiActive || layout == null || mat == null) return false
+        try {
+            var a = (argb >>> 24) & 0xFF
+            var r = (argb >>> 16) & 0xFF
+            var g = (argb >>> 8) & 0xFF
+            var b = argb & 0xFF
+            layout.drawText(mat, batchCtx.bufSrc, x, y, r, g, b, a, shadow, drawMode, false, 1.0, 0, 15728880)
+            batchCtx.drawn++
+            return true
+        } catch (eMuiDraw) {
+            batchCtx.muiActive = false
+            logErrorThrottled('ModernUI TextLayout.drawText fallback', eMuiDraw)
+            return false
+        }
+    }
+
+    function drawBatchedGlyph(batchCtx, seq, x, y, argb, shadow, mat, preLayout, muiDrawMode) {
+        if (batchCtx == null || BATCH_FAILED || mat == null) return false
+        if (preLayout != null && batchCtx.muiActive) {
+            if (drawMuiLayoutPass(batchCtx, preLayout, x, y, argb, shadow, mat, muiDrawMode != null ? muiDrawMode : (batchCtx.muiAllowSdf ? 1 : 0))) {
+                return true
+            }
+        }
+        if (seq == null) return false
         try {
             if (batchCtx.drawFn != null) {
                 batchCtx.drawFn.call(batchCtx.font, seq, x, y, argb, shadow, mat, batchCtx.bufSrc, batchCtx.displayMode, 0, 15728880)
@@ -1097,10 +1316,13 @@
                     // 当 minMs === maxMs（如 [rnfmabj-测试] 要求统一 0.8s 震动一次）时，统一相位 0，使所有字同步触发抖动但方向各异
                     var phaseOff = isUnifiedFreq ? 0.0 : (hashUnit(cSeed + 1.9) * 10.0)
                     var cfComp = Text.of(rf.text)
+                    var rawTxt = rf.text || ''
+                    var isBlankFrag = (rawTxt.length > 0 && rawTxt.indexOf('§') < 0 && /^\s+$/.test(rawTxt))
                     list.push({
                         comp:         cfComp,
                         seq:          resolveVisualSeq(cfComp),
-                        rawText:      rf.text,
+                        rawText:      rawTxt,
+                        isBlank:      isBlankFrag,
                         color:        grp.color,
                         baseX:        rf.x,
                         baseY:        baseY,
@@ -1112,11 +1334,15 @@
                         outlineColor: rf.outlineColor != null ? rf.outlineColor : -1,
                         cSeed:        cSeed,
                         periodMs:     periodMs,
+                        invPeriod:    1.0 / periodMs,
                         phaseOff:     phaseOff,
                         _hStepIdx:    NaN,
                         _hSeed:       NaN,
                         _oStepIdx:    NaN,
-                        _oSeed:       NaN
+                        _oSeed:       NaN,
+                        _muiLayout:   null,
+                        _muiEpoch:    -1,
+                        _muiCheckMs:  0
                     })
                     visSeq++
                 }
@@ -1127,48 +1353,74 @@
         return list
     }
 
+    // 预编译单条弹幕的逐字抖动配置：消除每帧逐字重复 Number/String/toLowerCase/clampNum 类型解析开销
+    function getCharShakeConfig(item) {
+        if (item != null && item._charShakeCfg != null) return item._charShakeCfg
+        var styleStr  = (item != null && item.charShakeStyle != null) ? String(item.charShakeStyle).toLowerCase() : 'omni'
+        var styleCode = (styleStr === 'horizontal_step' || styleStr === 'h_step' || styleStr === 'horizontal')
+            ? 1
+            : ((styleStr === 'smooth' || styleStr === 'drift') ? 2 : 0)
+        var shiftBase   = (item != null && item.charShakeShift != null && isFinite(Number(item.charShakeShift))) ? Number(item.charShakeShift) : 0.32
+        var shiftXScale = (item != null && item.charShakeShiftX != null && isFinite(Number(item.charShakeShiftX))) ? Number(item.charShakeShiftX) : shiftBase
+        var shiftYScale = (item != null && item.charShakeShiftY != null && isFinite(Number(item.charShakeShiftY))) ? Number(item.charShakeShiftY) : (shiftBase * 0.75)
+        var swayXScale  = (item != null && item.charShakeSwayX != null && isFinite(Number(item.charShakeSwayX))) ? Number(item.charShakeSwayX) : 0.88
+        var swayYScale  = (item != null && item.charShakeSwayY != null && isFinite(Number(item.charShakeSwayY))) ? Number(item.charShakeSwayY) : 0.0
+        var rotDegAmp   = clampNum((item != null && item.charShakeRotDeg != null && isFinite(Number(item.charShakeRotDeg))) ? Number(item.charShakeRotDeg) : 0.0, 0.0, 45.0)
+        var swayWin     = clampNum((item != null && item.charShakeWin != null && isFinite(Number(item.charShakeWin))) ? Number(item.charShakeWin) : 0.38, 0.05, 1.0)
+        var transMode   = (item != null && item.charShakeTransition != null) ? String(item.charShakeTransition).toLowerCase() : 'smooth'
+        var isSnap      = Boolean(item && item.charShakeSnap) || transMode === 'snap' || transMode === 'instant' || transMode === 'step' || transMode === '0'
+        var transWin    = 0.16
+        if (!isSnap && transMode !== '') {
+            var transNum = Number(transMode)
+            if (isFinite(transNum)) {
+                transWin = transNum <= 0 ? 0.0 : clampNum(transNum, 0.01, 1.0)
+            }
+        }
+        var jitterWin   = clampNum((item != null && item.charShakeWin != null && isFinite(Number(item.charShakeWin))) ? Number(item.charShakeWin) : 0.26, 0.05, 1.0)
+        var cfg = {
+            styleCode:   styleCode,
+            shiftXScale: shiftXScale,
+            shiftYScale: shiftYScale,
+            swayXScale:  swayXScale,
+            swayYScale:  swayYScale,
+            rotDegAmp:   rotDegAmp,
+            swayWin:     swayWin,
+            isSnap:      isSnap,
+            transWin:    transWin,
+            jitterWin:   jitterWin
+        }
+        if (item != null) item._charShakeCfg = cfg
+        return cfg
+    }
+
     // 计算单字在当前时刻的独立微抖动偏移（完全由样式参数控制，绝不在渲染器内写死单一效果）：
     //   - 'horizontal_step'：每 periodMs 触发 1 次轻微随机落点位移 (charShakeShift) + 初段水平/垂直阻尼晃动 (charShakeSwayX/Y, charShakeWin)
     //   - 'smooth'         ：按 periodMs 做连续双谐波平滑漂移
     //   - 'omni' (默认)    ：全向随机脉冲轻颤 + 极微弱残余偏移
     function sampleCharShakeOffset(cf, ageMs, curAmp, item, outObj) {
         var dst  = outObj || CHAR_OFFSET_SCRATCH
-        var ampN = Number(curAmp)
+        var ampN = curAmp
+        if (typeof ampN !== 'number') ampN = Number(curAmp)
         if (!isFinite(ampN) || ampN <= 0) {
             dst.dx     = 0.0
             dst.dy     = 0.0
             dst.rotDeg = 0.0
             return dst
         }
-        var effAmp  = clampNum(ampN, 0.05, 2.5)
-        var period  = max2(60, Number(cf && cf.periodMs) || 800)
-        var ageN    = Number(ageMs)
-        if (!isFinite(ageN) || ageN < 0) ageN = 0.0
-        var cyc     = (ageN / period) + (Number(cf && cf.phaseOff) || 0.0)
+        var effAmp  = ampN < 0.05 ? 0.05 : (ampN > 2.5 ? 2.5 : ampN)
+        var invPer  = (cf != null && cf.invPeriod > 0) ? cf.invPeriod : (1.0 / max2(60, Number(cf && cf.periodMs) || 800))
+        var ageN    = (ageMs >= 0 && isFinite(ageMs)) ? ageMs : 0.0
+        var cyc     = (ageN * invPer) + ((cf != null && cf.phaseOff) ? cf.phaseOff : 0.0)
         var stepIdx = Math.floor(cyc)
         var frac    = cyc - stepIdx
-        var seed    = Number(cf && cf.cSeed) || 1.0
-        var style   = 'omni'
-        if (item != null) {
-            if (item.charShakeStyleLower === undefined) {
-                item.charShakeStyleLower = String(item.charShakeStyle ? item.charShakeStyle : 'omni').toLowerCase()
-            }
-            style = item.charShakeStyleLower
-        }
+        var seed    = (cf != null && cf.cSeed) ? cf.cSeed : 1.0
+        var cfg     = getCharShakeConfig(item)
 
         var rawDx     = 0.0
         var rawDy     = 0.0
         var rawRotDeg = 0.0
 
-        if (style === 'horizontal_step' || style === 'h_step' || style === 'horizontal') {
-            var shiftBase   = (item && item.charShakeShift != null && isFinite(Number(item.charShakeShift))) ? Number(item.charShakeShift) : 0.32
-            var shiftXScale = (item && item.charShakeShiftX != null && isFinite(Number(item.charShakeShiftX))) ? Number(item.charShakeShiftX) : shiftBase
-            var shiftYScale = (item && item.charShakeShiftY != null && isFinite(Number(item.charShakeShiftY))) ? Number(item.charShakeShiftY) : (shiftBase * 0.75)
-            var swayXScale  = (item && item.charShakeSwayX != null && isFinite(Number(item.charShakeSwayX))) ? Number(item.charShakeSwayX) : 0.88
-            var swayYScale  = (item && item.charShakeSwayY != null && isFinite(Number(item.charShakeSwayY))) ? Number(item.charShakeSwayY) : 0.0
-            var rotDegAmp   = clampNum((item && item.charShakeRotDeg != null && isFinite(Number(item.charShakeRotDeg))) ? Number(item.charShakeRotDeg) : 0.0, 0.0, 45.0)
-            var swayWin     = clampNum((item && item.charShakeWin != null && isFinite(Number(item.charShakeWin))) ? Number(item.charShakeWin) : 0.38, 0.05, 1.0)
-
+        if (cfg.styleCode === 1) {
             var hPrevX, hPrevY, hNextX, hNextY, hPrevR, hNextR, dirSignX, dirSignY
             if (cf != null) {
                 if (cf._hStepIdx !== stepIdx || cf._hSeed !== seed) {
@@ -1202,52 +1454,39 @@
                 dirSignY = (hashUnit(stepIdx * 53.29 + seed + 3.7) >= 0.5) ? 1.0 : -1.0
             }
 
-            var prevDx = hPrevX * shiftXScale * effAmp
-            var prevDy = hPrevY * shiftYScale * effAmp
-            var nextDx = hNextX * shiftXScale * effAmp
-            var nextDy = hNextY * shiftYScale * effAmp
-            var transMode = 'smooth'
-            if (item != null) {
-                if (item.charShakeTransLower === undefined) {
-                    item.charShakeTransLower = (item.charShakeTransition != null) ? String(item.charShakeTransition).toLowerCase() : 'smooth'
-                }
-                transMode = item.charShakeTransLower
-            }
-            var isSnap    = Boolean(item && item.charShakeSnap) || transMode === 'snap' || transMode === 'instant' || transMode === 'step' || transMode === '0'
-            var shiftT    = 1.0
-            if (!isSnap) {
-                var transWin = 0.16
-                var transNum = Number(transMode)
-                if (transMode !== '' && isFinite(transNum)) {
-                    if (transNum <= 0) {
-                        transWin = 0.0
-                    } else {
-                        transWin = clampNum(transNum, 0.01, 1.0)
-                    }
-                }
-                shiftT = transWin > 0 ? (frac < transWin ? (frac / transWin) : 1.0) : 1.0
+            var prevDx = hPrevX * cfg.shiftXScale * effAmp
+            var prevDy = hPrevY * cfg.shiftYScale * effAmp
+            var nextDx = hNextX * cfg.shiftXScale * effAmp
+            var nextDy = hNextY * cfg.shiftYScale * effAmp
+            var shiftT = 1.0
+            if (!cfg.isSnap && cfg.transWin > 0 && frac < cfg.transWin) {
+                shiftT = frac / cfg.transWin
             }
             rawDx = prevDx + (nextDx - prevDx) * shiftT
             rawDy = prevDy + (nextDy - prevDy) * shiftT
 
-            if (rotDegAmp > 0) {
-                var prevRot = hPrevR * rotDegAmp * 0.65
-                var nextRot = hNextR * rotDegAmp * 0.65
+            if (cfg.rotDegAmp > 0) {
+                var prevRot = hPrevR * cfg.rotDegAmp * 0.65
+                var nextRot = hNextR * cfg.rotDegAmp * 0.65
                 rawRotDeg = prevRot + (nextRot - prevRot) * shiftT
             }
 
-            if (frac < swayWin) {
-                var u    = frac / swayWin
+            if (frac < cfg.swayWin) {
+                var u    = frac / cfg.swayWin
                 var wave = Math.sin(u * PI * 2.5) * (1.0 - u)
-                rawDx += dirSignX * wave * effAmp * swayXScale
-                rawDy += dirSignY * wave * effAmp * swayYScale
-                if (rotDegAmp > 0) {
-                    rawRotDeg += dirSignX * wave * rotDegAmp * 0.55
+                rawDx += dirSignX * wave * effAmp * cfg.swayXScale
+                rawDy += dirSignY * wave * effAmp * cfg.swayYScale
+                if (cfg.rotDegAmp > 0) {
+                    rawRotDeg += dirSignX * wave * cfg.rotDegAmp * 0.55
                 }
             }
-            rawDx += Math.sin(frac * PI * 2.0 + seed) * 0.10 * swayXScale * effAmp
-            rawDy += Math.cos(frac * PI * 2.0 + seed * 1.3) * 0.10 * swayYScale * effAmp
-        } else if (style === 'smooth' || style === 'drift') {
+            if (cfg.swayXScale !== 0) {
+                rawDx += Math.sin(frac * PI * 2.0 + seed) * 0.10 * cfg.swayXScale * effAmp
+            }
+            if (cfg.swayYScale !== 0) {
+                rawDy += Math.cos(frac * PI * 2.0 + seed * 1.3) * 0.10 * cfg.swayYScale * effAmp
+            }
+        } else if (cfg.styleCode === 2) {
             var phase = cyc * PI * 2.0
             var nx = Math.sin(phase + seed * 1.73) * 0.72 + Math.cos(phase * 0.53 + seed * 3.11) * 0.28
             var ny = Math.cos(phase * 0.87 + seed * 2.37) * 0.72 + Math.sin(phase * 0.47 + seed * 4.19) * 0.28
@@ -1265,10 +1504,9 @@
             } else {
                 theta = hashUnit(stepIdx * 19.37 + seed) * PI * 2.0
             }
-            var jitterWin = clampNum((item && item.charShakeWin != null) ? item.charShakeWin : 0.26, 0.05, 1.0)
-            var pulse     = 0.0
-            if (frac < jitterWin) {
-                var pu = frac / jitterWin
+            var pulse = 0.0
+            if (frac < cfg.jitterWin) {
+                var pu = frac / cfg.jitterWin
                 pulse = Math.sin(pu * PI * 3.0) * (1.0 - pu) * 0.85
             }
             var mag = (0.22 + pulse) * effAmp
@@ -1276,10 +1514,10 @@
             rawDy = Math.sin(theta) * mag * 0.92
         }
 
-        var outDx = clampNum(rawDx, -CONFIG.charShakeMaxDxPx, CONFIG.charShakeMaxDxPx)
-        var outDy = clampNum(rawDy, -CONFIG.charShakeMaxDyPx, CONFIG.charShakeMaxDyPx)
-        dst.dx     = isFinite(outDx) ? outDx : 0.0
-        dst.dy     = isFinite(outDy) ? outDy : 0.0
+        var maxDx = CONFIG.charShakeMaxDxPx
+        var maxDy = CONFIG.charShakeMaxDyPx
+        dst.dx     = isFinite(rawDx) ? (rawDx < -maxDx ? -maxDx : (rawDx > maxDx ? maxDx : rawDx)) : 0.0
+        dst.dy     = isFinite(rawDy) ? (rawDy < -maxDy ? -maxDy : (rawDy > maxDy ? maxDy : rawDy)) : 0.0
         dst.rotDeg = isFinite(rawRotDeg) ? rawRotDeg : 0.0
         return dst
     }
@@ -1310,13 +1548,64 @@
         } catch (e) { }
     }
 
-    function prepareOutlineZMat(batchCtx, baseMat, zOffset) {
+    var ITEM_POSE_SCRATCH = {
+        needed: false,
+        pushed: false,
+        px:     0.0,
+        py:     0.0,
+        angle:  0.0,
+        scaleX: 1.0,
+        scaleY: 1.0
+    }
+
+    function ensureFallbackBlend(event, batchCtx) {
+        if (batchCtx != null) {
+            if (batchCtx.prevBlend === null) {
+                batchCtx.prevBlend = queryGlBlendEnabled()
+                if (batchCtx.prevBlend !== true) {
+                    try {
+                        event.blend(true)
+                        batchCtx.needBlendRestore = true
+                    } catch (eBlendOn) { }
+                }
+            }
+            return
+        }
+        try { event.blend(true) } catch (eB) { }
+    }
+
+    function applyItemPoseToEvent(event, px, py, angle, scaleX, scaleY) {
+        event.push()
+        event.translate(px, py)
+        if (angle !== 0 && isFinite(angle)) {
+            event.rotateDeg(angle)
+        }
+        if ((scaleX !== 1.0 || scaleY !== 1.0) && isFinite(scaleX) && isFinite(scaleY)) {
+            if (typeof event['scale(float,float,float)'] === 'function') {
+                event['scale(float,float,float)'](scaleX, scaleY, 1.0)
+            } else if (typeof event['scale(float,float)'] === 'function') {
+                event['scale(float,float)'](scaleX, scaleY)
+            } else {
+                event.scale(scaleX, scaleY, 1.0)
+            }
+        }
+    }
+
+    function ensureItemPosePushed(event) {
+        if (ITEM_POSE_SCRATCH.needed && !ITEM_POSE_SCRATCH.pushed) {
+            applyItemPoseToEvent(event, ITEM_POSE_SCRATCH.px, ITEM_POSE_SCRATCH.py, ITEM_POSE_SCRATCH.angle, ITEM_POSE_SCRATCH.scaleX, ITEM_POSE_SCRATCH.scaleY)
+            ITEM_POSE_SCRATCH.pushed = true
+        }
+    }
+
+    // 增量 Z 分层辅助：每组外圈仅 set(baseMat) + translate(startZ) 1 次，后续仅原地递增 +dz，减少约 50% 矩阵 JNI 调用
+    function startOutlineZMat(batchCtx, baseMat, zStart) {
         if (batchCtx != null && batchCtx.outMat != null && baseMat != null) {
             try {
                 if (typeof batchCtx.outMat.set === 'function') {
                     batchCtx.outMat.set(baseMat)
                 }
-                batchCtx.outMat.translate(0.0, 0.0, zOffset)
+                batchCtx.outMat.translate(0.0, 0.0, zStart)
                 return batchCtx.outMat
             } catch (eZMat) {
                 batchCtx.outMat = null
@@ -1325,116 +1614,162 @@
         return baseMat
     }
 
-    // 合批路径外圈采样：通过双环 16 向圆周采样 + 单调负 Z 分层消除倾斜字体缺角、中文细笔画空隙与 Z-fighting
-    function drawBatchedOutline(batchCtx, effSeq, gx, gy, mat, outMode, oColRgb, oRad, baseA) {
+    function stepOutlineZMat(batchCtx, dz, fallbackMat) {
+        if (batchCtx != null && batchCtx.outMat != null) {
+            try {
+                batchCtx.outMat.translate(0.0, 0.0, dz)
+                return batchCtx.outMat
+            } catch (eZStep) {
+                batchCtx.outMat = null
+            }
+        }
+        return fallbackMat
+    }
+
+    // 合批路径外圈采样：
+    //   - glow：8 向错相外环 + 4 向正交内环桥接 (12 pass，当 oRad <= 0.65 时仅 8 向外环)，单调负 Z 消除 Z-fighting
+    //   - stroke：8 向外环轮廓 + 大半径时 4 向内环桥接 (ModernUI SDF 模式下 1.15px 以下 8 向已无缝闭合)
+    function drawBatchedOutline(batchCtx, effSeq, preLayout, outlineMuiMode, gx, gy, mat, outMode, oColRgb, oRad, baseA) {
         if (outMode === 'glow') {
             var outerByte = Math.round(0.18 * baseA * 255)
             if (outerByte >= OUTLINE_ALPHA_CUTOFF) {
                 var outerCol = packArgb(oColRgb, outerByte)
+                var oMat = startOutlineZMat(batchCtx, mat, -0.090)
                 for (var oi = 0; oi < 8; oi++) {
-                    var oMat = prepareOutlineZMat(batchCtx, mat, -0.090 + oi * 0.003)
-                    if (!drawBatchedGlyph(batchCtx, effSeq, gx + GLOW_OUTER_DX[oi] * oRad, gy + GLOW_OUTER_DY[oi] * oRad, outerCol, false, oMat)) {
+                    if (oi > 0) oMat = stepOutlineZMat(batchCtx, 0.003, mat)
+                    if (!drawBatchedGlyph(batchCtx, effSeq, gx + GLOW_OUTER_DX[oi] * oRad, gy + GLOW_OUTER_DY[oi] * oRad, outerCol, false, oMat, preLayout, outlineMuiMode)) {
                         return false
                     }
                 }
             }
-            var innerByte = Math.round(0.34 * baseA * 255)
-            if (innerByte >= OUTLINE_ALPHA_CUTOFF) {
-                var innerCol = packArgb(oColRgb, innerByte)
-                var innerRad = oRad * 0.48
-                for (var ii = 0; ii < 8; ii++) {
-                    var iMat = prepareOutlineZMat(batchCtx, mat, -0.050 + ii * 0.003)
-                    if (!drawBatchedGlyph(batchCtx, effSeq, gx + OUTLINE_8_DX[ii] * innerRad, gy + OUTLINE_8_DY[ii] * innerRad, innerCol, false, iMat)) {
-                        return false
+            if (oRad > 0.65) {
+                var innerByte = Math.round(0.42 * baseA * 255)
+                if (innerByte >= OUTLINE_ALPHA_CUTOFF) {
+                    var innerCol = packArgb(oColRgb, innerByte)
+                    var innerRad = oRad * 0.48
+                    var iMat = startOutlineZMat(batchCtx, mat, -0.050)
+                    for (var ii = 0; ii < 4; ii++) {
+                        if (ii > 0) iMat = stepOutlineZMat(batchCtx, 0.003, mat)
+                        if (!drawBatchedGlyph(batchCtx, effSeq, gx + CARDINAL_4_DX[ii] * innerRad, gy + CARDINAL_4_DY[ii] * innerRad, innerCol, false, iMat, preLayout, outlineMuiMode)) {
+                            return false
+                        }
                     }
                 }
             }
             return true
         }
 
-        // stroke 实心描边：8 向圆周轮廓 + 较大半径时的 4 向内环桥接（消除 Unifont 0.5px 细笔画镂空）
+        // stroke 实心描边：8 向圆周轮廓 + 较大半径时的 4 向内环桥接
         var strokeByte = Math.round(0.92 * baseA * 255)
         if (strokeByte < OUTLINE_ALPHA_CUTOFF) return true
         var strokeCol = packArgb(oColRgb, strokeByte)
+        var sMat = startOutlineZMat(batchCtx, mat, -0.045)
         for (var si = 0; si < 8; si++) {
-            var sMat = prepareOutlineZMat(batchCtx, mat, -0.045 + si * 0.003)
-            if (!drawBatchedGlyph(batchCtx, effSeq, gx + OUTLINE_8_DX[si] * oRad, gy + OUTLINE_8_DY[si] * oRad, strokeCol, false, sMat)) {
+            if (si > 0) sMat = stepOutlineZMat(batchCtx, 0.003, mat)
+            if (!drawBatchedGlyph(batchCtx, effSeq, gx + OUTLINE_8_DX[si] * oRad, gy + OUTLINE_8_DY[si] * oRad, strokeCol, false, sMat, preLayout, outlineMuiMode)) {
                 return false
             }
         }
-        if (oRad > 0.82) {
+        var midThresh = (preLayout != null && batchCtx.muiActive && batchCtx.muiAllowSdf) ? 1.15 : 0.82
+        if (oRad > midThresh) {
             var midRad = oRad * 0.48
+            var bMat = startOutlineZMat(batchCtx, mat, -0.018)
             for (var bi = 0; bi < 4; bi++) {
-                var idx = bi * 2
-                var bMat = prepareOutlineZMat(batchCtx, mat, -0.018 + bi * 0.003)
-                drawBatchedGlyph(batchCtx, effSeq, gx + OUTLINE_8_DX[idx] * midRad, gy + OUTLINE_8_DY[idx] * midRad, strokeCol, false, bMat)
+                if (bi > 0) bMat = stepOutlineZMat(batchCtx, 0.003, mat)
+                drawBatchedGlyph(batchCtx, effSeq, gx + CARDINAL_4_DX[bi] * midRad, gy + CARDINAL_4_DY[bi] * midRad, strokeCol, false, bMat, preLayout, outlineMuiMode)
             }
         }
         return true
     }
 
-    function tryDrawUnitBatched(event, comp, seq, floatX, floatY, halfW, rgbColor, shadow, outMode, outColor, outWidth, charScale, inFade, isBlurFade, isSplitFade, fadeProgress, hasUnitRot, baseA, invP, batchCtx) {
+    function tryDrawUnitBatched(event, comp, seq, ownerObj, floatX, floatY, halfW, rgbColor, shadow, outMode, outColor, outWidth, charScale, inFade, isBlurFade, isSplitFade, fadeProgress, hasUnitRot, baseA, invP, batchCtx) {
         if (batchCtx == null || BATCH_FAILED) return false
         var effSeq = seq || resolveVisualSeq(comp)
         if (effSeq == null) return false
 
+        var preLayout = resolveUnitMuiLayout(batchCtx, effSeq, ownerObj)
+        if (preLayout != null && batchCtx.muiActive) {
+            flushEmojiSheetIfNeeded(batchCtx, preLayout)
+        }
+
         var sc = (charScale != null && isFinite(charScale) && charScale > 0.2) ? charScale : 1.0
-        var needUnitTransform = (Math.abs(sc - 1.0) > 0.01 || hasUnitRot)
+        var hasUnitScale = (Math.abs(sc - 1.0) > 0.01)
+        var needUnitTransform = (hasUnitScale || hasUnitRot)
+        var hasAnyOutline = (outMode === 'stroke' || outMode === 'glow')
+        // 统一让同字符的外圈与主体沿用 SDF(1)（当启用外圈/旋转/虚化时），防止 BufferSource 在外圈与主体间来回切换 RenderType 触发断批冲洗
+        var outlineMuiMode = batchCtx.muiAllowSdf ? 1 : 0
+        var baseItemMat = batchCtx.itemMat || ((typeof event.getMatrix === 'function') ? event.getMatrix() : event.matrix)
+        if (baseItemMat == null) return false
 
         if (isSplitFade) {
-            var haloBellS      = Math.sin(clampNum(fadeProgress, 0.05, 0.95) * PI)
-            var haloAlphaS     = clampNum(Math.round((invP * 0.72 + haloBellS * 0.28) * 72), 5, 96)
-            var coreAlphaS     = clampNum(Math.round(baseA * 245 + 6), 5, 255)
-            var haloEffByteS   = Math.round(haloAlphaS)
-            var coreEffByteS   = clampNum(Math.round(coreAlphaS), 5, 255)
-            var spreadPxS      = 0.65 + fadeProgress * 2.85
-            var sMat           = batchCtx.itemMat || ((typeof event.getMatrix === 'function') ? event.getMatrix() : event.matrix)
-            if (haloEffByteS >= OUTLINE_ALPHA_CUTOFF) {
-                var hColB = packArgb(rgbColor, haloEffByteS)
-                if (!drawBatchedGlyph(batchCtx, effSeq, floatX - spreadPxS, floatY, hColB, false, prepareOutlineZMat(batchCtx, sMat, -0.024))) return false
-                drawBatchedGlyph(batchCtx, effSeq, floatX + spreadPxS, floatY, hColB, false, prepareOutlineZMat(batchCtx, sMat, -0.021))
-                drawBatchedGlyph(batchCtx, effSeq, floatX, floatY - spreadPxS * 0.78, hColB, false, prepareOutlineZMat(batchCtx, sMat, -0.018))
-                drawBatchedGlyph(batchCtx, effSeq, floatX, floatY + spreadPxS * 0.78, hColB, false, prepareOutlineZMat(batchCtx, sMat, -0.015))
+            var haloBellS    = Math.sin(clampNum(fadeProgress, 0.05, 0.95) * PI)
+            var haloAlphaS   = clampNum(Math.round((invP * 0.72 + haloBellS * 0.28) * 72), 5, 96)
+            var coreEffByteS = clampNum(Math.round(baseA * 245 + 6), 5, 255)
+            var spreadPxS    = 0.65 + fadeProgress * 2.85
+            if (haloAlphaS >= OUTLINE_ALPHA_CUTOFF) {
+                var hColB = packArgb(rgbColor, haloAlphaS)
+                if (!drawBatchedGlyph(batchCtx, effSeq, floatX - spreadPxS, floatY, hColB, false, startOutlineZMat(batchCtx, baseItemMat, -0.024), preLayout, outlineMuiMode)) return false
+                drawBatchedGlyph(batchCtx, effSeq, floatX + spreadPxS, floatY, hColB, false, stepOutlineZMat(batchCtx, 0.003, baseItemMat), preLayout, outlineMuiMode)
+                drawBatchedGlyph(batchCtx, effSeq, floatX, floatY - spreadPxS * 0.78, hColB, false, stepOutlineZMat(batchCtx, 0.003, baseItemMat), preLayout, outlineMuiMode)
+                drawBatchedGlyph(batchCtx, effSeq, floatX, floatY + spreadPxS * 0.78, hColB, false, stepOutlineZMat(batchCtx, 0.003, baseItemMat), preLayout, outlineMuiMode)
             }
-            return drawBatchedGlyph(batchCtx, effSeq, floatX, floatY, packArgb(rgbColor, coreEffByteS), Boolean(shadow) && fadeProgress < 0.42, sMat)
+            return drawBatchedGlyph(batchCtx, effSeq, floatX, floatY, packArgb(rgbColor, coreEffByteS), Boolean(shadow) && fadeProgress < 0.42, baseItemMat, preLayout, outlineMuiMode)
         }
 
         var unitPushed = false
         try {
             var mat, gx, gy
             if (needUnitTransform) {
-                event.push()
-                unitPushed = true
-                var cx = floatX + (halfW || 0)
-                var cy = floatY + 4.0
-                event.translate(cx, cy)
-                if (hasUnitRot && typeof event.rotateDeg === 'function') {
-                    event.rotateDeg(unitRotDegSafeValue)
-                }
-                if (Math.abs(sc - 1.0) > 0.01) {
-                    if (typeof event['scale(float,float)'] === 'function') {
-                        event['scale(float,float)'](sc, sc)
-                    } else {
-                        event.scale(sc, sc, 1.0)
+                if (batchCtx.canDirectMatrix) {
+                    var uMat = batchCtx.unitMat
+                    var hw = halfW || 0
+                    uMat.set(baseItemMat)
+                    uMat.translate(floatX + hw, floatY + 4.0, 0.0)
+                    if (hasUnitRot) uMat.rotateZ(unitRotDegSafeValue * DEG_TO_RAD)
+                    if (hasUnitScale) uMat.scale(sc, sc, 1.0)
+                    uMat.translate(-hw, -4.0, 0.0)
+                    mat = uMat
+                    gx  = 0.0
+                    gy  = 0.0
+                } else {
+                    ensureItemPosePushed(event)
+                    event.push()
+                    unitPushed = true
+                    var cx = floatX + (halfW || 0)
+                    var cy = floatY + 4.0
+                    event.translate(cx, cy)
+                    if (hasUnitRot && typeof event.rotateDeg === 'function') {
+                        event.rotateDeg(unitRotDegSafeValue)
                     }
+                    if (hasUnitScale) {
+                        if (typeof event['scale(float,float)'] === 'function') {
+                            event['scale(float,float)'](sc, sc)
+                        } else {
+                            event.scale(sc, sc, 1.0)
+                        }
+                    }
+                    event.translate(-(halfW || 0), -4.0)
+                    mat = (typeof event.getMatrix === 'function') ? event.getMatrix() : event.matrix
+                    gx  = 0.0
+                    gy  = 0.0
                 }
-                event.translate(-(halfW || 0), -4.0)
-                mat = (typeof event.getMatrix === 'function') ? event.getMatrix() : event.matrix
-                gx  = 0.0
-                gy  = 0.0
             } else {
-                mat = batchCtx.itemMat || ((typeof event.getMatrix === 'function') ? event.getMatrix() : event.matrix)
+                mat = baseItemMat
                 gx  = floatX
                 gy  = floatY
             }
 
-            if (outMode === 'stroke' || outMode === 'glow') {
+            if (hasAnyOutline) {
                 var oColRgb = (outColor != null && outColor >= 0) ? outColor : (outMode === 'glow' ? rgbColor : 0x050A10)
                 var oRad    = clampNum(outWidth || (outMode === 'glow' ? 0.85 : 0.72), 0.25, 2.5)
-                if (!drawBatchedOutline(batchCtx, effSeq, gx, gy, mat, outMode, oColRgb, oRad, baseA)) {
+                if (!drawBatchedOutline(batchCtx, effSeq, preLayout, outlineMuiMode, gx, gy, mat, outMode, oColRgb, oRad, baseA)) {
                     return false
                 }
             }
+
+            var coreMuiMode = (hasAnyOutline || isBlurFade || needUnitTransform)
+                ? outlineMuiMode
+                : computeMuiDrawMode(batchCtx, mat, false)
 
             if (isBlurFade) {
                 var blurRad   = 0.35 + fadeProgress * 0.48
@@ -1443,19 +1778,19 @@
                 if (mistEffB >= OUTLINE_ALPHA_CUTOFF) {
                     var mistCol = packArgb(rgbColor, mistEffB)
                     var blurY   = blurRad * 0.6
-                    if (!drawBatchedGlyph(batchCtx, effSeq, gx - blurRad, gy - blurY, mistCol, false, prepareOutlineZMat(batchCtx, mat, -0.020))) return false
-                    drawBatchedGlyph(batchCtx, effSeq, gx + blurRad, gy - blurY, mistCol, false, prepareOutlineZMat(batchCtx, mat, -0.017))
-                    drawBatchedGlyph(batchCtx, effSeq, gx - blurRad, gy + blurY, mistCol, false, prepareOutlineZMat(batchCtx, mat, -0.014))
-                    drawBatchedGlyph(batchCtx, effSeq, gx + blurRad, gy + blurY, mistCol, false, prepareOutlineZMat(batchCtx, mat, -0.011))
+                    if (!drawBatchedGlyph(batchCtx, effSeq, gx - blurRad, gy - blurY, mistCol, false, startOutlineZMat(batchCtx, mat, -0.020), preLayout, outlineMuiMode)) return false
+                    drawBatchedGlyph(batchCtx, effSeq, gx + blurRad, gy - blurY, mistCol, false, stepOutlineZMat(batchCtx, 0.003, mat), preLayout, outlineMuiMode)
+                    drawBatchedGlyph(batchCtx, effSeq, gx - blurRad, gy + blurY, mistCol, false, stepOutlineZMat(batchCtx, 0.003, mat), preLayout, outlineMuiMode)
+                    drawBatchedGlyph(batchCtx, effSeq, gx + blurRad, gy + blurY, mistCol, false, stepOutlineZMat(batchCtx, 0.003, mat), preLayout, outlineMuiMode)
                 }
                 var coreBlurUnit = clampNum(invP * invP * (1.0 - fadeProgress * 0.35), 0.03, 1.0)
                 var coreEffB     = clampNum(Math.round(coreBlurUnit * 255), 5, 255)
-                return drawBatchedGlyph(batchCtx, effSeq, gx, gy, packArgb(rgbColor, coreEffB), Boolean(shadow) && outMode === 'none' && fadeProgress < 0.35, mat)
+                return drawBatchedGlyph(batchCtx, effSeq, gx, gy, packArgb(rgbColor, coreEffB), Boolean(shadow) && outMode === 'none' && fadeProgress < 0.35, mat, preLayout, coreMuiMode)
             }
 
             var mainCol   = packArgb(rgbColor, 255)
             var useShadow = Boolean(shadow) && (outMode !== 'stroke')
-            return drawBatchedGlyph(batchCtx, effSeq, gx, gy, mainCol, useShadow, mat)
+            return drawBatchedGlyph(batchCtx, effSeq, gx, gy, mainCol, useShadow, mat, preLayout, coreMuiMode)
         } finally {
             if (unitPushed) {
                 try { event.pop() } catch (eUPop) { }
@@ -1465,8 +1800,8 @@
 
     var unitRotDegSafeValue = 0.0
 
-    // 统一绘制函数：支持 Font.drawInBatch 帧内合批、浮点坐标平移、单字缩放、外圈描边/发光 (stroke / glow)、柔焦虚化淡出 (blur) 与裂解淡出 (split)
-    function drawRichUnit(event, comp, floatX, floatY, halfW, rgbColor, shadow, outMode, outColor, outWidth, charScale, fadeStyle, inFade, fadeProgress, unitRotDeg, batchCtx, seqOpt) {
+    // 统一绘制函数：支持 ModernUI TextLayout / Font.drawInBatch 帧内合批、直接 Matrix4f 变换、外圈描边/发光、虚化/裂解淡出
+    function drawRichUnit(event, comp, floatX, floatY, halfW, rgbColor, shadow, outMode, outColor, outWidth, charScale, fadeStyle, inFade, fadeProgress, unitRotDeg, batchCtx, seqOpt, ownerObj) {
         var isBlurFade  = (inFade && fadeStyle === 'blur')
         var isSplitFade = (inFade && fadeStyle === 'split')
         if ((isBlurFade || isSplitFade) && fadeProgress >= 0.97) return
@@ -1480,10 +1815,13 @@
         if (hasUnitRot) unitRotDegSafeValue = unitRotDeg
 
         if (batchCtx != null && !BATCH_FAILED) {
-            if (tryDrawUnitBatched(event, comp, seqOpt, floatX, floatY, halfW, rgbColor, shadow, outMode, outColor, outWidth, charScale, inFade, isBlurFade, isSplitFade, fadeProgress, hasUnitRot, baseA, invP, batchCtx)) {
+            if (tryDrawUnitBatched(event, comp, seqOpt, ownerObj, floatX, floatY, halfW, rgbColor, shadow, outMode, outColor, outWidth, charScale, inFade, isBlurFade, isSplitFade, fadeProgress, hasUnitRot, baseA, invP, batchCtx)) {
                 return
             }
         }
+
+        ensureFallbackBlend(event, batchCtx)
+        ensureItemPosePushed(event)
 
         var needMatrix = (Math.abs(floatX - Math.round(floatX)) > 0.01) ||
                          (Math.abs(floatY - Math.round(floatY)) > 0.01) ||
@@ -1619,17 +1957,21 @@
         return v0 + (v1 - v0) * u
     }
 
-    function sampleContinuousShakeOffset(item, ageMs, curShake) {
-        if (curShake <= 0) return { x: 0, y: 0 }
+    function sampleContinuousShakeOffset(item, ageMs, curShake, outObj) {
+        var dst = outObj || { x: 0, y: 0 }
+        if (curShake <= 0) {
+            dst.x = 0
+            dst.y = 0
+            return dst
+        }
         var seed  = item.shakeSeed || 17.31
         var tSlow = ageMs * 0.022
         var tFast = ageMs * 0.058
         var nx = smoothNoise1D(tSlow, seed) * 0.72 + smoothNoise1D(tFast, seed + 101.7) * 0.28
         var ny = smoothNoise1D(tSlow, seed + 53.9) * 0.72 + smoothNoise1D(tFast, seed + 167.3) * 0.28
-        return {
-            x: clampNum(nx, -1.0, 1.0) * curShake,
-            y: clampNum(ny, -1.0, 1.0) * curShake
-        }
+        dst.x = clampNum(nx, -1.0, 1.0) * curShake
+        dst.y = clampNum(ny, -1.0, 1.0) * curShake
+        return dst
     }
 
     function buildRenderedLines(wrappedLines, startSkipVis, keepEndVis, appendCursor, fontObj, letterSpacingPx, spacingMode) {
@@ -2009,6 +2351,17 @@
                         exist.shakeFreqMin = shakeFreqMin
                         exist.shakeFreqMax = shakeFreqMax
                     }
+                    exist.charShakeStyle      = charShakeStyle
+                    exist.charShakeShift      = charShakeShift
+                    exist.charShakeShiftX     = charShakeShiftX
+                    exist.charShakeShiftY     = charShakeShiftY
+                    exist.charShakeSwayX      = charShakeSwayX
+                    exist.charShakeSwayY      = charShakeSwayY
+                    exist.charShakeRotDeg     = charShakeRotDeg
+                    exist.charShakeWin        = charShakeWin
+                    exist.charShakeSnap       = charShakeSnap
+                    exist.charShakeTransition = charShakeTransition
+                    exist._charShakeCfg       = null
                     if (!isRandomFade) {
                         exist.fadeStyle = fadeStyle
                     }
@@ -2395,15 +2748,13 @@
 
         var sw         = Number(event.width) || 854
         var sh         = Number(event.height) || 480
-        var fontObj    = getClientFont(event, now)
         var guiBlocked = isBlockingGuiOpen(event)
-        var prevBlend  = queryGlBlendEnabled()
-        var batchCtx   = createFrameBatchCtx(event, fontObj)
+        var fontObj    = null
+        var batchCtx   = null
+        var batchTried = false
+        var baseFrameM = null
 
         try {
-            if (prevBlend !== true) {
-                try { event.blend(true) } catch (eBlendOn) { }
-            }
             for (var i = 0; i < activeOverlays.length; i++) {
             var item = activeOverlays[i]
             if (now >= item.expire) {
@@ -2414,6 +2765,18 @@
 
             if (guiBlocked && !item.showInGui) {
                 continue
+            }
+
+            if (fontObj === null) {
+                fontObj = getClientFont(event, now)
+            }
+            if (!batchTried) {
+                batchTried = true
+                batchCtx   = ensureFrameBatchCtx(event, fontObj, now)
+                if (batchCtx != null) {
+                    baseFrameM = (typeof event.getMatrix === 'function') ? event.getMatrix() : event.matrix
+                    batchCtx.baseFrameMat = baseFrameM
+                }
             }
 
             var age          = max2(0, now - item.born)
@@ -2443,22 +2806,36 @@
 
             var itemSpacing     = item.letterSpacing || 0
             var itemSpacingMode = item.letterSpacingMode || 'relative'
-            var curWrapKey      = (fontObj != null ? FONT_SIGNATURE : 'E:') + '|' + effMaxLineW + '|ls:' + itemSpacing + ':' + itemSpacingMode + '|' + item.title + '|' + item.sub
-            if (item.wrapKey !== curWrapKey || !item.titleLines || !item.subLines) {
-                item.wrapKey    = curWrapKey
-                item.titleLines = wrapStyledTextLines(item.title, effMaxLineW, fontObj, itemSpacing, itemSpacingMode)
-                item.subLines   = wrapStyledTextLines(item.sub, effMaxLineW, fontObj, itemSpacing, itemSpacingMode)
-                var maxW = 0
-                for (var twi = 0; twi < item.titleLines.length; twi++) {
-                    if (item.titleLines[twi].widthPx > maxW) maxW = item.titleLines[twi].widthPx
+            var curFontSig      = (fontObj != null ? FONT_SIGNATURE : 'E:')
+            if (item._lastFontSig !== curFontSig ||
+                item._lastMaxLineW !== effMaxLineW ||
+                item._lastSpacing !== itemSpacing ||
+                item._lastSpacingMode !== itemSpacingMode ||
+                !item.wrapKey ||
+                !item.titleLines ||
+                !item.subLines) {
+                var rebuiltWrapKey = curFontSig + '|' + effMaxLineW + '|ls:' + itemSpacing + ':' + itemSpacingMode + '|' + item.title + '|' + item.sub
+                item._lastFontSig     = curFontSig
+                item._lastMaxLineW    = effMaxLineW
+                item._lastSpacing     = itemSpacing
+                item._lastSpacingMode = itemSpacingMode
+                if (item.wrapKey !== rebuiltWrapKey || !item.titleLines || !item.subLines) {
+                    item.wrapKey    = rebuiltWrapKey
+                    item.titleLines = wrapStyledTextLines(item.title, effMaxLineW, fontObj, itemSpacing, itemSpacingMode)
+                    item.subLines   = wrapStyledTextLines(item.sub, effMaxLineW, fontObj, itemSpacing, itemSpacingMode)
+                    var maxW = 0
+                    for (var twi = 0; twi < item.titleLines.length; twi++) {
+                        if (item.titleLines[twi].widthPx > maxW) maxW = item.titleLines[twi].widthPx
+                    }
+                    for (var swi = 0; swi < item.subLines.length; swi++) {
+                        if (item.subLines[swi].widthPx > maxW) maxW = item.subLines[swi].widthPx
+                    }
+                    var totalLineCount = item.titleLines.length + item.subLines.length
+                    item.blockW = maxW
+                    item.blockH = max2(CONFIG.minBlockHeightPx, totalLineCount * CONFIG.lineStepPx)
                 }
-                for (var swi = 0; swi < item.subLines.length; swi++) {
-                    if (item.subLines[swi].widthPx > maxW) maxW = item.subLines[swi].widthPx
-                }
-                var totalLineCount = item.titleLines.length + item.subLines.length
-                item.blockW = maxW
-                item.blockH = max2(CONFIG.minBlockHeightPx, totalLineCount * CONFIG.lineStepPx)
             }
+            var curWrapKey = item.wrapKey
 
             // 2. 打字机可见字数进度
             var shownVis = item.totalVis
@@ -2529,14 +2906,19 @@
             if (isShatterFade) {
                 curShake = max2(curShake, 1.8 * (1.0 - fadeProgress * 0.5))
             }
-            var shakeVec = (!isPerCharShake || isShatterFade)
-                ? sampleContinuousShakeOffset(item, age, curShake)
-                : { x: 0, y: 0 }
+            var shakeVec
+            if (!isPerCharShake || isShatterFade) {
+                shakeVec = sampleContinuousShakeOffset(item, age, curShake, SHAKE_VEC_SCRATCH)
+            } else {
+                SHAKE_VEC_SCRATCH.x = 0.0
+                SHAKE_VEC_SCRATCH.y = 0.0
+                shakeVec = SHAKE_VEC_SCRATCH
+            }
             var px = sw * item.rx + shakeVec.x
             var py = sh * item.ry + shakeVec.y
 
             if (item.clamp !== false) {
-                var rad      = Math.abs(item.angle || 0) * 0.017453292519943295
+                var rad      = Math.abs(item.angle || 0) * DEG_TO_RAD
                 var cosA     = Math.abs(Math.cos(rad))
                 var sinA     = Math.abs(Math.sin(rad))
                 var wScaled  = (item.blockW || 0) * Math.abs(scaleX)
@@ -2553,25 +2935,33 @@
                 py = clampNum(py, minY, maxY)
             }
 
-            var pushed = false
+            ITEM_POSE_SCRATCH.needed = false
+            ITEM_POSE_SCRATCH.pushed = false
             try {
-                event.push()
-                pushed = true
-                event.translate(px, py)
-                if (item.angle !== 0 && isFinite(item.angle)) {
-                    event.rotateDeg(item.angle)
-                }
-                if ((scaleX !== 1.0 || scaleY !== 1.0) && isFinite(scaleX) && isFinite(scaleY)) {
-                    if (typeof event['scale(float,float,float)'] === 'function') {
-                        event['scale(float,float,float)'](scaleX, scaleY, 1.0)
-                    } else if (typeof event['scale(float,float)'] === 'function') {
-                        event['scale(float,float)'](scaleX, scaleY)
-                    } else {
-                        event.scale(scaleX, scaleY, 1.0)
+                if (batchCtx != null && !BATCH_FAILED && batchCtx.canDirectMatrix && baseFrameM != null) {
+                    var iMat = batchCtx._itemScratch
+                    iMat.set(baseFrameM)
+                    iMat.translate(px, py, 0.0)
+                    if (item.angle !== 0 && isFinite(item.angle)) {
+                        iMat.rotateZ(item.angle * DEG_TO_RAD)
                     }
-                }
-                if (batchCtx != null && !BATCH_FAILED) {
-                    batchCtx.itemMat = (typeof event.getMatrix === 'function') ? event.getMatrix() : event.matrix
+                    if ((scaleX !== 1.0 || scaleY !== 1.0) && isFinite(scaleX) && isFinite(scaleY)) {
+                        iMat.scale(scaleX, scaleY, 1.0)
+                    }
+                    batchCtx.itemMat         = iMat
+                    ITEM_POSE_SCRATCH.needed = true
+                    ITEM_POSE_SCRATCH.px     = px
+                    ITEM_POSE_SCRATCH.py     = py
+                    ITEM_POSE_SCRATCH.angle  = item.angle
+                    ITEM_POSE_SCRATCH.scaleX = scaleX
+                    ITEM_POSE_SCRATCH.scaleY = scaleY
+                } else {
+                    applyItemPoseToEvent(event, px, py, item.angle, scaleX, scaleY)
+                    ITEM_POSE_SCRATCH.needed = true
+                    ITEM_POSE_SCRATCH.pushed = true
+                    if (batchCtx != null && !BATCH_FAILED) {
+                        batchCtx.itemMat = (typeof event.getMatrix === 'function') ? event.getMatrix() : event.matrix
+                    }
                 }
 
                 if (isShatterFade) {
@@ -2583,6 +2973,7 @@
                     var sSubLines    = buildRenderedLines(item.subLines, subSkipS, subKeepS, '', fontObj, itemSpacing, itemSpacingMode)
                     var cachedFrags  = getOrBuildShatterCache(item, sTitleLines, sSubLines, titleLineCount, startY, lineStep, shownVis, fontObj)
                     var fastMode     = (activeOverlays.length > CONFIG.shatterFastThreshold)
+                    var shShdBool    = Boolean(item.shadow)
                     for (var fIdx = 0; fIdx < cachedFrags.length; fIdx++) {
                         var frag = cachedFrags[fIdx]
                         if (fadeProgress >= frag.vanishAt) continue
@@ -2595,16 +2986,46 @@
                         var rotDeg = frag.rotMax * burstP
                         var fScale = max2(0.12, 1.0 - localP * 0.78)
                         var fCol   = ((frag.color != null && isFinite(frag.color)) ? Math.round(frag.color) : 0xFF5555) | 0xFF000000
+                        var fSeq   = frag.seq || (frag.seq = resolveVisualSeq(frag.comp))
+                        var fLay   = (batchCtx != null && !BATCH_FAILED) ? resolveUnitMuiLayout(batchCtx, fSeq, frag) : null
+                        var fMode  = (fLay != null && batchCtx.muiAllowSdf) ? 1 : 0
 
                         if (fastMode || (Math.abs(rotDeg) < 2.0 && fScale > 0.92)) {
                             var fxRaw = (frag.cx || 0) + (dx || 0) + (frag.halfW || 0)
                             var fyRaw = (frag.cy || 0) + (dy || 0) - 4.5
-                            if (!(batchCtx != null && !BATCH_FAILED && drawBatchedGlyph(batchCtx, frag.seq || (frag.seq = resolveVisualSeq(frag.comp)), fxRaw, fyRaw, fCol, Boolean(item.shadow), batchCtx.itemMat))) {
-                                event.text(frag.comp, Math.round(fxRaw) || 0, Math.round(fyRaw) || 0, fCol, Boolean(item.shadow))
+                            if (!(batchCtx != null && !BATCH_FAILED && drawBatchedGlyph(batchCtx, fSeq, fxRaw, fyRaw, fCol, shShdBool, batchCtx.itemMat, fLay, fMode))) {
+                                ensureFallbackBlend(event, batchCtx)
+                                ensureItemPosePushed(event)
+                                event.text(frag.comp, Math.round(fxRaw) || 0, Math.round(fyRaw) || 0, fCol, shShdBool)
+                            }
+                        } else if (batchCtx != null && !BATCH_FAILED && batchCtx.canDirectMatrix) {
+                            var fMatDirect = batchCtx.unitMat
+                            fMatDirect.set(batchCtx.itemMat)
+                            fMatDirect.translate((frag.cx || 0) + (dx || 0), (frag.cy || 0) + (dy || 0), 0.0)
+                            if (rotDeg !== 0 && isFinite(rotDeg)) fMatDirect.rotateZ(rotDeg * DEG_TO_RAD)
+                            if (fScale !== 1.0 && isFinite(fScale)) fMatDirect.scale(fScale, fScale, 1.0)
+                            if (!drawBatchedGlyph(batchCtx, fSeq, frag.halfW || 0, -4.5, fCol, shShdBool, fMatDirect, fLay, fMode)) {
+                                ensureFallbackBlend(event, batchCtx)
+                                ensureItemPosePushed(event)
+                                var fpDirect = false
+                                try {
+                                    event.push()
+                                    fpDirect = true
+                                    event.translate((frag.cx || 0) + (dx || 0), (frag.cy || 0) + (dy || 0))
+                                    if (rotDeg !== 0 && isFinite(rotDeg)) event.rotateDeg(rotDeg)
+                                    if (fScale !== 1.0 && isFinite(fScale)) {
+                                        event['scale(float,float)'] ? event['scale(float,float)'](fScale, fScale) : event.scale(fScale, fScale)
+                                    }
+                                    event.text(frag.comp, Math.round(frag.halfW || 0) || 0, -4, fCol, shShdBool)
+                                } catch (eFD) {
+                                } finally {
+                                    if (fpDirect) { try { event.pop() } catch (eFDPop) { } }
+                                }
                             }
                         } else {
                             var fragPushed = false
                             try {
+                                ensureItemPosePushed(event)
                                 event.push()
                                 fragPushed = true
                                 event.translate((frag.cx || 0) + (dx || 0), (frag.cy || 0) + (dy || 0))
@@ -2616,8 +3037,9 @@
                                 }
                                 var fhx = Math.round(frag.halfW || 0) || 0
                                 var fMat = (batchCtx != null && !BATCH_FAILED) ? ((typeof event.getMatrix === 'function') ? event.getMatrix() : event.matrix) : null
-                                if (!(fMat != null && drawBatchedGlyph(batchCtx, frag.seq || (frag.seq = resolveVisualSeq(frag.comp)), frag.halfW || 0, -4.5, fCol, Boolean(item.shadow), fMat))) {
-                                    event.text(frag.comp, fhx, -4, fCol, Boolean(item.shadow))
+                                if (!(fMat != null && drawBatchedGlyph(batchCtx, fSeq, frag.halfW || 0, -4.5, fCol, shShdBool, fMat, fLay, fMode))) {
+                                    ensureFallbackBlend(event, batchCtx)
+                                    event.text(frag.comp, fhx, -4, fCol, shShdBool)
                                 }
                             } catch (eFrag) {
                             } finally {
@@ -2660,6 +3082,7 @@
                         var cf = charFrags[cIdx]
                         if (cf.visIndex < startSkipVis || cf.visIndex >= keepEndVis) continue
                         lastVisCf = cf
+                        if (cf.isBlank) continue
 
                         var shouldShakeChar = (cf.shakeFlag === 1) || (isPerCharShake && cf.shakeFlag !== -1)
                         var offDx  = 0.0
@@ -2691,15 +3114,17 @@
                             fadeProgress,
                             offRot,
                             batchCtx,
-                            cf.seq
+                            cf.seq,
+                            cf
                         )
                     }
 
                     if (blinkCursor.length > 0 && lastVisCf != null) {
                         if (item._cursorText !== blinkCursor || item._cursorComp == null) {
-                            item._cursorText = blinkCursor
-                            item._cursorComp = Text.of(blinkCursor)
-                            item._cursorSeq  = resolveVisualSeq(item._cursorComp)
+                            item._cursorText  = blinkCursor
+                            item._cursorComp  = Text.of(blinkCursor)
+                            item._cursorSeq   = resolveVisualSeq(item._cursorComp)
+                            item._cursorOwner = { _muiLayout: null, _muiEpoch: -1, _muiCheckMs: 0 }
                         }
                         drawRichUnit(
                             event,
@@ -2718,7 +3143,8 @@
                             fadeProgress,
                             0.0,
                             batchCtx,
-                            item._cursorSeq
+                            item._cursorSeq,
+                            item._cursorOwner
                         )
                     }
                 } else {
@@ -2745,7 +3171,10 @@
                                 seq:   resolveVisualSeq(tComp),
                                 x:     -Math.floor((rLine1.fullW || 0) * 0.5) + (rLine1.offsetPx || 0),
                                 y:     startY + (rLine1.lineIndex || 0) * lineStep,
-                                halfW: (rLine1.fullW || 0) * 0.5
+                                halfW: (rLine1.fullW || 0) * 0.5,
+                                _muiLayout:  null,
+                                _muiEpoch:   -1,
+                                _muiCheckMs: 0
                             })
                         }
                         var sItems = []
@@ -2757,7 +3186,10 @@
                                 seq:   resolveVisualSeq(sComp),
                                 x:     -Math.floor((rLine2.fullW || 0) * 0.5) + (rLine2.offsetPx || 0),
                                 y:     startY + (titleLineCount + (rLine2.lineIndex || 0)) * lineStep,
-                                halfW: (rLine2.fullW || 0) * 0.5
+                                halfW: (rLine2.fullW || 0) * 0.5,
+                                _muiLayout:  null,
+                                _muiEpoch:   -1,
+                                _muiCheckMs: 0
                             })
                         }
                         lCache = { key: lineCacheKey, tItems: tItems, sItems: sItems }
@@ -2773,11 +3205,11 @@
 
                     for (var ti = 0; ti < lCache.tItems.length; ti++) {
                         var tEntry = lCache.tItems[ti]
-                        drawRichUnit(event, tEntry.comp, tEntry.x, tEntry.y, tEntry.halfW, rawMainCol, shdBool, lOutMode, lOutCol, lOutWid, 1.0, item.fadeStyle, inFade, fadeProgress, 0.0, batchCtx, tEntry.seq)
+                        drawRichUnit(event, tEntry.comp, tEntry.x, tEntry.y, tEntry.halfW, rawMainCol, shdBool, lOutMode, lOutCol, lOutWid, 1.0, item.fadeStyle, inFade, fadeProgress, 0.0, batchCtx, tEntry.seq, tEntry)
                     }
                     for (var si = 0; si < lCache.sItems.length; si++) {
                         var sEntry = lCache.sItems[si]
-                        drawRichUnit(event, sEntry.comp, sEntry.x, sEntry.y, sEntry.halfW, rawSubCol, shdBool, lOutMode, lOutCol, lOutWid, 1.0, item.fadeStyle, inFade, fadeProgress, 0.0, batchCtx, sEntry.seq)
+                        drawRichUnit(event, sEntry.comp, sEntry.x, sEntry.y, sEntry.halfW, rawSubCol, shdBool, lOutMode, lOutCol, lOutWid, 1.0, item.fadeStyle, inFade, fadeProgress, 0.0, batchCtx, sEntry.seq, sEntry)
                     }
                 }
                 item.drawErrors = 0
@@ -2789,15 +3221,18 @@
                     i--
                 }
             } finally {
-                if (pushed) {
+                if (ITEM_POSE_SCRATCH.pushed) {
+                    ITEM_POSE_SCRATCH.pushed = false
                     try { event.pop() } catch (ePop) { }
                 }
+                ITEM_POSE_SCRATCH.needed = false
             }
             }
         } finally {
             flushFrameBatchCtx(batchCtx)
-            if (prevBlend !== true) {
+            if (batchCtx != null && batchCtx.needBlendRestore) {
                 try { event.blend(false) } catch (eBlendOff) { }
+                batchCtx.needBlendRestore = false
             }
         }
     })

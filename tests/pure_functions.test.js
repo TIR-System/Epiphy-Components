@@ -1212,7 +1212,7 @@ test('audio: syncAll skips 0-handle ticks, arbitrates conflicts & merges block c
 // ----------------------------------------------------------------------------
 // 18. client renderer: batched glow (16-angle) & stroke (8-angle) outline passes and negative Z ordering
 // ----------------------------------------------------------------------------
-test('renderer: batched glow (16-angle) and stroke (8-angle) emit smooth circular passes with negative monotonic Z', function () {
+test('renderer: batched glow (8 outer + 4 inner) and stroke (8-angle) emit smooth circular passes with negative monotonic Z', function () {
     function MockMatrix4f() {
         this.z = 0
     }
@@ -1306,10 +1306,10 @@ test('renderer: batched glow (16-angle) and stroke (8-angle) emit smooth circula
     })
     paintHandlers[0](mockEvent)
 
-    // Expect 16 outline draws (8 outer @ 22.5deg + 8 inner @ 45deg) + 1 foreground core = 17 draws
-    assert.strictEqual(draws.length, 17)
-    var glowOutlines = draws.slice(0, 16)
-    var glowCore     = draws[16]
+    // Expect 12 outline draws (8 outer @ 22.5deg + 4 cardinal inner) + 1 foreground core = 13 draws
+    assert.strictEqual(draws.length, 13)
+    var glowOutlines = draws.slice(0, 12)
+    var glowCore     = draws[12]
     assert.strictEqual(glowCore.rgb, 0x8CE6FF)
     assert.strictEqual(glowCore.alpha, 255)
     assert.strictEqual(glowCore.z, 0)
@@ -1556,6 +1556,178 @@ test('audio-client: ESC pause and window focus resume resyncs gain, unpauses cha
     winActive = true
     tickHandlers[0]({})
     assert.strictEqual(playCalls.length, 2, 'must immediately reconnect stopped loop on focus regain without movement')
+})
+
+// 21. renderer: ModernUI TextLayout 直连路径、直接 Matrix4f 变换、空格裁剪与零 glIsEnabled/PoseStack 开销
+test('renderer: ModernUI TextLayout fast path caches layouts, skips PoseStack/glIsEnabled, and culls blanks', function () {
+    function FullMockMatrix4f() {
+        this.z = 0
+        this.ops = []
+    }
+    FullMockMatrix4f.prototype.set = function (o) {
+        this.z = o ? (o.z || 0) : 0
+        return this
+    }
+    FullMockMatrix4f.prototype.translate = function (dx, dy, dz) {
+        this.z += (dz || 0)
+        return this
+    }
+    FullMockMatrix4f.prototype.rotateZ = function (rad) {
+        this.ops.push(['rotateZ', rad])
+        return this
+    }
+    FullMockMatrix4f.prototype.scale = function (sx, sy, sz) {
+        this.ops.push(['scale', sx, sy, sz])
+        return this
+    }
+
+    var paintHandlers = []
+    var lookupCount   = 0
+    var drawCalls     = []
+    var glBlendQueries = 0
+    var pushCalls     = 0
+    var popCalls      = 0
+    var rotateDegCalls = 0
+    var flushCalls    = 0
+    var currentEpochObj = { ver: 1 }
+
+    var fakeLayoutsByStr = {}
+    function makeFakeLayout(key) {
+        return {
+            key: key,
+            hasColorEmoji: function () { return false },
+            drawText: function (mat, bufSrc, x, y, r, g, b, a, shadow, mode) {
+                drawCalls.push({
+                    key: key,
+                    x: x, y: y, r: r, g: g, b: b, a: a,
+                    shadow: shadow, mode: mode, z: mat ? mat.z : 0
+                })
+                return 0
+            }
+        }
+    }
+
+    var fakeMuiEngine = {
+        lookupFormattedLayout: function (seq, flags) {
+            assert.strictEqual(flags, 0, 'must pass int 0 to resolve unambiguous 2-arg overload')
+            lookupCount++
+            var s = String(seq)
+            var cacheKey = currentEpochObj.ver + ':' + s
+            if (!fakeLayoutsByStr[cacheKey]) {
+                fakeLayoutsByStr[cacheKey] = makeFakeLayout(cacheKey)
+            }
+            return fakeLayoutsByStr[cacheKey]
+        },
+        getTextRenderer: function () {
+            return {
+                chooseMode: function () { return 4 }
+            }
+        }
+    }
+
+    var cliSandbox = {
+        console: { info: function () {}, warn: function () {}, error: function (m) { throw new Error('unexpected error: ' + m) }, debug: function () {}, log: function () {} },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function (fn) { paintHandlers.push(fn) } },
+        NetworkEvents: { dataReceived: function () {} },
+        Java: {
+            loadClass: function (cls) {
+                if (cls === 'org.lwjgl.opengl.GL11') return { GL_BLEND: 3042, glIsEnabled: function () { glBlendQueries++; return true } }
+                if (cls === 'net.minecraft.client.gui.Font$DisplayMode') return { NORMAL: 'NORMAL' }
+                if (cls === 'org.joml.Matrix4f') return FullMockMatrix4f
+                if (cls === 'icyllis.modernui.mc.text.TextLayoutEngine') return { getInstance: function () { return fakeMuiEngine } }
+                if (cls === 'icyllis.modernui.mc.text.ModernTextRenderer') return { sAllowSDFTextIn2D: true }
+                return null
+            }
+        },
+        Text: {
+            of: function (s) {
+                return { string: String(s), getVisualOrderText: function () { return String(s) } }
+            }
+        },
+        global: {}
+    }
+    cliSandbox.globalThis = cliSandbox
+    vm.createContext(cliSandbox)
+    vm.runInContext(fs.readFileSync(RENDERER_PATH, 'utf8'), cliSandbox, { filename: 'Epiphy的-屏幕弹幕渲染器.js' })
+
+    var Client = cliSandbox.global.ScreenDanmakuClient
+    var baseMat = new FullMockMatrix4f()
+    var ev = {
+        width: 854,
+        height: 480,
+        level: 'minecraft:overworld',
+        font: {
+            width: function (s) { return String(s || '').length * 6 },
+            drawInBatch: function () { throw new Error('must NOT call ambiguous Font.drawInBatch when ModernUI TextLayout active') }
+        },
+        graphics: {
+            bufferSource: function () { return {} },
+            flush: function () { flushCalls++ }
+        },
+        getMatrix: function () { return baseMat },
+        push: function () { pushCalls++ },
+        pop: function () { popCalls++ },
+        translate: function () {},
+        scale: function () {},
+        rotateDeg: function () { rotateDegCalls++ },
+        blend: function () {}
+    }
+
+    // 1. 推送含空格、glow、逐字旋转抖动的弹幕（模拟功能测试配置）
+    Client.push({
+        title: 'A  B',
+        typewriter: false,
+        color: 0x8CE6FF,
+        outlineMode: 'glow',
+        outlineColor: 0xD82038,
+        outlineWidth: 1.05,
+        perCharShake: true,
+        charShakeStyle: 'horizontal_step',
+        charShakeRotDeg: 2.5,
+        shadow: false,
+        stay: 100
+    })
+
+    // 绘制第 1 帧：probe(1 canary) + frame0 canary(1) + 'A'(1) + 'B'(1) = 4 次 lookup（空格 0 次）；每可见字 13 次 drawText -> 共 26 次
+    paintHandlers[0](ev)
+    assert.strictEqual(drawCalls.length, 26, 'A and B only (spaces culled) * 13 passes = 26 TextLayout.drawText calls')
+    assert.strictEqual(pushCalls, 0, 'zero PoseStack.push JNI calls when Matrix4f supports rotateZ/scale')
+    assert.strictEqual(popCalls, 0, 'zero PoseStack.pop JNI calls')
+    assert.strictEqual(rotateDegCalls, 0, 'zero PoseStack.rotateDeg JNI calls')
+    assert.strictEqual(glBlendQueries, 0, 'zero GL11.glIsEnabled GPU sync stalls when batched succeeds')
+    assert.strictEqual(flushCalls, 1)
+    assert.ok(drawCalls.every(function (d) { return d.mode === 1 }), 'all glow & core passes must share MODE_SDF_FILL(1) to prevent BufferSource batch breaks')
+
+    // 2. 连续绘制第 2~5 帧：cf._muiLayout 应命中缓存，只有每帧 1 次 canary 检查，无多余 lookupFormattedLayout
+    var lookupsAfterFrame1 = lookupCount
+    drawCalls.length = 0
+    for (var fi = 0; fi < 4; fi++) {
+        paintHandlers[0](ev)
+    }
+    assert.strictEqual(drawCalls.length, 26 * 4)
+    assert.strictEqual(lookupCount - lookupsAfterFrame1, 4, 'only 1 canary check per frame, 0 redundant glyph layout lookups')
+
+    // 3. 模拟 F3+T 资源重载（TextLayoutEngine 返回新 canary 实例）：应立即递增 MUI_EPOCH 并刷新单位缓存
+    currentEpochObj.ver = 2
+    drawCalls.length = 0
+    paintHandlers[0](ev)
+    assert.strictEqual(drawCalls.length, 26)
+    assert.ok(drawCalls.every(function (d) { return d.key.indexOf('2:') === 0 }), 'must immediately switch to post-reload TextLayout epoch 2')
+
+    // 4. stroke 模式在 ModernUI SDF 下（outlineWidth=1.05 <= 1.15）仅需 8 外圈 + 1 主体 = 9 次 drawText
+    Client.clear('*')
+    drawCalls.length = 0
+    Client.push({
+        title: 'X',
+        typewriter: false,
+        color: 0x55FF55,
+        outlineMode: 'stroke',
+        outlineColor: 0x050A10,
+        outlineWidth: 1.05,
+        stay: 100
+    })
+    paintHandlers[0](ev)
+    assert.strictEqual(drawCalls.length, 9)
 })
 
 var passed = 0
