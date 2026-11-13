@@ -153,8 +153,8 @@
         }
         if (typeof raw !== 'string') return null;
         var s = raw.trim().toLowerCase();
-        if (s === 'true' || s === '1' || s === 'yes' || s === 'on' || s === 'y') return true;
-        if (s === 'false' || s === '0' || s === 'no' || s === 'off' || s === 'n') return false;
+        if (s === 'true' || s === '1' || s === '1b' || s === 'yes' || s === 'on' || s === 'y' || s === '是' || s === '开启' || s === '开') return true;
+        if (s === 'false' || s === '0' || s === '0b' || s === 'no' || s === 'off' || s === 'n' || s === '否' || s === '关闭' || s === '关') return false;
         return null;
     }
 
@@ -333,6 +333,9 @@
         }
 
         if (typeof raw === 'number') {
+            if (!isFinite(raw) || (c.rejectNonPositive && raw <= 0)) {
+                return { scale: defScale, isRandom: false };
+            }
             return { scale: clampNum(raw, sMin, sMax, defScale), isRandom: false };
         }
 
@@ -361,17 +364,20 @@
         }
         var n = parseFiniteNum(s);
         if (n !== null) {
+            if (c.rejectNonPositive && n <= 0) return { scale: defScale, isRandom: false };
             return { scale: clampNum(n, sMin, sMax, defScale), isRandom: false };
         }
         return { scale: defScale, isRandom: false };
     }
 
     function parseTilt(tiltVal, angleVal, fallbackAngle, defTilt) {
-        var def = (defTilt !== undefined && defTilt !== null && isFinite(defTilt))
+        var baseDef = (defTilt !== undefined && defTilt !== null && isFinite(Number(defTilt)))
             ? clampNum(defTilt, -180, 180, 0) : 0;
+        var def = (fallbackAngle !== undefined && fallbackAngle !== null && fallbackAngle !== '')
+            ? clampNum(fallbackAngle, -180, 180, baseDef)
+            : baseDef;
         var raw = (tiltVal !== undefined && tiltVal !== null && tiltVal !== '') ? tiltVal
-            : ((angleVal !== undefined && angleVal !== null && angleVal !== '') ? angleVal
-            : ((fallbackAngle !== undefined && fallbackAngle !== null && fallbackAngle !== '') ? fallbackAngle : undefined));
+            : ((angleVal !== undefined && angleVal !== null && angleVal !== '') ? angleVal : undefined);
         if (raw === undefined || typeof raw === 'boolean') return def;
 
         var bounds = readPairBounds(raw);
@@ -426,6 +432,7 @@
         }
         var type = (typeof fieldSpec === 'string') ? fieldSpec
             : (fieldSpec && fieldSpec.type ? fieldSpec.type : 'str');
+        var hasFallback = (fieldSpec && typeof fieldSpec === 'object' && hasOwn(fieldSpec, 'fallback'));
         if (fieldSpec && typeof fieldSpec.parse === 'function') {
             fieldSpec.parse(rawVal, opts, addError, key);
             return;
@@ -438,19 +445,14 @@
             opts[key] = String(rawVal).trim().toLowerCase();
             return;
         }
-        if (type === 'strictBool') {
-            var sb = parseBoolStrict(rawVal);
-            if (sb === null) {
-                addError('无效布尔参数 ' + key + '=' + String(rawVal) + ' (应为 true/false/1/0/on/off)');
-                return;
-            }
-            opts[key] = sb;
-            return;
-        }
-        if (type === 'bool') {
+        if (type === 'strictBool' || type === 'bool') {
             var b = parseBoolStrict(rawVal);
             if (b === null) {
-                addError('无效布尔参数 ' + key + '=' + String(rawVal));
+                if (hasFallback && type !== 'strictBool') {
+                    opts[key] = Boolean(fieldSpec.fallback);
+                    return;
+                }
+                addError('无效布尔参数 ' + key + '=' + String(rawVal) + ' (应为 true/false/1/0/on/off)');
                 return;
             }
             opts[key] = b;
@@ -459,6 +461,10 @@
         if (type === 'num' || type === 'strictNum') {
             var n = parseFiniteNum(rawVal);
             if (n === null) {
+                if (hasFallback && type !== 'strictNum') {
+                    opts[key] = fieldSpec.fallback;
+                    return;
+                }
                 addError('无效数字参数 ' + key + '=' + String(rawVal));
                 return;
             }
@@ -485,11 +491,16 @@
         if (type === 'nonneg') {
             var nn = parseNonNegNum(rawVal);
             if (nn === null) {
+                if (hasFallback) {
+                    opts[key] = fieldSpec.fallback;
+                    return;
+                }
                 addError('参数 ' + key + ' 必须为非负数: ' + String(rawVal));
                 return;
             }
-            if (fieldSpec && typeof fieldSpec === 'object' && fieldSpec.max != null && nn > fieldSpec.max) {
-                nn = fieldSpec.max;
+            if (fieldSpec && typeof fieldSpec === 'object') {
+                if (fieldSpec.min != null && nn < fieldSpec.min) nn = fieldSpec.min;
+                if (fieldSpec.max != null && nn > fieldSpec.max) nn = fieldSpec.max;
             }
             opts[key] = nn;
             return;

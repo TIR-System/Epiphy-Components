@@ -51,13 +51,16 @@
 // ============================================================================
 
 ;(() => {
-    var PROTO         = (typeof global !== 'undefined' && global.EpiphyProtocol != null) ? global.EpiphyProtocol : null
-    var CHANNEL       = (PROTO && PROTO.AUDIO_CHANNEL) || 'epiphy:audio'
-    var PROTO_VERSION = (PROTO && PROTO.AUDIO_PROTO_VERSION) || 5
-    var VERSION       = (PROTO && PROTO.AUDIO_SEMVER) || '5.2.0'
-    if (PROTO == null) {
-        console.warn(`[EpiphyAudio] 未检测到 startup_scripts/通用组件/Epiphy的-协议常量.js (EpiphyProtocol)，将使用内联兜底协议版本 ${PROTO_VERSION}；若双端版本不一致将被客户端拒收。`)
+    var PROTO         = (typeof global !== 'undefined') ? global.EpiphyProtocol : null
+    var SPEC          = (typeof global !== 'undefined') ? global.EpiphySpec : null
+    var BASE          = (typeof global !== 'undefined') ? global.EpiphyServerBase : null
+    if (!PROTO || !SPEC || !BASE) {
+        throw new Error('[EpiphyAudio] 缺少硬依赖 (EpiphyProtocol / EpiphySpec / EpiphyServerBase)，请确认基础脚本已加载')
     }
+    var LOGGER        = BASE.createLogger('EpiphyAudio', 5000)
+    var CHANNEL       = PROTO.AUDIO_CHANNEL
+    var PROTO_VERSION = PROTO.AUDIO_PROTO_VERSION
+    var VERSION       = PROTO.AUDIO_SEMVER
 
     var CONFIG = {
         syncIntervalTicks:   5,              // 资格、锚点与条件同步周期 (tick)
@@ -77,13 +80,7 @@
         errorLogIntervalMs:  5000            // 限频警告日志最小间隔 (ms)
     }
 
-    var PRIORITY_MAP = (PROTO && PROTO.PRIORITY_MAP) || {
-        low: 1, minor: 1, '低': 1, '次要': 1,
-        normal: 2, medium: 2, default: 2, '中': 2, '普通': 2,
-        high: 3, major: 3, important: 3, '高': 3, '重要': 3,
-        critical: 4, fatal: 4, urgent: 4, boss: 4, '极高': 4, '致命': 4,
-        active: 5, sustain: 5, '持续': 5
-    }
+    var PRIORITY_MAP = PROTO.PRIORITY_MAP
 
     var CATEGORY_ALIASES = {
         master: 'MASTER', music: 'MUSIC', record: 'RECORDS', records: 'RECORDS',
@@ -94,36 +91,10 @@
     var FALLOFFS         = new Set(['linear', 'smooth', 'cutoff', 'flat'])
     var AUDIENCES        = new Set(['near', 'self', 'players', 'dim', 'all'])
 
-    var tryCall = (fn, fallbackVal) => {
-        try {
-            var res = fn()
-            return res !== undefined ? res : fallbackVal
-        } catch (e) {
-            return fallbackVal
-        }
-    }
-
-    var loadJavaClass = (className) => {
-        try {
-            return Java.loadClass(className)
-        } catch (e) {
-            if (typeof global !== 'undefined' && global.EpiphyLog != null) {
-                global.EpiphyLog.debug('EpiphyAudio', 'loadJavaClass', `未加载类 ${className}: ${e}`)
-            }
-            return null
-        }
-    }
-
+    var loadJavaClass = BASE.loadJavaClass
     var UUIDClass     = loadJavaClass('java.util.UUID')
     var BlockPosClass = loadJavaClass('net.minecraft.core.BlockPos')
-    var SystemClass   = loadJavaClass('java.lang.System')
-
-    var nowNano = () => {
-        if (SystemClass != null) {
-            return tryCall(() => Number(SystemClass.nanoTime()), Date.now() * 1000000)
-        }
-        return Date.now() * 1000000
-    }
+    var nowNano       = BASE.nowNano
 
     var lastSyncAllMs       = 0
     var lastActiveSyncAllMs = 0
@@ -144,90 +115,43 @@
     var pendingReset    = true
     var nextHandleId       = 1
     var listenerTriggerSeq = 0
-    // ======================================================================== 基础工具与限频告警（委托 EpiphyLog）
+    // ======================================================================== 基础工具与限频告警（委托 EpiphySpec / EpiphyServerBase）
 
-    var min2 = (a, b) => (a < b ? a : b)
-    var max2 = (a, b) => (a > b ? a : b)
+    var min2     = SPEC.min2
+    var max2     = SPEC.max2
     var clampNum = (v, lo, hi) => (v < lo ? lo : (v > hi ? hi : v))
 
-    // 【catch 约定】日志设施自身的兜底：console / notifyPlayer.tell 不可用时已无更低层可退，留空避免递归报错。
     var reportWarning = (where, msg, notifyPlayer) => {
-        if (typeof global !== 'undefined' && global.EpiphyLog != null) {
-            return global.EpiphyLog.warn('EpiphyAudio', where, msg, notifyPlayer, CONFIG.errorLogIntervalMs)
-        }
-        var fullMsg = `[EpiphyAudio ${where}] ${msg}`
-        try { console.warn(fullMsg) } catch (e) {}
-        if (notifyPlayer != null) {
-            try { notifyPlayer.tell(Text.of(`§c${fullMsg}`)) } catch (e) {}
-        }
-        return null
+        return LOGGER.warn(where, msg, notifyPlayer, CONFIG.errorLogIntervalMs)
     }
 
     var reportCatch = (tag, err) => {
-        if (typeof global !== 'undefined' && global.EpiphyLog != null) {
-            return global.EpiphyLog.catchWarn('EpiphyAudio', tag, err, null, CONFIG.errorLogIntervalMs)
-        }
-        try { console.warn(`[EpiphyAudio 异常:${String(tag || 'unknown')}] ${String(err)}`) } catch (e) {}
-        return null
+        return LOGGER.catchWarn(tag, err, null, CONFIG.errorLogIntervalMs)
     }
 
     var parseFiniteNum = (val, defVal) => {
-        if (val === undefined || val === null || val === '') return defVal
-        var n = Number(val)
-        return isFinite(n) ? n : defVal
-    }
-
-    var parseBoolStrict = (val) => {
-        if (val === true || val === false) return val
-        if (val === undefined || val === null || val === '') return null
-        if (typeof val === 'number') return !isNaN(val) && val !== 0
-        var s = String(val).trim().toLowerCase()
-        if (s === 'true' || s === '1' || s === '1b' || s === 'yes' || s === 'on' || s === 'y' || s === '是' || s === '开启' || s === '开') return true
-        if (s === 'false' || s === '0' || s === '0b' || s === 'no' || s === 'off' || s === 'n' || s === 'none' || s === '否' || s === '关闭' || s === '关') return false
-        return null
+        var n = SPEC.parseFiniteNum(val)
+        return n !== null ? n : defVal
     }
 
     var parseBool = (val, defVal) => {
-        var b = parseBoolStrict(val)
-        return b === null ? defVal : b
-    }
-
-    var parsePriority = (val, defVal) => {
         if (val === undefined || val === null || val === '') return defVal
-        if (typeof val === 'number' && isFinite(val)) return clampNum(Math.round(val), 0, 10)
-        var s = String(val).trim().toLowerCase()
-        if (PRIORITY_MAP[s] != null) return PRIORITY_MAP[s]
-        var n = Number(s)
-        return isFinite(n) ? clampNum(Math.round(n), 0, 10) : defVal
+        if (typeof val === 'number') return !isNaN(val) && val !== 0
+        if (typeof val === 'string' && val.trim().toLowerCase() === 'none') return false
+        var b = SPEC.parseBoolStrict(val)
+        return b !== null ? b : defVal
     }
 
-    var parseTicks = (val, allowZero) => {
-        var canBeZero = Boolean(allowZero)
-        if (val === undefined || val === null || val === '') return null
-        if (typeof val === 'number') {
-            if (!isFinite(val)) return null
-            if (canBeZero && val === 0) return 0
-            return val > 0 ? Math.ceil(val) : null
-        }
-        var m = /^(\d+(?:\.\d+)?)\s*(t|tick|ticks|s|sec|m|min)?$/.exec(String(val).trim().toLowerCase())
-        if (m == null) return null
-        var n = Number(m[1])
-        var unit = m[2] || 't'
-        if (unit === 's' || unit === 'sec') n *= 20
-        else if (unit === 'm' || unit === 'min') n *= 1200
-        if (canBeZero && n === 0) return 0
-        return n > 0 ? Math.ceil(n) : null
-    }
+    var parsePriority = (val, defVal) => SPEC.parsePriority(val, defVal, { map: PRIORITY_MAP, min: 0, max: 10 })
+
+    var parseTicks = SPEC.parseTicks
 
     var normalizeSoundId = (v) => {
         if (v == null) return null
         var raw = v
         if (typeof raw === 'object') {
-            raw = tryCall(() => {
-                if (typeof raw.getLocation === 'function') return raw.getLocation()
-                if (raw.location != null) return raw.location
-                return raw
-            }, raw)
+            if (typeof raw.getLocation === 'function') raw = raw.getLocation()
+            else if (raw.location != null) raw = raw.location
         }
         var s = String(raw).trim().toLowerCase()
         if (s.length === 0 || s.length > 256) return null
@@ -235,12 +159,7 @@
         return /^[a-z0-9_.\-]+:[a-z0-9_.\-\/]+$/.test(s) ? s : null
     }
 
-    var normalizeDim = (v) => {
-        if (v == null) return null
-        var s = String(v).trim().toLowerCase()
-        if (s.length === 0) return null
-        return s.includes(':') ? s : `minecraft:${s}`
-    }
+    var normalizeDim = SPEC.normalizeDim
 
     var normalizeCategory = (v) => {
         if (v == null || v === '') return DEFAULT_CATEGORY
@@ -261,43 +180,7 @@
         return out
     }
 
-    // 【catch 约定】Java 对象属性/方法能力探测：跨映射读取字段或无参 getter，失败属预期分支，留空避免热路径污染。
-    var readMember = (obj, name) => {
-        if (obj == null) return null
-        var v = null
-        try { v = obj[name] } catch (e) { return null }
-        if (typeof v === 'function') {
-            try { return obj[name]() } catch (e) { return null }
-        }
-        return v
-    }
-
-    // 注意：KubeJS Rhino 中 NativeJavaList (如 level.players) 不可调用 .slice()，统一通过 size/get 或索引拷贝
-    var toJsArray = (list) => {
-        var out = []
-        if (list == null) return out
-        if (tryCall(() => {
-            if (typeof list.size === 'function' && typeof list.get === 'function') {
-                for (var i = 0, n = list.size(); i < n; i++) out.push(list.get(i))
-                return true
-            }
-            return false
-        }, false)) return out
-        if (tryCall(() => {
-            if (typeof list !== 'string' && typeof list.length === 'number') {
-                for (var j = 0, len = list.length; j < len; j++) out.push(list[j])
-                return true
-            }
-            return false
-        }, false)) return out
-        tryCall(() => {
-            if (typeof list.iterator === 'function') {
-                var it = list.iterator()
-                while (it.hasNext()) out.push(it.next())
-            }
-        }, null)
-        return out
-    }
+    var toJsArray = BASE.toJsArray
 
     // ======================================================================== Minecraft / KubeJS 6 对象访问
 
@@ -306,143 +189,47 @@
     var isBlockContainer = (o) => o != null && typeof o === 'object' && !isEntity(o) &&
         (typeof o.getBlockState === 'function' || o.blockState != null || (o.id != null && o.level != null && o.pos != null))
 
-    var uuidOf = (e) => {
-        if (e == null) return null
-        return tryCall(() => (typeof e.getStringUUID === 'function') ? String(e.getStringUUID()) : null, null)
-            || tryCall(() => (e.uuid != null) ? String(e.uuid) : null, null)
-            || tryCall(() => (typeof e.getUUID === 'function') ? String(e.getUUID()) : null, null)
-    }
-
-    var entityIdOf = (e) => {
-        if (e == null) return null
-        return tryCall(() => {
-            if (typeof e.getId === 'function') {
-                var id = Number(e.getId())
-                if (isFinite(id)) return id
-            }
-            return null
-        }, null)
-    }
-
-    var nameOf = (p) => {
-        if (p == null) return '?'
-        return tryCall(() => (p.username != null) ? String(p.username) : null, null)
-            || tryCall(() => (typeof p.getGameProfile === 'function') ? String(p.getGameProfile().getName()) : null, null)
-            || tryCall(() => (typeof p.getProfile === 'function') ? String(p.getProfile().getName()) : null, null)
-            || '?'
-    }
+    var uuidOf     = BASE.uuidOf
+    var entityIdOf = BASE.entityIdOf
+    var nameOf     = (p) => BASE.nameOf(p) || '?'
 
     var levelOf = (o) => {
         if (o == null) return null
-        var lv = readMember(o, 'level')
-        if (lv == null) {
-            lv = tryCall(() => (typeof o.getLevel === 'function') ? o.getLevel() : null, null)
-        }
-        return lv
+        var lv = o.level
+        if (lv == null && typeof o.getLevel === 'function') lv = o.getLevel()
+        return lv != null ? lv : null
     }
 
-    var dimOfLevel = (lv) => {
-        if (lv == null) return null
-        var byGetter = tryCall(() => {
-            if (typeof lv.getDimension === 'function') {
-                var gd = lv.getDimension()
-                return gd != null ? normalizeDim(String(gd)) : null
-            }
-            return null
-        }, null)
-        if (byGetter != null) return byGetter
-        return tryCall(() => {
-            var d = readMember(lv, 'dimension')
-            if (d != null && typeof d.location === 'function') d = d.location()
-            return d != null ? normalizeDim(String(d)) : null
-        }, null)
-    }
+    var dimOfLevel = BASE.dimOfLevel
 
     var resolveDimId = (levelOrDim) => {
         if (levelOrDim == null) return null
         if (typeof levelOrDim === 'string') return normalizeDim(levelOrDim)
         var fromLv = dimOfLevel(levelOrDim)
         if (fromLv != null) return fromLv
-        try { return normalizeDim(String(levelOrDim)) } catch (e) { return null }
+        return normalizeDim(levelOrDim)
     }
 
     var allLevels = () => {
-        if (serverRef == null) return []
-        try { return toJsArray(serverRef.getAllLevels()) } catch (e) { return [] }
+        if (serverRef == null || typeof serverRef.getAllLevels !== 'function') return []
+        return toJsArray(serverRef.getAllLevels())
     }
 
     var resolveServerLevel = (dimId) => {
         if (serverRef == null || !dimId) return null
-        var norm = normalizeDim(dimId)
-        var direct = tryCall(() => serverRef.getLevel(norm), null)
-        if (direct != null) return direct
-        for (var lv of allLevels()) {
-            if (dimOfLevel(lv) === norm) return lv
-        }
-        return null
+        return BASE.resolveLevel(dimId, serverRef)
     }
 
-    // 安全坐标提取：严禁将 null/undefined 传入 Number()（因为 Number(null) === 0 会将实体坐标误判为 0,0,0）
-    var readPos = (o) => {
-        if (o == null) return null
-        if (Array.isArray(o) || (typeof o === 'object' && typeof o.length === 'number' && o.length >= 3)) {
-            if (o[0] == null || o[1] == null || o[2] == null) return null
-            var ax = Number(o[0]), ay = Number(o[1]), az = Number(o[2])
-            return (isFinite(ax) && isFinite(ay) && isFinite(az)) ? { x: ax, y: ay, z: az } : null
-        }
-        var byGetters = tryCall(() => {
-            if (typeof o.getX === 'function' && typeof o.getY === 'function' && typeof o.getZ === 'function') {
-                var gx = Number(o.getX()), gy = Number(o.getY()), gz = Number(o.getZ())
-                if (isFinite(gx) && isFinite(gy) && isFinite(gz)) return { x: gx, y: gy, z: gz }
-            }
-            return null
-        }, null)
-        if (byGetters != null) return byGetters
-        var byBlock = tryCall(() => (o.block != null && o.block !== o) ? readPos(o.block) : null, null)
-        if (byBlock != null) return byBlock
-        var rx = readMember(o, 'x')
-        var ry = readMember(o, 'y')
-        var rz = readMember(o, 'z')
-        if (rx != null && ry != null && rz != null && rx !== '' && ry !== '' && rz !== '') {
-            var x = Number(rx), y = Number(ry), z = Number(rz)
-            if (isFinite(x) && isFinite(y) && isFinite(z)) return { x: x, y: y, z: z }
-        }
-        return null
-    }
-
-    var extractBlockId = (blockOrState) => {
-        if (blockOrState == null) return null
-        return tryCall(() => (blockOrState.id != null) ? String(blockOrState.id) : null, null)
-            || tryCall(() => (typeof blockOrState.getId === 'function') ? String(blockOrState.getId()) : null, null)
-            || tryCall(() => {
-                if (typeof blockOrState.getBlock === 'function') {
-                    var blk = blockOrState.getBlock()
-                    if (blk != null) {
-                        if (blk.id != null) return String(blk.id)
-                        if (typeof blk.getId === 'function') return String(blk.getId())
-                    }
-                }
-                return null
-            }, null)
-    }
-
-    var isBlockChunkLoaded = (lv, bx, bz) => {
-        if (lv == null) return false
-        var cx = bx >> 4
-        var cz = bz >> 4
-        if (tryCall(() => {
-            var cs = lv.getChunkSource()
-            return cs != null && cs.getChunkNow(cx, cz) != null
-        }, false)) return true
-        return Boolean(tryCall(() => lv.hasChunk(cx, cz), false))
-    }
+    var readPos            = BASE.readPos
+    var extractBlockId     = BASE.extractBlockId
+    var isBlockChunkLoaded = BASE.isChunkLoaded
 
     var queryBlockAt = (dimId, bx, by, bz) => {
         var lv = resolveServerLevel(dimId)
         if (lv == null) return null
         var ix = Math.floor(bx), iy = Math.floor(by), iz = Math.floor(bz)
         if (!isBlockChunkLoaded(lv, ix, iz)) return null
-        return tryCall(() => (typeof lv.getBlock === 'function') ? lv.getBlock(ix, iy, iz) : null, null)
+        return (typeof lv.getBlock === 'function') ? lv.getBlock(ix, iy, iz) : null
     }
 
     var isBlockPoweredAt = (dimId, bx, by, bz) => {
@@ -450,18 +237,13 @@
         if (lv == null) return false
         var ix = Math.floor(bx), iy = Math.floor(by), iz = Math.floor(bz)
         if (!isBlockChunkLoaded(lv, ix, iz)) return false
-        if (tryCall(() => {
-            var b = lv.getBlock(ix, iy, iz)
-            if (b != null) {
-                if (typeof b.getIndirectPower === 'function' && Number(b.getIndirectPower()) > 0) return true
-                if (b.indirectPower != null && Number(b.indirectPower) > 0) return true
-            }
-            return false
-        }, false)) return true
-        return Boolean(tryCall(() => {
-            return BlockPosClass != null && typeof lv.hasNeighborSignal === 'function'
-                && lv.hasNeighborSignal(new BlockPosClass(ix, iy, iz))
-        }, false))
+        var b = (typeof lv.getBlock === 'function') ? lv.getBlock(ix, iy, iz) : null
+        if (b != null) {
+            if (typeof b.getIndirectPower === 'function' && Number(b.getIndirectPower()) > 0) return true
+            if (b.indirectPower != null && Number(b.indirectPower) > 0) return true
+        }
+        return Boolean(BlockPosClass != null && typeof lv.hasNeighborSignal === 'function'
+            && lv.hasNeighborSignal(new BlockPosClass(ix, iy, iz)))
     }
 
     var deriveBlockAnchorKey = (dimId, bx, by, bz, soundId) => {
@@ -476,9 +258,11 @@
 
     var onlinePlayers = () => {
         if (serverRef == null) return []
-        var list = tryCall(() => toJsArray(serverRef.getPlayerList().getPlayers()), null)
-        if (list != null) return list
-        return tryCall(() => toJsArray(serverRef.players), [])
+        if (typeof serverRef.getPlayerList === 'function') {
+            var pl = serverRef.getPlayerList()
+            if (pl != null && typeof pl.getPlayers === 'function') return toJsArray(pl.getPlayers())
+        }
+        return serverRef.players != null ? toJsArray(serverRef.players) : []
     }
 
     var findPlayerByName = (name) => {
@@ -489,25 +273,30 @@
         return null
     }
 
+    var getActiveEntityFromLevel = (lv, uuidObj) => {
+        if (lv == null || typeof lv.getEntity !== 'function') return null
+        var e = lv.getEntity(uuidObj)
+        return (e != null && (typeof e.isRemoved !== 'function' || !e.isRemoved())) ? e : null
+    }
+
     var findEntityByUuid = (uuidStr, preferDim, levelMap) => {
         if (UUIDClass == null || !uuidStr) return null
-        var uuidObj = tryCall(() => UUIDClass.fromString(String(uuidStr)), null)
+        var uuidObj = null
+        try {
+            uuidObj = UUIDClass.fromString(String(uuidStr))
+        } catch (eUuid) {
+            return null
+        }
         if (uuidObj == null) return null
 
         if (preferDim && levelMap && levelMap[preferDim]) {
-            var prefEnt = tryCall(() => {
-                var e0 = levelMap[preferDim].getEntity(uuidObj)
-                return (e0 != null && !e0.isRemoved()) ? e0 : null
-            }, null)
+            var prefEnt = getActiveEntityFromLevel(levelMap[preferDim], uuidObj)
             if (prefEnt != null) return prefEnt
         }
 
         for (var lv of allLevels()) {
             if (preferDim && dimOfLevel(lv) === preferDim && levelMap && levelMap[preferDim]) continue
-            var ent = tryCall(() => {
-                var e1 = lv.getEntity(uuidObj)
-                return (e1 != null && !e1.isRemoved()) ? e1 : null
-            }, null)
+            var ent = getActiveEntityFromLevel(lv, uuidObj)
             if (ent != null) return ent
         }
         return null
@@ -945,14 +734,15 @@
             a.ref = rec.p; a.x = rec.x; a.y = rec.y; a.z = rec.z; a.dim = rec.dim; a.eid = rec.eid
             return true
         }
+        var isEntityActive = (e) => e != null
+            && (typeof e.isRemoved !== 'function' || !e.isRemoved())
+            && (typeof e.isAlive !== 'function' || e.isAlive())
         var ent = a.ref
-        var alive = tryCall(() => ent != null && !ent.isRemoved() && (typeof ent.isAlive !== 'function' || ent.isAlive()), false)
-        if (!alive) {
+        if (!isEntityActive(ent)) {
             ent = findEntityByUuid(a.uuid, a.dim, snap.levelMap)
             a.ref = ent
         }
-        if (ent == null) return false
-        if (!tryCall(() => (typeof ent.isAlive !== 'function' || ent.isAlive()), true)) return false
+        if (!isEntityActive(ent)) return false
         var pos = readPos(ent)
         if (pos == null) return false
         a.x   = pos.x
@@ -1914,11 +1704,11 @@
             reportWarning('atEvent', '传入的 event 为空')
             return 0
         }
-        var block  = tryCall(() => event.block, null)
+        var block = event.block
         if (block != null) return atBlock(block, soundId, opts)
-        var entity = tryCall(() => event.entity, null)
+        var entity = event.entity
         if (entity != null) return onEntity(entity, soundId, opts)
-        var player = tryCall(() => event.player, null)
+        var player = event.player
         if (player != null) return onEntity(player, soundId, opts)
         var pos = readPos(event.pos)
         var lv  = levelOf(event)
@@ -2278,39 +2068,14 @@
     }
 
     var computeMergedComponents = (scopeKey) => {
-        var list = []
+        var nodes = []
         for (var src of mergeBoundSources.values()) {
-            if (src != null && src.scopeKey === scopeKey) list.push(src)
-        }
-        if (list.length === 0) return []
-        list.sort((a, b) => a.seq - b.seq)
-        var n = list.length
-        var visited = new Array(n)
-        for (var vi = 0; vi < n; vi++) visited[vi] = false
-        var comps = []
-        for (var s = 0; s < n; s++) {
-            if (visited[s]) continue
-            visited[s] = true
-            var queue = [s]
-            var members = []
-            for (var qi = 0; qi < queue.length; qi++) {
-                var a = list[queue[qi]]
-                members.push(a)
-                for (var nb = 0; nb < n; nb++) {
-                    if (visited[nb]) continue
-                    var b = list[nb]
-                    var touch = a.range + b.range
-                    var dx = a.cx - b.cx, dy = a.cy - b.cy, dz = a.cz - b.cz
-                    if ((dx * dx + dy * dy + dz * dz) <= (touch * touch + 1e-6)) {
-                        visited[nb] = true
-                        queue.push(nb)
-                    }
-                }
+            if (src != null && src.scopeKey === scopeKey) {
+                nodes.push({ src: src, cx: src.cx, cy: src.cy, cz: src.cz, r: src.range, seq: src.seq })
             }
-            if (members.length > 1) members.sort((ma, mb) => ma.seq - mb.seq)
-            comps.push(members)
         }
-        return comps
+        if (nodes.length === 0) return []
+        return SPEC.computeSphereMergeClusters(nodes).map((c) => c.members.map((m) => m.src))
     }
 
     var startMergedClusterHandle = (comp, scopeKey, snap) => {
@@ -2532,98 +2297,9 @@
     }
 
     var audioBlockTracker    = null
-    var missingTrackerWarned = false
-
-    // 基础兜底表：当方块追踪组件缺失时，仅维护本会话内通过 placed/broken 事件感知的方块
-    var fallbackBindings     = new Map()
-    var fallbackTracked      = new Map()
-    var fallbackEventsHooked = false
-
-    var hookFallbackBlockEvents = () => {
-        if (fallbackEventsHooked) return
-        fallbackEventsHooked = true
-        try {
-            BlockEvents.placed((event) => {
-                try {
-                    if (audioBlockTracker != null || fallbackBindings.size === 0 || event.block == null) return
-                    var bid = extractBlockId(event.block)
-                    if (bid == null || !fallbackBindings.has(bid)) return
-                    var dim = dimOfLevel(event.level) || 'minecraft:overworld'
-                    var ix  = Math.floor(event.block.x), iy = Math.floor(event.block.y), iz = Math.floor(event.block.z)
-                    var key = `${dim}|${ix},${iy},${iz}`
-                    var rec = { key: key, blockId: bid, dim: dim, x: ix, y: iy, z: iz, audioKey: makeBoundAudioKey(bid, dim, ix, iy, iz) }
-                    fallbackTracked.set(key, rec)
-                    ensureBoundAudioSeq(rec)
-                    if (findActiveClusterHandleForKey(rec.audioKey) == null) {
-                        startBoundBlockAudio(rec, fallbackBindings.get(bid), event.level, event.block)
-                    }
-                } catch (eP) {
-                    reportCatch('fallback:placed', eP)
-                }
-            })
-            BlockEvents.broken((event) => {
-                try {
-                    if (audioBlockTracker != null || event.block == null) return
-                    var dim = dimOfLevel(event.level) || 'minecraft:overworld'
-                    var ix  = Math.floor(event.block.x), iy = Math.floor(event.block.y), iz = Math.floor(event.block.z)
-                    var key = `${dim}|${ix},${iy},${iz}`
-                    var rec = fallbackTracked.get(key)
-                    if (rec != null) {
-                        fallbackTracked.delete(key)
-                        handleBoundBlockRemoved(rec.audioKey, key, null)
-                    } else {
-                        var bid = extractBlockId(event.block)
-                        if (bid != null && fallbackBindings.has(bid)) {
-                            handleBoundBlockRemoved(makeBoundAudioKey(bid, dim, ix, iy, iz), key, null)
-                        }
-                    }
-                } catch (eB) {
-                    reportCatch('fallback:broken', eB)
-                }
-            })
-        } catch (eHook) {
-            reportCatch('fallback:hookEvents', eHook)
-        }
-    }
-
-    var createFallbackTracker = () => {
-        hookFallbackBlockEvents()
-        return {
-            isFallback: true,
-            bind: (idStr, meta) => { fallbackBindings.set(idStr, meta); return true },
-            unbind: (idStr, fadeOut) => {
-                fallbackBindings.delete(idStr)
-                var stopped = 0
-                for (var [k, rec] of Array.from(fallbackTracked.entries())) {
-                    if (rec.blockId === idStr) {
-                        handleBoundBlockRemoved(rec.audioKey, k, fadeOut)
-                        fallbackTracked.delete(k)
-                        stopped++
-                    }
-                }
-                return stopped
-            },
-            scanNow: () => 0
-        }
-    }
-
     var ensureAudioBlockTracker = () => {
         if (audioBlockTracker != null) return audioBlockTracker
-        var trackerApi = (typeof global !== 'undefined') ? global.EpiphyBlockTracker : null
-        if (trackerApi == null || typeof trackerApi.createTracker !== 'function') {
-            if (!missingTrackerWarned) {
-                missingTrackerWarned = true
-                var msg = '[EpiphyAudio] 依赖组件 EpiphyBlockTracker (Epiphy的-方块追踪组件.js) 未加载，已降级为基础事件兜底模式（仅支持新放置/破坏方块，无区块扫描与持久化）。'
-                if (typeof global !== 'undefined' && global.EpiphyLog != null) {
-                    global.EpiphyLog.once('warn', 'audio:missing_block_tracker', msg)
-                } else {
-                    // 【catch 约定】日志设施自身的兜底：console 不可用时已无更低层可退，留空。
-                    try { console.warn(msg) } catch (e) {}
-                }
-            }
-            return createFallbackTracker()
-        }
-        audioBlockTracker = trackerApi.createTracker({
+        audioBlockTracker = BASE.acquireBlockTracker({
             name:             'audio',
             maintainInterval: 20,
             maintainOffset:   2,
@@ -2736,7 +2412,6 @@
                     }
                     sendPacket(p, { proto: PROTO_VERSION, act: 'reset', ses: SESSION })
                 }
-                checkValveRegistration()
             }
             if (tickCounter % CONFIG.syncIntervalTicks === 0) {
                 syncAll()
@@ -2756,16 +2431,6 @@
                 loginReadyTick.set(uuid, tickCounter + 8)
             }
             sendPacket(p, { proto: PROTO_VERSION, act: 'reset', ses: SESSION })
-            if (valveMissing && checkValveRegistration(true)) {
-                var isOp = Boolean(tryCall(() => p.hasPermissions(2), false))
-                if (isOp) {
-                    try {
-                        p.tell(Text.of('§e[EpiphyAudio] §7未检测到权限阀组件 (EpiphyPermissionValve)，§f/epiphy audio §7指令功能未生效（JS 调用接口正常）。'))
-                    } catch (e) {
-                        reportCatch('loggedIn:tellValveMissing', e)
-                    }
-                }
-            }
         } catch (e) {
             reportWarning('loggedIn', String(e))
         }
@@ -2842,7 +2507,8 @@
         list:             list,
         listeners:        listeners,
         on:               on,
-        getStats:         () => getStats()
+        getStats:         () => getStats(),
+        _pure:            Object.freeze({ parseOptions: (str) => parseOptions(str) })
     }
 
     // ========================================================================
@@ -2883,339 +2549,258 @@
         '  §f/epiphy audio follow @s epiphy:air_raid_siren loop range=48 falloff=linear key=siren_alert'
     ]
 
-    var OPTION_KEYS = {
-        volume: 'volume', vol: 'volume',
-        pitch: 'pitch', pit: 'pitch',
-        range: 'range', radius: 'range', r: 'range',
-        loop: 'loop',
-        life: 'lifeMode', lifemode: 'lifeMode',
-        falloff: 'falloff', mode: 'falloff',
-        category: 'category', cat: 'category',
-        duration: 'duration', dur: 'duration', stay: 'duration',
-        lifetime: 'lifetime',
-        activehold: 'activeHold', holdticks: 'activeHold',
-        delay: 'delay', startdelay: 'delay',
-        fadein: 'fadeIn',
-        fadeout: 'fadeOut',
-        latejoin: 'lateJoin', late: 'lateJoin',
-        resume: 'resume',
-        duck: 'duckMusic', duckmusic: 'duckMusic',
-        outofrange: 'outOfRangeMode', outofrangemode: 'outOfRangeMode', omode: 'outOfRangeMode',
-        conflict: 'conflictMode', conflictmode: 'conflictMode',
-        conflictscope: 'conflictScope',
-        replace: 'replace', restart: 'replace',
-        audience: 'audience',
-        priority: 'priority', importance: 'priority',
-        startonenter: 'startOnEnter',
-        requireredstone: 'requireRedstone',
-        stoponbreak: 'stopOnBlockBreak', stoponblockbreak: 'stopOnBlockBreak',
-        stoponredstoneoff: 'stopOnRedstoneOff',
-        stoponentitydeath: 'stopOnEntityDeath',
-        stoponempty: 'stopWhenEmpty', stopwhenempty: 'stopWhenEmpty',
-        maxtriggers: 'maxTriggers', maxlisteners: 'maxTriggers',
-        key: 'key',
-        tag: 'tag', group: 'group'
-    }
-
-    var BOOL_OPTIONS = new Set([
-        'loop', 'lateJoin', 'resume', 'duckMusic', 'replace',
-        'startOnEnter', 'requireRedstone',
-        'stopOnBlockBreak', 'stopOnRedstoneOff', 'stopOnEntityDeath', 'stopWhenEmpty'
-    ])
-    var NUM_OPTIONS = new Set(['volume', 'pitch', 'range', 'maxTriggers'])
-    var BARE_WORDS = {
-        loop:    ['loop', true],
-        once:    ['loop', false],
-        active:  ['lifeMode', 'active'],
-        replace: ['replace', true],
-        restart: ['replace', true],
-        linear:  ['falloff', 'linear'],
-        smooth:  ['falloff', 'smooth'],
-        cutoff:  ['falloff', 'cutoff'],
-        flat:    ['falloff', 'flat'],
-        near:    ['audience', 'near'],
-        self:    ['audience', 'self'],
-        all:     ['audience', 'all']
+    var AUDIO_SPEC_SCHEMA = {
+        unknownMode: 'error',
+        aliases: {
+            vol:         'volume',
+            pit:         'pitch',
+            radius:      'range',
+            r:           'range',
+            life:        'lifeMode',
+            mode:        'falloff',
+            cat:         'category',
+            dur:         'duration',
+            stay:        'duration',
+            holdticks:   'activeHold',
+            startdelay:  'delay',
+            late:        'lateJoin',
+            duck:        'duckMusic',
+            outofrange:  'outOfRangeMode',
+            omode:       'outOfRangeMode',
+            conflict:    'conflictMode',
+            restart:     'replace',
+            importance:  'priority',
+            stoponbreak: 'stopOnBlockBreak',
+            stoponempty: 'stopWhenEmpty',
+            maxlisteners:'maxTriggers'
+        },
+        bareWords: {
+            loop:    { key: 'loop',     value: true },
+            once:    { key: 'loop',     value: false },
+            active:  { key: 'lifeMode', value: 'active' },
+            replace: { key: 'replace',  value: true },
+            restart: { key: 'replace',  value: true },
+            linear:  { key: 'falloff',  value: 'linear' },
+            smooth:  { key: 'falloff',  value: 'smooth' },
+            cutoff:  { key: 'falloff',  value: 'cutoff' },
+            flat:    { key: 'falloff',  value: 'flat' },
+            near:    { key: 'audience', value: 'near' },
+            self:    { key: 'audience', value: 'self' },
+            all:     { key: 'audience', value: 'all' }
+        },
+        fields: {
+            volume:            'strictNum',
+            pitch:             'strictNum',
+            range:             'strictNum',
+            maxTriggers:       'strictNum',
+            loop:              'strictBool',
+            lateJoin:          'strictBool',
+            resume:            'strictBool',
+            duckMusic:         'strictBool',
+            replace:           'strictBool',
+            startOnEnter:      'strictBool',
+            requireRedstone:   'strictBool',
+            stopOnBlockBreak:  'strictBool',
+            stopOnRedstoneOff: 'strictBool',
+            stopOnEntityDeath: 'strictBool',
+            stopWhenEmpty:     'strictBool',
+            lifeMode:          'str',
+            falloff:           'str',
+            category:          'str',
+            duration:          'str',
+            lifetime:          'str',
+            activeHold:        'str',
+            delay:             'str',
+            fadeIn:            'str',
+            fadeOut:           'str',
+            outOfRangeMode:    'str',
+            conflictMode:      'str',
+            conflictScope:     'str',
+            audience:          'str',
+            priority:          'str',
+            key:               'str',
+            tag:               'str',
+            group:             'str'
+        }
     }
 
     var parseOptions = (str) => {
-        var opts = {}
-        if (str == null || String(str).trim().length === 0) return { opts: opts }
-        var re = /([A-Za-z_]+)=(?:"([^"]*)"|'([^']*)'|(\S+))|(\S+)/g
-        var m
-        while ((m = re.exec(String(str))) !== null) {
-            if (m[5] != null) {
-                var bare = BARE_WORDS[m[5].toLowerCase()]
-                if (bare == null) return { error: `无法识别的独立参数词: ${m[5]}` }
-                opts[bare[0]] = bare[1]
-                continue
-            }
-            var key = OPTION_KEYS[m[1].toLowerCase()]
-            if (key == null) return { error: `未知参数项: ${m[1]}` }
-            var val = m[2] != null ? m[2] : (m[3] != null ? m[3] : m[4])
-            if (BOOL_OPTIONS.has(key)) {
-                var b = parseBoolStrict(val)
-                if (b == null) return { error: `${key} 参数仅接受布尔值 (true / false)` }
-                opts[key] = b
-            } else if (NUM_OPTIONS.has(key)) {
-                var n = Number(val)
-                if (!isFinite(n)) return { error: `${key} 参数需要有效数字，收到: ${val}` }
-                opts[key] = n
-            } else {
-                opts[key] = val
-            }
-        }
-        return { opts: opts }
-    }
-
-    var reply = (source, msg) => {
-        try { source.sendSuccess(Text.of(msg), false) } catch (e) { reportCatch('reply', e) }
-    }
-    var replyOk = (source, msg) => reply(source, `§a[EpiphyAudio] §7${msg}`)
-    var replyErr = (source, msg) => reply(source, `§c[EpiphyAudio 错误] ${msg} §7(输入 §f/epiphy audio help §7查看语法)`)
-
-    var sendAudioHelp = (source) => {
-        for (var line of AUDIO_HELP_LINES) reply(source, line)
-        return 1
-    }
-
-    var describeHandle = (info) => {
-        var where = info.anchor === 'none'
-            ? (info.dim != null ? info.dim : 'global')
-            : `${info.dim} (${info.x.toFixed(1)}, ${info.y.toFixed(1)}, ${info.z.toFixed(1)})`
-        var stateTag = info.waitingStart ? '§e[待启动]' : '§a[播放中]'
-        return `§7#${info.id} ${stateTag} §f${info.sound}` +
-            ` §7[${info.anchor}/${info.audience}/${info.falloff}${info.loop ? '/loop' : '/once'}]` +
-            ` §8${where} r=${info.range} 收听=${info.listeners} 优先级=${info.priority} age=${info.ageTicks}t` +
-            (info.key != null ? ` key=${info.key}` : '') + (info.tag != null ? ` tag=${info.tag}` : '')
-    }
-
-    var runPlayCommand = (source, fields, optionStr) => {
-        var parsed = parseOptions(optionStr)
-        if (parsed.error) {
-            replyErr(source, parsed.error)
-            return 0
-        }
-        var id = play(withFields(parsed.opts, fields))
-        if (id > 0) {
-            var info = get(id)
-            var stateDesc = (info && info.waitingStart)
-                ? '已挂起等待启动条件满足'
-                : `当前收听 §f${info != null ? info.listeners : 0}§7 人`
-            replyOk(source, `已调度 §f${fields.sound}§7（句柄 §e#${id}§7，${stateDesc}）`)
-            return 1
-        }
-        replyErr(source, '播放未生效：参数无效、非循环音频范围内无在线玩家、或句柄池已满')
-        return 0
+        if (str == null || String(str).trim().length === 0) return { opts: {} }
+        var res = SPEC.parseCommandSpec(str, AUDIO_SPEC_SCHEMA)
+        if (!res.ok) return { error: res.error }
+        return { opts: res.opts }
     }
 
     var buildAudioCommandNode = (ctxReg) => {
-        var event          = ctxReg.event
-        var Commands       = ctxReg.Commands
-        var Arguments      = ctxReg.Arguments
-        var guardExecution = ctxReg.guardExecution
-        var SOUND_ARG = Arguments.RESOURCE_LOCATION
-        var soundSuggest = tryCall(() => {
-            var sp = loadJavaClass('net.minecraft.commands.synchronization.SuggestionProviders')
-            return sp != null ? sp.AVAILABLE_SOUNDS : null
-        }, null)
+        var cb = BASE.createCommandBuilder(ctxReg, { tag: 'EpiphyAudio' })
 
-        var soundOf = (ctx) => String(SOUND_ARG.getResult(ctx, 'sound'))
+        var cmdErr = (sourceOrCtx, msg) => cb.replyErr(sourceOrCtx, `${msg} §7(输入 §f/epiphy audio help §7查看语法)`)
 
-        var soundArgument = () => {
-            var node = Commands.argument('sound', SOUND_ARG.create(event))
-            if (soundSuggest != null) {
-                try { node = node.suggests(soundSuggest) } catch (e) { reportCatch('soundSuggest', e) }
+        var runPlayCommand = (source, fields, optionStr) => {
+            var parsed = parseOptions(optionStr)
+            if (parsed.error) return cmdErr(source, parsed.error)
+            var id = play(withFields(parsed.opts, fields))
+            if (id > 0) {
+                var info = get(id)
+                var stateDesc = (info && info.waitingStart)
+                    ? '已挂起等待启动条件满足'
+                    : `当前收听 §f${info != null ? info.listeners : 0}§7 人`
+                cb.replyOk(source, `§7已调度 §f${fields.sound}§7（句柄 §e#${id}§7，${stateDesc}）`)
+                return 1
             }
-            return node
+            return cmdErr(source, '播放未生效：参数无效、非循环音频范围内无在线玩家、或句柄池已满')
         }
 
-        var soundWithOptions = (handler) =>
-            soundArgument()
-                .executes(guardExecution((ctx) => handler(ctx, '')))
-                .then(
-                    Commands.argument('options', Arguments.GREEDY_STRING.create(event))
-                        .executes(guardExecution((ctx) =>
-                            handler(ctx, String(Arguments.GREEDY_STRING.getResult(ctx, 'options')))
-                        ))
-                )
-
-        var vecToArray = (v) => {
-            var p = readPos(v)
-            return p != null ? [p.x, p.y, p.z] : null
+        var soundChain = (prefixArgs, handler) => {
+            var specs = prefixArgs.concat([
+                { name: 'sound', type: 'sound' },
+                { name: 'options', type: 'greedy' }
+            ])
+            return [
+                specs,
+                (ctx, v) => handler(ctx, v, v._count >= specs.length ? v.options : ''),
+                { minArgs: prefixArgs.length + 1 }
+            ]
         }
 
-        return Commands.literal('audio')
-            .executes(guardExecution((ctx) => sendAudioHelp(ctx.source)))
-            .then(Commands.literal('help')
-                .executes(guardExecution((ctx) => sendAudioHelp(ctx.source))))
-
-            .then(Commands.literal('play')
-                .then(Commands.argument('targets', Arguments.PLAYERS.create(event))
-                    .then(soundWithOptions((ctx, opt) => {
-                        var players = toJsArray(Arguments.PLAYERS.getResult(ctx, 'targets'))
-                        if (players.length === 0) { replyErr(ctx.source, '未匹配到任何在线玩家'); return 0 }
-                        return runPlayCommand(ctx.source, { sound: soundOf(ctx), players: players }, opt)
-                    }))))
-
-            .then(Commands.literal('follow')
-                .then(Commands.argument('entity', Arguments.ENTITY.create(event))
-                    .then(soundWithOptions((ctx, opt) => {
-                        var ent = Arguments.ENTITY.getResult(ctx, 'entity')
-                        return runPlayCommand(ctx.source, { sound: soundOf(ctx), entity: ent }, opt)
-                    }))))
-
-            .then(Commands.literal('at')
-                .then(Commands.argument('pos', Arguments.VEC3.create(event))
-                    .then(soundWithOptions((ctx, opt) => {
-                        var pos = vecToArray(Arguments.VEC3.getResult(ctx, 'pos'))
-                        var dim = tryCall(() => dimOfLevel(ctx.source.getLevel ? ctx.source.getLevel() : ctx.source.level), null)
-                        if (pos == null || dim == null) { replyErr(ctx.source, '无法确定目标坐标或当前维度'); return 0 }
-                        return runPlayCommand(ctx.source, { sound: soundOf(ctx), at: pos, dim: dim }, opt)
-                    }))))
-
-            .then(Commands.literal('pos')
-                .then(Commands.argument('dimension', Arguments.DIMENSION.create(event))
-                    .then(Commands.argument('pos', Arguments.VEC3.create(event))
-                        .then(soundWithOptions((ctx, opt) => {
-                            var dim = dimOfLevel(Arguments.DIMENSION.getResult(ctx, 'dimension'))
-                            var pos = vecToArray(Arguments.VEC3.getResult(ctx, 'pos'))
-                            if (pos == null || dim == null) { replyErr(ctx.source, '无法解析目标维度或坐标'); return 0 }
-                            return runPlayCommand(ctx.source, { sound: soundOf(ctx), at: pos, dim: dim }, opt)
-                        })))))
-
-            .then(Commands.literal('dim')
-                .then(Commands.argument('dimension', Arguments.DIMENSION.create(event))
-                    .then(soundWithOptions((ctx, opt) => {
-                        var dim = dimOfLevel(Arguments.DIMENSION.getResult(ctx, 'dimension'))
-                        if (dim == null) { replyErr(ctx.source, '无法解析目标维度'); return 0 }
-                        return runPlayCommand(ctx.source, { sound: soundOf(ctx), dim: dim, audience: 'dim' }, opt)
-                    }))))
-
-            .then(Commands.literal('all')
-                .then(soundWithOptions((ctx, opt) =>
-                    runPlayCommand(ctx.source, { sound: soundOf(ctx), audience: 'all' }, opt)
-                )))
-
-            .then(Commands.literal('update')
-                .then(Commands.argument('ref', Arguments.STRING.create(event))
-                    .then(Commands.argument('options', Arguments.GREEDY_STRING.create(event))
-                        .executes(guardExecution((ctx) => {
-                            var ref    = String(Arguments.STRING.getResult(ctx, 'ref'))
-                            var optStr = String(Arguments.GREEDY_STRING.getResult(ctx, 'options'))
-                            var parsed = parseOptions(optStr)
-                            if (parsed.error) { replyErr(ctx.source, parsed.error); return 0 }
-                            if (update(ref, parsed.opts)) {
-                                replyOk(ctx.source, `已实时热更新句柄 [${ref}]`)
-                                return 1
-                            }
-                            replyErr(ctx.source, `未找到句柄或 key [${ref}]`)
-                            return 0
-                        })))))
-
-            .then(Commands.literal('stop')
-                .then(Commands.argument('ref', Arguments.STRING.create(event))
-                    .executes(guardExecution((ctx) => {
-                        var ref = String(Arguments.STRING.getResult(ctx, 'ref'))
-                        var n   = stop(ref)
-                        if (n > 0) { replyOk(ctx.source, `已停止 [${ref}] (共 ${n} 个句柄)`); return 1 }
-                        replyErr(ctx.source, `未找到匹配 [${ref}] 的活动句柄`)
-                        return 0
-                    }))
-                    .then(Commands.argument('fadeOut', Arguments.WORD.create(event))
-                        .executes(guardExecution((ctx) => {
-                            var ref = String(Arguments.STRING.getResult(ctx, 'ref'))
-                            var fo  = String(Arguments.WORD.getResult(ctx, 'fadeOut'))
-                            var n   = stop(ref, fo)
-                            if (n > 0) { replyOk(ctx.source, `已软停止 [${ref}] (fadeOut=${fo}, 共 ${n} 个句柄)`); return 1 }
-                            replyErr(ctx.source, `未找到匹配 [${ref}] 的活动句柄`)
-                            return 0
-                        })))))
-
-            .then(Commands.literal('stopkey')
-                .then(Commands.argument('key', Arguments.STRING.create(event))
-                    .executes(guardExecution((ctx) => {
-                        var key = String(Arguments.STRING.getResult(ctx, 'key'))
-                        if (stopKey(key) > 0) { replyOk(ctx.source, `已停止 key=${key}`); return 1 }
-                        replyErr(ctx.source, `没有找到 key=${key} 的句柄`)
-                        return 0
-                    }))))
-
-            .then(Commands.literal('stoptag')
-                .then(Commands.argument('tag', Arguments.STRING.create(event))
-                    .executes(guardExecution((ctx) => {
-                        var tag = String(Arguments.STRING.getResult(ctx, 'tag'))
-                        var n   = stopTag(tag)
-                        replyOk(ctx.source, `已停止 tag/group=${tag} 的 ${n} 个句柄`)
+        return cb.literal('audio', {
+            helpLines: AUDIO_HELP_LINES,
+            children: [
+                cb.literal('help', { helpLines: AUDIO_HELP_LINES }),
+                cb.literal('play', {
+                    chain: soundChain([{ name: 'targets', type: 'players' }], (ctx, v, opt) => {
+                        if (v.targets.length === 0) return cmdErr(ctx.source, '未匹配到任何在线玩家')
+                        return runPlayCommand(ctx.source, { sound: v.sound, players: v.targets }, opt)
+                    })
+                }),
+                cb.literal('follow', {
+                    chain: soundChain([{ name: 'entity', type: 'entity' }], (ctx, v, opt) =>
+                        runPlayCommand(ctx.source, { sound: v.sound, entity: v.entity }, opt)
+                    )
+                }),
+                cb.literal('at', {
+                    chain: soundChain([{ name: 'pos', type: 'vec3' }], (ctx, v, opt) => {
+                        var lv = typeof ctx.source.getLevel === 'function' ? ctx.source.getLevel() : ctx.source.level
+                        var dim = dimOfLevel(lv)
+                        if (v.pos == null || dim == null) return cmdErr(ctx.source, '无法确定目标坐标或当前维度')
+                        return runPlayCommand(ctx.source, { sound: v.sound, at: v.pos, dim: dim }, opt)
+                    })
+                }),
+                cb.literal('pos', {
+                    chain: soundChain([
+                        { name: 'dimension', type: 'dim' },
+                        { name: 'pos', type: 'vec3' }
+                    ], (ctx, v, opt) => {
+                        if (v.pos == null || v.dimension == null) return cmdErr(ctx.source, '无法解析目标维度或坐标')
+                        return runPlayCommand(ctx.source, { sound: v.sound, at: v.pos, dim: v.dimension }, opt)
+                    })
+                }),
+                cb.literal('dim', {
+                    chain: soundChain([{ name: 'dimension', type: 'dim' }], (ctx, v, opt) => {
+                        if (v.dimension == null) return cmdErr(ctx.source, '无法解析目标维度')
+                        return runPlayCommand(ctx.source, { sound: v.sound, dim: v.dimension, audience: 'dim' }, opt)
+                    })
+                }),
+                cb.literal('all', {
+                    chain: soundChain([], (ctx, v, opt) =>
+                        runPlayCommand(ctx.source, { sound: v.sound, audience: 'all' }, opt)
+                    )
+                }),
+                cb.literal('update', {
+                    chain: [[
+                        { name: 'ref', type: 'string' },
+                        { name: 'options', type: 'greedy' }
+                    ], (ctx, v) => {
+                        var parsed = parseOptions(v.options)
+                        if (parsed.error) return cmdErr(ctx.source, parsed.error)
+                        if (update(v.ref, parsed.opts)) return cb.replyOk(ctx.source, `§7已实时热更新句柄 [${v.ref}]`)
+                        return cmdErr(ctx.source, `未找到句柄或 key [${v.ref}]`)
+                    }]
+                }),
+                cb.literal('stop', {
+                    chain: [[
+                        { name: 'ref', type: 'string' },
+                        { name: 'fadeOut', type: 'word' }
+                    ], (ctx, v) => {
+                        var n = (v._count >= 2) ? stop(v.ref, v.fadeOut) : stop(v.ref)
+                        if (n > 0) {
+                            var msg = (v._count >= 2)
+                                ? `§7已软停止 [${v.ref}] (fadeOut=${v.fadeOut}, 共 ${n} 个句柄)`
+                                : `§7已停止 [${v.ref}] (共 ${n} 个句柄)`
+                            return cb.replyOk(ctx.source, msg)
+                        }
+                        return cmdErr(ctx.source, `未找到匹配 [${v.ref}] 的活动句柄`)
+                    }, { minArgs: 1 }]
+                }),
+                cb.literal('stopkey', {
+                    chain: [[{ name: 'key', type: 'string' }], (ctx, v) => {
+                        if (stopKey(v.key) > 0) return cb.replyOk(ctx.source, `§7已停止 key=${v.key}`)
+                        return cmdErr(ctx.source, `没有找到 key=${v.key} 的句柄`)
+                    }]
+                }),
+                cb.literal('stoptag', {
+                    chain: [[{ name: 'tag', type: 'string' }], (ctx, v) => {
+                        var n = stopTag(v.tag)
+                        cb.replyOk(ctx.source, `§7已停止 tag/group=${v.tag} 的 ${n} 个句柄`)
                         return n > 0 ? 1 : 0
-                    }))))
-
-            .then(Commands.literal('stopsound')
-                .then(soundArgument()
-                    .executes(guardExecution((ctx) => {
-                        var n = stopSound(soundOf(ctx))
-                        replyOk(ctx.source, `已结束 ${n} 个句柄`)
+                    }]
+                }),
+                cb.literal('stopsound', {
+                    chain: [[
+                        { name: 'sound', type: 'sound' },
+                        { name: 'targets', type: 'players' }
+                    ], (ctx, v) => {
+                        var n = (v._count >= 2) ? stopFor(v.targets, v.sound) : stopSound(v.sound)
+                        var msg = (v._count >= 2)
+                            ? `§7已对 ${v.targets.length} 名玩家停止该音频，涉及 ${n} 个句柄`
+                            : `§7已结束 ${n} 个句柄`
+                        cb.replyOk(ctx.source, msg)
                         return n > 0 ? 1 : 0
-                    }))
-                    .then(Commands.argument('targets', Arguments.PLAYERS.create(event))
-                        .executes(guardExecution((ctx) => {
-                            var players = toJsArray(Arguments.PLAYERS.getResult(ctx, 'targets'))
-                            var n       = stopFor(players, soundOf(ctx))
-                            replyOk(ctx.source, `已对 ${players.length} 名玩家停止该音频，涉及 ${n} 个句柄`)
-                            return n > 0 ? 1 : 0
-                        })))))
-
-            .then(Commands.literal('stopfor')
-                .then(Commands.argument('targets', Arguments.PLAYERS.create(event))
-                    .executes(guardExecution((ctx) => {
-                        var players = toJsArray(Arguments.PLAYERS.getResult(ctx, 'targets'))
-                        var n       = stopFor(players, null)
-                        replyOk(ctx.source, `已对 ${players.length} 名玩家停止全部音频，涉及 ${n} 个句柄`)
+                    }, { minArgs: 1 }]
+                }),
+                cb.literal('stopfor', {
+                    chain: [[
+                        { name: 'targets', type: 'players' },
+                        { name: 'sound', type: 'sound' }
+                    ], (ctx, v) => {
+                        var n = stopFor(v.targets, v._count >= 2 ? v.sound : null)
+                        var kind = v._count >= 2 ? '指定音频' : '全部音频'
+                        cb.replyOk(ctx.source, `§7已对 ${v.targets.length} 名玩家停止${kind}，涉及 ${n} 个句柄`)
                         return n > 0 ? 1 : 0
-                    }))
-                    .then(soundArgument()
-                        .executes(guardExecution((ctx) => {
-                            var players = toJsArray(Arguments.PLAYERS.getResult(ctx, 'targets'))
-                            var n       = stopFor(players, soundOf(ctx))
-                            replyOk(ctx.source, `已对 ${players.length} 名玩家停止指定音频，涉及 ${n} 个句柄`)
-                            return n > 0 ? 1 : 0
-                        })))))
-
-            .then(Commands.literal('stopall')
-                .executes(guardExecution((ctx) => {
-                    var n = stopAll()
-                    replyOk(ctx.source, `已结束全部 ${n} 个活动句柄`)
-                    return 1
-                }))
-                .then(Commands.argument('fadeOut', Arguments.WORD.create(event))
-                    .executes(guardExecution((ctx) => {
-                        var fo = String(Arguments.WORD.getResult(ctx, 'fadeOut'))
-                        var n  = stopAll(fo)
-                        replyOk(ctx.source, `已软停止全部 ${n} 个活动句柄 (fadeOut=${fo})`)
+                    }, { minArgs: 1 }]
+                }),
+                cb.literal('stopall', {
+                    chain: [[{ name: 'fadeOut', type: 'word' }], (ctx, v) => {
+                        var hasFo = v._count >= 1
+                        var n = hasFo ? stopAll(v.fadeOut) : stopAll()
+                        var msg = hasFo
+                            ? `§7已软停止全部 ${n} 个活动句柄 (fadeOut=${v.fadeOut})`
+                            : `§7已结束全部 ${n} 个活动句柄`
+                        return cb.replyOk(ctx.source, msg)
+                    }, { minArgs: 0 }]
+                }),
+                cb.literal('list', {
+                    exec: (ctx) => {
+                        var all = list()
+                        cb.replyOk(ctx.source, `§7当前活动音频句柄 ${all.length} 个${all.length > CONFIG.listMaxLines ? `（仅展示前 ${CONFIG.listMaxLines} 个）` : ''}`)
+                        for (var i = 0; i < all.length && i < CONFIG.listMaxLines; i++) {
+                            cb.sendText(ctx.source, describeHandle(all[i]))
+                        }
                         return 1
-                    }))))
-
-            .then(Commands.literal('list')
-                .executes(guardExecution((ctx) => {
-                    var all = list()
-                    replyOk(ctx.source, `当前活动音频句柄 ${all.length} 个${all.length > CONFIG.listMaxLines ? `（仅展示前 ${CONFIG.listMaxLines} 个）` : ''}`)
-                    for (var i = 0; i < all.length && i < CONFIG.listMaxLines; i++) {
-                        reply(ctx.source, describeHandle(all[i]))
                     }
-                    return 1
-                })))
-
-            .then(Commands.literal('info')
-                .then(Commands.argument('ref', Arguments.STRING.create(event))
-                    .executes(guardExecution((ctx) => {
-                        var ref  = String(Arguments.STRING.getResult(ctx, 'ref'))
-                        var info = get(ref)
-                        if (info == null) { replyErr(ctx.source, `句柄或 key [${ref}] 不存在`); return 0 }
-                        reply(ctx.source, describeHandle(info))
-                        var names = listeners(ref)
-                        reply(ctx.source, `§7当前收听玩家: §f${names.length > 0 ? names.join(', ') : '（无）'}`)
+                }),
+                cb.literal('info', {
+                    chain: [[{ name: 'ref', type: 'string' }], (ctx, v) => {
+                        var info = get(v.ref)
+                        if (info == null) return cmdErr(ctx.source, `句柄或 key [${v.ref}] 不存在`)
+                        cb.sendText(ctx.source, describeHandle(info))
+                        var names = listeners(v.ref)
+                        cb.sendText(ctx.source, `§7当前收听玩家: §f${names.length > 0 ? names.join(', ') : '（无）'}`)
                         return 1
-                    }))))
+                    }]
+                })
+            ]
+        })
     }
 
     var audioSubcommandSpec = {
@@ -3237,57 +2822,25 @@
         buildNode: buildAudioCommandNode
     }
 
-    var valveMissing = false
-
-    function checkValveRegistration(quiet) {
-        var queue = (typeof global !== 'undefined' && global != null) ? global.EpiphyCommandRegistryQueue : null
-        var valve = (typeof global !== 'undefined' && global != null)
-            ? (global.EpiphyPermissionValve || global.PermissionValve)
-            : null
-        var stillQueued = Array.isArray(queue) && queue.includes(audioSubcommandSpec)
-        var missing = (valve == null || stillQueued)
-        valveMissing = missing
-        if (missing && !quiet) {
-            console.info('[EpiphyAudio] 未检测到权限阀组件 (EpiphyPermissionValve)，/epiphy audio 指令功能未生效（JS 调用接口正常）。')
-        }
-        return missing
-    }
-
     try {
-        var valve = (typeof global !== 'undefined' && global != null)
-            ? (global.EpiphyPermissionValve || global.PermissionValve)
-            : null
-        if (valve != null && typeof valve.registerSubcommand === 'function') {
-            valve.registerSubcommand(audioSubcommandSpec)
-        } else {
-            if (!Array.isArray(global.EpiphyCommandRegistryQueue)) {
-                global.EpiphyCommandRegistryQueue = []
-            }
-            var q = global.EpiphyCommandRegistryQueue
-            for (var qi = q.length - 1; qi >= 0; qi--) {
-                if (q[qi] != null && q[qi].name === 'audio') q.splice(qi, 1)
-            }
-            q.push(audioSubcommandSpec)
-        }
+        BASE.registerSubcommandSafe(audioSubcommandSpec)
     } catch (eReg) {
-        console.warn(`[EpiphyAudio] 注册 /epiphy audio 指令时出现异常，已终止指令注册: ${eReg}`)
+        LOGGER.warn('commandReg', `注册 /epiphy audio 指令时出现异常，已终止指令注册: ${eReg}`)
     }
 
     var getAudioTrackerCalls = () => {
-        return tryCall(() => {
-            var t = (typeof global !== 'undefined' && global != null) ? global.EpiphyBlockTracker : null
-            if (t != null && typeof t.getStats === 'function') {
-                var st = t.getStats()
-                if (st != null && st.subscriberCalls != null && st.subscriberCalls.audio != null) {
-                    return st.subscriberCalls.audio
-                }
-            }
-            return 0
-        }, 0)
+        var t = (typeof global !== 'undefined' && global != null) ? global.EpiphyBlockTracker : null
+        var st = (t != null && typeof t.getStats === 'function') ? t.getStats() : null
+        return (st != null && st.subscriberCalls != null && st.subscriberCalls.audio != null)
+            ? st.subscriberCalls.audio : 0
     }
 
     var getStats = () => {
-        var mode = (audioBlockTracker != null && !audioBlockTracker.isFallback) ? 'tracker' : 'fallback'
+        var tracker    = audioBlockTracker
+        var isFb       = Boolean(tracker != null && tracker.isFallback)
+        var mode       = (tracker != null && !tracker.isFallback) ? 'tracker' : 'fallback'
+        var fbBindings = (isFb && typeof tracker.getBindingCount === 'function') ? tracker.getBindingCount() : 0
+        var fbTracked  = (isFb && typeof tracker.getTrackedRecords === 'function') ? tracker.getTrackedRecords(null).length : 0
         return {
             handlesSize:         handles.size,
             maxHandles:          CONFIG.maxHandles,
@@ -3301,9 +2854,9 @@
             lastSyncTick:        lastSyncAllTick,
             currentTick:         tickCounter,
             trackedRecordsCalls: getAudioTrackerCalls(),
-            fallbackBindings:    fallbackBindings.size,
-            fallbackTracked:     fallbackTracked.size,
-            valveMissing:        valveMissing,
+            fallbackBindings:    fbBindings,
+            fallbackTracked:     fbTracked,
+            valveMissing:        !BASE.isValveReady(),
             debug:               Boolean(CONFIG.debug)
         }
     }
@@ -3333,6 +2886,7 @@
         metrics: getStats,
         check: () => {
             var hasRealTracker = (audioBlockTracker != null && !audioBlockTracker.isFallback)
+            var vMissing = !BASE.isValveReady()
             return [
                 {
                     name:   'handles_headroom',
@@ -3341,8 +2895,8 @@
                 },
                 {
                     name:   'valve_registered',
-                    ok:     !valveMissing,
-                    detail: `valveMissing=${valveMissing}`
+                    ok:     !vMissing,
+                    detail: `valveMissing=${vMissing}`
                 },
                 {
                     name:   'block_tracker_attached',
@@ -3388,12 +2942,5 @@
             }
         }
     }
-    if (typeof global !== 'undefined' && global != null) {
-        if (global.EpiphyDebug != null && typeof global.EpiphyDebug.registerProvider === 'function') {
-            global.EpiphyDebug.registerProvider(audioDebugProvider)
-        } else {
-            if (!Array.isArray(global.EpiphyDebugProviderQueue)) global.EpiphyDebugProviderQueue = []
-            global.EpiphyDebugProviderQueue.push(audioDebugProvider)
-        }
-    }
+    BASE.registerDebugProvider(audioDebugProvider)
 })()

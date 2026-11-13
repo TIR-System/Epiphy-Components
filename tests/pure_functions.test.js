@@ -2040,6 +2040,179 @@ test('EpiphyServerBase: resolveWorldStorageInfo & centralized acquireBlockTracke
     assert.ok(sb.global.EpiphyDebugProviderQueue.some(function (p) { return p && p.name === 'test_mod' }))
 })
 
+test('EpiphyAudio._pure.parseOptions: aliases, bare words, strict errors and unknown tokens', function () {
+    var sb = createKubeSandbox()
+    loadServerBase(sb)
+    runScriptIn(sb, AUDIO_PATH)
+    var A = sb.global.EpiphyAudio
+    assert.ok(A && A._pure && typeof A._pure.parseOptions === 'function')
+
+    var ok1 = A._pure.parseOptions('vol=0.75 r=32 lifetime=120 life=active mode=linear conflict=nearest omode=bypass stoponbreak=false stoponempty=yes loop all')
+    assert.strictEqual(ok1.error, undefined)
+    assert.strictEqual(ok1.opts.volume, 0.75)
+    assert.strictEqual(ok1.opts.range, 32)
+    assert.strictEqual(ok1.opts.lifetime, '120')
+    assert.strictEqual(ok1.opts.lifeMode, 'active')
+    assert.strictEqual(ok1.opts.falloff, 'linear')
+    assert.strictEqual(ok1.opts.conflictMode, 'nearest')
+    assert.strictEqual(ok1.opts.outOfRangeMode, 'bypass')
+    assert.strictEqual(ok1.opts.stopOnBlockBreak, false)
+    assert.strictEqual(ok1.opts.stopWhenEmpty, true)
+    assert.strictEqual(ok1.opts.loop, true)
+    assert.strictEqual(ok1.opts.audience, 'all')
+
+    var ok2 = A._pure.parseOptions('once active near smooth')
+    assert.strictEqual(ok2.error, undefined)
+    assert.strictEqual(ok2.opts.loop, false)
+    assert.strictEqual(ok2.opts.lifeMode, 'active')
+    assert.strictEqual(ok2.opts.audience, 'near')
+    assert.strictEqual(ok2.opts.falloff, 'smooth')
+
+    var badBool = A._pure.parseOptions('loop=notabool')
+    assert.ok(badBool.error && badBool.error.indexOf('loop') >= 0)
+
+    var badNum = A._pure.parseOptions('vol=abc')
+    assert.ok(badNum.error && badNum.error.indexOf('volume') >= 0)
+
+    var badKey = A._pure.parseOptions('unknownKey=1')
+    assert.ok(badKey.error && badKey.error.indexOf('unknownKey') >= 0)
+
+    var badWord = A._pure.parseOptions('bogusword')
+    assert.ok(badWord.error && badWord.error.indexOf('bogusword') >= 0)
+})
+
+test('EpiphyServerBase fallback tracker: promotes makeRecordExtra fields & dispatches throttled onTick', function () {
+    var sb = createKubeSandbox()
+    var hooks = attachSandboxEventHooks(sb)
+    loadServerBase(sb)
+    var B = sb.global.EpiphyServerBase
+
+    var tickSeen = []
+    var foundViews = []
+    var mockLevel = { dimension: 'minecraft:overworld', players: [] }
+    var mockServer = { getLevel: function (d) { return d === 'minecraft:overworld' ? mockLevel : null } }
+
+    var tr = B.acquireBlockTracker({
+        name: 'audio_fb_test',
+        maintainInterval: 3,
+        maintainOffset: 2,
+        makeRecordExtra: function (bid, dim, x, y, z) {
+            return { audioKey: 'k:' + bid + '@' + x + ',' + y + ',' + z, customTag: 99 }
+        },
+        onFound: function (view) { foundViews.push(view) },
+        onTick: function (view, meta, tickNum, lv) {
+            tickSeen.push({ tick: tickNum, audioKey: view.audioKey, levelOk: lv === mockLevel })
+        }
+    })
+    assert.strictEqual(tr.isFallback, true)
+    tr.bind('mod:speaker', { radius: 24 })
+
+    hooks.placed.forEach(function (fn) {
+        fn({ level: mockLevel, block: { id: 'mod:speaker', x: 1, y: 2, z: 3 } })
+    })
+    assert.strictEqual(foundViews.length, 1)
+    assert.strictEqual(foundViews[0].audioKey, 'k:mod:speaker@1,2,3')
+    assert.strictEqual(foundViews[0].customTag, 99)
+    assert.strictEqual(foundViews[0].extra.audioKey, 'k:mod:speaker@1,2,3')
+
+    for (var t = 1; t <= 6; t++) {
+        hooks.tick.forEach(function (fn) { fn({ server: mockServer }) })
+    }
+    assert.deepStrictEqual(tickSeen, [
+        { tick: 2, audioKey: 'k:mod:speaker@1,2,3', levelOk: true },
+        { tick: 5, audioKey: 'k:mod:speaker@1,2,3', levelOk: true }
+    ])
+})
+
+test('ScreenDanmaku & EpiphyAudio: buildNode builds converged Brigadier trees and executes subcommands', function () {
+    var sb = createKubeSandbox()
+    loadServerBase(sb)
+    runScriptIn(sb, DANMAKU_PATH)
+    runScriptIn(sb, AUDIO_PATH)
+
+    function makeMockNode(kind, name) {
+        var frozenChildren = []
+        var execFn = null
+        var node = {
+            kind: kind,
+            name: name,
+            requires: function () { return node },
+            executes: function (fn) { execFn = fn; return node },
+            suggests: function () { return node },
+            then: function (child) { frozenChildren.push(child._snapshot()); return node },
+            _snapshot: function () {
+                return { kind: kind, name: name, hasExec: execFn !== null, execFn: execFn, children: frozenChildren.slice() }
+            }
+        }
+        return node
+    }
+
+    var Commands = {
+        literal: function (n) { return makeMockNode('literal', n) },
+        argument: function (n, type) { return makeMockNode('arg:' + type, n) }
+    }
+    var argNames = ['PLAYERS', 'PLAYER', 'ENTITY', 'ENTITIES', 'WORD', 'STRING', 'GREEDY_STRING',
+                    'INTEGER', 'DOUBLE', 'FLOAT', 'DIMENSION', 'VEC3', 'RESOURCE_LOCATION']
+    var Arguments = {}
+    for (var ai = 0; ai < argNames.length; ai++) {
+        (function (t) {
+            Arguments[t] = {
+                create: function () { return t },
+                getResult: function (ctx, name) { return ctx.args ? ctx.args[name] : undefined }
+            }
+        })(argNames[ai])
+    }
+
+    var regCtx = {
+        event: {},
+        Commands: Commands,
+        Arguments: Arguments,
+        guardExecution: function (fn) { return fn },
+        canSee: function () { return true }
+    }
+
+    var queue = sb.global.EpiphyCommandRegistryQueue || []
+    var specsByName = {}
+    for (var qi = 0; qi < queue.length; qi++) {
+        if (queue[qi] && queue[qi].name) specsByName[queue[qi].name] = queue[qi]
+    }
+    assert.ok(specsByName.danmaku && typeof specsByName.danmaku.buildNode === 'function')
+    assert.ok(specsByName.audio && typeof specsByName.audio.buildNode === 'function')
+
+    function indexChildren(snap) {
+        var m = {}
+        for (var c = 0; c < snap.children.length; c++) m[snap.children[c].name] = snap.children[c]
+        return m
+    }
+
+    var dmSnap = specsByName.danmaku.buildNode(regCtx)._snapshot()
+    var dmKids = indexChildren(dmSnap)
+    var expectedDm = ['help', 'stop', 'clear', 'player', 'here', 'pos']
+    for (var di = 0; di < expectedDm.length; di++) {
+        assert.ok(dmKids[expectedDm[di]], 'danmaku missing subcommand: ' + expectedDm[di])
+    }
+
+    var sent = []
+    var mockSrc = { sendSuccess: function (msg) { sent.push(String(msg)) } }
+    assert.strictEqual(dmKids.help.execFn({ source: mockSrc, args: {} }), 1)
+    assert.ok(sent.length >= 3, 'danmaku help prints multiple lines')
+
+    var auSnap = specsByName.audio.buildNode(regCtx)._snapshot()
+    var auKids = indexChildren(auSnap)
+    var expectedAu = ['help', 'play', 'follow', 'at', 'pos', 'dim', 'all', 'update',
+                      'stop', 'stopkey', 'stoptag', 'stopsound', 'stopfor', 'stopall', 'list', 'info']
+    for (var aui = 0; aui < expectedAu.length; aui++) {
+        assert.ok(auKids[expectedAu[aui]], 'audio missing subcommand: ' + expectedAu[aui])
+    }
+
+    var audioOut = []
+    var auSrc = { sendSuccess: function (msg) { audioOut.push(String(msg)) } }
+    assert.strictEqual(auKids.list.execFn({ source: auSrc, args: {} }), 1)
+    assert.strictEqual(auKids.stopall.execFn({ source: auSrc, args: {} }), 1)
+    assert.ok(audioOut.some(function (l) { return l.indexOf('活动音频句柄') >= 0 }))
+    assert.ok(audioOut.some(function (l) { return l.indexOf('0 个活动句柄') >= 0 }))
+})
+
 var passed = 0
 for (var i = 0; i < tests.length; i++) {
     var t = tests[i]

@@ -67,12 +67,15 @@
 // ============================================================================
 
 ;(function () {
-    var PROTO         = (typeof global !== 'undefined' && global.EpiphyProtocol != null) ? global.EpiphyProtocol : null
-    var CHANNEL       = (PROTO && PROTO.DANMAKU_CHANNEL) || 'epiphy:screen_danmaku'
-    var PROTO_VERSION = (PROTO && PROTO.DANMAKU_PROTO_VERSION) || 5
-    if (PROTO == null) {
-        console.warn('[ScreenDanmaku] 未检测到 startup_scripts/通用组件/Epiphy的-协议常量.js (EpiphyProtocol)，将使用内联兜底协议版本 ' + PROTO_VERSION + '；若双端版本不一致将被客户端拒收。')
+    var PROTO         = (typeof global !== 'undefined') ? global.EpiphyProtocol : null
+    var SPEC          = (typeof global !== 'undefined') ? global.EpiphySpec : null
+    var BASE          = (typeof global !== 'undefined') ? global.EpiphyServerBase : null
+    if (!PROTO || !SPEC || !BASE) {
+        throw new Error('[ScreenDanmaku] 缺少硬依赖 (EpiphyProtocol / EpiphySpec / EpiphyServerBase)，请确认基础脚本已加载')
     }
+    var LOGGER        = BASE.createLogger('ScreenDanmaku', 5000)
+    var CHANNEL       = PROTO.DANMAKU_CHANNEL
+    var PROTO_VERSION = PROTO.DANMAKU_PROTO_VERSION
     var SERVER_REF    = null
     var spreadCounter = 0
 
@@ -173,21 +176,10 @@
         showInGui:      false
     }
 
-    var PRIORITY_MAP = (PROTO && PROTO.PRIORITY_MAP) || {
-        low: 1, minor: 1, '低': 1, '次要': 1,
-        normal: 2, medium: 2, default: 2, '中': 2, '普通': 2,
-        high: 3, major: 3, important: 3, '高': 3, '重要': 3,
-        critical: 4, fatal: 4, urgent: 4, boss: 4, '极高': 4, '致命': 4,
-        active: 5, sustain: 5, '持续': 5
-    }
+    var PRIORITY_MAP = PROTO.PRIORITY_MAP
 
-    // 内置 HUD 常见禁区（归一化矩形 { x, y, w, h }，优先从 EpiphyProtocol 读取单一真相源）
-    var HUD_FORBIDDEN_PRESETS = (PROTO && PROTO.HUD_FORBIDDEN_PRESETS) || {
-        minimap:   { x: 0.74, y: 0.00, w: 0.26, h: 0.28 }, // 右上角小地图区
-        hotbar:    { x: 0.22, y: 0.80, w: 0.56, h: 0.20 }, // 底部快捷栏、经验条与状态栏
-        crosshair: { x: 0.40, y: 0.38, w: 0.20, h: 0.22 }, // 屏幕正中心准星视野区
-        bossbar:   { x: 0.25, y: 0.00, w: 0.50, h: 0.09 }  // 顶部 Boss 血条区
-    }
+    // 内置 HUD 常见禁区（归一化矩形 { x, y, w, h }，从 EpiphyProtocol 读取单一真相源）
+    var HUD_FORBIDDEN_PRESETS = PROTO.HUD_FORBIDDEN_PRESETS
 
     var DEFAULT_HUD_AVOID_LIST = [
         HUD_FORBIDDEN_PRESETS.minimap,
@@ -211,33 +203,8 @@
         right_hud:     { rx: 0.84, ry: 0.52, spreadX: 0.06, spreadY: 0.16 }
     }
 
-    var SIZE_PRESETS = {
-        tiny:   0.58,
-        small:  0.74,
-        normal: 1.00,
-        medium: 1.00,
-        large:  1.35,
-        huge:   1.70
-    }
-
-    var COLOR_PRESETS = {
-        red:          0xFF4444,
-        dark_red:     0xAA0000,
-        gold:         0xFFAA00,
-        yellow:       0xFFFF55,
-        green:        0x55FF55,
-        dark_green:   0x00AA00,
-        aqua:         0x55FFFF,
-        dark_aqua:    0x00AAAA,
-        blue:         0x5555FF,
-        light_purple: 0xFF55FF,
-        purple:       0xAA00AA,
-        dark_purple:  0xAA00AA,
-        white:        0xFFFFFF,
-        gray:         0xAAAAAA,
-        dark_gray:    0x555555,
-        black:        0x000000
-    }
+    var SIZE_PRESETS  = SPEC.SIZE_PRESETS
+    var COLOR_PRESETS = SPEC.COLOR_PRESETS
 
     var VALID_FADE_STYLES = {
         shrink:     'shrink',
@@ -276,55 +243,20 @@
         return defVal
     }
 
-    // 【catch 约定】以下 try/catch 均为 Java Vec3 / BlockPos 坐标字段与方法能力探测：
-    // 读取失败说明传入对象并非有效三维坐标容器，直接返回 null 属于预期分支，留空避免高频误报。
-    function readVec3(vec) {
-        if (vec == null) return null
-        try {
-            var vx = (typeof vec.x === 'function') ? vec.x() : vec.x
-            var vy = (typeof vec.y === 'function') ? vec.y() : vec.y
-            var vz = (typeof vec.z === 'function') ? vec.z() : vec.z
-            var nx = Number(vx), ny = Number(vy), nz = Number(vz)
-            if (isFinite(nx) && isFinite(ny) && isFinite(nz)) return { x: nx, y: ny, z: nz }
-        } catch (e) { }
-        return null
-    }
+    var readVec3 = BASE.readPos
+    var nowNano  = BASE.nowNano
 
-    // 统一路由至 EpiphyLog（Epiphy的-日志.js）限频日志层：库函数遇到无效参数或已捕获异常时仅记 warn，不抛异常中断调用方 tick
-    // 【catch 约定】以下日志设施自身的兜底：console / notifyPlayer.tell 不可用时已无更低层可退，留空避免递归报错。
     function reportConfigWarning(msg, notifyPlayer) {
-        if (typeof global !== 'undefined' && global.EpiphyLog != null) {
-            return global.EpiphyLog.warn('ScreenDanmaku', '参数警告', msg, notifyPlayer, CONFIG.errorLogIntervalMs)
-        }
-        try { console.warn('[ScreenDanmaku 参数警告] ' + msg) } catch (e) { }
-        if (notifyPlayer != null) {
-            try { notifyPlayer.tell(Text.of('§c[ScreenDanmaku 参数警告] ' + msg)) } catch (e2) { }
-        }
-        return null
+        return LOGGER.warn('参数警告', msg, notifyPlayer, CONFIG.errorLogIntervalMs)
     }
 
     function reportCatch(tag, err) {
-        if (typeof global !== 'undefined' && global.EpiphyLog != null) {
-            return global.EpiphyLog.catchWarn('ScreenDanmaku', tag, err, null, CONFIG.errorLogIntervalMs)
-        }
-        try { console.warn('[ScreenDanmaku 异常:' + String(tag || 'unknown') + '] ' + String(err)) } catch (eIgnore) { }
-        return null
+        return LOGGER.catchWarn(tag, err, null, CONFIG.errorLogIntervalMs)
     }
 
     var danmakuTickCounter   = 0
     var blockSourceSeq       = 0
     var playerSourceCooldown = new Map() // '<playerUuid>|<scopeKey>' -> expireTick
-
-    // 【catch 约定】System.nanoTime 探测失败时回退 Date.now()*1e6，不影响弹幕调度逻辑。
-    var DanmakuSystemClass = null
-    try { DanmakuSystemClass = Java.loadClass('java.lang.System') } catch (eSys) { }
-
-    function nowNano() {
-        if (DanmakuSystemClass != null) {
-            try { return Number(DanmakuSystemClass.nanoTime()) } catch (eNs) { }
-        }
-        return Date.now() * 1000000
-    }
 
     var lastEmitMs            = 0
     var maxEmitMs             = 0
@@ -407,10 +339,7 @@
     }
 
     function getPlayerUuidSafe(p) {
-        if (p == null) return 'unknown'
-        try { return String(p.getUuid()) } catch (e) { }
-        try { return String(p.username || 'player') } catch (e2) { }
-        return 'unknown'
+        return BASE.uuidOf(p) || BASE.nameOf(p) || 'unknown'
     }
 
     function prepareSourceConflictOpts(opts) {
@@ -453,26 +382,18 @@
     }
 
     function parsePriority(val, defVal) {
-        if (val === undefined || val === null || val === '') return defVal
-        if (typeof val === 'number' && isFinite(val)) return Math.max(0, Math.min(10, Math.round(val)))
-        var s = String(val).trim().toLowerCase()
-        if (PRIORITY_MAP[s] != null) return PRIORITY_MAP[s]
-        var n = Number(s)
-        if (isFinite(n)) return Math.max(0, Math.min(10, Math.round(n)))
-        return defVal
+        return SPEC.parsePriority(val, defVal, { map: PRIORITY_MAP, min: 0, max: 10 })
     }
 
     function parseFiniteNum(val, defVal) {
-        if (val === undefined || val === null || val === '') return defVal
-        var n = Number(val)
-        return isFinite(n) ? n : defVal
+        var n = SPEC.parseFiniteNum(val)
+        return n !== null ? n : defVal
     }
 
     function parseNonNegNum(val, defVal, minVal) {
+        var n = SPEC.parseNonNegNum(val)
+        if (n === null) return defVal
         var floor = (minVal != null && isFinite(minVal)) ? minVal : 0
-        if (val === undefined || val === null || val === '') return defVal
-        var n = Number(val)
-        if (!isFinite(n) || n < 0) return defVal
         return Math.max(floor, n)
     }
 
@@ -483,27 +404,14 @@
         return Math.max(16, Math.min(4096, Math.round(n)))
     }
 
-    function parseTicksOrSec(raw) {
-        if (raw === undefined || raw === null || String(raw).trim() === '') return null
-        var s = String(raw).trim().toLowerCase()
-        if (s.slice(-1) === 's') {
-            var sec = Number(s.slice(0, -1))
-            if (isFinite(sec) && sec > 0) return Math.round(sec * 20)
-            return null
-        }
-        var n = Number(s)
-        if (isFinite(n) && n > 0) return Math.round(n)
-        return null
-    }
+    var parseTicksOrSec = SPEC.parseTicksOrSec
 
     function parseBool(val, defVal) {
         if (val === undefined || val === null || val === '') return defVal
-        if (typeof val === 'boolean') return val
         if (typeof val === 'number') return !isNaN(val) && val !== 0
-        var s = String(val).trim().toLowerCase()
-        if (s === 'true' || s === '1' || s === '1b' || s === 'yes' || s === 'on' || s === 'y' || s === '是' || s === '开启' || s === '开') return true
-        if (s === 'false' || s === '0' || s === '0b' || s === 'no' || s === 'off' || s === 'n' || s === 'none' || s === '否' || s === '关闭' || s === '关') return false
-        return defVal
+        if (typeof val === 'string' && val.trim().toLowerCase() === 'none') return false
+        var b = SPEC.parseBoolStrict(val)
+        return b !== null ? b : defVal
     }
 
     function quantizeZoneTag(rx, ry) {
@@ -513,88 +421,41 @@
     }
 
     function parseColor(val, defColor) {
-        if (val === undefined || val === null || val === '') return { color: defColor, isRandom: false }
-        if (typeof val === 'number' && isFinite(val)) return { color: val & 0xFFFFFF, isRandom: false }
-        var s = String(val).trim().toLowerCase()
-        if (s === 'random' || s === 'rand') {
-            var keys = ['red', 'gold', 'yellow', 'aqua', 'light_purple', 'white', 'green']
-            return { color: COLOR_PRESETS[keys[Math.floor(Math.random() * keys.length)]], isRandom: true }
-        }
-        if (COLOR_PRESETS[s] != null) return { color: COLOR_PRESETS[s], isRandom: false }
-        if (s.indexOf('#') === 0) s = s.substring(1)
-        else if (s.indexOf('0x') === 0) s = s.substring(2)
-        var parsed = parseInt(s, 16)
-        if (isFinite(parsed)) return { color: parsed & 0xFFFFFF, isRandom: false }
-        return { color: defColor, isRandom: false }
+        return SPEC.parseColor(val, defColor, COLOR_PRESETS)
     }
 
     function isArrayLike(v, minLen) {
-        var req = minLen || 2
-        return v != null && typeof v === 'object' && typeof v !== 'string' && typeof v.length === 'number' && v.length >= req
+        if (!SPEC.isArrayLike(v)) return false
+        return v.length >= (minLen || 2)
     }
 
     function parseSize(sizeVal, scaleVal) {
-        var raw = (sizeVal !== undefined && sizeVal !== null && sizeVal !== '') ? sizeVal : scaleVal
-        if (raw === undefined || raw === null || raw === '') return { scale: DEFAULTS.size, isRandom: false }
-        if (Array.isArray(raw) || isArrayLike(raw, 2)) {
-            var sMin = parseNonNegNum(raw[0], 0.65, CONFIG.sizeMin)
-            var sMax = parseNonNegNum(raw[1], 1.25, CONFIG.sizeMin)
-            var lo   = Math.min(sMin, sMax)
-            var hi   = Math.max(sMin, sMax)
-            var val  = Math.max(CONFIG.sizeMin, Math.min(CONFIG.sizeMax, lo + Math.random() * (hi - lo)))
-            return { scale: Number(val.toFixed(2)), isRandom: lo !== hi }
-        }
-        if (typeof raw === 'number' && isFinite(raw) && raw > 0) {
-            return { scale: Math.max(CONFIG.sizeMin, Math.min(CONFIG.sizeMax, raw)), isRandom: false }
-        }
-        var s = String(raw).trim().toLowerCase()
-        if (s === 'small_random' || s === 'small_rand') {
-            var sr = CONFIG.smallRandRange
-            return { scale: Number((sr[0] + Math.random() * (sr[1] - sr[0])).toFixed(2)), isRandom: true }
-        }
-        if (s === 'random' || s === 'rand') {
-            var rr = CONFIG.randSizeRange
-            return { scale: Number((rr[0] + Math.random() * (rr[1] - rr[0])).toFixed(2)), isRandom: true }
-        }
-        if (SIZE_PRESETS[s] != null) return { scale: SIZE_PRESETS[s], isRandom: false }
-        var num = Number(s)
-        if (isFinite(num) && num > 0) {
-            return { scale: Math.max(CONFIG.sizeMin, Math.min(CONFIG.sizeMax, num)), isRandom: false }
-        }
-        return { scale: DEFAULTS.size, isRandom: false }
+        return SPEC.parseSize(sizeVal, scaleVal, {
+            sizeMin:           CONFIG.sizeMin,
+            sizeMax:           CONFIG.sizeMax,
+            smallRandRange:    CONFIG.smallRandRange,
+            randSizeRange:     CONFIG.randSizeRange,
+            sizePresets:       SIZE_PRESETS,
+            defaultSize:       DEFAULTS.size,
+            rejectNonPositive: true
+        })
     }
 
     function parseTilt(tiltVal, angleVal, fallbackAngle) {
         var raw = (tiltVal !== undefined && tiltVal !== null && tiltVal !== '') ? tiltVal : angleVal
-        if (raw === undefined || raw === null || raw === '') {
-            return fallbackAngle != null ? fallbackAngle : DEFAULTS.tilt
-        }
-        if (Array.isArray(raw) || isArrayLike(raw, 2)) {
-            var aMin = parseFiniteNum(raw[0], -22)
-            var aMax = parseFiniteNum(raw[1], 22)
-            return Number((aMin + Math.random() * (aMax - aMin)).toFixed(1))
-        }
-        if (typeof raw === 'number' && isFinite(raw)) return raw
-        var s = String(raw).trim().toLowerCase()
-        if (s === 'random' || s === 'rand') {
-            if (Math.random() < 0.22) {
-                return Number(((Math.random() - 0.5) * 7.0).toFixed(1))
+        if (typeof raw === 'string') {
+            var s = raw.trim().toLowerCase()
+            if (s === 'random' || s === 'rand') {
+                if (Math.random() < 0.22) {
+                    return Number(((Math.random() - 0.5) * 7.0).toFixed(1))
+                }
+                var sign = Math.random() < 0.5 ? -1 : 1
+                return Number((sign * (5.0 + Math.random() * 23.0)).toFixed(1))
             }
-            var sign = Math.random() < 0.5 ? -1 : 1
-            return Number((sign * (5.0 + Math.random() * 23.0)).toFixed(1))
+            if (s === 'left') return Number((-10.0 - Math.random() * 15.0).toFixed(1))
+            if (s === 'right') return Number((10.0 + Math.random() * 15.0).toFixed(1))
         }
-        if (s === 'left') return Number((-10.0 - Math.random() * 15.0).toFixed(1))
-        if (s === 'right') return Number((10.0 + Math.random() * 15.0).toFixed(1))
-        if (s === 'none' || s === 'flat' || s === 'straight') return 0.0
-        // 区间写法：'-40~40' / '-40,40'（指令 tilt=-40~40 使用）
-        var rangeMatch = /^(-?\d+(?:\.\d+)?)\s*[~,]\s*(-?\d+(?:\.\d+)?)$/.exec(s)
-        if (rangeMatch != null) {
-            var rMin = Number(rangeMatch[1]), rMax = Number(rangeMatch[2])
-            return Number((rMin + Math.random() * (rMax - rMin)).toFixed(1))
-        }
-        var num = Number(s)
-        if (isFinite(num)) return num
-        return fallbackAngle != null ? fallbackAngle : DEFAULTS.tilt
+        return SPEC.parseTilt(tiltVal, angleVal, fallbackAngle, DEFAULTS.tilt)
     }
 
     // 解析禁区避让列表：支持预设名（'minimap'|'hotbar'|'crosshair'|'bossbar'）、对象 {x,y,w,h} 或四元数组 [x,y,w,h]
@@ -1247,40 +1108,17 @@
 
     // 【catch 约定】以下 try/catch 均为 Java API 能力探测：先 typeof 判函数再调，
     // 失败表示该 API 在本次加载的 MC/Rhino 版本中不存在，属于预期分支，故留空。
-    // 这些路径每次调用都会经过，写日志会污染限频桶并拖慢热路径。
-    // 读取玩家实体坐标（优先读取 KubeJS BlockContainerJS 的明文坐标）
-    function readPlayerPos(p) {
-        if (p == null) return null
-        try {
-            var b = p.block
-            if (b != null) {
-                var bx = Number(b.x), by = Number(b.y), bz = Number(b.z)
-                if (isFinite(bx) && isFinite(by) && isFinite(bz)) {
-                    return { x: bx, y: by, z: bz }
-                }
-            }
-        } catch (e0) { }
-        try {
-            if (typeof p.getX === 'function' && typeof p.getY === 'function' && typeof p.getZ === 'function') {
-                var gx = Number(p.getX()), gy = Number(p.getY()), gz = Number(p.getZ())
-                if (isFinite(gx) && isFinite(gy) && isFinite(gz)) {
-                    return { x: gx, y: gy, z: gz }
-                }
-            }
-        } catch (e1) { }
-        return null
-    }
+    var readPlayerPos = BASE.readPos
 
     function forEachPlayerInRadius(level, x, y, z, radius, fn) {
         if (level == null) return 0
         var cx = Number(x), cy = Number(y), cz = Number(z), r = Number(radius)
         if (!isFinite(cx) || !isFinite(cy) || !isFinite(cz) || !isFinite(r) || r < 0) return 0
         var d2 = r * r
-        var list = level.players
-        if (list == null) return 0
+        var players = BASE.toJsArray(level.players)
         var hitCount = 0
-        for (var i = 0, len = list.size(); i < len; i++) {
-            var p = list.get(i)
+        for (var i = 0; i < players.length; i++) {
+            var p = players[i]
             var pPos = readPlayerPos(p)
             if (pPos == null) continue
             var dx = pPos.x - cx, dy = pPos.y - cy, dz = pPos.z - cz
@@ -1293,22 +1131,8 @@
         return hitCount
     }
 
-    // 【catch 约定】以下两个函数内的 try/catch 为维度/玩家查找能力探测：失败属于未找到目标的正常分支，留空；
-    // 真正的数据包发送 (target.sendData) 异常通过 reportCatch 上报，避免静默丢包。
     function resolveLevel(levelOrDim, serverFallback) {
-        if (levelOrDim == null) return null
-        if (typeof levelOrDim === 'object' && levelOrDim.players != null) {
-            return levelOrDim
-        }
-        var dimId = String(levelOrDim).trim()
-        if (dimId.indexOf(':') < 0) dimId = 'minecraft:' + dimId
-        var srv = serverFallback || SERVER_REF
-        if (srv != null) {
-            try {
-                return srv.getLevel(dimId)
-            } catch (e) { }
-        }
-        return null
+        return BASE.resolveLevel(levelOrDim, serverFallback || SERVER_REF)
     }
 
     function sendSinglePlayerPacket(target, pkt) {
@@ -1652,59 +1476,22 @@
             }
         }
         if (mergeNodes.length === 0) return byKey
-
-        var n = mergeNodes.length
-        var visited = new Array(n)
-        for (var vi = 0; vi < n; vi++) visited[vi] = false
-
-        for (var s = 0; s < n; s++) {
-            if (visited[s]) continue
-            visited[s] = true
-            var queue   = [s]
-            var members = []
-            for (var qi = 0; qi < queue.length; qi++) {
-                var idx = queue[qi]
-                var a = mergeNodes[idx]
-                members.push(a)
-                for (var nb = 0; nb < n; nb++) {
-                    if (visited[nb]) continue
-                    var b = mergeNodes[nb]
-                    var touch = a.r + b.r
-                    var dx = a.cx - b.cx, dy = a.cy - b.cy, dz = a.cz - b.cz
-                    if ((dx * dx + dy * dy + dz * dz) <= (touch * touch + 1e-6)) {
-                        visited[nb] = true
-                        queue.push(nb)
-                    }
-                }
-            }
-            if (members.length > 1) {
-                members.sort(function (ma, mb) { return ma.seq - mb.seq })
-            }
-            var minX = Infinity, maxX = -Infinity
-            var minY = Infinity, maxY = -Infinity
-            var minZ = Infinity, maxZ = -Infinity
-            for (var mi = 0; mi < members.length; mi++) {
-                var m = members[mi]
-                if (m.cx - m.r < minX) minX = m.cx - m.r
-                if (m.cx + m.r > maxX) maxX = m.cx + m.r
-                if (m.cy - m.r < minY) minY = m.cy - m.r
-                if (m.cy + m.r > maxY) maxY = m.cy + m.r
-                if (m.cz - m.r < minZ) minZ = m.cz - m.r
-                if (m.cz + m.r > maxZ) maxZ = m.cz + m.r
-            }
+        var clusters = SPEC.computeSphereMergeClusters(mergeNodes)
+        for (var c = 0; c < clusters.length; c++) {
+            var cl = clusters[c]
             var clusterObj = {
-                leaderKey: members[0].rec.key,
-                leaderSeq: members[0].seq,
-                members:   members,
-                minX:      minX,
-                maxX:      maxX,
-                minY:      minY,
-                maxY:      maxY,
-                minZ:      minZ,
-                maxZ:      maxZ
+                leaderKey: cl.leader.rec.key,
+                leaderSeq: cl.leader.seq,
+                members:   cl.members,
+                minX:      cl.minX,
+                maxX:      cl.maxX,
+                minY:      cl.minY,
+                maxY:      cl.maxY,
+                minZ:      cl.minZ,
+                maxZ:      cl.maxZ
             }
-            for (var ki = 0; ki < members.length; ki++) {
-                byKey.set(members[ki].rec.key, clusterObj)
+            for (var ki = 0; ki < cl.members.length; ki++) {
+                byKey.set(cl.members[ki].rec.key, clusterObj)
             }
         }
         return byKey
@@ -1728,19 +1515,11 @@
 
     function forEachPlayerInLevel(level, fn) {
         if (level == null || typeof fn !== 'function') return 0
-        var list = level.players
-        if (list == null) return 0
-        var isJavaList = (typeof list.size === 'function' && typeof list.get === 'function')
-        var len = isJavaList ? list.size() : (typeof list.length === 'number' ? list.length : 0)
-        var count = 0
-        for (var i = 0; i < len; i++) {
-            var p = isJavaList ? list.get(i) : list[i]
-            if (p != null) {
-                count++
-                fn(p)
-            }
+        var players = BASE.toJsArray(level.players)
+        for (var i = 0; i < players.length; i++) {
+            fn(players[i])
         }
-        return count
+        return players.length
     }
 
     function forEachPlayerInMergeCluster(level, cluster, fn) {
@@ -1772,17 +1551,15 @@
             raw = binding.conflictScope === 'block'
                 ? danmakuBlockTracker.getTrackedRecords(rec.blockId)
                 : danmakuBlockTracker.getTrackedRecords(null)
-        } else {
-            fallbackTracked.forEach(function (item) { raw.push(item) })
         }
 
         var list = []
         for (var i = 0; i < raw.length; i++) {
             var item = raw[i]
             if (item == null || item.dim !== rec.dim) continue
-            var itemBinding = danmakuBlockTracker != null
+            var itemBinding = (danmakuBlockTracker != null && typeof danmakuBlockTracker.getBinding === 'function')
                 ? danmakuBlockTracker.getBinding(item.blockId)
-                : fallbackBindings.get(item.blockId)
+                : null
             if (itemBinding == null) continue
             if (getBlockConflictScopeKey(item, itemBinding) !== scopeKey) continue
             var seq = ensureRecordSeq(item)
@@ -1933,11 +1710,10 @@
         var t0Ns    = nowNano()
         var sentOut = 0
         try {
-            if (curBlock == null) {
+            if (curBlock == null && typeof lv.getBlock === 'function') {
                 try { curBlock = lv.getBlock(rec.x, rec.y, rec.z) } catch (e0) { reportCatch('boundBlockGet', e0) }
             }
-            var extractId = (typeof global !== 'undefined' && global.EpiphyBlockTracker) ? global.EpiphyBlockTracker.extractBlockId : null
-            if (extractId != null && extractId(curBlock) !== rec.blockId) return 0
+            if (curBlock != null && BASE.extractBlockId(curBlock) !== rec.blockId) return 0
 
             var cx = rec.x + 0.5, cy = rec.y + 0.5, cz = rec.z + 0.5
             var r  = binding.radius
@@ -2064,98 +1840,11 @@
         clearNear(rec.dim, rec.x + 0.5, rec.y + 0.5, rec.z + 0.5, binding.radius + 6, binding.group)
     }
 
-    var danmakuBlockTracker  = null
-    var missingTrackerWarned = false
-
-    // 基础兜底表：当方块追踪组件缺失时，仅维护本会话内通过 placed/broken 事件感知的方块，避免功能完全瘫痪
-    var fallbackBindings      = new Map()
-    var fallbackTracked       = new Map()
-    var fallbackEventsHooked  = false
-
-    function hookFallbackBlockEvents() {
-        if (fallbackEventsHooked) return
-        fallbackEventsHooked = true
-        try {
-            BlockEvents.placed(function (event) {
-                try {
-                    if (danmakuBlockTracker != null || fallbackBindings.size === 0 || event.block == null) return
-                    var bid = event.block.id != null ? String(event.block.id) : null
-                    if (bid == null || !fallbackBindings.has(bid)) return
-                    var dim = String(event.level.dimension || 'minecraft:overworld')
-                    var key = dim + '|' + Math.floor(event.block.x) + ',' + Math.floor(event.block.y) + ',' + Math.floor(event.block.z)
-                    var rec = { key: key, blockId: bid, dim: dim, x: Math.floor(event.block.x), y: Math.floor(event.block.y), z: Math.floor(event.block.z) }
-                    fallbackTracked.set(key, rec)
-                    ensureRecordSeq(rec)
-                    invalidateScopeCache(null)
-                    var fbBinding = fallbackBindings.get(bid)
-                    if (fbBinding != null && (!((fbBinding.conflictMode || 'overlap') === 'merge') || isMergeClusterLeader(rec, fbBinding))) {
-                        emitForBoundBlock(rec, fbBinding, event.level, event.block)
-                    }
-                } catch (eP) {
-                    reportCatch('fallback:placed', eP)
-                }
-            })
-            BlockEvents.broken(function (event) {
-                try {
-                    if (danmakuBlockTracker != null || event.block == null) return
-                    var dim = String(event.level.dimension || 'minecraft:overworld')
-                    var key = dim + '|' + Math.floor(event.block.x) + ',' + Math.floor(event.block.y) + ',' + Math.floor(event.block.z)
-                    var rec = fallbackTracked.get(key)
-                    if (rec != null) {
-                        var b = fallbackBindings.get(rec.blockId)
-                        fallbackTracked.delete(key)
-                        handleBoundBlockRemoved(rec, b)
-                    }
-                } catch (eB) {
-                    reportCatch('fallback:broken', eB)
-                }
-            })
-        } catch (eHook) {
-            reportCatch('fallback:hookEvents', eHook)
-        }
-    }
-
-    function createFallbackTracker() {
-        hookFallbackBlockEvents()
-        return {
-            isFallback: true,
-            bind: function (idStr, meta) { fallbackBindings.set(idStr, meta); return true },
-            unbind: function (idStr) {
-                var b = fallbackBindings.get(idStr)
-                fallbackBindings.delete(idStr)
-                var removed = 0
-                fallbackTracked.forEach(function (rec, k) {
-                    if (rec.blockId === idStr) {
-                        if (b != null && b.group) clearNear(rec.dim, rec.x + 0.5, rec.y + 0.5, rec.z + 0.5, b.radius + 6, b.group)
-                        fallbackTracked.delete(k)
-                        blockSeqByKey.delete(k)
-                        removed++
-                    }
-                })
-                invalidateScopeCache(null)
-                return removed
-            },
-            scanNow: function () { return 0 }
-        }
-    }
+    var danmakuBlockTracker = null
 
     function ensureDanmakuBlockTracker() {
         if (danmakuBlockTracker != null) return danmakuBlockTracker
-        var trackerApi = (typeof global !== 'undefined') ? global.EpiphyBlockTracker : null
-        if (trackerApi == null || typeof trackerApi.createTracker !== 'function') {
-            if (!missingTrackerWarned) {
-                missingTrackerWarned = true
-                var msg = '[ScreenDanmaku] 依赖组件 EpiphyBlockTracker (Epiphy的-方块追踪组件.js) 未加载，已降级为基础事件兜底模式（仅支持新放置/破坏方块，无区块扫描与持久化）。'
-                if (typeof global !== 'undefined' && global.EpiphyLog != null) {
-                    global.EpiphyLog.once('warn', 'danmaku:missing_block_tracker', msg)
-                } else {
-                    // 【catch 约定】日志设施自身的兜底：console 不可用时已无更低层可退，留空。
-                    try { console.warn(msg) } catch (e) { }
-                }
-            }
-            return createFallbackTracker()
-        }
-        danmakuBlockTracker = trackerApi.createTracker({
+        danmakuBlockTracker = BASE.acquireBlockTracker({
             name:             'danmaku',
             maintainInterval: 1,
             onBindingChanged: function () {
@@ -2165,7 +1854,7 @@
                 ensureRecordSeq(rec)
                 invalidateScopeCache(null)
                 // 仅在玩家新放置时立即触发首帧反馈；若归属于已存在合并集群的从属方块则静默合并，不额外运行
-                if (source === 'placed') {
+                if (source === 'placed' || source === 'fallback_placed') {
                     if ((binding.conflictMode || 'overlap') === 'merge' && !isMergeClusterLeader(rec, binding)) {
                         return
                     }
@@ -2183,7 +1872,10 @@
                     emitForBoundBlock(rec, binding, lv, curBlock)
                 }
             },
-            onRemoved: function (rec, binding) {
+            onRemoved: function (rec, binding, reason) {
+                if (reason === 'unbind' && rec != null && rec.key != null) {
+                    blockSeqByKey.delete(rec.key)
+                }
                 handleBoundBlockRemoved(rec, binding)
             }
         })
@@ -2280,15 +1972,6 @@
             if (event.server != null) SERVER_REF = event.server
             if (danmakuTickCounter === 1) {
                 absorbGlobalDanmakuBlockBindings()
-                checkDanmakuValveRegistration()
-            }
-            if (danmakuBlockTracker == null && fallbackTracked.size > 0 && SERVER_REF != null) {
-                fallbackTracked.forEach(function (rec) {
-                    var b = fallbackBindings.get(rec.blockId)
-                    if (b != null && (danmakuTickCounter % b.intervalTicks) === 0) {
-                        emitForBoundBlock(rec, b, null, null)
-                    }
-                })
             }
         } catch (eTick) {
             reportCatch('ServerEvents.tick', eTick)
@@ -2390,335 +2073,231 @@
         '  §f/epiphy danmaku here 30 &b致某人的指令 pos=spread tilt=-40~40 mode=char shake=per_char shakefreq=0.8~1.3 fade=blur group=prescript maxgroup=3'
     ]
 
-    function sendDanmakuHelp(source) {
-        for (var i = 0; i < DANMAKU_HELP_LINES.length; i++) {
-            try {
-                source.sendSuccess(Text.of(DANMAKU_HELP_LINES[i]), false)
-            } catch (e) {
-                reportCatch('helpSend', e)
-            }
+    function dmBoolField(defVal) {
+        return function (v, o, _err, k) {
+            o[k] = parseBool(v, defVal)
         }
-        return 1
+    }
+
+    var DANMAKU_SPEC_SCHEMA = {
+        unknownMode:   'collectFree',
+        splitFreePipe: true,
+        aliases: {
+            spacing:        'letterSpacing',
+            charspacing:    'letterSpacing',
+            outlinemode:    'outlineMode',
+            outlinecolor:   'outlineColor',
+            glowcolor:      'outlineColor',
+            outlinewidth:   'outlineWidth',
+            glowwidth:      'outlineWidth',
+            boldtarget:     'boldTarget',
+            scaletarget:    'scaleTarget',
+            targetscale:    'targetScale',
+            shaketarget:    'shakeTarget',
+            bychar:         'typewriter',
+            existtime:      'duration',
+            holdticks:      'activeHold',
+            life:           'lifeMode',
+            existmode:      'lifeMode',
+            sustained:      'continuous',
+            shakemode:      'shakeMode',
+            shakeamp:       'shakeAmp',
+            shakeinterval:  'shakeFreq',
+            charshake:      'perCharShake',
+            fadestyle:      'fadeStyle',
+            fademode:       'fadeStyle',
+            importance:     'priority',
+            maxgroupsize:   'maxGroup',
+            grouplimit:     'maxGroup',
+            maxconcurrent:  'maxGroup',
+            showingui:      'showInGui',
+            move:           'movable',
+            updatepos:      'movable',
+            resetanimation: 'restart',
+            slot:           'id',
+            ns:             'namespace'
+        },
+        fields: {
+            text:          'str',
+            title:         'str',
+            sub:           'str',
+            subtitle:      'str',
+            pos:           'str',
+            rx:            'str',
+            ry:            'str',
+            avoid:         'str',
+            avoidHud:      dmBoolField(DEFAULTS.avoidHud),
+            size:          'str',
+            scale:         'str',
+            tilt:          'str',
+            angle:         'str',
+            color:         'str',
+            subColor:      'str',
+            letterSpacing: { type: 'num', fallback: 0 },
+            outline:       'str',
+            outlineMode:   'str',
+            outlineColor:  'str',
+            outlineWidth:  { type: 'nonneg', min: 0.25, fallback: DEFAULTS.outlineWidth },
+            glow:          'str',
+            boldTarget:    'str',
+            scaleTarget:   'str',
+            targetScale:   { type: 'num', fallback: 1.35 },
+            shakeTarget:   'str',
+            mode:          'str',
+            typewriter:    dmBoolField(false),
+            charMs:        { type: 'nonneg', min: 8, fallback: DEFAULTS.charMs },
+            cursor:        'str',
+            shadow:        dmBoolField(DEFAULTS.shadow),
+            shake:         'str',
+            shakeMode:     'str',
+            shakeAmp:      { type: 'nonneg', min: 0.0, fallback: DEFAULTS.shakeAmp },
+            shakeFreq:     'str',
+            perCharShake:  dmBoolField(true),
+            fade:          'str',
+            fadeStyle:     'str',
+            fadeOut:       'str',
+            stay:          'str',
+            duration:      'str',
+            activeHold:    'str',
+            lifeMode:      'str',
+            continuous:    dmBoolField(false),
+            priority:      'str',
+            maxPriority:   'str',
+            includeOnce:   dmBoolField(false),
+            maxWidth:      function (v, o) { o.maxWidth = sanitizeMaxWidth(v) },
+            wrap:          dmBoolField(DEFAULTS.wrap),
+            clamp:         dmBoolField(DEFAULTS.clamp),
+            showInGui:     dmBoolField(DEFAULTS.showInGui),
+            maxGroup:      { type: 'nonneg', min: 0, fallback: 0 },
+            movable:       dmBoolField(DEFAULTS.movable),
+            normalizeKey:  dmBoolField(DEFAULTS.normalizeKey),
+            restart:       dmBoolField(false),
+            key:           'str',
+            id:            'str',
+            namespace:     'str',
+            group:         'str',
+            debug:         dmBoolField(true)
+        }
     }
 
     function parseSpecString(specStr) {
-        var opts = {}
         if (!specStr || String(specStr).trim().length === 0) {
-            return opts
+            return {}
         }
-
-        var KNOWN_KEYS = {
-            text: true, title: true, sub: true, subtitle: true,
-            pos: true, rx: true, ry: true, avoid: true, avoidhud: true,
-            size: true, scale: true,
-            tilt: true, angle: true,
-            color: true, subcolor: true,
-            spacing: true, letterspacing: true, charspacing: true,
-            outline: true, outlinemode: true, outlinecolor: true, outlinewidth: true,
-            glow: true, glowcolor: true, glowwidth: true,
-            boldtarget: true, scaletarget: true, targetscale: true, shaketarget: true,
-            mode: true, typewriter: true, bychar: true, charms: true, cursor: true, shadow: true,
-            shake: true, shakemode: true, shakeamp: true, shakefreq: true, shakeinterval: true, percharshake: true, charshake: true, jitter: true,
-            fade: true, fadestyle: true, fademode: true, fadeout: true,
-            stay: true, duration: true, existtime: true, activehold: true, holdticks: true,
-            life: true, lifemode: true, existmode: true, continuous: true, sustained: true,
-            priority: true, importance: true, maxpriority: true, includeonce: true,
-            maxwidth: true, wrap: true, clamp: true, showingui: true,
-            maxgroup: true, maxgroupsize: true, grouplimit: true, maxconcurrent: true,
-            movable: true, move: true, updatepos: true,
-            normalizekey: true,
-            restart: true, resetanimation: true,
-            key: true, id: true, slot: true, namespace: true, ns: true, group: true,
-            debug: true
-        }
-
-        var regex = /([a-zA-Z]+)=(?:"([^"]*)"|'([^']*)'|(\S+))|(\S+)/g
-        var match
-        var freeWords = []
-
-        while ((match = regex.exec(specStr)) !== null) {
-            if (match[1] != null) {
-                var rawKey = match[1]
-                var kLower = rawKey.toLowerCase()
-                var val = match[2] != null ? match[2] : (match[3] != null ? match[3] : match[4])
-                if (KNOWN_KEYS[kLower]) {
-                    if (kLower === 'subcolor') opts.subColor = val
-                    else if (kLower === 'spacing' || kLower === 'letterspacing' || kLower === 'charspacing') opts.letterSpacing = parseFiniteNum(val, 0)
-                    else if (kLower === 'outlinemode') opts.outlineMode = val
-                    else if (kLower === 'outlinecolor' || kLower === 'glowcolor') opts.outlineColor = val
-                    else if (kLower === 'outlinewidth' || kLower === 'glowwidth') opts.outlineWidth = parseNonNegNum(val, DEFAULTS.outlineWidth, 0.25)
-                    else if (kLower === 'boldtarget') opts.boldTarget = val
-                    else if (kLower === 'scaletarget') opts.scaleTarget = val
-                    else if (kLower === 'targetscale') opts.targetScale = parseFiniteNum(val, 1.35)
-                    else if (kLower === 'shaketarget') opts.shakeTarget = val
-                    else if (kLower === 'charms') opts.charMs = parseNonNegNum(val, DEFAULTS.charMs, 8)
-                    else if (kLower === 'bychar' || kLower === 'typewriter') opts.typewriter = parseBool(val, false)
-                    else if (kLower === 'existtime') opts.duration = val
-                    else if (kLower === 'activehold' || kLower === 'holdticks') opts.activeHold = val
-                    else if (kLower === 'life' || kLower === 'lifemode' || kLower === 'existmode') opts.lifeMode = val
-                    else if (kLower === 'continuous' || kLower === 'sustained') opts.continuous = parseBool(val, false)
-                    else if (kLower === 'shakemode') opts.shakeMode = val
-                    else if (kLower === 'shakeamp') opts.shakeAmp = parseNonNegNum(val, DEFAULTS.shakeAmp, 0.0)
-                    else if (kLower === 'shakefreq' || kLower === 'shakeinterval') opts.shakeFreq = val
-                    else if (kLower === 'percharshake' || kLower === 'charshake') opts.perCharShake = parseBool(val, true)
-                    else if (kLower === 'fadestyle' || kLower === 'fademode') opts.fadeStyle = val
-                    else if (kLower === 'fadeout') opts.fadeOut = val
-                    else if (kLower === 'importance') opts.priority = val
-                    else if (kLower === 'maxpriority') opts.maxPriority = val
-                    else if (kLower === 'includeonce') opts.includeOnce = parseBool(val, false)
-                    else if (kLower === 'maxwidth') opts.maxWidth = sanitizeMaxWidth(val)
-                    else if (kLower === 'maxgroup' || kLower === 'maxgroupsize' || kLower === 'grouplimit' || kLower === 'maxconcurrent') opts.maxGroup = parseNonNegNum(val, 0, 0)
-                    else if (kLower === 'shadow') opts.shadow = parseBool(val, DEFAULTS.shadow)
-                    else if (kLower === 'wrap') opts.wrap = parseBool(val, DEFAULTS.wrap)
-                    else if (kLower === 'clamp') opts.clamp = parseBool(val, DEFAULTS.clamp)
-                    else if (kLower === 'debug') opts.debug = parseBool(val, true)
-                    else if (kLower === 'showingui') opts.showInGui = parseBool(val, DEFAULTS.showInGui)
-                    else if (kLower === 'avoidhud') opts.avoidHud = parseBool(val, DEFAULTS.avoidHud)
-                    else if (kLower === 'movable' || kLower === 'move' || kLower === 'updatepos') opts.movable = parseBool(val, DEFAULTS.movable)
-                    else if (kLower === 'normalizekey') opts.normalizeKey = parseBool(val, DEFAULTS.normalizeKey)
-                    else if (kLower === 'restart' || kLower === 'resetanimation') opts.restart = parseBool(val, false)
-                    else if (kLower === 'slot') opts.id = val
-                    else if (kLower === 'ns') opts.namespace = val
-                    else opts[kLower] = val
-                } else {
-                    freeWords.push(match[0])
-                }
-            } else if (match[5] != null) {
-                freeWords.push(match[5])
-            }
-        }
-
-        var joinedFree = freeWords.join(' ').trim()
-        if (joinedFree.length > 0 && opts.text == null && opts.title == null) {
-            var placeholder = '\uE000'
-            var escapedFree = joinedFree.replace(/\\\|/g, placeholder)
-            var pipeIdx     = escapedFree.indexOf('|')
-            if (pipeIdx >= 0) {
-                opts.text = escapedFree.substring(0, pipeIdx).replace(/\uE000/g, '|').trim()
-                if (opts.sub == null) {
-                    opts.sub = escapedFree.substring(pipeIdx + 1).replace(/\uE000/g, '|').trim()
-                }
-            } else {
-                opts.text = escapedFree.replace(/\uE000/g, '|')
-            }
-        }
-
-        return opts
-    }
-
-    function sendSourceError(source, msg) {
-        try {
-            source.sendSuccess(Text.of('§c[Epiphy Danmaku 错误] ' + msg + ' §7(输入 §f/epiphy danmaku help §7查看语法)'), false)
-        } catch (e) {
-            reportCatch('sourceErrorSend', e)
-        }
+        return SPEC.parseCommandSpec(specStr, DANMAKU_SPEC_SCHEMA).opts
     }
 
     // 构建 danmaku 子命令节点，所有 executes 分支统一由权限阀 guardExecution 包裹
     function buildDanmakuCommandNode(regCtx) {
-        var event          = regCtx.event
-        var Commands       = regCtx.Commands
-        var Arguments      = regCtx.Arguments
-        var guardExecution = regCtx.guardExecution
+        var cb = BASE.createCommandBuilder(regCtx, { tag: 'Epiphy Danmaku' })
 
-        return Commands.literal('danmaku')
-            .executes(guardExecution(function (ctx) {
-                return sendDanmakuHelp(ctx.source)
-            }))
-            .then(
-                Commands.literal('help')
-                    .executes(guardExecution(function (ctx) {
-                        return sendDanmakuHelp(ctx.source)
-                    }))
-            )
-            .then(
-                Commands.literal('stop')
-                    .executes(guardExecution(function (ctx) {
-                        var p = ctx.source.player
-                        if (p == null) {
-                            sendSourceError(ctx.source, '控制台或命令方块执行 stop 请指定目标玩家！')
-                            return 0
-                        }
-                        deactivatePlayer(p, '*')
-                        ctx.source.sendSuccess(Text.of('§a[Epiphy Danmaku] 已停止你屏幕上的持续激活弹幕。'), false)
-                        return 1
-                    }))
-                    .then(
-                        Commands.argument('targets', Arguments.PLAYERS.create(event))
-                            .executes(guardExecution(function (ctx) {
-                                var players = Arguments.PLAYERS.getResult(ctx, 'targets')
-                                var cnt = toPlayer(players, { action: 'deactivate', key: '*', group: '*' })
-                                ctx.source.sendSuccess(Text.of('§a[Epiphy Danmaku] 已停止 ' + cnt + ' 名玩家的持续激活弹幕。'), false)
-                                return cnt
-                            }))
-                            .then(
-                                Commands.argument('key', Arguments.WORD.create(event))
-                                    .executes(guardExecution(function (ctx) {
-                                        var players = Arguments.PLAYERS.getResult(ctx, 'targets')
-                                        var k = Arguments.WORD.getResult(ctx, 'key')
-                                        var cnt = toPlayer(players, { action: 'deactivate', key: k, group: k })
-                                        ctx.source.sendSuccess(Text.of('§a[Epiphy Danmaku] 已停止 ' + cnt + ' 名玩家的 [' + k + '] 持续弹幕。'), false)
-                                        return cnt
-                                    }))
-                                    .then(
-                                        Commands.argument('fadeOut', Arguments.INTEGER.create(event))
-                                            .executes(guardExecution(function (ctx) {
-                                                var players = Arguments.PLAYERS.getResult(ctx, 'targets')
-                                                var k = Arguments.WORD.getResult(ctx, 'key')
-                                                var fo = Arguments.INTEGER.getResult(ctx, 'fadeOut')
-                                                var cnt = toPlayer(players, { action: 'deactivate', key: k, group: k, fadeOut: fo })
-                                                ctx.source.sendSuccess(Text.of('§a[Epiphy Danmaku] 已停止 ' + cnt + ' 名玩家的 [' + k + '] 持续弹幕 (fadeOut=' + fo + ')。'), false)
-                                                return cnt
-                                            }))
-                                            .then(
-                                                Commands.argument('maxPriority', Arguments.WORD.create(event))
-                                                    .executes(guardExecution(function (ctx) {
-                                                        var players = Arguments.PLAYERS.getResult(ctx, 'targets')
-                                                        var k = Arguments.WORD.getResult(ctx, 'key')
-                                                        var fo = Arguments.INTEGER.getResult(ctx, 'fadeOut')
-                                                        var mp = Arguments.WORD.getResult(ctx, 'maxPriority')
-                                                        var cnt = toPlayer(players, { action: 'deactivate', key: k, group: k, fadeOut: fo, maxPriority: mp })
-                                                        ctx.source.sendSuccess(Text.of('§a[Epiphy Danmaku] 已停止 ' + cnt + ' 名玩家的 [' + k + '] 持续弹幕 (fadeOut=' + fo + ', maxPriority=' + mp + ')。'), false)
-                                                        return cnt
-                                                    }))
-                                            )
-                                    )
-                            )
-                    )
-            )
-            .then(
-                Commands.literal('clear')
-                    .executes(guardExecution(function (ctx) {
-                        var p = ctx.source.player
-                        if (p == null) {
-                            sendSourceError(ctx.source, '控制台或命令方块执行 clear 请指定目标玩家！')
-                            return 0
-                        }
-                        clearPlayer(p, '*')
-                        ctx.source.sendSuccess(Text.of('§a[Epiphy Danmaku] 已清空你屏幕上的所有弹幕。'), false)
-                        return 1
-                    }))
-                    .then(
-                        Commands.argument('targets', Arguments.PLAYERS.create(event))
-                            .executes(guardExecution(function (ctx) {
-                                var players = Arguments.PLAYERS.getResult(ctx, 'targets')
-                                var cnt = toPlayer(players, { action: 'clear', group: '*' })
-                                ctx.source.sendSuccess(Text.of('§a[Epiphy Danmaku] 已清空 ' + cnt + ' 名玩家的全部屏幕弹幕。'), false)
-                                return cnt
-                            }))
-                            .then(
-                                Commands.argument('group', Arguments.WORD.create(event))
-                                    .executes(guardExecution(function (ctx) {
-                                        var players = Arguments.PLAYERS.getResult(ctx, 'targets')
-                                        var grp = Arguments.WORD.getResult(ctx, 'group')
-                                        var cnt = toPlayer(players, { action: 'clear', group: grp })
-                                        ctx.source.sendSuccess(Text.of('§a[Epiphy Danmaku] 已清空 ' + cnt + ' 名玩家的 [' + grp + '] 分组弹幕。'), false)
-                                        return cnt
-                                    }))
-                                    .then(
-                                        Commands.argument('maxPriority', Arguments.WORD.create(event))
-                                            .executes(guardExecution(function (ctx) {
-                                                var players = Arguments.PLAYERS.getResult(ctx, 'targets')
-                                                var grp = Arguments.WORD.getResult(ctx, 'group')
-                                                var mp = Arguments.WORD.getResult(ctx, 'maxPriority')
-                                                var cnt = toPlayer(players, { action: 'clear', group: grp, maxPriority: mp })
-                                                ctx.source.sendSuccess(Text.of('§a[Epiphy Danmaku] 已清空 ' + cnt + ' 名玩家的 [' + grp + '] 分组弹幕 (maxPriority=' + mp + ')。'), false)
-                                                return cnt
-                                            }))
-                                    )
-                            )
-                    )
-            )
-            .then(
-                Commands.literal('player')
-                    .then(
-                        Commands.argument('targets', Arguments.PLAYERS.create(event))
-                            .then(
-                                Commands.argument('spec', Arguments.GREEDY_STRING.create(event))
-                                    .executes(guardExecution(function (ctx) {
-                                        var players = Arguments.PLAYERS.getResult(ctx, 'targets')
-                                        var specStr = Arguments.GREEDY_STRING.getResult(ctx, 'spec')
-                                        var opts    = parseSpecString(specStr)
-                                        if (!opts.text && !opts.title) {
-                                            sendSourceError(ctx.source, '缺少必填的弹幕主文本！')
-                                            return 0
-                                        }
-                                        var cnt = toPlayer(players, opts)
-                                        ctx.source.sendSuccess(
-                                            Text.of('§a[Epiphy Danmaku] 已向 ' + cnt + ' 名玩家发送弹幕: §f' + (opts.text || opts.title)),
-                                            false
-                                        )
-                                        return cnt
-                                    }))
-                            )
-                    )
-            )
-            .then(
-                Commands.literal('here')
-                    .then(
-                        Commands.argument('radius', Arguments.DOUBLE.create(event))
-                            .then(
-                                Commands.argument('spec', Arguments.GREEDY_STRING.create(event))
-                                    .executes(guardExecution(function (ctx) {
-                                        var radius  = Arguments.DOUBLE.getResult(ctx, 'radius')
-                                        var specStr = Arguments.GREEDY_STRING.getResult(ctx, 'spec')
-                                        var opts    = parseSpecString(specStr)
-                                        if (!opts.text && !opts.title) {
-                                            sendSourceError(ctx.source, '缺少必填的弹幕主文本！')
-                                            return 0
-                                        }
-                                        var pos   = readVec3(ctx.source.position)
-                                        var level = ctx.source.level
-                                        if (pos == null) {
-                                            sendSourceError(ctx.source, '无法读取当前指令执行位置！')
-                                            return 0
-                                        }
-                                        var cnt   = inDimension(level, pos.x, pos.y, pos.z, radius, opts)
-                                        ctx.source.sendSuccess(
-                                            Text.of('§a[Epiphy Danmaku] 已在当前维度半径 ' + radius + 'm 内触发弹幕（命中 ' + cnt + ' 名玩家）。'),
-                                            false
-                                        )
-                                        return 1
-                                    }))
-                            )
-                    )
-            )
-            .then(
-                Commands.literal('pos')
-                    .then(
-                        Commands.argument('dim', Arguments.DIMENSION.create(event))
-                            .then(
-                                Commands.argument('center', Arguments.VEC3.create(event))
-                                    .then(
-                                        Commands.argument('radius', Arguments.DOUBLE.create(event))
-                                            .then(
-                                                Commands.argument('spec', Arguments.GREEDY_STRING.create(event))
-                                                    .executes(guardExecution(function (ctx) {
-                                                        var targetLevel = Arguments.DIMENSION.getResult(ctx, 'dim')
-                                                        var center      = readVec3(Arguments.VEC3.getResult(ctx, 'center'))
-                                                        var radius      = Arguments.DOUBLE.getResult(ctx, 'radius')
-                                                        var specStr     = Arguments.GREEDY_STRING.getResult(ctx, 'spec')
-                                                        if (center == null) {
-                                                            sendSourceError(ctx.source, '无法解析目标坐标！')
-                                                            return 0
-                                                        }
-                                                        var opts        = parseSpecString(specStr)
-                                                        if (!opts.text && !opts.title) {
-                                                            sendSourceError(ctx.source, '缺少必填的弹幕主文本！')
-                                                            return 0
-                                                        }
-                                                        var cnt = inDimension(targetLevel, center.x, center.y, center.z, radius, opts)
-                                                        ctx.source.sendSuccess(
-                                                            Text.of('§a[Epiphy Danmaku] 已在目标维度 (' + center.x.toFixed(1) + ', ' + center.y.toFixed(1) + ', ' + center.z.toFixed(1) + ') 半径 ' + radius + 'm 内触发弹幕（命中 ' + cnt + ' 名玩家）。'),
-                                                            false
-                                                        )
-                                                        return 1
-                                                    }))
-                                            )
-                                    )
-                            )
-                    )
-            )
+        function cmdErr(ctx, msg) {
+            return cb.replyErr(ctx, msg + ' §7(输入 §f/epiphy danmaku help §7查看语法)')
+        }
+
+        function handleStop(ctx, v) {
+            if (v._count === 0) {
+                var p = ctx.source.player
+                if (p == null) return cmdErr(ctx, '控制台或命令方块执行 stop 请指定目标玩家！')
+                deactivatePlayer(p, '*')
+                return cb.replyOk(ctx, '已停止你屏幕上的持续激活弹幕。')
+            }
+            var key = v._count >= 2 ? v.key : '*'
+            var pkt = { action: 'deactivate', key: key, group: key }
+            if (v._count >= 3) pkt.fadeOut = v.fadeOut
+            if (v._count >= 4) pkt.maxPriority = v.maxPriority
+            var cnt = toPlayer(v.targets, pkt)
+            if (v._count === 1) cb.replyOk(ctx, '已停止 ' + cnt + ' 名玩家的持续激活弹幕。')
+            else if (v._count === 2) cb.replyOk(ctx, '已停止 ' + cnt + ' 名玩家的 [' + key + '] 持续弹幕。')
+            else if (v._count === 3) cb.replyOk(ctx, '已停止 ' + cnt + ' 名玩家的 [' + key + '] 持续弹幕 (fadeOut=' + v.fadeOut + ')。')
+            else cb.replyOk(ctx, '已停止 ' + cnt + ' 名玩家的 [' + key + '] 持续弹幕 (fadeOut=' + v.fadeOut + ', maxPriority=' + v.maxPriority + ')。')
+            return cnt
+        }
+
+        function handleClear(ctx, v) {
+            if (v._count === 0) {
+                var p = ctx.source.player
+                if (p == null) return cmdErr(ctx, '控制台或命令方块执行 clear 请指定目标玩家！')
+                clearPlayer(p, '*')
+                return cb.replyOk(ctx, '已清空你屏幕上的所有弹幕。')
+            }
+            var grp = v._count >= 2 ? v.group : '*'
+            var pkt = { action: 'clear', group: grp }
+            if (v._count >= 3) pkt.maxPriority = v.maxPriority
+            var cnt = toPlayer(v.targets, pkt)
+            if (v._count === 1) cb.replyOk(ctx, '已清空 ' + cnt + ' 名玩家的全部屏幕弹幕。')
+            else if (v._count === 2) cb.replyOk(ctx, '已清空 ' + cnt + ' 名玩家的 [' + grp + '] 分组弹幕。')
+            else cb.replyOk(ctx, '已清空 ' + cnt + ' 名玩家的 [' + grp + '] 分组弹幕 (maxPriority=' + v.maxPriority + ')。')
+            return cnt
+        }
+
+        function handlePlayer(ctx, v) {
+            var opts = parseSpecString(v.spec)
+            if (!opts.text && !opts.title) return cmdErr(ctx, '缺少必填的弹幕主文本！')
+            var cnt = toPlayer(v.targets, opts)
+            cb.replyOk(ctx, '已向 ' + cnt + ' 名玩家发送弹幕: §f' + (opts.text || opts.title))
+            return cnt
+        }
+
+        function handleHere(ctx, v) {
+            var opts = parseSpecString(v.spec)
+            if (!opts.text && !opts.title) return cmdErr(ctx, '缺少必填的弹幕主文本！')
+            var pos = BASE.readPos(ctx.source.position)
+            if (pos == null) return cmdErr(ctx, '无法读取当前指令执行位置！')
+            var cnt = inDimension(ctx.source.level, pos.x, pos.y, pos.z, v.radius, opts)
+            return cb.replyOk(ctx, '已在当前维度半径 ' + v.radius + 'm 内触发弹幕（命中 ' + cnt + ' 名玩家）。')
+        }
+
+        function handlePos(ctx, v) {
+            var center = BASE.readPos(v.center)
+            if (center == null) return cmdErr(ctx, '无法解析目标坐标！')
+            var opts = parseSpecString(v.spec)
+            if (!opts.text && !opts.title) return cmdErr(ctx, '缺少必填的弹幕主文本！')
+            var cnt = inDimension(v.dim, center.x, center.y, center.z, v.radius, opts)
+            return cb.replyOk(ctx, '已在目标维度 (' + center.x.toFixed(1) + ', ' + center.y.toFixed(1) + ', ' + center.z.toFixed(1) + ') 半径 ' + v.radius + 'm 内触发弹幕（命中 ' + cnt + ' 名玩家）。')
+        }
+
+        return cb.literal('danmaku', {
+            helpLines: DANMAKU_HELP_LINES,
+            children: [
+                cb.literal('help', { helpLines: DANMAKU_HELP_LINES }),
+                cb.literal('stop', {
+                    chain: [[
+                        { name: 'targets', type: 'players' },
+                        { name: 'key', type: 'word' },
+                        { name: 'fadeOut', type: 'int' },
+                        { name: 'maxPriority', type: 'word' }
+                    ], handleStop, { minArgs: 0 }]
+                }),
+                cb.literal('clear', {
+                    chain: [[
+                        { name: 'targets', type: 'players' },
+                        { name: 'group', type: 'word' },
+                        { name: 'maxPriority', type: 'word' }
+                    ], handleClear, { minArgs: 0 }]
+                }),
+                cb.literal('player', {
+                    chain: [[
+                        { name: 'targets', type: 'players' },
+                        { name: 'spec', type: 'greedy' }
+                    ], handlePlayer]
+                }),
+                cb.literal('here', {
+                    chain: [[
+                        { name: 'radius', type: 'double' },
+                        { name: 'spec', type: 'greedy' }
+                    ], handleHere]
+                }),
+                cb.literal('pos', {
+                    chain: [[
+                        { name: 'dim', type: 'dim' },
+                        { name: 'center', type: 'vec3' },
+                        { name: 'radius', type: 'double' },
+                        { name: 'spec', type: 'greedy' }
+                    ], handlePos]
+                })
+            ]
+        })
     }
 
     var danmakuSubcommandSpec = {
@@ -2744,59 +2323,15 @@
         buildNode:  buildDanmakuCommandNode
     }
 
-    var valveMissing      = false
-    var valveRegError     = null
-    var notifiedValveOps  = new Set()
+    var valveRegError = null
 
-    function checkDanmakuValveRegistration(quiet) {
-        var queue = (typeof global !== 'undefined' && global != null) ? global.EpiphyCommandRegistryQueue : null
-        var valve = (typeof global !== 'undefined' && global != null)
-            ? (global.EpiphyPermissionValve || global.PermissionValve)
-            : null
-        var stillQueued = Array.isArray(queue) && queue.indexOf(danmakuSubcommandSpec) >= 0
-        var missing = (valve == null || stillQueued)
-        valveMissing = missing
-        if (missing && !quiet) {
-            console.info('[ScreenDanmaku] 未检测到权限阀组件 (EpiphyPermissionValve)，/epiphy danmaku 指令功能未生效（JS 调用接口正常）。')
-        }
-        return missing
-    }
-
-    try {
-        PlayerEvents.loggedIn(function (event) {
-            try {
-                if (valveMissing) checkDanmakuValveRegistration(true)
-                if (!valveMissing && valveRegError == null) return
-                var p = event != null ? event.player : null
-                if (p == null) return
-                var isOp = false
-                try { isOp = Boolean(p.hasPermissions(2)) } catch (ePerm) { reportCatch('loggedIn:hasPermissions', ePerm) }
-                if (!isOp) return
-                var uuid = null
-                try { uuid = String(p.getUuid()) } catch (eUuid) { uuid = String(p.username || 'op') }
-                if (notifiedValveOps.has(uuid)) return
-                notifiedValveOps.add(uuid)
-                if (valveRegError != null) {
-                    p.tell(Text.of('§c[ScreenDanmaku] §7注册 §f/epiphy danmaku §7指令时发生异常，指令功能未生效: §c' + valveRegError))
-                } else {
-                    p.tell(Text.of('§e[ScreenDanmaku] §7未检测到权限阀组件 (EpiphyPermissionValve)，§f/epiphy danmaku §7指令功能未生效（JS 调用接口正常）。'))
-                }
-            } catch (eIn) {
-                reportCatch('PlayerEvents.loggedIn:valveNotify', eIn)
-            }
-        })
-    } catch (eRegLogin) {
-        reportCatch('registerLoggedIn:valveNotify', eRegLogin)
-    }
-
-    try {
+    if (typeof PlayerEvents !== 'undefined' && PlayerEvents != null && typeof PlayerEvents.loggedOut === 'function') {
         PlayerEvents.loggedOut(function (event) {
             try {
                 var p = event != null ? event.player : null
                 if (p == null) return
                 var uuid = getPlayerUuidSafe(p)
                 if (uuid && uuid !== 'unknown') {
-                    notifiedValveOps.delete(uuid)
                     var prefix = uuid + '|'
                     playerSourceCooldown.forEach(function (_exp, k) {
                         if (String(k).indexOf(prefix) === 0) {
@@ -2808,29 +2343,13 @@
                 reportCatch('PlayerEvents.loggedOut:cleanup', eOut)
             }
         })
-    } catch (eRegLogout) {
-        reportCatch('registerLoggedOut:cleanup', eRegLogout)
     }
 
     try {
-        var valve = (typeof global !== 'undefined' && global != null)
-            ? (global.EpiphyPermissionValve || global.PermissionValve)
-            : null
-        if (valve != null && typeof valve.registerSubcommand === 'function') {
-            valve.registerSubcommand(danmakuSubcommandSpec)
-        } else if (typeof global !== 'undefined' && global != null) {
-            if (!Array.isArray(global.EpiphyCommandRegistryQueue)) {
-                global.EpiphyCommandRegistryQueue = []
-            }
-            var q = global.EpiphyCommandRegistryQueue
-            for (var qi = q.length - 1; qi >= 0; qi--) {
-                if (q[qi] != null && q[qi].name === 'danmaku') q.splice(qi, 1)
-            }
-            q.push(danmakuSubcommandSpec)
-        }
+        BASE.registerSubcommandSafe(danmakuSubcommandSpec)
     } catch (eReg) {
         valveRegError = String(eReg)
-        console.warn('[ScreenDanmaku] 注册 /epiphy danmaku 指令时出现异常，已终止指令注册: ' + eReg)
+        LOGGER.warn('commandReg', '注册 /epiphy danmaku 指令时出现异常，已终止指令注册: ' + eReg)
     }
 
     function getDanmakuTrackerCalls() {
@@ -2847,11 +2366,16 @@
     }
 
     function getStats() {
-        var mode = (danmakuBlockTracker != null && !danmakuBlockTracker.isFallback) ? 'tracker' : 'fallback'
+        var tracker    = danmakuBlockTracker
+        var isFb       = Boolean(tracker != null && tracker.isFallback)
+        var mode       = (tracker != null && !tracker.isFallback) ? 'tracker' : 'fallback'
+        var fbBindings = (isFb && typeof tracker.getBindingCount === 'function') ? tracker.getBindingCount() : 0
+        var fbTracked  = (isFb && typeof tracker.getTrackedRecords === 'function') ? tracker.getTrackedRecords(null).length : 0
+        var vMissing   = !BASE.isValveReady()
         return {
             trackerMode:           mode,
-            fallbackBindings:      fallbackBindings.size,
-            fallbackTracked:       fallbackTracked.size,
+            fallbackBindings:      fbBindings,
+            fallbackTracked:       fbTracked,
             lastEmitCycleMs:       lastEmitCycleMs,
             lastActiveEmitCycleMs: lastActiveEmitCycleMs,
             maxEmitCycleMs:        maxEmitCycleMs,
@@ -2865,7 +2389,7 @@
             blockSeqByKeySize:     blockSeqByKey.size,
             cooldownSize:          playerSourceCooldown.size,
             trackedRecordsCalls:   getDanmakuTrackerCalls(),
-            valveMissing:          valveMissing,
+            valveMissing:          vMissing,
             valveRegError:         valveRegError,
             debug:                 Boolean(CONFIG.debug),
             tickCounter:           danmakuTickCounter
@@ -2903,11 +2427,12 @@
         metrics: getStats,
         check: function () {
             var hasRealTracker = (danmakuBlockTracker != null && !danmakuBlockTracker.isFallback)
+            var vMissing = !BASE.isValveReady()
             return [
                 {
                     name:   'valve_registered',
-                    ok:     !valveMissing && valveRegError == null,
-                    detail: 'valveMissing=' + valveMissing + ', err=' + String(valveRegError)
+                    ok:     !vMissing && valveRegError == null,
+                    detail: 'valveMissing=' + vMissing + ', err=' + String(valveRegError)
                 },
                 {
                     name:   'block_tracker_attached',
@@ -2960,12 +2485,5 @@
             }
         }
     }
-    if (typeof global !== 'undefined' && global != null) {
-        if (global.EpiphyDebug != null && typeof global.EpiphyDebug.registerProvider === 'function') {
-            global.EpiphyDebug.registerProvider(danmakuDebugProvider)
-        } else {
-            if (!Array.isArray(global.EpiphyDebugProviderQueue)) global.EpiphyDebugProviderQueue = []
-            global.EpiphyDebugProviderQueue.push(danmakuDebugProvider)
-        }
-    }
+    BASE.registerDebugProvider(danmakuDebugProvider)
 })()

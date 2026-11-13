@@ -33,10 +33,14 @@
     var SERVER_HOOKS_CLASS = null;
     var SUGGEST_PROVIDERS_CLASS = null;
 
+    function hasOwn(obj, key) {
+        return obj != null && Object.prototype.hasOwnProperty.call(obj, key);
+    }
+
     function loadJavaClass(className, logger) {
         if (!className) return null;
         var key = String(className);
-        if (Object.prototype.hasOwnProperty.call(javaClassCache, key)) {
+        if (hasOwn(javaClassCache, key)) {
             return javaClassCache[key] === FAILED_CLASS ? null : javaClassCache[key];
         }
         if (typeof Java === 'undefined' || Java == null || typeof Java.loadClass !== 'function') {
@@ -172,6 +176,10 @@
             var u = obj.getUUID();
             if (u != null) return String(u);
         }
+        if (typeof obj.getUuid === 'function') {
+            var u2 = obj.getUuid();
+            if (u2 != null) return String(u2);
+        }
         if (typeof obj.getProfile === 'function') {
             var prof = obj.getProfile();
             if (prof != null && typeof prof.getId === 'function' && prof.getId() != null) {
@@ -211,6 +219,10 @@
 
     function dimOfLevel(lv) {
         if (lv == null) return null;
+        if (typeof lv.getDimension === 'function') {
+            var gd = lv.getDimension();
+            if (gd != null) return spec.normalizeDim(String(gd));
+        }
         if (typeof lv.dimension === 'function') return spec.normalizeDim(lv.dimension());
         if (lv.dimension != null) return spec.normalizeDim(lv.dimension);
         if (typeof lv.getLevel === 'function') {
@@ -221,7 +233,8 @@
     }
 
     function resolveLevel(levelOrDim, preferServer) {
-        if (levelOrDim != null && typeof levelOrDim === 'object' && typeof levelOrDim.getBlock === 'function') {
+        if (levelOrDim != null && typeof levelOrDim === 'object'
+            && (typeof levelOrDim.getBlock === 'function' || levelOrDim.players != null)) {
             return levelOrDim;
         }
         var srv = resolveServer(preferServer);
@@ -242,17 +255,28 @@
 
     function readPos(obj) {
         if (obj == null) return null;
+        if (spec.isArrayLike(obj) && obj.length >= 3) {
+            if (obj[0] == null || obj[1] == null || obj[2] == null) return null;
+            var ax = Number(obj[0]), ay = Number(obj[1]), az = Number(obj[2]);
+            return (isFinite(ax) && isFinite(ay) && isFinite(az)) ? { x: ax, y: ay, z: az } : null;
+        }
         if (typeof obj.getX === 'function') {
-            return { x: Number(obj.getX()), y: Number(obj.getY()), z: Number(obj.getZ()) };
+            var gx = Number(obj.getX()), gy = Number(obj.getY()), gz = Number(obj.getZ());
+            return (isFinite(gx) && isFinite(gy) && isFinite(gz)) ? { x: gx, y: gy, z: gz } : null;
         }
         if (obj.pos != null && typeof obj.pos === 'object') {
             return readPos(obj.pos);
         }
-        if (typeof obj.x === 'function') {
-            return { x: Number(obj.x()), y: Number(obj.y()), z: Number(obj.z()) };
+        if (obj.block != null && obj.block !== obj) {
+            return readPos(obj.block);
         }
-        if (obj.x != null && obj.y != null && obj.z != null) {
-            return { x: Number(obj.x), y: Number(obj.y), z: Number(obj.z) };
+        if (typeof obj.x === 'function') {
+            var fx = Number(obj.x()), fy = Number(obj.y()), fz = Number(obj.z());
+            return (isFinite(fx) && isFinite(fy) && isFinite(fz)) ? { x: fx, y: fy, z: fz } : null;
+        }
+        if (obj.x != null && obj.y != null && obj.z != null && obj.x !== '' && obj.y !== '' && obj.z !== '') {
+            var nx = Number(obj.x), ny = Number(obj.y), nz = Number(obj.z);
+            return (isFinite(nx) && isFinite(ny) && isFinite(nz)) ? { x: nx, y: ny, z: nz } : null;
         }
         return null;
     }
@@ -476,21 +500,31 @@
     var fallbackHooksInstalled = false;
     var fallbackSubscribers = new Map();
     var fallbackTracked = new Map(); // posKey -> { key, blockId, dim, x, y, z, extras }
+    var fallbackTickCounter = 0;
 
     function makeFallbackView(rec, sub) {
         var extras = rec.extras || (rec.extras = {});
         if (extras[sub.id] === undefined && sub.makeRecordExtra) {
             extras[sub.id] = sub.makeRecordExtra(rec.blockId, rec.dim, rec.x, rec.y, rec.z);
         }
-        return {
+        var builtExtra = extras[sub.id];
+        var view = {
             key:     rec.key,
             blockId: rec.blockId,
             dim:     rec.dim,
             x:       rec.x,
             y:       rec.y,
             z:       rec.z,
-            extra:   extras[sub.id] !== undefined ? extras[sub.id] : null
+            extra:   builtExtra !== undefined ? builtExtra : null
         };
+        if (builtExtra != null && typeof builtExtra === 'object') {
+            for (var ek in builtExtra) {
+                if (hasOwn(builtExtra, ek) && !hasOwn(view, ek)) {
+                    view[ek] = builtExtra[ek];
+                }
+            }
+        }
+        return view;
     }
 
     function ensureFallbackBlockHooks() {
@@ -578,16 +612,45 @@
                 }
             });
         }
+
+        if (typeof ServerEvents !== 'undefined' && ServerEvents != null && typeof ServerEvents.tick === 'function') {
+            ServerEvents.tick(function (event) {
+                fallbackTickCounter++;
+                if (fallbackSubscribers.size === 0 || fallbackTracked.size === 0) return;
+                var srv = (event != null && event.server != null) ? event.server : resolveServer(null);
+                if (srv == null) return;
+                fallbackSubscribers.forEach(function (sub) {
+                    if (sub == null || sub.destroyed || !sub.onTick) return;
+                    if (fallbackTickCounter < sub.maintainOffset) return;
+                    if (((fallbackTickCounter - sub.maintainOffset) % sub.maintainInterval) !== 0) return;
+                    fallbackTracked.forEach(function (rec) {
+                        if (rec == null) return;
+                        var meta = sub.bindings.get(rec.blockId);
+                        if (meta == null) return;
+                        var lv = resolveLevel(rec.dim, srv);
+                        try {
+                            sub.onTick(makeFallbackView(rec, sub), meta, fallbackTickCounter, lv, null);
+                        } catch (eTick) {
+                            baseLogger.catchWarn('fallbackTracker:' + sub.id + ':onTick', eTick);
+                        }
+                    });
+                });
+            });
+        }
     }
 
-    ensureFallbackBlockHooks();
-
     function createFallbackTrackerInstance(cfg) {
+        ensureFallbackBlockHooks();
         var subId = String((cfg && cfg.name) || ('fb_' + fallbackSubscribers.size));
+        var rawInterval = (cfg && cfg.maintainInterval != null) ? Math.floor(Number(cfg.maintainInterval)) : 1;
+        var rawOffset = (cfg && cfg.maintainOffset != null) ? Math.floor(Number(cfg.maintainOffset)) : 0;
         var sub = {
             id:                   subId,
+            maintainInterval:     (isFinite(rawInterval) && rawInterval > 0) ? rawInterval : 1,
+            maintainOffset:       (isFinite(rawOffset) && rawOffset >= 0) ? rawOffset : 0,
             makeRecordExtra:      (cfg && typeof cfg.makeRecordExtra === 'function') ? cfg.makeRecordExtra : null,
             onFound:              (cfg && typeof cfg.onFound === 'function') ? cfg.onFound : null,
+            onTick:               (cfg && typeof cfg.onTick === 'function') ? cfg.onTick : null,
             onRemoved:            (cfg && typeof cfg.onRemoved === 'function') ? cfg.onRemoved : null,
             onBrokenUnregistered: (cfg && typeof cfg.onBrokenUnregistered === 'function') ? cfg.onBrokenUnregistered : null,
             onBindingChanged:     (cfg && typeof cfg.onBindingChanged === 'function') ? cfg.onBindingChanged : null,
