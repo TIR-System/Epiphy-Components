@@ -939,7 +939,7 @@
         var gfx = event.graphics
         if (gfx == null || typeof gfx.bufferSource !== 'function' || typeof gfx.flush !== 'function') return null
         if (typeof event.getMatrix !== 'function' && event.matrix == null) return null
-        if (typeof fontObj.drawInBatch !== 'function') return null
+        if (typeof fontObj.drawInBatch !== 'function' && typeof fontObj.m_272191_ !== 'function') return null
         var bufSrc = null
         try {
             bufSrc = gfx.bufferSource()
@@ -948,23 +948,35 @@
         }
         if (bufSrc == null) return null
         var drawFn = null
+        var useDirectSrgDraw = false
         try {
-            var explicit = fontObj['drawInBatch(net.minecraft.util.FormattedCharSequence,float,float,int,boolean,org.joml.Matrix4f,net.minecraft.client.renderer.MultiBufferSource,net.minecraft.client.gui.Font$DisplayMode,int,int)']
-            if (typeof explicit === 'function') drawFn = explicit
-        } catch (eExp) { }
+            var explicitSrg = fontObj['m_272191_(net.minecraft.util.FormattedCharSequence,float,float,int,boolean,org.joml.Matrix4f,net.minecraft.client.renderer.MultiBufferSource,net.minecraft.client.gui.Font$DisplayMode,int,int)']
+            if (typeof explicitSrg === 'function') drawFn = explicitSrg
+        } catch (eSrgExp) { }
+        if (drawFn == null && typeof fontObj.m_272191_ === 'function') {
+            // Forge SRG 下 FormattedCharSequence 重载独立命名为 m_272191_，可直接避开 ModernUI FormattedTextWrapper 与 String/Component 重载二义性
+            useDirectSrgDraw = true
+        }
+        if (drawFn == null && !useDirectSrgDraw) {
+            try {
+                var explicit = fontObj['drawInBatch(net.minecraft.util.FormattedCharSequence,float,float,int,boolean,org.joml.Matrix4f,net.minecraft.client.renderer.MultiBufferSource,net.minecraft.client.gui.Font$DisplayMode,int,int)']
+                if (typeof explicit === 'function') drawFn = explicit
+            } catch (eExp) { }
+        }
         var scratchOutMat = null
         if (Matrix4fClass != null) {
             try { scratchOutMat = new Matrix4fClass() } catch (eM) { scratchOutMat = null }
         }
         return {
-            font:        fontObj,
-            drawFn:      drawFn,
-            graphics:    gfx,
-            bufSrc:      bufSrc,
-            displayMode: modeNormal,
-            itemMat:     null,
-            outMat:      scratchOutMat,
-            drawn:       0
+            font:             fontObj,
+            drawFn:           drawFn,
+            useDirectSrgDraw: useDirectSrgDraw,
+            graphics:         gfx,
+            bufSrc:           bufSrc,
+            displayMode:      modeNormal,
+            itemMat:          null,
+            outMat:           scratchOutMat,
+            drawn:            0
         }
     }
 
@@ -984,6 +996,8 @@
         try {
             if (batchCtx.drawFn != null) {
                 batchCtx.drawFn.call(batchCtx.font, seq, x, y, argb, shadow, mat, batchCtx.bufSrc, batchCtx.displayMode, 0, 15728880)
+            } else if (batchCtx.useDirectSrgDraw) {
+                batchCtx.font.m_272191_(seq, x, y, argb, shadow, mat, batchCtx.bufSrc, batchCtx.displayMode, 0, 15728880)
             } else {
                 batchCtx.font.drawInBatch(seq, x, y, argb, shadow, mat, batchCtx.bufSrc, batchCtx.displayMode, 0, 15728880)
             }
@@ -2240,25 +2254,39 @@
     //   注意：HUD 的 PaintScreenEventJS 构造时不传入 Screen（event.screen 恒为 null），
     //   且 Minecraft 类因存在 setScreen(Screen) 而无 getScreen()，mc.screen 在 Rhino 中会被推导为只写 setter；
     //   必须通过 MinecraftClientKJS 注入的 getCurrentScreen() / currentScreen 读取当前打开的 Screen。
+    function readMcCurrentScreen(mcObj) {
+        if (mcObj == null) return null
+        try {
+            if (typeof mcObj.getCurrentScreen === 'function') {
+                var gs = mcObj.getCurrentScreen()
+                if (gs != null) return gs
+            }
+        } catch (e0) { }
+        try {
+            if (mcObj.currentScreen != null) return mcObj.currentScreen
+        } catch (e1) { }
+        try {
+            // 注意勿访问 mcObj.screen（Rhino 会因 setScreen 将其识别为只写属性）；Forge SRG 下真实字段为 f_91080_
+            if (mcObj.f_91080_ != null) return mcObj.f_91080_
+        } catch (e2) { }
+        return null
+    }
+
     function resolveCurrentScreen(event) {
         if (event != null) {
             if (event.screen != null) return event.screen
             var mc = event.mc
-            if (mc != null) {
-                try {
-                    if (typeof mc.getCurrentScreen === 'function') return mc.getCurrentScreen()
-                } catch (e0) { }
-                try {
-                    if (mc.currentScreen != null) return mc.currentScreen
-                } catch (e1) { }
-            }
+            var fromEventMc = readMcCurrentScreen(mc)
+            if (fromEventMc != null) return fromEventMc
         }
         if (typeof Client !== 'undefined' && Client != null) {
+            var fromClient = readMcCurrentScreen(Client)
+            if (fromClient != null) return fromClient
+        }
+        if (MinecraftClass != null) {
             try {
-                if (typeof Client.getCurrentScreen === 'function') return Client.getCurrentScreen()
-            } catch (e2) { }
-            try {
-                if (Client.currentScreen != null) return Client.currentScreen
+                var fromStaticMc = readMcCurrentScreen(MinecraftClass.getInstance())
+                if (fromStaticMc != null) return fromStaticMc
             } catch (e3) { }
         }
         return null
@@ -2272,7 +2300,8 @@
             try {
                 if (typeof scr.getClass === 'function') clsName = String(scr.getClass().getName())
             } catch (eCls) { }
-            if (clsName.indexOf('ChatScreen') >= 0 || clsName.indexOf('ReceivingLevelScreen') >= 0 || clsName.indexOf('Overlay') >= 0) {
+            // ChatScreen 打开时 chat box 与输入框占据屏幕，必须视为 GUI 遮挡界面触发防覆盖隐藏
+            if (clsName.indexOf('ReceivingLevelScreen') >= 0 || clsName.indexOf('Overlay') >= 0) {
                 return false
             }
             return true
