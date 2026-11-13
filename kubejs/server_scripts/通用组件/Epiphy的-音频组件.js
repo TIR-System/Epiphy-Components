@@ -1095,12 +1095,37 @@
         return { proto: PROTO_VERSION, act: 'stop', ses: SESSION, h: h.id, fout: fout }
     }
 
+    var findOtherCountedMergeSibling = (h, uuid) => {
+        var sk = getConflictScopeKey(h)
+        for (var other of handles.values()) {
+            if (other == null || other.id === h.id) continue
+            if (other.conflictMode !== 'merge') continue
+            if (getConflictScopeKey(other) !== sk) continue
+            if (other.listeners && other.listeners[uuid] && other.countedListeners && other.countedListeners[uuid]) {
+                return other
+            }
+        }
+        return null
+    }
+
+    var findOtherActiveMergeSibling = (h, uuid) => {
+        var sk = getConflictScopeKey(h)
+        for (var other of handles.values()) {
+            if (other == null || other.id === h.id) continue
+            if (other.conflictMode !== 'merge') continue
+            if (getConflictScopeKey(other) !== sk) continue
+            if (other.listeners && other.listeners[uuid]) return other
+        }
+        return null
+    }
+
     var addListener = (h, rec) => {
         h.listeners[rec.uuid] = true
         var seq = ++listenerTriggerSeq
         if (!h.listenerEnteredSeq) h.listenerEnteredSeq = {}
         if (!h.listenerInRange) h.listenerInRange = {}
         if (!h.listenerInRangeSeq) h.listenerInRangeSeq = {}
+        if (!h.countedListeners) h.countedListeners = {}
         h.listenerEnteredSeq[rec.uuid] = seq
         var inOwnRange = (h.anchor.kind === 'none') || (distSqToHandle(rec, h) <= h.range * h.range)
         h.listenerInRange[rec.uuid] = inOwnRange
@@ -1108,7 +1133,14 @@
         h.listenerCount++
         h.triggerCount++
         h.hadListenerOnce = true
-        listenCount.set(rec.uuid, (listenCount.get(rec.uuid) || 0) + 1)
+        // merge 集群对同一玩家仅计为 1 次并发句柄，避免多方块叠加耗尽 maxHandlesPerPlayer
+        var alreadyCountedInCluster = (h.conflictMode === 'merge' && findOtherCountedMergeSibling(h, rec.uuid) != null)
+        if (!alreadyCountedInCluster) {
+            h.countedListeners[rec.uuid] = true
+            listenCount.set(rec.uuid, (listenCount.get(rec.uuid) || 0) + 1)
+        } else {
+            h.countedListeners[rec.uuid] = false
+        }
         emit('join', h, rec.p)
     }
 
@@ -1117,16 +1149,24 @@
         if (rec != null) {
             sendPacket(rec.p, buildStopPacket(h, customFadeOut))
         }
+        var wasCounted = Boolean(h.countedListeners && h.countedListeners[uuid])
         delete h.listeners[uuid]
         if (h.mutedListeners) delete h.mutedListeners[uuid]
         if (h.listenerEnteredSeq) delete h.listenerEnteredSeq[uuid]
         if (h.listenerInRange) delete h.listenerInRange[uuid]
         if (h.listenerInRangeSeq) delete h.listenerInRangeSeq[uuid]
+        if (h.countedListeners) delete h.countedListeners[uuid]
         h.listenerCount = max2(0, h.listenerCount - 1)
-        if (listenCount.has(uuid)) {
-            var next = listenCount.get(uuid) - 1
-            if (next <= 0) listenCount.delete(uuid)
-            else listenCount.set(uuid, next)
+        if (wasCounted) {
+            var nextOwner = (h.conflictMode === 'merge') ? findOtherActiveMergeSibling(h, uuid) : null
+            if (nextOwner != null) {
+                if (!nextOwner.countedListeners) nextOwner.countedListeners = {}
+                nextOwner.countedListeners[uuid] = true
+            } else if (listenCount.has(uuid)) {
+                var next = listenCount.get(uuid) - 1
+                if (next <= 0) listenCount.delete(uuid)
+                else listenCount.set(uuid, next)
+            }
         }
         emit('leave', h, rec != null ? rec.p : null, reason)
     }
@@ -1218,7 +1258,8 @@
                     loginReadyTick.delete(rec.uuid)
                 }
                 if (!isPlayerEligible(h, rec, false)) continue
-                if ((listenCount.get(rec.uuid) || 0) >= CONFIG.maxHandlesPerPlayer) {
+                var isMergeSibling = (h.conflictMode === 'merge' && findOtherActiveMergeSibling(h, rec.uuid) != null)
+                if (!isMergeSibling && (listenCount.get(rec.uuid) || 0) >= CONFIG.maxHandlesPerPlayer) {
                     reportWarning('maxHandlesPerPlayer', `玩家 ${rec.name || rec.uuid} 同时收听句柄数已达上限 (${CONFIG.maxHandlesPerPlayer})，已跳过新增音频 #${h.id}`)
                     continue
                 }
@@ -1388,8 +1429,8 @@
 
                 var winner = list[0]
                 if (groupMode === 'merge') {
-                    // 组合合并模式：范围取并集总合；若当前未静音句柄仍在自身范围内则保持连续播放不跳切，
-                    // 否则切换为距离最近的在范围内成员
+                    // 组合合并模式：范围取并集总合；若当前未静音句柄仍在舒适区则保持连续不跳切，
+                    // 当退至外缘 (>0.72*range) 且存在显著更近的同组句柄时平滑切至最近成员，避免边缘音量衰减为零
                     var currentActive = null
                     var inRangeList = []
                     for (var m = 0; m < list.length; m++) {
@@ -1401,17 +1442,27 @@
                             }
                         }
                     }
-                    if (currentActive != null) {
-                        winner = currentActive
-                    } else {
-                        var pool = inRangeList.length > 0 ? inRangeList : list
-                        winner = pool[0]
-                        for (var pIdx = 1; pIdx < pool.length; pIdx++) {
-                            var pCand = pool[pIdx]
-                            if (distSqToHandle(rec, pCand) < distSqToHandle(rec, winner) - 0.25) {
-                                winner = pCand
-                            }
+                    var pool = inRangeList.length > 0 ? inRangeList : list
+                    var closest = pool[0]
+                    var closestDistSq = distSqToHandle(rec, closest)
+                    for (var pIdx = 1; pIdx < pool.length; pIdx++) {
+                        var pCand = pool[pIdx]
+                        var dCandSq = distSqToHandle(rec, pCand)
+                        if (dCandSq < closestDistSq - 0.25) {
+                            closest = pCand
+                            closestDistSq = dCandSq
                         }
+                    }
+                    if (currentActive != null) {
+                        var curDistSq = distSqToHandle(rec, currentActive)
+                        var rimThreshold = currentActive.range * 0.72
+                        if (closest.id !== currentActive.id && curDistSq > (rimThreshold * rimThreshold) && closestDistSq * 2.5 < curDistSq) {
+                            winner = closest
+                        } else {
+                            winner = currentActive
+                        }
+                    } else {
+                        winner = closest
                     }
                 } else {
                     for (var j = 1; j < list.length; j++) {

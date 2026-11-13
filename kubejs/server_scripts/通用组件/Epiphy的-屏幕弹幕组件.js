@@ -1751,37 +1751,46 @@
         var cx = rec.x + 0.5, cy = rec.y + 0.5, cz = rec.z + 0.5
         var r  = binding.radius
 
-        // 模式 1（共享模式 perPlayer === false，默认）：只计算并打包 1 次，同一份数据包复用发给半径内所有玩家（所有人看到完全一致）
+        // 模式 1（共享模式 perPlayer === false，默认）：仅当至少有一名玩家通过作用域准入后才延迟生成并打包一次，避免 merge/竞争落选方块空耗构包
         if (!binding.perPlayer) {
-            var sharedSpec = null
-            try {
-                sharedSpec = typeof binding.specOrFn === 'function'
-                    ? binding.specOrFn({
-                        block:  curBlock,
-                        level:  lv,
-                        server: SERVER_REF,
-                        dim:    rec.dim,
-                        x:      rec.x,
-                        y:      rec.y,
-                        z:      rec.z,
-                        player: null
-                    })
-                    : binding.specOrFn
-            } catch (eSharedSpec) {
-                reportCatch('emitForBoundBlock:shared_spec', eSharedSpec)
-                return 0
-            }
-            if (sharedSpec == null) return 0
-            var sharedPkt = buildValidatedPacket(sharedSpec, null)
-            if (sharedPkt == null) return 0
-            return forEachPlayerInRadius(lv, cx, cy, cz, r, function (p) {
+            var sharedBuilt = false
+            var sharedPkt   = null
+            var sharedSent  = 0
+            forEachPlayerInRadius(lv, cx, cy, cz, r, function (p) {
                 if (!shouldEmitForBoundBlockToPlayer(rec, binding, p)) return
+                if (!sharedBuilt) {
+                    sharedBuilt = true
+                    var sharedSpec = null
+                    try {
+                        sharedSpec = typeof binding.specOrFn === 'function'
+                            ? binding.specOrFn({
+                                block:  curBlock,
+                                level:  lv,
+                                server: SERVER_REF,
+                                dim:    rec.dim,
+                                x:      rec.x,
+                                y:      rec.y,
+                                z:      rec.z,
+                                player: null
+                            })
+                            : binding.specOrFn
+                    } catch (eSharedSpec) {
+                        reportCatch('emitForBoundBlock:shared_spec', eSharedSpec)
+                        sharedSpec = null
+                    }
+                    if (sharedSpec != null) {
+                        sharedPkt = buildValidatedPacket(sharedSpec, null)
+                    }
+                }
+                if (sharedPkt == null) return
                 try {
                     p.sendData(CHANNEL, sharedPkt)
+                    sharedSent++
                 } catch (eSend) {
                     reportCatch('emitForBoundBlock:shared_send', eSend)
                 }
             })
+            return sharedSent
         }
 
         // 模式 2（独立模式 perPlayer === true）：对半径内每名玩家各自调用一次 specOrFn（传入 player: p），支持按玩家定制文案或独立随机落点
@@ -1919,10 +1928,42 @@
                 }
             },
             onRemoved: function (rec, binding) {
-                invalidateScopeCache(rec != null ? rec.key : null)
-                if (binding != null && binding.group) {
-                    clearNear(rec.dim, rec.x + 0.5, rec.y + 0.5, rec.z + 0.5, binding.radius + 6, binding.group)
+                var remaining = null
+                if (rec != null && binding != null && binding.group && binding.conflictMode === 'merge') {
+                    // 合并模式：在清空 cache 前取出同组其它合并方块，移除一块时仅清退离开合并并集范围的玩家
+                    var scopeEntry = getScopeCacheEntry(rec, binding)
+                    remaining = []
+                    for (var i = 0; i < scopeEntry.list.length; i++) {
+                        if (scopeEntry.list[i].rec.key !== rec.key) {
+                            remaining.push(scopeEntry.list[i])
+                        }
+                    }
                 }
+                invalidateScopeCache(rec != null ? rec.key : null)
+                if (rec == null || binding == null || !binding.group) return
+                if (remaining != null && remaining.length > 0) {
+                    var lv = resolveLevel(rec.dim, null)
+                    if (lv != null) {
+                        var pkt = buildValidatedPacket(buildClearOptions(binding.group, null), null)
+                        if (pkt != null) {
+                            forEachPlayerInRadius(lv, rec.x + 0.5, rec.y + 0.5, rec.z + 0.5, binding.radius + 6, function (p) {
+                                var pPos = readPlayerPos(p)
+                                if (pPos != null) {
+                                    for (var j = 0; j < remaining.length; j++) {
+                                        var rem = remaining[j]
+                                        var dx  = pPos.x - rem.cx, dy = pPos.y - rem.cy, dz = pPos.z - rem.cz
+                                        if ((dx * dx + dy * dy + dz * dz) <= rem.rSq) {
+                                            return
+                                        }
+                                    }
+                                }
+                                try { p.sendData(CHANNEL, pkt) } catch (eClr) { reportCatch('clearNearSend', eClr) }
+                            })
+                        }
+                    }
+                    return
+                }
+                clearNear(rec.dim, rec.x + 0.5, rec.y + 0.5, rec.z + 0.5, binding.radius + 6, binding.group)
             }
         })
         return danmakuBlockTracker
