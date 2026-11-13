@@ -1342,6 +1342,26 @@
         global.EpiphyCommandRegistryQueue.length = 0
     }
 
+    function getStats() {
+        var worldKeys   = Object.keys(worldAuthStore)
+        var grantCount  = 0
+        for (var wi = 0; wi < worldKeys.length; wi++) {
+            var entry = worldAuthStore[worldKeys[wi]]
+            if (entry != null && entry.grants != null) {
+                grantCount += Object.keys(entry.grants).length
+            }
+        }
+        return {
+            subcommands:          subcmdOrder.slice(),
+            subcommandCount:      subcmdOrder.length,
+            declaredCallers:      Object.keys(registeredCallers),
+            declaredCallersCount: Object.keys(registeredCallers).length,
+            declarationStackDepth: declarationStack.length,
+            loadedWorldsCount:    worldKeys.length,
+            totalGrantedPlayers:  grantCount
+        }
+    }
+
     var valveApi = {
         ROOT_LITERAL:              ROOT_LITERAL,
         POLICIES:                  POLICY_PRESETS,
@@ -1362,7 +1382,8 @@
         isPlayerAuthorized:        isPlayerAuthorized,
         isPlayerAdmin:             isPlayerAdmin,
         isWorldCheatsEnabled:      isWorldCheatsEnabled,
-        sendHelp:                  sendAggregatedHelp
+        sendHelp:                  sendAggregatedHelp,
+        getStats:                  getStats
     }
 
     try {
@@ -1552,4 +1573,51 @@
             logCatch('ServerEvents.command', eCmd)
         }
     })
+
+    // 动态注册权限阀运行时统计到统一调试组件 (EpiphyDebug)
+    var valveDebugProvider = {
+        name:    'valve',
+        label:   '权限阀中心',
+        order:   30,
+        summary: function () {
+            var s = getStats()
+            return 'subcmds=' + s.subcommandCount + ' [' + (s.subcommands.join(',') || 'none') + ']' +
+                ' | callers=' + s.declaredCallersCount +
+                ' | stackDepth=' + s.declarationStackDepth +
+                ' | grants=' + s.totalGrantedPlayers
+        },
+        detail: function () {
+            var s = getStats()
+            var lines = [
+                'subcommands (' + s.subcommandCount + '): ' + (s.subcommands.join(', ') || '（无）'),
+                'declaredCallers (' + s.declaredCallersCount + '): ' + (s.declaredCallers.join(', ') || '（无）'),
+                'declarationStackDepth: ' + s.declarationStackDepth,
+                'loadedWorldsCount: ' + s.loadedWorldsCount + ', totalGrantedPlayers: ' + s.totalGrantedPlayers
+            ]
+            for (var i = 0; i < subcmdOrder.length; i++) {
+                var sk = subcmdOrder[i]
+                var sp = subcommands[sk]
+                if (sp != null) {
+                    lines.push('policy[' + sk + ']: mode=' + sp.policy.mode + ', console=' + sp.policy.allowConsole + ', declared=' + sp.policy.allowDeclaredCallers)
+                }
+            }
+            return lines
+        },
+        check: function () {
+            var s = getStats()
+            return [{
+                name:   'declaration_stack_balanced',
+                ok:     s.declarationStackDepth === 0,
+                detail: 'declarationStackDepth=' + s.declarationStackDepth
+            }]
+        }
+    }
+    if (typeof global !== 'undefined' && global != null) {
+        if (global.EpiphyDebug != null && typeof global.EpiphyDebug.registerProvider === 'function') {
+            global.EpiphyDebug.registerProvider(valveDebugProvider)
+        } else {
+            if (!Array.isArray(global.EpiphyDebugProviderQueue)) global.EpiphyDebugProviderQueue = []
+            global.EpiphyDebugProviderQueue.push(valveDebugProvider)
+        }
+    }
 })()

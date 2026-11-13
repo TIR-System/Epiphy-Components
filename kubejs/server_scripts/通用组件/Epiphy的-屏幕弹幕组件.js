@@ -2610,4 +2610,82 @@
         valveRegError = String(eReg)
         console.warn('[ScreenDanmaku] 注册 /epiphy danmaku 指令时出现异常，已终止指令注册: ' + eReg)
     }
+
+    function getDanmakuTrackerCalls() {
+        try {
+            var t = (typeof global !== 'undefined' && global != null) ? global.EpiphyBlockTracker : null
+            if (t != null && typeof t.getStats === 'function') {
+                var st = t.getStats()
+                if (st != null && st.subscriberCalls != null && st.subscriberCalls.danmaku != null) {
+                    return st.subscriberCalls.danmaku
+                }
+            }
+        } catch (eT) { }
+        return 0
+    }
+
+    var danmakuDebugProvider = {
+        name:    'danmaku',
+        label:   '屏幕弹幕组件',
+        order:   40,
+        summary: function () {
+            var mode = (danmakuBlockTracker != null && !danmakuBlockTracker.isFallback) ? 'tracker' : 'fallback'
+            return 'scopeCache=' + scopeListCache.size +
+                ' (rev=' + boundScopeRevision + ')' +
+                ' | cooldowns=' + playerSourceCooldown.size +
+                ' | getTrackedRecords=' + getDanmakuTrackerCalls() +
+                ' | mode=' + mode
+        },
+        detail: function () {
+            var mode = (danmakuBlockTracker != null && !danmakuBlockTracker.isFallback) ? 'tracker' : 'fallback'
+            return [
+                'trackerMode: ' + mode + ' (fallbackBindings=' + fallbackBindings.size + ', fallbackTracked=' + fallbackTracked.size + ')',
+                'scopeListCache.size: ' + scopeListCache.size + ' (boundScopeRevision=' + boundScopeRevision + ')',
+                'blockSeqByKey.size: ' + blockSeqByKey.size,
+                'playerSourceCooldown.size: ' + playerSourceCooldown.size,
+                'getTrackedRecords(danmaku): ' + getDanmakuTrackerCalls(),
+                'valveMissing: ' + valveMissing + ', valveRegError: ' + String(valveRegError),
+                'CONFIG.debug: ' + Boolean(CONFIG.debug) + ', tickCounter: ' + danmakuTickCounter
+            ]
+        },
+        check: function () {
+            var hasRealTracker = (danmakuBlockTracker != null && !danmakuBlockTracker.isFallback)
+            return [
+                {
+                    name:   'valve_registered',
+                    ok:     !valveMissing && valveRegError == null,
+                    detail: 'valveMissing=' + valveMissing + ', err=' + String(valveRegError)
+                },
+                {
+                    name:   'block_tracker_attached',
+                    ok:     hasRealTracker || danmakuBlockTracker == null,
+                    detail: 'tracker=' + (danmakuBlockTracker == null ? 'lazy_uninit' : (hasRealTracker ? 'EpiphyBlockTracker' : 'fallback'))
+                }
+            ]
+        },
+        actions: {
+            clearcache: {
+                desc: '清空弹幕作用域范围缓存',
+                fn: function () {
+                    invalidateScopeCache(null)
+                    return '已清空 scopeListCache（当前 rev=' + boundScopeRevision + '）'
+                }
+            },
+            scan: {
+                desc: '触发弹幕绑定方块附近区段扫描',
+                fn: function () {
+                    var n = scanBlocksNow()
+                    return '弹幕绑定方块已入队扫描 ' + n + ' 个区块段'
+                }
+            }
+        }
+    }
+    if (typeof global !== 'undefined' && global != null) {
+        if (global.EpiphyDebug != null && typeof global.EpiphyDebug.registerProvider === 'function') {
+            global.EpiphyDebug.registerProvider(danmakuDebugProvider)
+        } else {
+            if (!Array.isArray(global.EpiphyDebugProviderQueue)) global.EpiphyDebugProviderQueue = []
+            global.EpiphyDebugProviderQueue.push(danmakuDebugProvider)
+        }
+    }
 })()

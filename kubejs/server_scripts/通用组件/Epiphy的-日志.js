@@ -167,6 +167,40 @@
         onceKeys      = {}
     }
 
+    function getStats() {
+        var bucketCount           = 0
+        var totalSuppressed       = 0
+        var playerBucketCount     = 0
+        var totalPlayerSuppressed = 0
+        for (var bk in buckets) {
+            if (Object.prototype.hasOwnProperty.call(buckets, bk)) {
+                bucketCount++
+                totalSuppressed += (buckets[bk].suppressed || 0)
+            }
+        }
+        for (var pk in playerBuckets) {
+            if (Object.prototype.hasOwnProperty.call(playerBuckets, pk)) {
+                playerBucketCount++
+                totalPlayerSuppressed += (playerBuckets[pk].suppressed || 0)
+            }
+        }
+        var activeDbg = []
+        for (var dk in debugModules) {
+            if (Object.prototype.hasOwnProperty.call(debugModules, dk) && debugModules[dk] === true) {
+                activeDbg.push(dk)
+            }
+        }
+        return {
+            defaultIntervalMs:     DEFAULT_INTERVAL_MS,
+            bucketCount:           bucketCount,
+            totalSuppressed:       totalSuppressed,
+            playerBucketCount:     playerBucketCount,
+            totalPlayerSuppressed: totalPlayerSuppressed,
+            onceKeyCount:          Object.keys(onceKeys).length,
+            activeDebugModules:    activeDbg
+        }
+    }
+
     var api = {
         DEFAULT_INTERVAL_MS: DEFAULT_INTERVAL_MS,
         warn:                warn,
@@ -177,9 +211,57 @@
         setDebug:            setDebug,
         isDebug:             isDebug,
         debug:               debug,
-        reset:               reset
+        reset:               reset,
+        getStats:            getStats
     }
 
     global.EpiphyLog    = api
     global.EpiphyLogger = api
+
+    // 动态上报自身统计到统一调试组件 (EpiphyDebug)
+    var logDebugProvider = {
+        name:    'log',
+        label:   '限频日志中心',
+        order:   10,
+        summary: function () {
+            var s = getStats()
+            return 'buckets=' + s.bucketCount +
+                ' | suppressed=' + s.totalSuppressed +
+                ' | onceKeys=' + s.onceKeyCount +
+                ' | debug=[' + (s.activeDebugModules.join(',') || 'off') + ']'
+        },
+        detail: function () {
+            var s = getStats()
+            return [
+                'defaultIntervalMs: ' + s.defaultIntervalMs,
+                'buckets: ' + s.bucketCount + ' (suppressed=' + s.totalSuppressed + ')',
+                'playerBuckets: ' + s.playerBucketCount + ' (suppressed=' + s.totalPlayerSuppressed + ')',
+                'onceKeys: ' + s.onceKeyCount,
+                'activeDebugModules: ' + (s.activeDebugModules.join(', ') || '（全部关闭）')
+            ]
+        },
+        check: function () {
+            var s = getStats()
+            return [{
+                name:   'suppressed_volume',
+                ok:     s.totalSuppressed < 5000,
+                detail: 'totalSuppressed=' + s.totalSuppressed + ', buckets=' + s.bucketCount
+            }]
+        },
+        actions: {
+            reset: {
+                desc: '清空限频桶与 once 去重记录',
+                fn: function () {
+                    reset()
+                    return '已重置 EpiphyLog 限频桶与 once 缓存'
+                }
+            }
+        }
+    }
+    if (global.EpiphyDebug != null && typeof global.EpiphyDebug.registerProvider === 'function') {
+        global.EpiphyDebug.registerProvider(logDebugProvider)
+    } else {
+        if (!Array.isArray(global.EpiphyDebugProviderQueue)) global.EpiphyDebugProviderQueue = []
+        global.EpiphyDebugProviderQueue.push(logDebugProvider)
+    }
 })()

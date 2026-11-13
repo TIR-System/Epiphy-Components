@@ -1153,4 +1153,73 @@
         dimOfLevel:        dimOfLevel,
         resolveLevel:      resolveLevel
     }
+
+    // 动态上报扫描队列、已追踪池、getTrackedRecords 调用频次等到 EpiphyDebug
+    var trackerDebugProvider = {
+        name:    'tracker',
+        label:   '方块追踪组件',
+        order:   20,
+        summary: function () {
+            var s = getStats()
+            return 'scanQueue.length=' + s.scanQueueArrayLength +
+                ' (pending=' + s.pendingScanCount + ')' +
+                ' | trackedBlocks.size=' + s.trackedBlocksSize +
+                ' | scannedSections=' + s.scannedSectionsSize +
+                ' | getTrackedRecords=' + s.getTrackedRecordsCalls
+        },
+        detail: function () {
+            var s = getStats()
+            return [
+                'bindingsCount: ' + s.bindingsCount + ' (version=' + s.bindingsVersion + ')',
+                'subscribersCount: ' + s.subscribersCount,
+                'trackedBlocks.size: ' + s.trackedBlocksSize,
+                'scannedSections.size: ' + s.scannedSectionsSize + ' / max=' + MAX_SCANNED_SECTIONS,
+                'scanQueue.length: ' + s.scanQueueArrayLength + ' (head=' + s.scanQueueHead + ', pending=' + s.pendingScanCount + ', max=' + MAX_SCAN_QUEUE_SIZE + ')',
+                'stateIdCache.size: ' + s.stateIdCacheSize,
+                'getTrackedRecordsCalls: ' + s.getTrackedRecordsCalls + ' (perSub=' + JSON.stringify(s.subscriberCalls) + ')',
+                'persistDirty: ' + persistDirty + ', storagePath: ' + (loadedStoragePath || '（未加载世界）')
+            ]
+        },
+        check: function () {
+            var s = getStats()
+            var qOk = s.pendingScanCount < Math.floor(MAX_SCAN_QUEUE_SIZE * 0.85)
+            var pOk = (SERVER_REF == null || loadedStoragePath != null)
+            return [
+                {
+                    name:   'scan_queue_headroom',
+                    ok:     qOk,
+                    detail: 'pending=' + s.pendingScanCount + '/' + MAX_SCAN_QUEUE_SIZE + ' (arrayLen=' + s.scanQueueArrayLength + ')'
+                },
+                {
+                    name:   'storage_initialized',
+                    ok:     pOk,
+                    detail: 'loadedStoragePath=' + String(loadedStoragePath)
+                }
+            ]
+        },
+        actions: {
+            rescan: {
+                desc: '重扫在线玩家周边非空气区块段',
+                fn: function () {
+                    var n = rescanAll()
+                    return '已重扫并新入队 ' + n + ' 个非空气区块段（待扫总数: ' + getPendingScanCount() + '）'
+                }
+            },
+            flush: {
+                desc: '立即将 trackedBlocks 落盘保存',
+                fn: function () {
+                    flushTrackedBlocks()
+                    return '已落盘 savedCount=' + trackedBlocks.size + ' -> ' + String(loadedStoragePath)
+                }
+            }
+        }
+    }
+    if (typeof global !== 'undefined' && global != null) {
+        if (global.EpiphyDebug != null && typeof global.EpiphyDebug.registerProvider === 'function') {
+            global.EpiphyDebug.registerProvider(trackerDebugProvider)
+        } else {
+            if (!Array.isArray(global.EpiphyDebugProviderQueue)) global.EpiphyDebugProviderQueue = []
+            global.EpiphyDebugProviderQueue.push(trackerDebugProvider)
+        }
+    }
 })()

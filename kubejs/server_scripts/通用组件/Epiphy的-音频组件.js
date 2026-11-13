@@ -112,6 +112,20 @@
 
     var UUIDClass     = loadJavaClass('java.util.UUID')
     var BlockPosClass = loadJavaClass('net.minecraft.core.BlockPos')
+    var SystemClass   = loadJavaClass('java.lang.System')
+
+    var nowNano = () => {
+        if (SystemClass != null) {
+            return tryCall(() => Number(SystemClass.nanoTime()), Date.now() * 1000000)
+        }
+        return Date.now() * 1000000
+    }
+
+    var lastSyncAllMs       = 0
+    var lastActiveSyncAllMs = 0
+    var maxSyncAllMs        = 0
+    var syncAllCount        = 0
+    var lastSyncAllTick     = 0
 
     var SESSION        = Date.now().toString(36) + Math.floor(Math.random() * 1679616).toString(36)
     var handles        = new Map() // id -> handle
@@ -1298,39 +1312,51 @@
     }
 
     var syncAll = () => {
-        if (handles.size === 0) return
-        var snap             = snapshotPlayers()
-        var noOnlinePlayers  = (snap.list.length === 0)
-        var needsArbitration = false
-        handles.forEach((h) => {
-            if (h == null || !handles.has(h.id)) return
-            if (h.endTick > 0 && tickCounter >= h.endTick) {
-                endHandle(h, 'expired', snap)
-                return
-            }
-            if (noOnlinePlayers && h.started && h.listenerCount === 0 && (h.loop || h.lateJoin)) {
-                // 无人在线且无活跃监听器时，常规方块/坐标音源降频检查结束条件（每 20 tick 一次），避免空转 queryBlockAt
-                if (h.anchor.kind !== 'entity' && h.stopCond.predicate == null && (tickCounter % 20) !== 0) {
+        var t0Ns = nowNano()
+        try {
+            if (handles.size === 0) return
+            var snap             = snapshotPlayers()
+            var noOnlinePlayers  = (snap.list.length === 0)
+            var needsArbitration = false
+            handles.forEach((h) => {
+                if (h == null || !handles.has(h.id)) return
+                if (h.endTick > 0 && tickCounter >= h.endTick) {
+                    endHandle(h, 'expired', snap)
                     return
                 }
-            }
-            if (!h.started) {
-                activateHandle(h, snap)
-            } else {
-                syncHandle(h, snap)
-                if (handles.has(h.id) && !h.loop && !h.lateJoin && h.listenerCount === 0) {
-                    endHandle(h, 'no_listener', snap)
+                if (noOnlinePlayers && h.started && h.listenerCount === 0 && (h.loop || h.lateJoin)) {
+                    // 无人在线且无活跃监听器时，常规方块/坐标音源降频检查结束条件（每 20 tick 一次），避免空转 queryBlockAt
+                    if (h.anchor.kind !== 'entity' && h.stopCond.predicate == null && (tickCounter % 20) !== 0) {
+                        return
+                    }
                 }
-            }
-            if (!needsArbitration && !noOnlinePlayers && handles.has(h.id) && h.started && h.listenerCount > 0) {
-                if ((h.conflictMode && h.conflictMode !== 'none') ||
-                    (h.mutedListeners != null && Object.keys(h.mutedListeners).length > 0)) {
-                    needsArbitration = true
+                if (!h.started) {
+                    activateHandle(h, snap)
+                } else {
+                    syncHandle(h, snap)
+                    if (handles.has(h.id) && !h.loop && !h.lateJoin && h.listenerCount === 0) {
+                        endHandle(h, 'no_listener', snap)
+                    }
                 }
+                if (!needsArbitration && !noOnlinePlayers && handles.has(h.id) && h.started && h.listenerCount > 0) {
+                    if ((h.conflictMode && h.conflictMode !== 'none') ||
+                        (h.mutedListeners != null && Object.keys(h.mutedListeners).length > 0)) {
+                        needsArbitration = true
+                    }
+                }
+            })
+            if (needsArbitration) {
+                arbitrateHandleConflicts(snap)
             }
-        })
-        if (needsArbitration) {
-            arbitrateHandleConflicts(snap)
+        } finally {
+            var dtMs = (nowNano() - t0Ns) / 1000000.0
+            if (dtMs >= 0 && isFinite(dtMs)) {
+                lastSyncAllMs   = dtMs
+                syncAllCount++
+                lastSyncAllTick = tickCounter
+                if (handles.size > 0) lastActiveSyncAllMs = dtMs
+                if (dtMs > maxSyncAllMs) maxSyncAllMs = dtMs
+            }
         }
     }
 
@@ -2789,5 +2815,96 @@
         }
     } catch (eReg) {
         console.warn(`[EpiphyAudio] 注册 /epiphy audio 指令时出现异常，已终止指令注册: ${eReg}`)
+    }
+
+    var getAudioTrackerCalls = () => {
+        return tryCall(() => {
+            var t = (typeof global !== 'undefined' && global != null) ? global.EpiphyBlockTracker : null
+            if (t != null && typeof t.getStats === 'function') {
+                var st = t.getStats()
+                if (st != null && st.subscriberCalls != null && st.subscriberCalls.audio != null) {
+                    return st.subscriberCalls.audio
+                }
+            }
+            return 0
+        }, 0)
+    }
+
+    var audioDebugProvider = {
+        name:    'audio',
+        label:   '空间音频组件',
+        order:   50,
+        summary: () => {
+            var mode = (audioBlockTracker != null && !audioBlockTracker.isFallback) ? 'tracker' : 'fallback'
+            return `handles.size=${handles.size} | syncAll=${lastSyncAllMs.toFixed(3)}ms` +
+                ` (active=${lastActiveSyncAllMs.toFixed(3)}ms, max=${maxSyncAllMs.toFixed(3)}ms)` +
+                ` | listeners=${listenCount.size} | mode=${mode}`
+        },
+        detail: () => {
+            var mode = (audioBlockTracker != null && !audioBlockTracker.isFallback) ? 'tracker' : 'fallback'
+            return [
+                `handles.size: ${handles.size} / max=${CONFIG.maxHandles}, keyIndex.size=${keyIndex.size}`,
+                `listenCount.size: ${listenCount.size}, trackerMode=${mode}`,
+                `syncAllMs: last=${lastSyncAllMs.toFixed(3)}ms, lastActive=${lastActiveSyncAllMs.toFixed(3)}ms, max=${maxSyncAllMs.toFixed(3)}ms`,
+                `syncAllCount: ${syncAllCount}, lastSyncTick=${lastSyncAllTick}, currentTick=${tickCounter}`,
+                `getTrackedRecords(audio): ${getAudioTrackerCalls()}`,
+                `fallbackBindings=${fallbackBindings.size}, fallbackTracked=${fallbackTracked.size}`,
+                `valveMissing=${valveMissing}, CONFIG.debug=${Boolean(CONFIG.debug)}`
+            ]
+        },
+        check: () => {
+            var hasRealTracker = (audioBlockTracker != null && !audioBlockTracker.isFallback)
+            return [
+                {
+                    name:   'handles_headroom',
+                    ok:     handles.size < Math.floor(CONFIG.maxHandles * 0.9),
+                    detail: `handles=${handles.size}/${CONFIG.maxHandles}`
+                },
+                {
+                    name:   'valve_registered',
+                    ok:     !valveMissing,
+                    detail: `valveMissing=${valveMissing}`
+                },
+                {
+                    name:   'block_tracker_attached',
+                    ok:     hasRealTracker || audioBlockTracker == null,
+                    detail: `tracker=${audioBlockTracker == null ? 'lazy_uninit' : (hasRealTracker ? 'EpiphyBlockTracker' : 'fallback')}`
+                }
+            ]
+        },
+        actions: {
+            rescan: {
+                desc: '重扫在线玩家周边音频绑定方块',
+                fn: () => {
+                    var n = scanBlocksNow()
+                    return `音频绑定方块已入队扫描 ${n} 个区块段`
+                }
+            },
+            stopall: {
+                desc: '停止当前全部活动音频句柄',
+                fn: () => {
+                    var n = stopAll()
+                    return `已停止全部 ${n} 个音频句柄`
+                }
+            },
+            resetmetrics: {
+                desc: '重置 syncAll 峰值与累计耗时计数',
+                fn: () => {
+                    lastSyncAllMs       = 0
+                    lastActiveSyncAllMs = 0
+                    maxSyncAllMs        = 0
+                    syncAllCount        = 0
+                    return '已清零 syncAll 耗时统计'
+                }
+            }
+        }
+    }
+    if (typeof global !== 'undefined' && global != null) {
+        if (global.EpiphyDebug != null && typeof global.EpiphyDebug.registerProvider === 'function') {
+            global.EpiphyDebug.registerProvider(audioDebugProvider)
+        } else {
+            if (!Array.isArray(global.EpiphyDebugProviderQueue)) global.EpiphyDebugProviderQueue = []
+            global.EpiphyDebugProviderQueue.push(audioDebugProvider)
+        }
     }
 })()
