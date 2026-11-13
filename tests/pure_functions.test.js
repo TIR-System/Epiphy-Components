@@ -6,9 +6,12 @@ var path   = require('path')
 var vm     = require('vm')
 
 var ROOT_DIR       = path.resolve(__dirname, '..')
-var DANMAKU_PATH   = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-屏幕弹幕组件.js')
-var VALVE_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-权限阀.js')
+var LOG_PATH       = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-日志.js')
 var TRACKER_PATH   = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-方块追踪组件.js')
+var VALVE_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-权限阀.js')
+var DEBUG_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-调试组件.js')
+var DANMAKU_PATH   = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-屏幕弹幕组件.js')
+var AUDIO_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-音频组件.js')
 
 function createKubeSandbox(loadClassFn) {
     var noop = function () {}
@@ -464,6 +467,123 @@ test('block tracker: bind() & scanNow() preserve pure-air LRU, queued work and t
     assert.strictEqual(recs.length, 1)
     assert.strictEqual(Tracker.getStats().getTrackedRecordsCalls, 1)
     assert.strictEqual(Tracker.getStats().subscriberCalls.sub_a, 1)
+
+    // rescanAll() clears global section LRU explicitly and re-enqueues nearby non-air sections
+    var rescanEnqueued = Tracker.rescanAll()
+    assert.ok(rescanEnqueued >= 1)
+})
+
+// ----------------------------------------------------------------------------
+// 8. EpiphyLog.getStats & EpiphyDebug dynamic provider hub across all 6 server scripts
+// ----------------------------------------------------------------------------
+test('debug hub: dynamic queue drain, multi-module metrics, checks, actions & admin policy', function () {
+    function MockMinecraftServer() {}
+    function MockServerPlayer(name, op) {
+        this.username = name
+        this._op = Boolean(op)
+        this._sent = []
+    }
+    MockServerPlayer.prototype.getStringUUID = function () { return 'uuid-' + this.username }
+    MockServerPlayer.prototype.getUuid = function () { return 'uuid-' + this.username }
+    MockServerPlayer.prototype.hasPermissions = function (lv) { return this._op && lv <= 4 }
+    MockServerPlayer.prototype.sendData = function (ch, pkt) { this._sent.push({ ch: ch, pkt: pkt }) }
+
+    var tickHandlers = []
+    var isoSandbox = createKubeSandbox(function (clsName) {
+        if (clsName === 'net.minecraft.server.MinecraftServer') return MockMinecraftServer
+        if (clsName === 'net.minecraft.server.level.ServerPlayer') return MockServerPlayer
+        return null
+    })
+    isoSandbox.ServerEvents.tick = function (fn) { tickHandlers.push(fn) }
+
+    // Load all 6 server components in real KubeJS priority order (1100 -> 1050 -> 1000 -> 950 -> 500 -> 500)
+    vm.runInContext(fs.readFileSync(LOG_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-日志.js' })
+    vm.runInContext(fs.readFileSync(TRACKER_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-方块追踪组件.js' })
+    vm.runInContext(fs.readFileSync(VALVE_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-权限阀.js' })
+    vm.runInContext(fs.readFileSync(DEBUG_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-调试组件.js' })
+    vm.runInContext(fs.readFileSync(DANMAKU_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-屏幕弹幕组件.js' })
+    vm.runInContext(fs.readFileSync(AUDIO_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-音频组件.js' })
+
+    var Log     = isoSandbox.global.EpiphyLog
+    var Valve   = isoSandbox.global.EpiphyPermissionValve
+    var Debug   = isoSandbox.global.EpiphyDebug
+    var Danmaku = isoSandbox.global.ScreenDanmaku
+    var Audio   = isoSandbox.global.EpiphyAudio
+
+    assert.ok(Log && typeof Log.getStats === 'function')
+    assert.ok(Debug && typeof Debug.collectSnapshot === 'function')
+    assert.deepStrictEqual(
+        plain(Debug.listProviders()),
+        ['log', 'tracker', 'valve', 'danmaku', 'audio', 'debug']
+    )
+
+    // Exercise Log stats (rate-limit suppression + once)
+    Log.warn('TestMod', 'rateTag', 'msg1', null, 60000)
+    Log.warn('TestMod', 'rateTag', 'msg2', null, 60000)
+    Log.once('warn', 'once_k1', 'hello once')
+    var logStats = Log.getStats()
+    assert.strictEqual(logStats.bucketCount, 1)
+    assert.strictEqual(logStats.totalSuppressed, 1)
+    assert.strictEqual(logStats.onceKeyCount, 1)
+
+    // Exercise Audio play + ServerEvents.tick to record handles.size and syncAll timing
+    var p1 = new MockServerPlayer('Tester', false)
+    var op = new MockServerPlayer('AdminOP', true)
+    p1.x = 0; p1.y = 64; p1.z = 0
+    op.x = 2; op.y = 64; op.z = 0
+    var mockLevel = {
+        dimension: 'minecraft:overworld',
+        players: [p1, op],
+        getBlock: function () { return { id: 'minecraft:air' } },
+        getMinBuildHeight: function () { return 0 },
+        getMaxBuildHeight: function () { return 64 },
+        getChunkSource: function () { return { getChunkNow: function () { return null } } }
+    }
+    p1.level = mockLevel
+    op.level = mockLevel
+    var mockServer = {
+        getLevel: function () { return mockLevel },
+        getAllLevels: function () { return [mockLevel] },
+        getPlayerList: function () { return { getPlayers: function () { return [p1, op] } } }
+    }
+
+    Audio.play({ sound: 'epiphy:children_of_the_city', audience: 'all', loop: true })
+    for (var ti = 0; ti < tickHandlers.length; ti++) {
+        tickHandlers[ti]({ server: mockServer })
+    }
+
+    var snap = Debug.collectSnapshot(null)
+    assert.strictEqual(snap.onlinePlayersCount, 2)
+    assert.strictEqual(snap.providerCount, 6)
+
+    var byName = {}
+    for (var mi = 0; mi < snap.modules.length; mi++) {
+        byName[snap.modules[mi].name] = snap.modules[mi]
+    }
+    assert.ok(byName.tracker.summaryText.indexOf('scanQueue.length=') >= 0)
+    assert.ok(byName.tracker.summaryText.indexOf('trackedBlocks.size=') >= 0)
+    assert.ok(byName.tracker.summaryText.indexOf('getTrackedRecords=') >= 0)
+    assert.ok(byName.audio.summaryText.indexOf('handles.size=1') >= 0, 'audio summary: ' + byName.audio.summaryText)
+    assert.ok(byName.audio.summaryText.indexOf('syncAll=') >= 0)
+
+    var chk = Debug.runChecks(null)
+    assert.strictEqual(chk.warnCount, 0, 'all checks should pass cleanly: ' + JSON.stringify(chk.items))
+
+    var actRes = Debug.runAction('danmaku', 'clearcache')
+    assert.strictEqual(actRes.ok, true)
+
+    var dbgToggle = Debug.toggleLogDebug('danmaku', true)
+    assert.strictEqual(dbgToggle.ok, true)
+    assert.strictEqual(Log.isDebug('ScreenDanmaku'), true)
+    assert.strictEqual(Danmaku.CONFIG.debug, true)
+    Debug.toggleLogDebug('danmaku', false)
+    assert.strictEqual(Danmaku.CONFIG.debug, false)
+
+    // Permission check: /epiphy debug must allow OP & console, deny regular player & declared callers
+    var opAccess     = Valve.evaluateSourceAccess({ source: op, player: op, hasPermission: function () { return true } }, 'debug', Valve.getStats && { mode: 'admin', requireCheats: false, requireOp: true, allowAuthorized: false, opLevel: 2, allowCommandBlock: false, allowConsole: true, allowDeclaredCallers: false })
+    var playerAccess = Valve.evaluateSourceAccess({ source: p1, player: p1, hasPermission: function () { return false } }, 'debug', { mode: 'admin', requireCheats: false, requireOp: true, allowAuthorized: false, opLevel: 2, allowCommandBlock: false, allowConsole: true, allowDeclaredCallers: false })
+    assert.strictEqual(opAccess.allowed, true)
+    assert.strictEqual(playerAccess.allowed, false)
 })
 
 // Run suite

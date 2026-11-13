@@ -18,6 +18,10 @@
 //      缺失时 bindBlock 降级为基础事件兜底模式（仅支持新放置/破坏方块，无区块扫描与持久化），不影响常规弹幕 API
 //    - 可选依赖：kubejs/server_scripts/通用组件/Epiphy的-权限阀.js (EpiphyPermissionValve, priority: 1000)
 //      缺失时 /epiphy danmaku 指令不生效（OP 登录时提示），JS 调用接口正常；后续 /reload 补全权限阀后会自动从队列补注册并复位提示标志
+//
+//  [Rhino 语法兼容性约定] KubeJS 2001.6.x 内置 Rhino 对 ES6 支持不完整且存在语义偏差（如 `let`/`const`
+//    的 TDZ 与循环块级绑定存在兼容陷阱）。本系列变量统一使用 `var`，弹幕模块维持 ES5 + `Map`/`Set`；
+//    同系列音频模块使用经本服实测稳定的 ES6 子集（`=>` / 模板字符串 / `for..of`）。请勿引入 `let`/`const`。
 // ============================================================================
 //  调用说明（global.ScreenDanmaku）
 // ============================================================================
@@ -73,6 +77,7 @@
     var spreadCounter = 0
 
     var CONFIG = {
+        debug:              false,
         errorLogIntervalMs: 5000,
         avoidMaxRetries:    14,
         sizeMin:            0.2,

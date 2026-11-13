@@ -31,6 +31,10 @@
 //       - 字体外圈 (outlineMode: 'none' | 'stroke' | 'glow', outlineColor, outlineWidth)：支持黑底绿字等实心外圈或柔光外圈；
 //       - 局部内联标记（仅当文本包含标签或启用时生效）：<b>加粗</b>、<scale=1.35>放大</scale>/<big>放大</big>、<shake>仅特定字震动</shake>、<noshake>免震</noshake>、<glow>/<outline>局部外圈。
 //    7. 排版与边界：支持 \n 换行、maxWidth / wrap 自动折行、clamp 旋转包围盒防出屏、GUI 自动避让（showInGui: true 强制显示）、同组条数上限 (maxGroup)。
+//
+//  [Rhino 语法兼容性约定] KubeJS 2001.6.x 内置 Rhino 对 ES6 支持不完整且存在语义偏差（如 `let`/`const`
+//    块级绑定/TDZ 行为偏差，且部分新特性在每帧 Java 互操作热路径下存在额外开销）。故本渲染器坚持 ES5 + `var`
+//    写法；同系列音频客户端播放器则使用经实测稳定的 ES6 子集（`=>` / 模板字符串 / `for..of`）。请勿引入 `let`/`const`。
 // ============================================================================
 
 ;(function () {
