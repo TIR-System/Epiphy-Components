@@ -9,7 +9,7 @@
 //  职责说明：
 //    1. 维护全服唯一的物理方块追踪表与 16x16x16 LevelChunkSection 渐进式扫描队列；
 //       同一物理方块可同时被同系列多个业务订阅者（如 danmaku 与 audio）订阅，只扫一遍、只存一份；
-//    2. 统一持久化至 server.persistentData ('epiphy_tracked_blocks_v2')；
+//    2. 统一持久化至按存档隔离的 JsonIO 文件（kubejs_epiphy_tracked_blocks.json + 防抖落盘），仅首次加载时从旧版 persistentData 迁移；
 //    3. 提供 migrateLegacyOnce(sourceSpec, blockId) 供业务侧声明旧存档数据一次性迁移，底座本身零业务耦合；
 //    4. 每个订阅句柄支持 destroy() 彻底注销自身及其孤立追踪记录。
 //
@@ -21,18 +21,27 @@
 // ============================================================================
 
 ;(function () {
-    var PERSIST_KEY           = 'epiphy_tracked_blocks_v2'
-    var SCAN_ENQ_INTERVAL     = 20
-    var SCAN_SECTIONS_PER_TICK = 2
+    var PERSIST_KEY            = 'epiphy_tracked_blocks_v2'
+    var WORLD_FILE_NAME        = 'kubejs_epiphy_tracked_blocks.json'
+    var FALLBACK_DIR           = 'kubejs/config/epiphy_tracked_blocks'
+    var SAVE_DEBOUNCE_TICKS    = 40
+    var VERIFY_WINDOW_TICKS    = 20
+    var SCAN_ENQ_INTERVAL      = 20
+    var SCAN_SECTIONS_PER_TICK = 1
 
-    var SERVER_REF       = null
-    var loadedPersistSrv = null
-    var tickCounter      = 0
+    var SERVER_REF         = null
+    var loadedPersistSrv   = null
+    var loadedStoragePath  = null
+    var tickCounter        = 0
+    var persistDirty       = false
+    var lastFlushTick      = -9999
+    var migratedLegacyFlag = false
+    var nextVerifySlot     = 0
 
     // 共享物理方块池与扫描状态（全局唯一份）
     // bindingsByBlockId: Map<blockId, Map<subId, bindingMeta>>
     // subscribers:       Map<subId, subscriberObj>
-    // trackedBlocks:     Map<posKey, { key, blockId, dim, x, y, z, extras: { [subId]: obj } }>
+    // trackedBlocks:     Map<posKey, { key, blockId, dim, x, y, z, vSlot, extras: { [subId]: obj } }>
     var bindingsByBlockId = new Map()
     var subscribers       = new Map()
     var trackedBlocks     = new Map()
@@ -41,6 +50,7 @@
     var migratedKeys      = new Set()
     var pendingMigrations = []
 
+    // 【catch 约定】日志设施自身的兜底：console 不可用时已无更低层可退，留空。
     function logCatch(tag, err) {
         if (typeof global !== 'undefined' && global.EpiphyLog != null) {
             global.EpiphyLog.catchWarn('EpiphyBlockTracker', tag, err)
@@ -49,6 +59,22 @@
         }
     }
 
+    // 【catch 约定】Java 运行时类存在性探测：类未加载或非 Rhino 环境时返回 null 并走降级路径。
+    function loadJavaClass(className) {
+        try {
+            return Java.loadClass(className)
+        } catch (e) {
+            return null
+        }
+    }
+
+    var LevelResourceClass = loadJavaClass('net.minecraft.world.level.storage.LevelResource')
+    var FilesClass         = loadJavaClass('java.nio.file.Files')
+    var PathsClass         = loadJavaClass('java.nio.file.Paths')
+
+    // 【catch 约定】以下 try/catch 均为 Java API 能力探测（normalizeDim/dimOfLevel/resolveLevel）：
+    // 先检查方法或属性类型再调用，失败表示该 API 在当前 MC/Rhino 映射中不存在，属于预期分支，故留空。
+    // 这些路径在事件与 tick 中频繁调用，写日志会污染限频桶并拖慢热路径。
     function normalizeDim(dim) {
         if (dim == null) return null
         if (typeof dim === 'string') {
@@ -110,6 +136,8 @@
         return String(dim || 'minecraft:overworld') + '|' + Math.floor(x) + ',' + Math.floor(y) + ',' + Math.floor(z)
     }
 
+    // 【catch 约定】以下 try/catch 均为 Java API 能力探测（extractBlockId/isChunkLoaded/readPlayerPos）：
+    // 不同 MC/Rhino 映射下的方块对象、区块加载查询与玩家坐标访问接口存在差异，失败属预期分支，留空避免热路径污染。
     function extractBlockId(blockOrState) {
         if (blockOrState == null) return null
         try { if (blockOrState.id != null) return String(blockOrState.id) } catch (e0) { }
@@ -179,16 +207,123 @@
         return view
     }
 
-    function saveTrackedBlocks() {
-        if (SERVER_REF == null) return
+    function formatTimestampNow() {
+        try {
+            return new Date().toISOString()
+        } catch (e) {
+            return String(Date.now())
+        }
+    }
+
+    function readJsonField(obj, key) {
+        if (obj == null) return null
+        try {
+            if (obj[key] !== undefined) return obj[key]
+            if (typeof obj.get === 'function') return obj.get(key)
+        } catch (e) { }
+        return null
+    }
+
+    function toSeqArray(val) {
+        if (val == null) return null
+        if (Array.isArray(val)) return val
+        try {
+            if (typeof val.size === 'function' && typeof val.get === 'function') {
+                var len = Number(val.size())
+                var out = []
+                for (var i = 0; i < len; i++) out.push(val.get(i))
+                return out
+            }
+        } catch (e) { }
+        return null
+    }
+
+    function resolveWorldStorageInfo(server) {
+        var srv = server || SERVER_REF
+        if (srv != null && LevelResourceClass != null) {
+            try {
+                var rootRes = LevelResourceClass.ROOT
+                if (rootRes != null && typeof srv.getWorldPath === 'function') {
+                    var worldPath = srv.getWorldPath(rootRes)
+                    if (worldPath != null) {
+                        var normRoot = (typeof worldPath.normalize === 'function') ? worldPath.normalize() : worldPath
+                        var jsonPath = String(normRoot).replace(/[\\/]+$/, '') + '/' + WORLD_FILE_NAME
+                        return {
+                            worldKey: 'path:' + jsonPath.toLowerCase(),
+                            filePath: jsonPath
+                        }
+                    }
+                }
+            } catch (ePath) {
+                logCatch('resolveWorldPath', ePath)
+            }
+        }
+
+        var levelName = 'default_world'
+        if (srv != null) {
+            try {
+                var wData = (typeof srv.getWorldData === 'function') ? srv.getWorldData() : srv.worldData
+                if (wData != null) {
+                    var rawName = (typeof wData.getLevelName === 'function') ? wData.getLevelName() : wData.levelName
+                    if (rawName != null && String(rawName).trim().length > 0) {
+                        levelName = String(rawName).trim()
+                    }
+                }
+            } catch (eName) { }
+        }
+        var safeFileSlug = levelName.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim() || 'default_world'
+        var fallbackPath = FALLBACK_DIR + '/' + safeFileSlug + '.json'
+        return {
+            worldKey: 'name:' + safeFileSlug.toLowerCase(),
+            filePath: fallbackPath
+        }
+    }
+
+    function ensureParentDir(filePathStr) {
+        if (FilesClass == null || PathsClass == null) return
+        try {
+            var p = PathsClass.get(String(filePathStr))
+            var parent = p != null ? p.getParent() : null
+            if (parent != null && !FilesClass.exists(parent)) {
+                FilesClass.createDirectories(parent)
+            }
+        } catch (e) {
+            logCatch('ensureParentDir', e)
+        }
+    }
+
+    function flushTrackedBlocks() {
+        if (SERVER_REF == null || !persistDirty) return false
         try {
             var arr = []
             trackedBlocks.forEach(function (item) {
                 arr.push([item.blockId, item.dim, item.x, item.y, item.z])
             })
-            SERVER_REF.persistentData.putString(PERSIST_KEY, JSON.stringify(arr))
+            if (typeof JsonIO !== 'undefined' && JsonIO != null) {
+                var targetPath = loadedStoragePath || resolveWorldStorageInfo(SERVER_REF).filePath
+                loadedStoragePath = targetPath
+                ensureParentDir(targetPath)
+                JsonIO.write(targetPath, {
+                    version:        2,
+                    updatedAt:      formatTimestampNow(),
+                    migratedLegacy: migratedLegacyFlag,
+                    blocks:         arr
+                })
+                persistDirty  = false
+                lastFlushTick = tickCounter
+                return true
+            }
         } catch (eSave) {
-            logCatch('saveTrackedBlocks', eSave)
+            logCatch('flushTrackedBlocks', eSave)
+        }
+        return false
+    }
+
+    function saveTrackedBlocks(immediate) {
+        if (SERVER_REF == null) return
+        persistDirty = true
+        if (immediate === true || (tickCounter - lastFlushTick) >= SAVE_DEBOUNCE_TICKS) {
+            flushTrackedBlocks()
         }
     }
 
@@ -224,6 +359,12 @@
         })
     }
 
+    function allocVerifySlot() {
+        var s = nextVerifySlot
+        nextVerifySlot = (nextVerifySlot + 1) % VERIFY_WINDOW_TICKS
+        return s
+    }
+
     function registerTrackedBlock(blockId, dim, x, y, z, saveNow, triggerFound, source) {
         var bMap = bindingsByBlockId.get(blockId)
         if (bMap == null || bMap.size === 0) return null
@@ -233,9 +374,9 @@
         var key = makePosKey(dim, ix, iy, iz)
         var rec = trackedBlocks.get(key)
         if (rec == null || rec.blockId !== blockId) {
-            rec = { key: key, blockId: blockId, dim: dim, x: ix, y: iy, z: iz, extras: {} }
+            rec = { key: key, blockId: blockId, dim: dim, x: ix, y: iy, z: iz, vSlot: allocVerifySlot(), chunkLoaded: true, extras: {} }
             trackedBlocks.set(key, rec)
-            if (saveNow !== false) saveTrackedBlocks()
+            if (saveNow !== false) saveTrackedBlocks(false)
         }
         if (triggerFound) {
             dispatchFoundToSubscribers(rec, null, source)
@@ -243,15 +384,25 @@
         return rec
     }
 
-    function importSerializedBlockArray(rawStr, fallbackBlockId, sourceKey) {
+    function importSerializedBlockArray(rawOrArr, fallbackBlockId, sourceKey) {
         var imported = 0
         var skipped  = 0
-        if (!rawStr || String(rawStr).length === 0) return 0
-        var arr = JSON.parse(String(rawStr))
-        if (!Array.isArray(arr)) return 0
+        if (rawOrArr == null) return 0
+        var parsed = rawOrArr
+        if (typeof rawOrArr === 'string') {
+            if (rawOrArr.length === 0) return 0
+            try {
+                parsed = JSON.parse(rawOrArr)
+            } catch (eParse) {
+                logCatch('importSerializedBlockArray:parse(' + String(sourceKey || 'unknown') + ')', eParse)
+                return 0
+            }
+        }
+        var arr = toSeqArray(parsed)
+        if (arr == null) return 0
         for (var i = 0; i < arr.length; i++) {
-            var it = arr[i]
-            if (!Array.isArray(it)) {
+            var it = toSeqArray(arr[i])
+            if (it == null) {
                 skipped++
                 continue
             }
@@ -278,7 +429,7 @@
             }
             var key = makePosKey(dim, bx, by, bz)
             if (!trackedBlocks.has(key)) {
-                trackedBlocks.set(key, { key: key, blockId: bid, dim: dim, x: bx, y: by, z: bz, extras: {} })
+                trackedBlocks.set(key, { key: key, blockId: bid, dim: dim, x: bx, y: by, z: bz, vSlot: allocVerifySlot(), chunkLoaded: true, extras: {} })
                 imported++
             }
         }
@@ -287,6 +438,7 @@
             if (typeof global !== 'undefined' && global.EpiphyLog != null) {
                 global.EpiphyLog.warn('EpiphyBlockTracker', 'importSkipped', warnMsg)
             } else {
+                // 【catch 约定】日志设施自身的兜底：console 不可用时已无更低层可退，留空。
                 try { console.warn(warnMsg) } catch (e) { }
             }
         }
@@ -295,24 +447,58 @@
 
     function ensureLoaded() {
         if (SERVER_REF == null || loadedPersistSrv === SERVER_REF) return
-        loadedPersistSrv = SERVER_REF
+        loadedPersistSrv   = SERVER_REF
+        trackedBlocks.clear()
         scannedSections.clear()
-        scanQueue.length = 0
+        scanQueue.length   = 0
         migratedKeys.clear()
+        persistDirty       = false
+        lastFlushTick      = -9999
+        migratedLegacyFlag = false
+        nextVerifySlot     = 0
 
-        var loadKeys = [PERSIST_KEY, 'epiphy_danmaku_bound_blocks_v1', 'epiphy_audio_bound_blocks_v1']
-        var importedLegacyV1 = 0
-        for (var kIdx = 0; kIdx < loadKeys.length; kIdx++) {
+        var storageInfo    = resolveWorldStorageInfo(SERVER_REF)
+        loadedStoragePath  = storageInfo.filePath
+
+        if (typeof JsonIO !== 'undefined' && JsonIO != null) {
             try {
-                var raw = SERVER_REF.persistentData.getString(loadKeys[kIdx])
-                var cnt = importSerializedBlockArray(raw, null, loadKeys[kIdx])
-                if (kIdx > 0) importedLegacyV1 += cnt
-            } catch (eLoad) {
-                logCatch('ensureLoaded:' + loadKeys[kIdx], eLoad)
+                var rawObj = JsonIO.read(loadedStoragePath)
+                if (rawObj != null) {
+                    var directSeq = toSeqArray(rawObj)
+                    if (directSeq != null) {
+                        importSerializedBlockArray(directSeq, null, loadedStoragePath)
+                    } else {
+                        var blocksField = readJsonField(rawObj, 'blocks')
+                        if (blocksField != null) {
+                            importSerializedBlockArray(blocksField, null, loadedStoragePath)
+                        }
+                        if (readJsonField(rawObj, 'migratedLegacy') === true) {
+                            migratedLegacyFlag = true
+                        }
+                    }
+                }
+            } catch (eJsonLoad) {
+                logCatch('ensureLoaded:JsonIO', eJsonLoad)
             }
         }
-        if (importedLegacyV1 > 0) {
-            saveTrackedBlocks()
+
+        if (!migratedLegacyFlag) {
+            var loadKeys = [PERSIST_KEY, 'epiphy_danmaku_bound_blocks_v1', 'epiphy_audio_bound_blocks_v1']
+            var importedLegacy = 0
+            for (var kIdx = 0; kIdx < loadKeys.length; kIdx++) {
+                try {
+                    var raw = SERVER_REF.persistentData.getString(loadKeys[kIdx])
+                    if (raw && String(raw).length > 0) {
+                        importedLegacy += importSerializedBlockArray(raw, null, loadKeys[kIdx])
+                    }
+                } catch (eLoad) {
+                    logCatch('ensureLoaded:' + loadKeys[kIdx], eLoad)
+                }
+            }
+            migratedLegacyFlag = true
+            if (importedLegacy > 0) {
+                saveTrackedBlocks(true)
+            }
         }
     }
 
@@ -370,7 +556,7 @@
                                     var dbz  = Math.floor(Number(dl.z))
                                     var dkey = makePosKey(ddim, dbx, dby, dbz)
                                     if (!trackedBlocks.has(dkey)) {
-                                        trackedBlocks.set(dkey, { key: dkey, blockId: bid, dim: ddim, x: dbx, y: dby, z: dbz, extras: {} })
+                                        trackedBlocks.set(dkey, { key: dkey, blockId: bid, dim: ddim, x: dbx, y: dby, z: dbz, vSlot: allocVerifySlot(), chunkLoaded: true, extras: {} })
                                         addedKeys.push(dkey)
                                     }
                                 }
@@ -386,7 +572,7 @@
         }
 
         if (addedKeys.length > 0) {
-            saveTrackedBlocks()
+            saveTrackedBlocks(true)
             for (var a = 0; a < addedKeys.length; a++) {
                 var rec = trackedBlocks.get(addedKeys[a])
                 if (rec != null) dispatchFoundToSubscribers(rec, null, 'migrate')
@@ -590,7 +776,7 @@
             }
             bMap.delete(subId)
             if (bMap.size === 0) bindingsByBlockId.delete(idStr)
-            saveTrackedBlocks()
+            saveTrackedBlocks(true)
             return removed
         }
 
@@ -711,10 +897,25 @@
             tickCounter++
             if (SERVER_REF == null) return
             tickAllTrackedBlocks()
+            if (persistDirty && (tickCounter - lastFlushTick) >= SAVE_DEBOUNCE_TICKS) {
+                flushTrackedBlocks()
+            }
         } catch (eTick) {
             logCatch('ServerEvents.tick', eTick)
         }
     })
+
+    try {
+        ServerEvents.unloaded(function () {
+            try {
+                flushTrackedBlocks()
+            } catch (eUnl) {
+                logCatch('ServerEvents.unloaded', eUnl)
+            }
+        })
+    } catch (eRegUnl) {
+        logCatch('registerServerUnloaded', eRegUnl)
+    }
 
     function configure(patch) {
         if (patch == null || typeof patch !== 'object') return { scanEnqInterval: SCAN_ENQ_INTERVAL, scanSectionsPerTick: SCAN_SECTIONS_PER_TICK }
