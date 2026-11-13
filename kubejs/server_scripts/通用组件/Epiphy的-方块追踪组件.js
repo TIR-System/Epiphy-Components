@@ -639,6 +639,19 @@
         }
     }
 
+    var stateIdCache       = new Map()
+
+    function extractStateIdCached(st) {
+        if (st == null) return null
+        if (typeof st.isAir === 'function' && st.isAir()) return null
+        var cached = stateIdCache.get(st)
+        if (cached !== undefined) return cached
+        if (stateIdCache.size >= 4096) stateIdCache.clear()
+        var bid = extractBlockId(st)
+        stateIdCache.set(st, bid)
+        return bid
+    }
+
     function processScanSlice() {
         if (scanQueue.length === 0 || bindingsByBlockId.size === 0) return
         var processed = 0
@@ -661,14 +674,33 @@
                 if (sections == null || secIdx < 0 || secIdx >= sections.length) continue
                 var section = sections[secIdx]
                 if (section == null || section.hasOnlyAir()) continue
+
+                // 先探测区块段调色板 (O(palette))：若整段完全不包含任何已绑定方块，直接跳过 4096 格遍历
+                var shouldScanSection = true
+                if (typeof section.maybeHas === 'function') {
+                    // 【catch 约定】Java Palette.maybeHas 能力探测：若当前 MC/Rhino 映射不支持 SAM 转换或抛错则降级全扫，留空避免刷屏。
+                    try {
+                        shouldScanSection = Boolean(section.maybeHas(function (pState) {
+                            var pBid = extractStateIdCached(pState)
+                            if (pBid == null) return false
+                            var pMap = bindingsByBlockId.get(pBid)
+                            return pMap != null && pMap.size > 0
+                        }))
+                    } catch (ePal) {
+                        shouldScanSection = true
+                    }
+                }
+                if (!shouldScanSection) continue
+
                 var baseX = task.sx << 4, baseY = task.sy << 4, baseZ = task.sz << 4
                 for (var ly = 0; ly < 16; ly++) {
                     var wy = baseY + ly
                     for (var lx = 0; lx < 16; lx++) {
                         var wx = baseX + lx
                         for (var lz = 0; lz < 16; lz++) {
-                            var st   = section.getBlockState(lx, ly, lz)
-                            var bid  = extractBlockId(st)
+                            var st = section.getBlockState(lx, ly, lz)
+                            if (st == null || (typeof st.isAir === 'function' && st.isAir())) continue
+                            var bid  = extractStateIdCached(st)
                             var bMap = bid != null ? bindingsByBlockId.get(bid) : null
                             if (bMap != null && bMap.size > 0) {
                                 var wz  = baseZ + lz
@@ -685,7 +717,7 @@
                 logCatch('scanSection', eScan)
             }
         }
-        if (dirty) saveTrackedBlocks()
+        if (dirty) saveTrackedBlocks(false)
     }
 
     function tickAllTrackedBlocks() {
@@ -699,24 +731,36 @@
         }
         processScanSlice()
 
-        var dirty = false
-        var keys  = Array.from(trackedBlocks.keys())
-        for (var i = 0; i < keys.length; i++) {
+        var dirty       = false
+        var verifyPhase = tickCounter % VERIFY_WINDOW_TICKS
+        trackedBlocks.forEach(function (rec, posKey) {
             try {
-                var rec  = trackedBlocks.get(keys[i])
-                if (rec == null) continue
+                if (rec == null) return
                 var bMap = bindingsByBlockId.get(rec.blockId)
-                if (bMap == null || bMap.size === 0) continue
+                if (bMap == null || bMap.size === 0) return
 
-                var lv = resolveLevel(rec.dim, null)
-                if (lv == null || !isChunkLoaded(lv, rec.x, rec.z)) continue
-                var curBlock = null
-                try { curBlock = lv.getBlock(rec.x, rec.y, rec.z) } catch (eGet) { logCatch('tick:getBlock', eGet) }
-                if (extractBlockId(curBlock) !== rec.blockId) {
-                    dispatchRemovedToSubscribers(rec, 'block_changed', null, null)
-                    trackedBlocks.delete(keys[i])
-                    dirty = true
-                    continue
+                // 将 block_changed 实体复核按 VERIFY_WINDOW_TICKS (1/20) 分摊到各 tick，并消除每 tick 数组分配
+                var vSlot      = (rec.vSlot != null) ? (rec.vSlot % VERIFY_WINDOW_TICKS) : 0
+                var needVerify = (vSlot === verifyPhase)
+                var lv         = null
+                var curBlock   = null
+
+                if (needVerify) {
+                    lv = resolveLevel(rec.dim, null)
+                    if (lv == null || !isChunkLoaded(lv, rec.x, rec.z)) {
+                        rec.chunkLoaded = false
+                        return
+                    }
+                    rec.chunkLoaded = true
+                    try { curBlock = lv.getBlock(rec.x, rec.y, rec.z) } catch (eGet) { logCatch('tick:getBlock', eGet) }
+                    if (extractBlockId(curBlock) !== rec.blockId) {
+                        dispatchRemovedToSubscribers(rec, 'block_changed', null, null)
+                        trackedBlocks.delete(posKey)
+                        dirty = true
+                        return
+                    }
+                } else if (rec.chunkLoaded === false) {
+                    return
                 }
 
                 bMap.forEach(function (binding, subId) {
@@ -732,8 +776,8 @@
             } catch (eItem) {
                 logCatch('tickItem', eItem)
             }
-        }
-        if (dirty) saveTrackedBlocks()
+        })
+        if (dirty) saveTrackedBlocks(false)
     }
 
     function createTracker(cfg) {
@@ -918,14 +962,26 @@
     }
 
     function configure(patch) {
-        if (patch == null || typeof patch !== 'object') return { scanEnqInterval: SCAN_ENQ_INTERVAL, scanSectionsPerTick: SCAN_SECTIONS_PER_TICK }
-        if (patch.scanEnqInterval != null && isFinite(Number(patch.scanEnqInterval))) {
-            SCAN_ENQ_INTERVAL = Math.max(1, Math.floor(Number(patch.scanEnqInterval)))
+        if (patch != null && typeof patch === 'object') {
+            if (patch.scanEnqInterval != null && isFinite(Number(patch.scanEnqInterval))) {
+                SCAN_ENQ_INTERVAL = Math.max(1, Math.floor(Number(patch.scanEnqInterval)))
+            }
+            if (patch.scanSectionsPerTick != null && isFinite(Number(patch.scanSectionsPerTick))) {
+                SCAN_SECTIONS_PER_TICK = Math.max(1, Math.floor(Number(patch.scanSectionsPerTick)))
+            }
+            if (patch.verifyWindowTicks != null && isFinite(Number(patch.verifyWindowTicks))) {
+                VERIFY_WINDOW_TICKS = Math.max(1, Math.floor(Number(patch.verifyWindowTicks)))
+            }
+            if (patch.saveDebounceTicks != null && isFinite(Number(patch.saveDebounceTicks))) {
+                SAVE_DEBOUNCE_TICKS = Math.max(1, Math.floor(Number(patch.saveDebounceTicks)))
+            }
         }
-        if (patch.scanSectionsPerTick != null && isFinite(Number(patch.scanSectionsPerTick))) {
-            SCAN_SECTIONS_PER_TICK = Math.max(1, Math.floor(Number(patch.scanSectionsPerTick)))
+        return {
+            scanEnqInterval:     SCAN_ENQ_INTERVAL,
+            scanSectionsPerTick: SCAN_SECTIONS_PER_TICK,
+            verifyWindowTicks:   VERIFY_WINDOW_TICKS,
+            saveDebounceTicks:   SAVE_DEBOUNCE_TICKS
         }
-        return { scanEnqInterval: SCAN_ENQ_INTERVAL, scanSectionsPerTick: SCAN_SECTIONS_PER_TICK }
     }
 
     global.EpiphyBlockTracker = {
