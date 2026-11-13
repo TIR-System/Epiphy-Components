@@ -64,11 +64,14 @@
     var attCache        = new Map() // soundId -> attenuation_distance
     var warnedKeys      = new Set()
     var pendingActions    = []
-    var session           = null
-    var clientTicks       = 0
-    var wasPaused         = false
-    var unpauseGraceUntil = 0
-    var lastLevelKey      = ''
+    var session              = null
+    var clientTicks          = 0
+    var wasPaused            = false
+    var wasWindowInactive    = false
+    var wasScreenOpen        = false
+    var unpauseGraceUntil    = 0
+    var postResumeResyncUntil = 0
+    var lastLevelKey         = ''
     var lastErrorLogAt    = 0
     var suppressedErrors  = 0
 
@@ -192,6 +195,41 @@
             if (typeof m.isPaused === 'function') return Boolean(m.isPaused())
             if (m.paused !== undefined) return Boolean(m.paused)
         } catch (e) {}
+        return false
+    }
+
+    var isClientWindowActive = () => {
+        var m = getMc()
+        if (m == null) return true
+        try {
+            if (typeof m.isWindowActive === 'function') return Boolean(m.isWindowActive())
+            if (typeof m.m_91294_ === 'function') return Boolean(m.m_91294_())
+            if (m.windowActive !== undefined) return Boolean(m.windowActive)
+        } catch (e) {}
+        return true
+    }
+
+    var hasCurrentScreenOpen = () => {
+        var m = getMc()
+        if (m != null) {
+            try {
+                if (typeof m.getCurrentScreen === 'function' && m.getCurrentScreen() != null) return true
+            } catch (e0) {}
+            try {
+                if (m.currentScreen != null) return true
+            } catch (e1) {}
+            try {
+                if (m.f_91080_ != null) return true
+            } catch (e2) {}
+        }
+        if (typeof Client !== 'undefined' && Client != null) {
+            try {
+                if (typeof Client.getCurrentScreen === 'function' && Client.getCurrentScreen() != null) return true
+            } catch (e3) {}
+            try {
+                if (Client.currentScreen != null) return true
+            } catch (e4) {}
+        }
         return false
     }
 
@@ -398,26 +436,46 @@
         return clampNum(base * fadeMult * distMult, 0.0, 2.0)
     }
 
-    var cachedSoundEngineField   = null
-    var cachedChannelMapField    = null
-    var cachedListenersField     = null
-    var cachedSubOverlayField    = null
+    var fieldCacheSoundEngine = { cls: null, field: null, prop: null }
+    var fieldCacheChannelMap  = { cls: null, field: null, prop: null }
+    var fieldCacheListeners   = { cls: null, field: null, prop: null }
+    var fieldCacheSubOverlay  = { cls: null, field: null, prop: null }
+    var fieldCacheInstVolume  = { cls: null, field: null, prop: null }
 
-    var readJavaField = (obj, names) => {
+    var readJavaField = (obj, names, cacheSlot) => {
         if (obj == null) return null
+        if (cacheSlot != null) {
+            if (cacheSlot.prop != null) {
+                try {
+                    var pv = obj[cacheSlot.prop]
+                    if (pv !== undefined && pv !== null) return pv
+                } catch (eCp) {}
+            }
+            if (cacheSlot.field != null) {
+                try { return cacheSlot.field.get(obj) } catch (eCf) {}
+            }
+        }
         for (var i = 0; i < names.length; i++) {
             var nm = names[i]
             try {
-                if (obj[nm] !== undefined && obj[nm] !== null) return obj[nm]
+                if (obj[nm] !== undefined && obj[nm] !== null) {
+                    if (cacheSlot != null) cacheSlot.prop = nm
+                    return obj[nm]
+                }
             } catch (e0) {}
         }
         try {
-            var cls = obj.getClass()
+            var origCls = obj.getClass()
+            var cls = origCls
             while (cls != null) {
                 for (var j = 0; j < names.length; j++) {
                     try {
                         var fld = cls.getDeclaredField(names[j])
                         fld.setAccessible(true)
+                        if (cacheSlot != null) {
+                            cacheSlot.cls   = origCls
+                            cacheSlot.field = fld
+                        }
                         return fld.get(obj)
                     } catch (e1) {}
                 }
@@ -427,14 +485,50 @@
         return null
     }
 
+    var syncSoundInstanceVolume = (inst, gain) => {
+        if (inst == null) return
+        // 原版 SoundEngine.m_174988_ 遇到 calculateVolume <= 0 会直接调 Channel.stop() 摧毁流！
+        // 因此更新 SimpleSoundInstance.volume (f_119573_) 时下限保底为 0.0001（由 OpenAL ch.setVolume 精确置 0.0 静音），
+        // 同时消除 buildSoundInstance 首帧 fadeIn=0.02 残留导致暂停/切屏/重算音量后回落至 0.02 的问题。
+        var instVol = clampNum(gain > 0.0001 ? gain : 0.0001, 0.0001, 2.0)
+        try {
+            if (fieldCacheInstVolume.field != null) {
+                fieldCacheInstVolume.field.setFloat(inst, instVol)
+                return
+            }
+        } catch (eCached) {}
+        var names = ['volume', 'f_119573_']
+        try {
+            if (typeof inst.getClass === 'function') {
+                var cls = inst.getClass()
+                while (cls != null) {
+                    for (var i = 0; i < names.length; i++) {
+                        try {
+                            var fld = cls.getDeclaredField(names[i])
+                            fld.setAccessible(true)
+                            fieldCacheInstVolume.cls   = cls
+                            fieldCacheInstVolume.field = fld
+                            fld.setFloat(inst, instVol)
+                            return
+                        } catch (e1) {}
+                    }
+                    cls = cls.getSuperclass()
+                }
+            }
+        } catch (e2) {}
+        for (var j = 0; j < names.length; j++) {
+            try {
+                if (inst[names[j]] !== undefined) {
+                    inst[names[j]] = instVol
+                    return
+                }
+            } catch (e3) {}
+        }
+    }
+
     var getSoundEngine = (sm) => {
         if (sm == null) return null
-        if (cachedSoundEngineField != null) {
-            try { return cachedSoundEngineField.get(sm) } catch (e) {}
-        }
-        var se = readJavaField(sm, ['soundEngine', 'f_120349_'])
-        if (se != null) return se
-        return null
+        return readJavaField(sm, ['soundEngine', 'f_120349_'], fieldCacheSoundEngine)
     }
 
     var getCategoryGainMultiplier = (catObj) => {
@@ -453,20 +547,50 @@
         return 1.0
     }
 
-    var applyChannelGain = (sm, entry, gain) => {
+    var applyChannelGain = (sm, entry, gain, forceUnpause) => {
         if (sm == null || entry == null || entry.inst == null) return
+        syncSoundInstanceVolume(entry.inst, gain)
         var se = getSoundEngine(sm)
         if (se == null) return
-        var chanMap = readJavaField(se, ['instanceToChannel', 'f_120220_'])
+        // SoundEngine.instanceToChannel 在 Forge 1.20.1 SRG 中的真实字段名为 f_120226_（原 f_120220_ 为 Library）
+        var chanMap = readJavaField(se, ['instanceToChannel', 'f_120226_'], fieldCacheChannelMap)
         if (chanMap == null || typeof chanMap.get !== 'function') return
         var chHandle = chanMap.get(entry.inst)
         if (chHandle == null || typeof chHandle.execute !== 'function') return
 
         var mul = getCategoryGainMultiplier(entry.catObj)
         var finalGain = clampNum(gain * mul, 0.0, 2.0)
+        var shouldUnpause = Boolean(forceUnpause)
         try {
             chHandle.execute((ch) => {
-                try { ch.setVolume(finalGain) } catch (e0) {}
+                if (ch == null) return
+                try {
+                    if (typeof ch.stopped === 'function' && ch.stopped()) {
+                        entry._channelStopped = true
+                        return
+                    }
+                    if (typeof ch.m_83680_ === 'function' && ch.m_83680_()) {
+                        entry._channelStopped = true
+                        return
+                    }
+                } catch (eStopChk) {}
+                try {
+                    if (typeof ch.setVolume === 'function') {
+                        ch.setVolume(finalGain)
+                    } else if (typeof ch.m_83666_ === 'function') {
+                        ch.m_83666_(finalGain)
+                    }
+                } catch (e0) {}
+                if (shouldUnpause) {
+                    try {
+                        // Channel.unpause() / m_83678_() 仅在源处于 AL_PAUSED(4115) 时执行 alSourcePlay，天然幂等
+                        if (typeof ch.unpause === 'function') {
+                            ch.unpause()
+                        } else if (typeof ch.m_83678_ === 'function') {
+                            ch.m_83678_()
+                        }
+                    } catch (eUnpause) {}
+                }
             })
         } catch (e1) {}
     }
@@ -599,6 +723,8 @@
         entry.inst            = built.inst
         entry.is2D            = built.is2D
         entry.lastSubPingTick = clientTicks
+        entry._channelStopped = false
+        entry.lastSentAlGain  = -1.0
 
         var sm = getSoundManager()
         if (sm != null) {
@@ -631,7 +757,8 @@
             var notified = false
             var se = getSoundEngine(sm)
             if (se != null) {
-                var listeners = readJavaField(se, ['listeners', 'f_120229_'])
+                // SoundEngine.listeners 在 Forge 1.20.1 SRG 中为 f_120231_（f_120229_ 为 queuedSounds）
+                var listeners = readJavaField(se, ['listeners', 'f_120231_'], fieldCacheListeners)
                 if (listeners != null && typeof listeners.iterator === 'function') {
                     var it = listeners.iterator()
                     while (it.hasNext()) {
@@ -649,7 +776,8 @@
             if (!notified) {
                 var mc = getMc()
                 var gui = mc != null ? mc.gui : null
-                var subOv = gui != null ? readJavaField(gui, ['subtitleOverlay', 'f_93006_']) : null
+                // Gui.subtitleOverlay 在 Forge 1.20.1 SRG 中为 f_92996_
+                var subOv = gui != null ? readJavaField(gui, ['subtitleOverlay', 'f_92996_'], fieldCacheSubOverlay) : null
                 if (subOv != null && typeof subOv.onPlaySound === 'function') {
                     subOv.onPlaySound(entry.inst, weighed)
                 }
@@ -841,7 +969,8 @@
                 lastSubPingTick: 0,
                 waitSince:       null,
                 retryAt:         0,
-                retryDelay:      CONFIG.resumeMinDelayTicks
+                retryDelay:      CONFIG.resumeMinDelayTicks,
+                _channelStopped: false
             }
             entries.set(h, entry)
             tryStartEntry(entry, lv, localPlayer)
@@ -895,10 +1024,21 @@
 
     // ======================================================================== 客户端 Tick 驱动与巡检
 
-    var tickActiveEntries = (lv, localPlayer) => {
+    var prepareEntriesForResume = () => {
+        for (var e of entries.values()) {
+            if (e == null) continue
+            e.lastSentAlGain    = -1.0
+            e.lastSubPingTick   = 0
+            e._channelStopped   = false
+            e._resumeReconnected = false
+        }
+    }
+
+    var tickActiveEntries = (lv, localPlayer, forceResync) => {
         var playerPos = getEntityPos(localPlayer)
         var sm        = getSoundManager()
         var hasAudibleDuckingBgm = false
+        var forceSync = Boolean(forceResync)
 
         for (var h of Array.from(entries.keys())) {
             var entry = entries.get(h)
@@ -931,8 +1071,8 @@
             entry.currentAlGain = entry.smoothGain
 
             if (sm != null) {
-                if (Math.abs(entry.currentAlGain - (entry.lastSentAlGain != null ? entry.lastSentAlGain : -1)) > 0.004 || entry.currentAlGain === 0.0) {
-                    applyChannelGain(sm, entry, entry.currentAlGain)
+                if (forceSync || Math.abs(entry.currentAlGain - (entry.lastSentAlGain != null ? entry.lastSentAlGain : -1)) > 0.004 || entry.currentAlGain === 0.0) {
+                    applyChannelGain(sm, entry, entry.currentAlGain, forceSync)
                     entry.lastSentAlGain = entry.currentAlGain
                 }
                 refreshSubtitleForEntry(entry, sm)
@@ -968,7 +1108,11 @@
             if ((clientTicks - entry.startTick) < 20) continue
 
             var active = true
-            try { active = Boolean(sm.isActive(entry.inst)) } catch (e) { active = true }
+            if (entry._channelStopped === true) {
+                active = false
+            } else {
+                try { active = Boolean(sm.isActive(entry.inst)) } catch (e) { active = true }
+            }
             if (active) {
                 if ((clientTicks - entry.startTick) >= CONFIG.stableTicks) {
                     entry.retryDelay = CONFIG.resumeMinDelayTicks
@@ -984,7 +1128,9 @@
             // 循环音源意外中断（如切换音频设备、F3+T 重载资源包或切屏被底层回收）：立即重连恢复
             stopSoundInstance(entry)
             if (entry.spec.resume) {
-                var quickFail = (clientTicks - entry.startTick) < CONFIG.stableTicks
+                var resumeImmediate = (clientTicks <= postResumeResyncUntil && !entry._resumeReconnected)
+                var quickFail = !resumeImmediate && (clientTicks - entry.startTick) < CONFIG.stableTicks
+                if (resumeImmediate) entry._resumeReconnected = true
                 entry.retryAt = clientTicks + (quickFail ? entry.retryDelay : 0)
                 if (quickFail) {
                     entry.retryDelay = min2(entry.retryDelay * 2, CONFIG.resumeMaxDelayTicks)
@@ -1001,13 +1147,36 @@
 
     ClientEvents.tick((event) => {
         try {
-            if (isClientPaused()) {
-                wasPaused = true
+            var pausedNow       = isClientPaused()
+            var windowActiveNow = isClientWindowActive()
+            var screenOpenNow   = hasCurrentScreenOpen()
+
+            if (pausedNow) {
+                wasPaused         = true
+                wasWindowInactive = !windowActiveNow
+                wasScreenOpen     = screenOpenNow
                 return
             }
+
+            var resumedNow = false
             if (wasPaused) {
-                wasPaused = false
-                unpauseGraceUntil = clientTicks + 15
+                wasPaused  = false
+                resumedNow = true
+            }
+            if (wasWindowInactive && windowActiveNow) {
+                resumedNow = true
+            }
+            if (wasScreenOpen && !screenOpenNow) {
+                resumedNow = true
+            }
+            wasWindowInactive = !windowActiveNow
+            wasScreenOpen     = screenOpenNow
+
+            if (resumedNow) {
+                // ESC/暂停界面关闭或切屏切回窗口时，立刻强制重同步各活跃通道增益、尝试唤醒 OpenAL 暂停态并放行断流巡检，无需等待玩家移动
+                unpauseGraceUntil     = 0
+                postResumeResyncUntil = clientTicks + 12
+                prepareEntriesForResume()
             }
 
             clientTicks++
@@ -1023,8 +1192,9 @@
 
             if (entries.size === 0 || lv == null) return
 
-            tickActiveEntries(lv, localPlayer)
-            if (clientTicks % CONFIG.sweepIntervalTicks === 0) {
+            var inResumeWindow = (clientTicks <= postResumeResyncUntil)
+            tickActiveEntries(lv, localPlayer, inResumeWindow)
+            if (inResumeWindow || (clientTicks % CONFIG.sweepIntervalTicks === 0)) {
                 sweepEntries(lv, localPlayer)
             }
         } catch (e) {
@@ -1036,8 +1206,12 @@
         var resetClientState = () => {
             clearAllNow()
             pendingActions.length = 0
-            lastLevelKey = ''
-            wasPaused    = false
+            lastLevelKey          = ''
+            wasPaused             = false
+            wasWindowInactive     = false
+            wasScreenOpen         = false
+            unpauseGraceUntil     = 0
+            postResumeResyncUntil = 0
         }
         ClientEvents.loggedOut(() => {
             resetClientState()
