@@ -11,8 +11,9 @@ var TRACKER_PATH   = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组�
 var VALVE_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-权限阀.js')
 var DEBUG_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-调试组件.js')
 var DANMAKU_PATH   = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-屏幕弹幕组件.js')
-var AUDIO_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-音频组件.js')
-var RENDERER_PATH  = path.join(ROOT_DIR, 'kubejs', 'client_scripts', '通用组件', 'Epiphy的-屏幕弹幕渲染器.js')
+var AUDIO_PATH        = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-音频组件.js')
+var RENDERER_PATH     = path.join(ROOT_DIR, 'kubejs', 'client_scripts', '通用组件', 'Epiphy的-屏幕弹幕渲染器.js')
+var AUDIO_CLIENT_PATH = path.join(ROOT_DIR, 'kubejs', 'client_scripts', '通用组件', 'Epiphy的-音频播放器.js')
 
 function createKubeSandbox(loadClassFn) {
     var noop = function () {}
@@ -1342,6 +1343,219 @@ test('renderer: batched glow (16-angle) and stroke (8-angle) emit smooth circula
         assert.ok(draws[si].alpha >= 230)
         assert.ok(draws[si].z < 0)
     }
+})
+
+// 19. renderer: ChatScreen 触发 GUI 防覆盖并兼容 Forge SRG m_272191_ 合批绘制
+test('renderer: ChatScreen triggers GUI blocking for showInGui=false danmaku and supports SRG m_272191_ batch draw', function () {
+    function MockMatrix4f() { this.z = 0 }
+    MockMatrix4f.prototype.set = function (o) { this.z = o ? (o.z || 0) : 0; return this }
+    MockMatrix4f.prototype.translate = function (dx, dy, dz) { this.z += (dz || 0); return this }
+    function makeScreen(className) {
+        return { getClass: function () { return { getName: function () { return className } } } }
+    }
+
+    var paintHandlers = []
+    var drawnTexts = []
+    var srgDraws = 0
+    var currentScreen = makeScreen('net.minecraft.client.gui.screens.ChatScreen')
+    var mockFont = {
+        width: function (s) { return String(s || '').length * 6 },
+        // 故意让 drawInBatch 抛二义性异常以验证 m_272191_ 直连路径在 ModernUI + SRG 下生效
+        drawInBatch: function () { throw new Error('ambiguous overload in mock') },
+        m_272191_: function (seq) {
+            srgDraws++
+            drawnTexts.push(String(seq))
+            return 0
+        }
+    }
+    var mockMc = { f_91080_: null }
+    var errors = []
+    var cliSandbox = {
+        console: { info: function () {}, warn: function () {}, error: function (m) { errors.push(String(m)) }, debug: function () {}, log: function () {} },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function (fn) { paintHandlers.push(fn) } },
+        NetworkEvents: { dataReceived: function () {} },
+        Client: {
+            getCurrentScreen: function () { return currentScreen }
+        },
+        Java: {
+            loadClass: function (cls) {
+                if (cls === 'net.minecraft.client.gui.Font$DisplayMode') return { NORMAL: 'NORMAL' }
+                if (cls === 'org.joml.Matrix4f') return MockMatrix4f
+                if (cls === 'net.minecraft.client.Minecraft') return { getInstance: function () { return mockMc } }
+                return null
+            }
+        },
+        Text: {
+            of: function (s) {
+                return { string: String(s), getVisualOrderText: function () { return String(s) } }
+            }
+        },
+        global: {}
+    }
+    cliSandbox.globalThis = cliSandbox
+    vm.createContext(cliSandbox)
+    vm.runInContext(fs.readFileSync(RENDERER_PATH, 'utf8'), cliSandbox, { filename: 'Epiphy的-屏幕弹幕渲染器.js' })
+
+    var Client = cliSandbox.global.ScreenDanmakuClient
+    Client.push({ title: 'H', showInGui: false, typewriter: false, stay: 100 })
+    Client.push({ title: 'S', showInGui: true,  typewriter: false, stay: 100 })
+
+    var ev = {
+        width: 854,
+        height: 480,
+        level: 'minecraft:overworld',
+        font: mockFont,
+        graphics: { bufferSource: function () { return {} }, flush: function () {} },
+        getMatrix: function () { return new MockMatrix4f() },
+        push: function () {},
+        pop: function () {},
+        translate: function () {},
+        scale: function () {},
+        rotateDeg: function () {},
+        blend: function () {}
+    }
+
+    // ChatScreen 打开时：仅绘制 showInGui=true 的 'S'，且走 Forge SRG m_272191_ 无错误
+    paintHandlers[0](ev)
+    assert.deepStrictEqual(drawnTexts, ['S'])
+    assert.strictEqual(srgDraws, 1)
+    assert.strictEqual(errors.length, 0)
+
+    // 当 Client.getCurrentScreen() 返回 null 但 Minecraft.f_91080_ 为 ChatScreen 时仍应拦截
+    drawnTexts.length = 0
+    currentScreen = null
+    mockMc.f_91080_ = makeScreen('net.minecraft.client.gui.screens.ChatScreen')
+    paintHandlers[0](ev)
+    assert.deepStrictEqual(drawnTexts, ['S'])
+
+    // 仅 ReceivingLevelScreen 不阻挡
+    drawnTexts.length = 0
+    mockMc.f_91080_ = makeScreen('net.minecraft.client.gui.screens.ReceivingLevelScreen')
+    paintHandlers[0](ev)
+    assert.deepStrictEqual(drawnTexts, ['H', 'S'])
+})
+
+// 20. audio-client: ESC 暂停/切屏回归后未移动即重同步通道音量/unpause 并立即重连断流
+test('audio-client: ESC pause and window focus resume resyncs gain, unpauses channel and reconnects stopped stream without movement', function () {
+    var tickHandlers = []
+    var netHandlers  = {}
+    var paused       = false
+    var winActive    = true
+    var curScreen    = null
+    var playCalls    = []
+    var volCalls     = []
+    var unpauseCalls = 0
+    var activeSet    = new Set()
+    var chanMap      = new Map()
+    var chanStopped  = false
+    var soundEngine  = { f_120226_: chanMap, f_120231_: [] }
+    var soundManager = {
+        f_120349_: soundEngine,
+        getSoundEvent: function () {
+            return { getSound: function () { return { getAttenuationDistance: function () { return 16 } } } }
+        },
+        play: function (inst) {
+            playCalls.push(inst)
+            activeSet.add(inst)
+            chanStopped = false
+            var ch = {
+                m_83666_: function (v) { volCalls.push(v) },
+                m_83678_: function () { unpauseCalls++ },
+                m_83680_: function () { return chanStopped }
+            }
+            chanMap.set(inst, { execute: function (fn) { fn(ch) } })
+        },
+        stop: function (inst) {
+            activeSet.delete(inst)
+            chanMap.delete(inst)
+        },
+        isActive: function (inst) { return activeSet.has(inst) }
+    }
+    var playerObj = { getId: function () { return 1 }, getX: function () { return 8 }, getY: function () { return 64 }, getZ: function () { return 0 } }
+    var levelObj  = { getDimension: function () { return 'minecraft:overworld' } }
+    var mockMc = {
+        isPaused: function () { return paused },
+        isWindowActive: function () { return winActive },
+        getCurrentScreen: function () { return curScreen },
+        getSoundManager: function () { return soundManager },
+        options: { getSoundSourceVolume: function () { return 1.0 } },
+        level: levelObj,
+        player: playerObj
+    }
+    function MockSoundInstance(res, cat, vol, pit, rnd, loop, delay, att, x, y, z, rel) {
+        this.res = res; this.f_119573_ = vol; this.pit = pit; this.loop = loop
+    }
+
+    var cliSandbox = {
+        console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+        ClientEvents: {
+            tick: function (fn) { tickHandlers.push(fn) },
+            loggedOut: function () {},
+            loggedIn: function () {}
+        },
+        NetworkEvents: {
+            dataReceived: function (ch, fn) { netHandlers[ch] = fn }
+        },
+        Client: mockMc,
+        Java: {
+            loadClass: function (cls) {
+                if (cls === 'net.minecraft.client.Minecraft') return { getInstance: function () { return mockMc } }
+                if (cls === 'net.minecraft.resources.ResourceLocation') return function (s) { return String(s) }
+                if (cls === 'net.minecraft.sounds.SoundSource') return { MASTER: 'MASTER', RECORDS: 'RECORDS', MUSIC: 'MUSIC', valueOf: function (n) { return n } }
+                if (cls === 'net.minecraft.util.RandomSource') return { create: function () { return {} } }
+                if (cls === 'net.minecraft.client.resources.sounds.SimpleSoundInstance') return MockSoundInstance
+                if (cls === 'net.minecraft.client.resources.sounds.SoundInstance$Attenuation') return { NONE: 'NONE', LINEAR: 'LINEAR' }
+                return null
+            }
+        },
+        global: {}
+    }
+    cliSandbox.globalThis = cliSandbox
+    vm.createContext(cliSandbox)
+    vm.runInContext(fs.readFileSync(AUDIO_CLIENT_PATH, 'utf8'), cliSandbox, { filename: 'Epiphy的-音频播放器.js' })
+
+    var AudioCli = cliSandbox.global.EpiphyAudioClient
+    assert.ok(AudioCli && tickHandlers.length === 1 && netHandlers['epiphy:audio'])
+
+    // 1. 收到循环+fadeIn 播放包（玩家固定在 x=8，不移动）
+    netHandlers['epiphy:audio']({
+        data: {
+            proto: 5, act: 'play', ses: 1, h: 1,
+            snd: 'test:bgm', cat: 'RECORDS', vol: 1.0, pit: 1.0,
+            loop: 1, mode: 'smooth', omode: 'mute', resume: 1, duck: 0,
+            fin: 20, fout: 20, rst: 1, anc: 'pos', x: 0, y: 64, z: 0, rng: 32
+        }
+    })
+    for (var i = 0; i < 30; i++) tickHandlers[0]({})
+    assert.strictEqual(playCalls.length, 1)
+    assert.ok(playCalls[0].f_119573_ > 0.7, 'SimpleSoundInstance Java volume (f_119573_) must sync past initial fadeIn 0.02')
+
+    // 2. 模拟 ESC 暂停 + 切屏失焦，再回到游戏（玩家坐标全程未移动）
+    volCalls.length = 0
+    unpauseCalls = 0
+    paused = true
+    winActive = false
+    curScreen = { pause: true }
+    for (var p = 0; p < 5; p++) tickHandlers[0]({})
+    assert.strictEqual(volCalls.length, 0)
+
+    paused = false
+    winActive = true
+    curScreen = null
+    tickHandlers[0]({}) // 回归游戏第 1 tick，零移动！
+    assert.ok(volCalls.length >= 1, 'must immediately re-apply channel gain on first resumed tick without player movement')
+    assert.ok(volCalls[volCalls.length - 1] > 0.7)
+    assert.ok(unpauseCalls >= 1, 'must call Channel.unpause() on resume')
+
+    // 3. 模拟多人/切屏失焦期间底层流停止，回到窗口第 1 tick 必须立即重连（不能拖延到 10 tick 巡检或等待移动）
+    volCalls.length = 0
+    winActive = false
+    for (var w = 0; w < 3; w++) tickHandlers[0]({})
+    activeSet.delete(playCalls[0])
+    chanStopped = true
+    winActive = true
+    tickHandlers[0]({})
+    assert.strictEqual(playCalls.length, 2, 'must immediately reconnect stopped loop on focus regain without movement')
 })
 
 var passed = 0
