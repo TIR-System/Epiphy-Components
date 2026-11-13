@@ -29,6 +29,12 @@
 // ============================================================================
 
 ;(function () {
+    var BASE = (typeof global !== 'undefined') ? global.EpiphyServerBase : null
+    if (!BASE) {
+        throw new Error('[EpiphyDebug] 缺少硬依赖 global.EpiphyServerBase，请确认 server_scripts/通用组件/Epiphy的-服务端基础.js 已加载')
+    }
+
+    var LOGGER        = BASE.createLogger('EpiphyDebug', 5000)
     var providers     = new Map() // key -> providerRecord
     var providerOrder = []
     var SERVER_REF    = null
@@ -38,13 +44,8 @@
         return String(raw).trim().toLowerCase()
     }
 
-    // 【catch 约定】日志设施自身的兜底：EpiphyLog/console 均不可用时已无更低层可退，留空。
     function logCatch(tag, err) {
-        if (typeof global !== 'undefined' && global.EpiphyLog != null) {
-            global.EpiphyLog.catchWarn('EpiphyDebug', tag, err)
-        } else {
-            try { console.warn('[EpiphyDebug ' + tag + '] ' + err) } catch (e) { }
-        }
+        LOGGER.catchWarn(tag, err)
     }
 
     function sendSourceMsg(source, text) {
@@ -444,55 +445,52 @@
         return 1
     }
 
-    function buildDebugCommandNode(ctxApi) {
-        var Commands  = ctxApi.Commands
-        var Arguments = ctxApi.Arguments
-        var guard     = ctxApi.guardExecution
+    function execLogToggle(source, target, enableFlag) {
+        var res = toggleLogDebug(target, enableFlag)
+        var tag = enableFlag ? '§a[EpiphyDebug] 已开启调试日志: §f' : '§e[EpiphyDebug] 已关闭调试日志: §f'
+        sendSourceMsg(source, tag + (res.applied.join(', ') || target))
+        return 1
+    }
 
-        return Commands.literal('debug')
-            .executes(guard(function (ctx) {
-                return printStatusCommand(ctx.source)
-            }))
-            .then(Commands.literal('status')
-                .executes(guard(function (ctx) {
-                    return printStatusCommand(ctx.source)
-                })))
-            .then(Commands.literal('checks')
-                .executes(guard(function (ctx) {
-                    return printChecksCommand(ctx.source)
-                })))
-            .then(Commands.literal('module')
-                .then(Commands.argument('mod', Arguments.WORD.create(ctxApi.event))
-                    .executes(guard(function (ctx) {
-                        var mod = String(Arguments.WORD.getResult(ctx, 'mod'))
-                        return printModuleCommand(ctx.source, mod)
-                    }))))
-            .then(Commands.literal('log')
-                .then(Commands.argument('target', Arguments.WORD.create(ctxApi.event))
-                    .then(Commands.literal('on')
-                        .executes(guard(function (ctx) {
-                            var target = String(Arguments.WORD.getResult(ctx, 'target'))
-                            var res    = toggleLogDebug(target, true)
-                            sendSourceMsg(ctx.source, '§a[EpiphyDebug] 已开启调试日志: §f' + (res.applied.join(', ') || target))
-                            return 1
-                        })))
-                    .then(Commands.literal('off')
-                        .executes(guard(function (ctx) {
-                            var target = String(Arguments.WORD.getResult(ctx, 'target'))
-                            var res    = toggleLogDebug(target, false)
-                            sendSourceMsg(ctx.source, '§e[EpiphyDebug] 已关闭调试日志: §f' + (res.applied.join(', ') || target))
-                            return 1
-                        })))))
-            .then(Commands.literal('action')
-                .then(Commands.argument('mod', Arguments.WORD.create(ctxApi.event))
-                    .then(Commands.argument('act', Arguments.WORD.create(ctxApi.event))
-                        .executes(guard(function (ctx) {
-                            var mod = String(Arguments.WORD.getResult(ctx, 'mod'))
-                            var act = String(Arguments.WORD.getResult(ctx, 'act'))
-                            var res = runAction(mod, act, null)
+    function buildDebugCommandNode(ctxApi) {
+        var b = BASE.createCommandBuilder(ctxApi, { tag: 'EpiphyDebug' })
+        return b.literal('debug', {
+            exec: function (ctx) { return printStatusCommand(ctx.source) },
+            children: [
+                b.literal('status', function (ctx) { return printStatusCommand(ctx.source) }),
+                b.literal('checks', function (ctx) { return printChecksCommand(ctx.source) }),
+                b.literal('module', {
+                    chain: [
+                        [{ name: 'mod', type: 'word' }],
+                        function (ctx, args) { return printModuleCommand(ctx.source, args.mod) }
+                    ]
+                }),
+                b.literal('log', {
+                    children: [
+                        b.arg({ name: 'target', type: 'word' }, {
+                            children: [
+                                b.literal('on', function (ctx) {
+                                    return execLogToggle(ctx.source, b.readArg(ctx, 'target', 'word'), true)
+                                }),
+                                b.literal('off', function (ctx) {
+                                    return execLogToggle(ctx.source, b.readArg(ctx, 'target', 'word'), false)
+                                })
+                            ]
+                        })
+                    ]
+                }),
+                b.literal('action', {
+                    chain: [
+                        [{ name: 'mod', type: 'word' }, { name: 'act', type: 'word' }],
+                        function (ctx, args) {
+                            var res = runAction(args.mod, args.act, null)
                             sendSourceMsg(ctx.source, (res.ok ? '§a[EpiphyDebug] ' : '§c[EpiphyDebug] ') + res.message)
                             return res.ok ? 1 : 0
-                        })))))
+                        }
+                    ]
+                })
+            ]
+        })
     }
 
     var DEBUG_HELP_LINES = [
@@ -583,23 +581,5 @@
         toggleLogDebug:     toggleLogDebug
     }
 
-    try {
-        var valve = (typeof global !== 'undefined' && global != null)
-            ? (global.EpiphyPermissionValve || global.PermissionValve)
-            : null
-        if (valve != null && typeof valve.registerSubcommand === 'function') {
-            valve.registerSubcommand(debugSubcommandSpec)
-        } else if (typeof global !== 'undefined' && global != null) {
-            if (!Array.isArray(global.EpiphyCommandRegistryQueue)) {
-                global.EpiphyCommandRegistryQueue = []
-            }
-            var q = global.EpiphyCommandRegistryQueue
-            for (var qi = q.length - 1; qi >= 0; qi--) {
-                if (q[qi] != null && q[qi].name === 'debug') q.splice(qi, 1)
-            }
-            q.push(debugSubcommandSpec)
-        }
-    } catch (eReg) {
-        logCatch('registerSubcommand', eReg)
-    }
+    BASE.registerSubcommandSafe(debugSubcommandSpec, { requirePermissionValve: false })
 })()

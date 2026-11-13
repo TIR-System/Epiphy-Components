@@ -29,6 +29,13 @@
     var WORLD_FILE_NAME = 'kubejs_epiphy_tracked_blocks.json'
     var FALLBACK_DIR    = 'kubejs/config/epiphy_tracked_blocks'
 
+    var BASE = (typeof global !== 'undefined') ? global.EpiphyServerBase : null
+    var SPEC = (typeof global !== 'undefined') ? global.EpiphySpec       : null
+    if (!BASE || !SPEC) {
+        throw new Error('[EpiphyBlockTracker] 缺少硬依赖 global.EpiphyServerBase / global.EpiphySpec')
+    }
+    var LOGGER = BASE.createLogger('EpiphyBlockTracker', 5000)
+
     var CONFIG = {
         saveDebounceTicks:   40,
         verifyWindowTicks:   20,
@@ -47,16 +54,7 @@
     var migratedLegacyFlag = false
     var nextVerifySlot     = 0
 
-    // 【catch 约定】System.nanoTime 探测失败时回退 Date.now()*1e6，不影响逻辑正确性。
-    var SystemClass = null
-    try { SystemClass = Java.loadClass('java.lang.System') } catch (eSys) { }
-
-    function nowNano() {
-        if (SystemClass != null) {
-            try { return Number(SystemClass.nanoTime()) } catch (eNs) { }
-        }
-        return Date.now() * 1000000
-    }
+    var nowNano = BASE.nowNano
 
     var lastTickAllMs       = 0
     var lastActiveTickAllMs = 0
@@ -92,132 +90,18 @@
         forceNearby:      false
     }
 
-    // 【catch 约定】日志设施自身的兜底：console 不可用时已无更低层可退，留空。
     function logCatch(tag, err) {
-        if (typeof global !== 'undefined' && global.EpiphyLog != null) {
-            global.EpiphyLog.catchWarn('EpiphyBlockTracker', tag, err)
-        } else {
-            try { console.warn('[EpiphyBlockTracker 异常:' + tag + '] ' + String(err)) } catch (e) { }
-        }
+        LOGGER.catchWarn(tag, err)
     }
 
-    // 【catch 约定】Java 运行时类存在性探测：类未加载或非 Rhino 环境时返回 null 并走降级路径。
-    function loadJavaClass(className) {
-        try {
-            return Java.loadClass(className)
-        } catch (e) {
-            return null
-        }
-    }
+    var normalizeDim = SPEC.normalizeDim
 
-    var LevelResourceClass = loadJavaClass('net.minecraft.world.level.storage.LevelResource')
-    var FilesClass         = loadJavaClass('java.nio.file.Files')
-    var PathsClass         = loadJavaClass('java.nio.file.Paths')
-
-    // 【catch 约定】以下 try/catch 均为 Java API 能力探测（normalizeDim/dimOfLevel/resolveLevel）：
-    // 先检查方法或属性类型再调用，失败表示该 API 在当前 MC/Rhino 映射中不存在，属于预期分支，故留空。
-    // 这些路径在事件与 tick 中频繁调用，写日志会污染限频桶并拖慢热路径。
-    function normalizeDim(dim) {
-        if (dim == null) return null
-        if (typeof dim === 'string') {
-            var s = dim.trim()
-            if (!s) return null
-            return s.indexOf(':') >= 0 ? s : ('minecraft:' + s)
-        }
-        try {
-            if (typeof dim.location === 'function') return String(dim.location())
-        } catch (e0) { }
-        try {
-            if (dim.dimension != null) return normalizeDim(dim.dimension)
-        } catch (e1) { }
-        try {
-            var str = String(dim)
-            if (str && str.indexOf(':') >= 0 && str.indexOf('ServerLevel') < 0) return str
-        } catch (e2) { }
-        return null
-    }
-
-    function dimOfLevel(lv) {
-        if (lv == null) return null
-        try {
-            if (lv.dimension != null) return normalizeDim(lv.dimension)
-        } catch (e0) { }
-        try {
-            if (typeof lv.dimension === 'function') return normalizeDim(lv.dimension())
-        } catch (e1) { }
-        return null
-    }
-
-    function resolveLevel(levelOrDim, server) {
-        if (levelOrDim != null && typeof levelOrDim === 'object' && typeof levelOrDim.getBlock === 'function') {
-            return levelOrDim
-        }
-        var srv = server || SERVER_REF
-        if (srv == null) return null
-        var targetDim = normalizeDim(levelOrDim) || 'minecraft:overworld'
-        try {
-            if (typeof srv.getLevel === 'function') {
-                var direct = srv.getLevel(targetDim)
-                if (direct != null) return direct
-            }
-        } catch (e0) { }
-        try {
-            var all = srv.getAllLevels()
-            if (all != null && typeof all.iterator === 'function') {
-                var it = all.iterator()
-                while (it.hasNext()) {
-                    var lv = it.next()
-                    if (dimOfLevel(lv) === targetDim) return lv
-                }
-            }
-        } catch (e1) { }
-        return null
-    }
-
-    function makePosKey(dim, x, y, z) {
-        return String(dim || 'minecraft:overworld') + '|' + Math.floor(x) + ',' + Math.floor(y) + ',' + Math.floor(z)
-    }
-
-    // 【catch 约定】以下 try/catch 均为 Java API 能力探测（extractBlockId/isChunkLoaded/readPlayerPos）：
-    // 不同 MC/Rhino 映射下的方块对象、区块加载查询与玩家坐标访问接口存在差异，失败属预期分支，留空避免热路径污染。
-    function extractBlockId(blockOrState) {
-        if (blockOrState == null) return null
-        try { if (blockOrState.id != null) return String(blockOrState.id) } catch (e0) { }
-        try { if (typeof blockOrState.getId === 'function') return String(blockOrState.getId()) } catch (e1) { }
-        try {
-            if (typeof blockOrState.getBlock === 'function') {
-                var blk = blockOrState.getBlock()
-                if (blk != null) {
-                    if (blk.id != null) return String(blk.id)
-                    if (typeof blk.getId === 'function') return String(blk.getId())
-                }
-            }
-        } catch (e2) { }
-        return null
-    }
-
-    function isChunkLoaded(lv, bx, bz) {
-        if (lv == null) return false
-        var cx = bx >> 4, cz = bz >> 4
-        try {
-            var cs = lv.getChunkSource()
-            if (cs != null && cs.getChunkNow(cx, cz) != null) return true
-        } catch (e0) { }
-        try { return Boolean(lv.hasChunk(cx, cz)) } catch (e1) { return false }
-    }
-
-    function readPlayerPos(player) {
-        if (player == null) return null
-        try {
-            if (typeof player.getX === 'function') {
-                return { x: Number(player.getX()), y: Number(player.getY()), z: Number(player.getZ()) }
-            }
-            if (player.x != null) {
-                return { x: Number(player.x), y: Number(player.y), z: Number(player.z) }
-            }
-        } catch (e) { }
-        return null
-    }
+    function dimOfLevel(lv) { return BASE.dimOfLevel(lv) }
+    function resolveLevel(levelOrDim, server) { return BASE.resolveLevel(levelOrDim, server || SERVER_REF) }
+    function makePosKey(dim, x, y, z) { return BASE.makePosKey(dim, x, y, z) }
+    function extractBlockId(blockOrState) { return BASE.extractBlockId(blockOrState) }
+    function isChunkLoaded(lv, bx, bz) { return BASE.isChunkLoaded(lv, bx, bz) }
+    function readPlayerPos(player) { return BASE.readPos(player) }
 
     // 为订阅者按需生成该方块的私有扩展字段并缓存视图到 rec.views[subId]，消除每 tick 重复分配对象与 for-in 拷贝
     function ensureSubscriberView(rec, sub) {
@@ -262,84 +146,10 @@
         }
     }
 
-    // 【catch 约定】以下 try/catch 均为 GSON Map/List 与 WorldData API 能力探测：
-    // 失败表示对象不属于对应容器类型或无该方法，走默认值回退属预期分支，故留空。
-    function readJsonField(obj, key) {
-        if (obj == null) return null
-        try {
-            if (obj[key] !== undefined) return obj[key]
-            if (typeof obj.get === 'function') return obj.get(key)
-        } catch (e) { }
-        return null
-    }
-
-    function toSeqArray(val) {
-        if (val == null) return null
-        if (Array.isArray(val)) return val
-        try {
-            if (typeof val.size === 'function' && typeof val.get === 'function') {
-                var len = Number(val.size())
-                var out = []
-                for (var i = 0; i < len; i++) out.push(val.get(i))
-                return out
-            }
-        } catch (e) { }
-        return null
-    }
-
-    function resolveWorldStorageInfo(server) {
-        var srv = server || SERVER_REF
-        if (srv != null && LevelResourceClass != null) {
-            try {
-                var rootRes = LevelResourceClass.ROOT
-                if (rootRes != null && typeof srv.getWorldPath === 'function') {
-                    var worldPath = srv.getWorldPath(rootRes)
-                    if (worldPath != null) {
-                        var normRoot = (typeof worldPath.normalize === 'function') ? worldPath.normalize() : worldPath
-                        var jsonPath = String(normRoot).replace(/[\\/]+$/, '') + '/' + WORLD_FILE_NAME
-                        return {
-                            worldKey: 'path:' + jsonPath.toLowerCase(),
-                            filePath: jsonPath
-                        }
-                    }
-                }
-            } catch (ePath) {
-                logCatch('resolveWorldPath', ePath)
-            }
-        }
-
-        var levelName = 'default_world'
-        if (srv != null) {
-            try {
-                var wData = (typeof srv.getWorldData === 'function') ? srv.getWorldData() : srv.worldData
-                if (wData != null) {
-                    var rawName = (typeof wData.getLevelName === 'function') ? wData.getLevelName() : wData.levelName
-                    if (rawName != null && String(rawName).trim().length > 0) {
-                        levelName = String(rawName).trim()
-                    }
-                }
-            } catch (eName) { }
-        }
-        var safeFileSlug = levelName.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim() || 'default_world'
-        var fallbackPath = FALLBACK_DIR + '/' + safeFileSlug + '.json'
-        return {
-            worldKey: 'name:' + safeFileSlug.toLowerCase(),
-            filePath: fallbackPath
-        }
-    }
-
-    function ensureParentDir(filePathStr) {
-        if (FilesClass == null || PathsClass == null) return
-        try {
-            var p = PathsClass.get(String(filePathStr))
-            var parent = p != null ? p.getParent() : null
-            if (parent != null && !FilesClass.exists(parent)) {
-                FilesClass.createDirectories(parent)
-            }
-        } catch (e) {
-            logCatch('ensureParentDir', e)
-        }
-    }
+    function readJsonField(obj, key) { return BASE.readMapField(obj, key) }
+    function toSeqArray(val) { return BASE.toSeqArray(val) }
+    function resolveWorldStorageInfo(server) { return BASE.resolveWorldStorageInfo(server || SERVER_REF, WORLD_FILE_NAME, FALLBACK_DIR) }
+    function ensureParentDir(filePathStr) { return BASE.ensureParentDir(filePathStr, LOGGER) }
 
     function flushTrackedBlocks() {
         if (SERVER_REF == null || !persistDirty) return false
@@ -1411,12 +1221,5 @@
             }
         }
     }
-    if (typeof global !== 'undefined' && global != null) {
-        if (global.EpiphyDebug != null && typeof global.EpiphyDebug.registerProvider === 'function') {
-            global.EpiphyDebug.registerProvider(trackerDebugProvider)
-        } else {
-            if (!Array.isArray(global.EpiphyDebugProviderQueue)) global.EpiphyDebugProviderQueue = []
-            global.EpiphyDebugProviderQueue.push(trackerDebugProvider)
-        }
-    }
+    BASE.registerDebugProvider(trackerDebugProvider)
 })()

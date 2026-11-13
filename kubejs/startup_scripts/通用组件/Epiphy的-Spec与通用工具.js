@@ -121,6 +121,9 @@
 
     function normalizeDim(dim) {
         if (dim == null) return null;
+        if (typeof dim !== 'string' && dim.dimension != null) {
+            return normalizeDim(dim.dimension);
+        }
         var s;
         if (typeof dim === 'string') {
             s = dim;
@@ -132,7 +135,7 @@
             s = String(dim);
         }
         s = s.trim().toLowerCase();
-        if (!s) return null;
+        if (!s || s.indexOf('serverlevel') >= 0) return null;
         if (s.indexOf('resourcekey[') === 0) {
             var m = /\s\/\s([^\]]+)\]$/.exec(s);
             if (m && m[1]) s = m[1].trim();

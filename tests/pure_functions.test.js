@@ -55,9 +55,28 @@ function createKubeSandbox(loadClassFn) {
     return sandbox
 }
 
+function runScriptIn(sb, scriptPath) {
+    vm.runInContext(fs.readFileSync(scriptPath, 'utf8'), sb, { filename: path.basename(scriptPath) })
+    return sb
+}
+
+function loadStartupBase(sb) {
+    runScriptIn(sb, PROTOCOL_PATH)
+    runScriptIn(sb, SPEC_PATH)
+    return sb
+}
+
+function loadServerBase(sb) {
+    loadStartupBase(sb)
+    runScriptIn(sb, LOG_PATH)
+    runScriptIn(sb, SERVER_BASE_PATH)
+    return sb
+}
+
 var sandbox = createKubeSandbox()
-vm.runInContext(fs.readFileSync(VALVE_PATH, 'utf8'), sandbox, { filename: 'Epiphy的-权限阀.js' })
-vm.runInContext(fs.readFileSync(DANMAKU_PATH, 'utf8'), sandbox, { filename: 'Epiphy的-屏幕弹幕组件.js' })
+loadServerBase(sandbox)
+runScriptIn(sandbox, VALVE_PATH)
+runScriptIn(sandbox, DANMAKU_PATH)
 
 var Valve   = sandbox.global.EpiphyPermissionValve
 var Danmaku = sandbox.global.ScreenDanmaku
@@ -311,7 +330,8 @@ test('permission valve evaluateSourceAccess: declared server.runCommand cannot b
         if (clsName === 'net.minecraft.server.level.ServerPlayer') return MockServerPlayer
         return null
     })
-    vm.runInContext(fs.readFileSync(VALVE_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-权限阀.js' })
+    loadServerBase(isoSandbox)
+    runScriptIn(isoSandbox, VALVE_PATH)
     var IsoValve = isoSandbox.global.EpiphyPermissionValve
     IsoValve.declareCaller('danmaku_script', ['danmaku'])
 
@@ -378,7 +398,8 @@ test('block tracker: bind() & scanNow() preserve pure-air LRU, queued work and t
     var isoSandbox = createKubeSandbox()
     isoSandbox.ServerEvents.tick = function (fn) { tickHandlers.push(fn) }
 
-    vm.runInContext(fs.readFileSync(TRACKER_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-方块追踪组件.js' })
+    loadServerBase(isoSandbox)
+    runScriptIn(isoSandbox, TRACKER_PATH)
     var Tracker = isoSandbox.global.EpiphyBlockTracker
     assert.ok(Tracker && typeof Tracker.createTracker === 'function', 'EpiphyBlockTracker must export createTracker')
 
@@ -503,8 +524,10 @@ test('debug hub: dynamic queue drain, multi-module metrics, checks, actions & ad
 
     // Load all 6 server components in real KubeJS priority order (1100 -> 1050 -> 1000 -> 950 -> 500 -> 500)
     vm.runInContext(fs.readFileSync(LOG_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-日志.js' })
-    vm.runInContext(fs.readFileSync(TRACKER_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-方块追踪组件.js' })
-    vm.runInContext(fs.readFileSync(VALVE_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-权限阀.js' })
+    loadServerBase(isoSandbox)
+    runScriptIn(isoSandbox, TRACKER_PATH)
+    loadServerBase(isoSandbox)
+    runScriptIn(isoSandbox, VALVE_PATH)
     vm.runInContext(fs.readFileSync(DEBUG_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-调试组件.js' })
     vm.runInContext(fs.readFileSync(DANMAKU_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-屏幕弹幕组件.js' })
     vm.runInContext(fs.readFileSync(AUDIO_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-音频组件.js' })
@@ -776,7 +799,8 @@ test('block tracker: scan aborts rollback LRU, reports queue-full status & recor
         return null
     })
     var hooks = attachSandboxEventHooks(isoSandbox)
-    vm.runInContext(fs.readFileSync(TRACKER_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-方块追踪组件.js' })
+    loadServerBase(isoSandbox)
+    runScriptIn(isoSandbox, TRACKER_PATH)
     vm.runInContext(fs.readFileSync(DEBUG_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-调试组件.js' })
 
     var Tracker = isoSandbox.global.EpiphyBlockTracker
@@ -912,7 +936,8 @@ test('block tracker: scan aborts rollback LRU, reports queue-full status & recor
 test('danmaku: onBindingChanged invalidates scope cache & first/latest/nearest/stagger conflict arbitration', function () {
     var isoSandbox = createKubeSandbox()
     var hooks = attachSandboxEventHooks(isoSandbox)
-    vm.runInContext(fs.readFileSync(TRACKER_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-方块追踪组件.js' })
+    loadServerBase(isoSandbox)
+    runScriptIn(isoSandbox, TRACKER_PATH)
     vm.runInContext(fs.readFileSync(DEBUG_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-调试组件.js' })
 
     var capturedDanmakuSub = null
@@ -1026,7 +1051,8 @@ test('danmaku: merge cluster honors earliest leader, suppresses followers, expan
         return null
     })
     var hooks = attachSandboxEventHooks(isoSandbox)
-    vm.runInContext(fs.readFileSync(TRACKER_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-方块追踪组件.js' })
+    loadServerBase(isoSandbox)
+    runScriptIn(isoSandbox, TRACKER_PATH)
     vm.runInContext(fs.readFileSync(DEBUG_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-调试组件.js' })
     vm.runInContext(fs.readFileSync(DANMAKU_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-屏幕弹幕组件.js' })
 
@@ -1109,7 +1135,8 @@ test('audio: syncAll skips 0-handle ticks, arbitrates conflicts & merges block c
         return null
     })
     var hooks = attachSandboxEventHooks(isoSandbox)
-    vm.runInContext(fs.readFileSync(TRACKER_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-方块追踪组件.js' })
+    loadServerBase(isoSandbox)
+    runScriptIn(isoSandbox, TRACKER_PATH)
     vm.runInContext(fs.readFileSync(DEBUG_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-调试组件.js' })
     vm.runInContext(fs.readFileSync(AUDIO_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-音频组件.js' })
 
@@ -1737,24 +1764,6 @@ test('renderer: ModernUI TextLayout fast path caches layouts, skips PoseStack/gl
     paintHandlers[0](ev)
     assert.strictEqual(drawCalls.length, 9)
 })
-
-function runScriptIn(sb, scriptPath) {
-    vm.runInContext(fs.readFileSync(scriptPath, 'utf8'), sb, { filename: path.basename(scriptPath) })
-    return sb
-}
-
-function loadStartupBase(sb) {
-    runScriptIn(sb, PROTOCOL_PATH)
-    runScriptIn(sb, SPEC_PATH)
-    return sb
-}
-
-function loadServerBase(sb) {
-    loadStartupBase(sb)
-    runScriptIn(sb, LOG_PATH)
-    runScriptIn(sb, SERVER_BASE_PATH)
-    return sb
-}
 
 test('EpiphySpec: missing EpiphyProtocol throws explicit hard-dependency error', function () {
     var sb = createKubeSandbox()

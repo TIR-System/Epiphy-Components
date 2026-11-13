@@ -154,11 +154,11 @@
 
     function readMapField(obj, key) {
         if (obj == null) return null;
-        if (typeof obj.get === 'function') {
-            return obj.get(key);
-        }
         if (typeof obj === 'object' && obj[key] !== undefined) {
             return obj[key];
+        }
+        if (typeof obj.get === 'function') {
+            return obj.get(key);
         }
         return null;
     }
@@ -170,7 +170,13 @@
         if (obj.uuid != null) return String(obj.uuid);
         if (typeof obj.getUUID === 'function') {
             var u = obj.getUUID();
-            return u != null ? String(u) : null;
+            if (u != null) return String(u);
+        }
+        if (typeof obj.getProfile === 'function') {
+            var prof = obj.getProfile();
+            if (prof != null && typeof prof.getId === 'function' && prof.getId() != null) {
+                return String(prof.getId());
+            }
         }
         if (obj.id != null && typeof obj.id === 'string') return obj.id;
         return null;
@@ -178,9 +184,13 @@
 
     function nameOf(obj) {
         if (obj == null) return null;
+        if (typeof obj.getProfile === 'function') {
+            var p = obj.getProfile();
+            if (p != null && typeof p.getName === 'function' && p.getName() != null) return String(p.getName());
+        }
         if (typeof obj.getGameProfile === 'function') {
             var gp = obj.getGameProfile();
-            if (gp != null && typeof gp.getName === 'function') return String(gp.getName());
+            if (gp != null && typeof gp.getName === 'function' && gp.getName() != null) return String(gp.getName());
         }
         if (obj.username != null) return String(obj.username);
         if (typeof obj.getName === 'function') {
@@ -222,10 +232,9 @@
             if (direct != null) return direct;
         }
         if (typeof srv.getAllLevels === 'function') {
-            var it = srv.getAllLevels().iterator();
-            while (it.hasNext()) {
-                var lv = it.next();
-                if (dimOfLevel(lv) === targetDim) return lv;
+            var all = toJsArray(srv.getAllLevels());
+            for (var i = 0; i < all.length; i++) {
+                if (dimOfLevel(all[i]) === targetDim) return all[i];
             }
         }
         return null;
@@ -295,10 +304,10 @@
         var fbDir = String(fallbackDir || 'kubejs/config/epiphy_store');
         var worldName = 'world';
 
-        if (srv != null && typeof srv.getWorldData === 'function') {
-            var wd = srv.getWorldData();
-            if (wd != null && typeof wd.getLevelName === 'function') {
-                var ln = wd.getLevelName();
+        if (srv != null) {
+            var wd = (typeof srv.getWorldData === 'function') ? srv.getWorldData() : srv.worldData;
+            if (wd != null) {
+                var ln = (typeof wd.getLevelName === 'function') ? wd.getLevelName() : wd.levelName;
                 if (ln != null && String(ln).trim() !== '') worldName = String(ln).trim();
             }
         }
@@ -307,12 +316,15 @@
             try {
                 var rootPath = srv.getWorldPath(LEVEL_RESOURCE_ROOT);
                 if (rootPath != null) {
-                    var normRoot = rootPath.toAbsolutePath().normalize();
-                    var resolved = normRoot.resolve(fileName).normalize();
-                    var rootStr = String(normRoot).replace(/\\/g, '/');
+                    var normRoot = (typeof rootPath.toAbsolutePath === 'function')
+                        ? rootPath.toAbsolutePath().normalize()
+                        : ((typeof rootPath.normalize === 'function') ? rootPath.normalize() : rootPath);
+                    var resolved = (typeof normRoot.resolve === 'function')
+                        ? normRoot.resolve(fileName).normalize()
+                        : (String(normRoot).replace(/[\\/]+$/, '') + '/' + fileName);
                     var fileStr = String(resolved).replace(/\\/g, '/');
                     return {
-                        worldKey:    'path:' + rootStr,
+                        worldKey:    'path:' + fileStr.toLowerCase(),
                         worldName:   worldName,
                         filePath:    fileStr,
                         isWorldRoot: true
@@ -323,9 +335,9 @@
             }
         }
 
-        var slug = worldName.replace(/[\\/:*?"<>|]+/g, '_').trim() || 'world';
+        var slug = worldName.replace(/[<>:"/\\|?*\x00-\x1F]+/g, '_').trim() || 'world';
         return {
-            worldKey:    'slug:' + slug,
+            worldKey:    'slug:' + slug.toLowerCase(),
             worldName:   worldName,
             filePath:    fbDir + '/' + slug + '.json',
             isWorldRoot: false
@@ -468,7 +480,7 @@
     function makeFallbackView(rec, sub) {
         var extras = rec.extras || (rec.extras = {});
         if (extras[sub.id] === undefined && sub.makeRecordExtra) {
-            extras[sub.id] = sub.makeRecordExtra(rec, sub.bindings.get(rec.blockId));
+            extras[sub.id] = sub.makeRecordExtra(rec.blockId, rec.dim, rec.x, rec.y, rec.z);
         }
         return {
             key:     rec.key,
@@ -782,6 +794,10 @@
             return raw;
         }
 
+        function readArg(ctx, name, typeName) {
+            return extractArg(ctx, { name: name, type: typeName || 'word' });
+        }
+
         function makeArgNode(argSpec) {
             var argObj = resolveArgObj(argSpec.type);
             if (argObj == null) {
@@ -879,12 +895,40 @@
             return node;
         }
 
+        function arg(argSpec, cfgOrFn) {
+            var node = makeArgNode(argSpec);
+            if (typeof cfgOrFn === 'function') {
+                return node.executes(wrapDepthExec([argSpec], 1, cfgOrFn, undefined));
+            }
+            var cfg = cfgOrFn || {};
+            if (typeof cfg.exec === 'function') {
+                node = node.executes(wrapDepthExec([argSpec], 1, cfg.exec, cfg.policy));
+            }
+            if (cfg.chain) {
+                node = attachChain(node, cfg.chain[0], cfg.chain[1], cfg.chain[2]);
+            }
+            if (cfg.chains) {
+                for (var c = 0; c < cfg.chains.length; c++) {
+                    var ch = cfg.chains[c];
+                    node = attachChain(node, ch[0], ch[1], ch[2]);
+                }
+            }
+            if (cfg.children) {
+                for (var i = 0; i < cfg.children.length; i++) {
+                    if (cfg.children[i] != null) node = node.then(cfg.children[i]);
+                }
+            }
+            return node;
+        }
+
         return {
             guard:       guard,
             sendText:    sendText,
             sendLines:   sendLines,
             replyOk:     replyOk,
             replyErr:    replyErr,
+            readArg:     readArg,
+            arg:         arg,
             literal:     literal,
             chain:       buildArgChain,
             attachChain: attachChain

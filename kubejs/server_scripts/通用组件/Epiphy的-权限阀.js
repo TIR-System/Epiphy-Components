@@ -39,84 +39,37 @@
 // ============================================================================
 
 ;(function () {
+    var BASE = (typeof global !== 'undefined') ? global.EpiphyServerBase : null
+    var LOG  = (typeof global !== 'undefined') ? global.EpiphyLog        : null
+    if (!BASE || !LOG) {
+        throw new Error('[EpiphyPermissionValve] 缺少硬依赖 global.EpiphyServerBase / global.EpiphyLog')
+    }
+
+    var LOGGER          = BASE.createLogger('EpiphyPermissionValve', 5000)
     var ROOT_LITERAL    = 'epiphy'
     var FALLBACK_DIR    = 'kubejs/config/epiphy_permissions'
     var WORLD_FILE_NAME = 'kubejs_epiphy_permissions.json'
 
     var SERVER_REF = null
 
-    // 【catch 约定】日志设施自身的兜底：console / EpiphyLog 不可用时已无更低层可退，留空。
-    function logWarn(tag, msg) {
-        if (typeof global !== 'undefined' && global.EpiphyLog != null) {
-            global.EpiphyLog.warn('EpiphyPermissionValve', tag, msg)
-        } else {
-            try { console.warn('[EpiphyPermissionValve ' + tag + '] ' + msg) } catch (e) { }
-        }
-    }
-
-    function logError(tag, msg) {
-        if (typeof global !== 'undefined' && global.EpiphyLog != null) {
-            global.EpiphyLog.error('EpiphyPermissionValve', tag, msg)
-        } else {
-            try { console.error('[EpiphyPermissionValve ' + tag + '] ' + msg) } catch (e) { }
-        }
-    }
-
-    function logCatch(tag, err) {
-        if (typeof global !== 'undefined' && global.EpiphyLog != null) {
-            global.EpiphyLog.catchWarn('EpiphyPermissionValve', tag, err)
-        } else {
-            try { console.warn('[EpiphyPermissionValve 异常:' + tag + '] ' + String(err)) } catch (e) { }
-        }
-    }
-
-    function logOnceWarn(key, msg) {
-        if (typeof global !== 'undefined' && global.EpiphyLog != null) {
-            global.EpiphyLog.once('warn', key, msg)
-        } else {
-            try { console.warn(msg) } catch (e) { }
-        }
-    }
-
-    function loadJavaClass(className) {
-        try {
-            return Java.loadClass(className)
-        } catch (e) {
-            if (typeof global !== 'undefined' && global.EpiphyLog != null) {
-                global.EpiphyLog.debug('EpiphyPermissionValve', 'loadJavaClass', '未加载类 ' + className + ': ' + e)
-            }
-            return null
-        }
-    }
-
-    // 仅用于跨版本/跨映射的 Java 方法或属性探测（失败属正常回退路径）
-    function tryCall(fn, fallbackVal) {
-        try {
-            var res = fn()
-            return res !== undefined ? res : fallbackVal
-        } catch (e) {
-            return fallbackVal
-        }
-    }
+    function logWarn(tag, msg) { LOG.warn('EpiphyPermissionValve', tag, msg) }
+    function logError(tag, msg) { LOG.error('EpiphyPermissionValve', tag, msg) }
+    function logCatch(tag, err) { LOGGER.catchWarn(tag, err) }
+    function logOnceWarn(key, msg) { LOG.once('warn', key, msg) }
+    function loadJavaClass(className) { return BASE.loadJavaClass(className, LOGGER) }
 
     var BaseCommandBlockClass  = loadJavaClass('net.minecraft.world.level.BaseCommandBlock')
     var MinecraftServerClass   = loadJavaClass('net.minecraft.server.MinecraftServer')
     var RconConsoleSourceClass = loadJavaClass('net.minecraft.server.rcon.RconConsoleSource')
     var ServerPlayerClass      = loadJavaClass('net.minecraft.server.level.ServerPlayer')
-    var LevelResourceClass     = loadJavaClass('net.minecraft.world.level.storage.LevelResource')
-    var FilesClass             = loadJavaClass('java.nio.file.Files')
 
-    // 注意：Java.loadClass(...) 返回的是 Rhino 的 NativeJavaClass 静态成员包装器（仅暴露该类的静态字段/方法），
-    // 直接访问 NativeJavaClass.isInstance 会抛 InternalError: Java class "..." has no public instance field or method named "isInstance"！
-    // 要进行严格类型校验，必须支持：
-    //   1. JS `obj instanceof NativeJavaClass`（Rhino 原生支持对 NativeJavaClass 执行 instanceof）；
-    //   2. 或通过 `__javaObject__.isAssignableFrom(obj.getClass())` 反射校验。
+    // 注意：Java.loadClass(...) 返回 Rhino NativeJavaClass，需兼容 instanceof 与 __javaObject__.isInstance 校验。
     function isJavaInstance(javaClassWrapper, obj) {
         if (javaClassWrapper == null || obj == null) return false
-        if (tryCall(function () { return obj instanceof javaClassWrapper }, false)) {
-            return true
-        }
-        return Boolean(tryCall(function () {
+        try {
+            if (obj instanceof javaClassWrapper) return true
+        } catch (e0) { }
+        try {
             var rawClassObj = javaClassWrapper.__javaObject__
             if (rawClassObj != null && typeof rawClassObj.isInstance === 'function') {
                 return Boolean(rawClassObj.isInstance(obj))
@@ -124,8 +77,8 @@
             if (rawClassObj != null && typeof rawClassObj.isAssignableFrom === 'function' && typeof obj.getClass === 'function') {
                 return Boolean(rawClassObj.isAssignableFrom(obj.getClass()))
             }
-            return false
-        }, false))
+        } catch (e1) { }
+        return false
     }
 
     var subcommands       = {}
@@ -325,14 +278,11 @@
 
     function extractServerFromObj(obj) {
         if (obj == null) return null
-        return tryCall(function () {
-            if (typeof obj.getServer === 'function') {
-                var s0 = obj.getServer()
-                if (s0 != null) return s0
-            }
-            if (obj.server != null) return obj.server
-            return null
-        }, null)
+        if (typeof obj.getServer === 'function') {
+            var s0 = obj.getServer()
+            if (s0 != null) return s0
+        }
+        return obj.server != null ? obj.server : null
     }
 
     function resolveServer(source, player) {
@@ -342,81 +292,21 @@
             return s
         }
         if (SERVER_REF == null) {
-            var fromUtils = tryCall(function () {
-                return (typeof Utils !== 'undefined' && Utils != null && typeof Utils.getServer === 'function')
-                    ? Utils.getServer()
-                    : null
-            }, null)
-            if (fromUtils != null) SERVER_REF = fromUtils
+            SERVER_REF = BASE.resolveServer(null)
         }
         return SERVER_REF
     }
 
     function resolveWorldStorageInfo(server) {
-        var srv = server || SERVER_REF
-        if (srv != null && LevelResourceClass != null) {
-            try {
-                var rootRes = LevelResourceClass.ROOT
-                if (rootRes != null && typeof srv.getWorldPath === 'function') {
-                    var worldPath = srv.getWorldPath(rootRes)
-                    if (worldPath != null) {
-                        var normRoot = (typeof worldPath.normalize === 'function') ? worldPath.normalize() : worldPath
-                        var jsonPath = String(normRoot).replace(/[\\/]+$/, '') + '/' + WORLD_FILE_NAME
-                        return {
-                            worldKey: 'path:' + jsonPath.toLowerCase(),
-                            filePath: jsonPath
-                        }
-                    }
-                }
-            } catch (ePath) {
-                logCatch('resolveWorldPath', ePath)
-            }
-        }
-
-        var levelName = 'default_world'
-        if (srv != null) {
-            var resolvedName = tryCall(function () {
-                var wData = (typeof srv.getWorldData === 'function') ? srv.getWorldData() : srv.worldData
-                if (wData != null) {
-                    var rawName = (typeof wData.getLevelName === 'function') ? wData.getLevelName() : wData.levelName
-                    if (rawName != null && String(rawName).trim().length > 0) {
-                        return String(rawName).trim()
-                    }
-                }
-                return null
-            }, null)
-            if (resolvedName) levelName = resolvedName
-        }
-        var safeFileSlug = levelName.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim() || 'default_world'
-        var fallbackPath = FALLBACK_DIR + '/' + safeFileSlug + '.json'
-        return {
-            worldKey: 'name:' + safeFileSlug.toLowerCase(),
-            filePath: fallbackPath
-        }
+        return BASE.resolveWorldStorageInfo(server || SERVER_REF, WORLD_FILE_NAME, FALLBACK_DIR)
     }
 
     function ensureParentDir(filePathStr) {
-        if (FilesClass == null) return
-        try {
-            var PathsClass = loadJavaClass('java.nio.file.Paths')
-            if (PathsClass == null) return
-            var p = PathsClass.get(String(filePathStr))
-            var parent = p != null ? p.getParent() : null
-            if (parent != null && !FilesClass.exists(parent)) {
-                FilesClass.createDirectories(parent)
-            }
-        } catch (e) {
-            logCatch('ensureParentDir', e)
-        }
+        return BASE.ensureParentDir(filePathStr, LOGGER)
     }
 
     function readMapField(obj, key) {
-        if (obj == null) return null
-        return tryCall(function () {
-            if (obj[key] !== undefined) return obj[key]
-            if (typeof obj.get === 'function') return obj.get(key)
-            return null
-        }, null)
+        return BASE.readMapField(obj, key)
     }
 
     // 解析单条用户授权数据（兼容旧版数组格式 ['*'] 与新版带审计信息格式 { displayName, scopes: { '*': { by, at } } }）
@@ -577,118 +467,68 @@
     function extractActorLabel(sourceOrName) {
         if (sourceOrName == null) return 'SYSTEM'
         if (typeof sourceOrName === 'string') return sourceOrName.trim() || 'SYSTEM'
-        var p = tryCall(function () {
+        try {
             if (typeof sourceOrName.isPlayer === 'function' && sourceOrName.isPlayer()) {
-                return (typeof sourceOrName.getPlayer === 'function') ? sourceOrName.getPlayer() : sourceOrName.player
+                var p = (typeof sourceOrName.getPlayer === 'function') ? sourceOrName.getPlayer() : sourceOrName.player
+                var pName = extractPlayerName(p)
+                if (pName) return pName
             }
-            return null
-        }, null)
-        if (p != null) {
-            var pName = extractPlayerName(p)
-            if (pName) return pName
-        }
-        var tn = tryCall(function () {
-            return (typeof sourceOrName.getTextName === 'function') ? sourceOrName.getTextName() : null
-        }, null)
-        if (tn != null && String(tn).trim().length > 0) return String(tn).trim()
+            if (typeof sourceOrName.getTextName === 'function') {
+                var tn = sourceOrName.getTextName()
+                if (tn != null && String(tn).trim().length > 0) return String(tn).trim()
+            }
+        } catch (e) { }
         return 'CONSOLE'
     }
 
     function extractPlayerName(player) {
-        if (player == null) return ''
-        var fromProfile = tryCall(function () {
-            if (typeof player.getProfile === 'function') {
-                var prof = player.getProfile()
-                if (prof != null && typeof prof.getName === 'function' && prof.getName() != null) {
-                    return String(prof.getName())
-                }
-            }
-            return null
-        }, null)
-        if (fromProfile) return fromProfile
-        var fromUser = tryCall(function () {
-            return player.username != null ? String(player.username) : null
-        }, null)
-        if (fromUser) return fromUser
-        return tryCall(function () {
-            if (typeof player.getName === 'function') {
-                var comp = player.getName()
-                if (comp != null && typeof comp.getString === 'function') return String(comp.getString())
-                if (comp != null) return String(comp)
-            }
-            return ''
-        }, '')
+        return BASE.nameOf(player) || ''
     }
 
     function extractPlayerUuid(player) {
-        if (player == null) return ''
-        var sUuid = tryCall(function () {
-            return typeof player.getStringUUID === 'function' ? String(player.getStringUUID()) : null
-        }, null)
-        if (sUuid) return sUuid
-        var rawUuid = tryCall(function () {
-            return player.uuid != null ? String(player.uuid) : null
-        }, null)
-        if (rawUuid) return rawUuid
-        return tryCall(function () {
-            if (typeof player.getProfile === 'function') {
-                var prof = player.getProfile()
-                if (prof != null && typeof prof.getId === 'function' && prof.getId() != null) {
-                    return String(prof.getId())
-                }
-            }
-            return ''
-        }, '')
+        return BASE.uuidOf(player) || ''
+    }
+
+    function playerHasPermLevel(player, level) {
+        return Boolean(player != null && typeof player.hasPermissions === 'function' && player.hasPermissions(level))
     }
 
     function isWorldCheatsEnabled(server, player) {
         var srv = server || SERVER_REF
-        if (srv == null) {
-            return Boolean(tryCall(function () {
-                return player != null && typeof player.hasPermissions === 'function' && player.hasPermissions(2)
-            }, false))
+        if (srv == null) return playerHasPermLevel(player, 2)
+        if ((typeof srv.isDedicatedServer === 'function' && srv.isDedicatedServer())
+            || (typeof srv.isDedicated === 'function' && srv.isDedicated())) {
+            return true
         }
-        if (tryCall(function () {
-            return (typeof srv.isDedicatedServer === 'function' && srv.isDedicatedServer())
-                || (typeof srv.isDedicated === 'function' && srv.isDedicated())
-        }, false)) return true
-        if (tryCall(function () {
-            var pList = (typeof srv.getPlayerList === 'function') ? srv.getPlayerList() : srv.playerList
-            return pList != null && typeof pList.isAllowCheatsForAllPlayers === 'function' && pList.isAllowCheatsForAllPlayers()
-        }, false)) return true
-        var wAllow = tryCall(function () {
-            var wData = (typeof srv.getWorldData === 'function') ? srv.getWorldData() : srv.worldData
-            if (wData != null) {
-                if (typeof wData.getAllowCommands === 'function') return Boolean(wData.getAllowCommands())
-                if (wData.allowCommands !== undefined) return Boolean(wData.allowCommands)
-            }
-            return null
-        }, null)
-        if (wAllow !== null) return wAllow
-        return Boolean(tryCall(function () {
-            return player != null && typeof player.hasPermissions === 'function' && player.hasPermissions(2)
-        }, false))
+        var pList = (typeof srv.getPlayerList === 'function') ? srv.getPlayerList() : srv.playerList
+        if (pList != null && typeof pList.isAllowCheatsForAllPlayers === 'function' && pList.isAllowCheatsForAllPlayers()) {
+            return true
+        }
+        var wData = (typeof srv.getWorldData === 'function') ? srv.getWorldData() : srv.worldData
+        if (wData != null) {
+            if (typeof wData.getAllowCommands === 'function') return Boolean(wData.getAllowCommands())
+            if (wData.allowCommands !== undefined) return Boolean(wData.allowCommands)
+        }
+        return playerHasPermLevel(player, 2)
     }
 
     function isPlayerAdmin(server, player, source, minOpLevel) {
         if (player == null) return false
         var srv   = server || resolveServer(source, player)
         var reqLv = (minOpLevel != null && isFinite(minOpLevel) && minOpLevel > 0) ? Math.round(minOpLevel) : 2
-        if (tryCall(function () { return typeof player.isOp === 'function' && player.isOp() }, false)) return true
-        if (tryCall(function () { return typeof player.hasPermissions === 'function' && player.hasPermissions(reqLv) }, false)) return true
-        if (tryCall(function () { return source != null && typeof source.hasPermission === 'function' && source.hasPermission(reqLv) }, false)) return true
+        if (typeof player.isOp === 'function' && player.isOp()) return true
+        if (playerHasPermLevel(player, reqLv)) return true
+        if (source != null && typeof source.hasPermission === 'function' && source.hasPermission(reqLv)) return true
         if (srv != null) {
-            return Boolean(tryCall(function () {
-                var prof  = (typeof player.getProfile === 'function') ? player.getProfile() : player.profile
-                var pList = (typeof srv.getPlayerList === 'function') ? srv.getPlayerList() : srv.playerList
-                if (prof != null && pList != null && typeof pList.isOp === 'function' && pList.isOp(prof)) {
-                    return true
-                }
-                if (prof != null && typeof srv.isSingleplayerOwner === 'function' && srv.isSingleplayerOwner(prof)) {
-                    return isWorldCheatsEnabled(srv, player)
-                }
-                return false
-            }, false))
+            var prof  = (typeof player.getProfile === 'function') ? player.getProfile()
+                : ((typeof player.getGameProfile === 'function') ? player.getGameProfile() : player.profile)
+            var pList = (typeof srv.getPlayerList === 'function') ? srv.getPlayerList() : srv.playerList
+            if (prof != null && pList != null && typeof pList.isOp === 'function' && pList.isOp(prof)) {
+                return true
+            }
+            if (prof != null && typeof srv.isSingleplayerOwner === 'function' && srv.isSingleplayerOwner(prof)) {
+                return isWorldCheatsEnabled(srv, player)
+            }
         }
         return false
     }
@@ -741,20 +581,17 @@
         if (player == null) return
         var srv = server || resolveServer(null, player)
         if (srv == null) return
-        if (tryCall(function () {
+        try {
             var pList = (typeof srv.getPlayerList === 'function') ? srv.getPlayerList() : srv.playerList
             if (pList != null && typeof pList.sendPlayerPermissionLevel === 'function') {
                 pList.sendPlayerPermissionLevel(player)
-                return true
+                return
             }
-            return false
-        }, false)) return
-        tryCall(function () {
             var cmds = (typeof srv.getCommands === 'function') ? srv.getCommands() : srv.commands
             if (cmds != null && typeof cmds.sendCommands === 'function') {
                 cmds.sendCommands(player)
             }
-        }, null)
+        } catch (e) { }
     }
 
     function applyGrantToRecord(grantsMap, key, displayName, scope, auditMeta) {
@@ -922,7 +759,7 @@
     function runDeclaredCommand(runnerObj, callerId, commandStr, silent) {
         if (runnerObj == null || !commandStr) return 0
         var looksLikePlayer = (ServerPlayerClass != null && isJavaInstance(ServerPlayerClass, runnerObj))
-            || Boolean(tryCall(function () { return typeof runnerObj.getUuid === 'function' && typeof runnerObj.hasPermissions === 'function' }, false))
+            || (typeof runnerObj.getUuid === 'function' && typeof runnerObj.hasPermissions === 'function')
         if (looksLikePlayer) {
             logWarn('runDeclaredCommand', '出于安全边界禁止将玩家对象作为 runDeclaredCommand 的提权执行代理，已拦截。')
             return 0
@@ -947,27 +784,28 @@
             return { kind: 'untrusted_other', player: null, rawSource: null, className: 'null' }
         }
 
-        var rawSource = tryCall(function () { return source.source }, null)
-        var rawCls    = tryCall(function () {
-            return (rawSource != null && typeof rawSource.getClass === 'function') ? String(rawSource.getClass().getName()) : ''
-        }, '')
+        var rawSource = source.source !== undefined ? source.source : null
+        var rawCls    = (rawSource != null && typeof rawSource.getClass === 'function')
+            ? String(rawSource.getClass().getName()) : ''
 
         // 1. 优先严格验证是否为真实玩家直接执行（最不可信物理源优先拦截，防提权伪装）：
         //    注意：CommandSourceStack.getPlayer() 返回的是 ServerPlayer，但 Rhino 可能会对其中一个包装一层 NativeJavaObject / KubeJS 代理，
         //    导致 rawSource === player 引用不相等；因此同时支持 Java Object.equals() 与 UUID 相等比对，并配合 ServerPlayerClass.isInstance 校验。
-        var player = tryCall(function () {
+        var player = null
+        try {
             var isPl = (typeof source.isPlayer === 'function') ? Boolean(source.isPlayer()) : true
-            if (!isPl) return null
-            var pCand = (typeof source.getPlayer === 'function') ? source.getPlayer() : source.player
-            return (pCand != null && typeof pCand !== 'boolean') ? pCand : null
-        }, null)
+            if (isPl) {
+                var pCand = (typeof source.getPlayer === 'function') ? source.getPlayer() : source.player
+                if (pCand != null && typeof pCand !== 'boolean') player = pCand
+            }
+        } catch (ePl) { player = null }
 
         if (player != null) {
             var isRealPlayerSource = false
             if (rawSource != null) {
                 var sameEntity = (rawSource === player)
                 if (!sameEntity && typeof rawSource.equals === 'function') {
-                    sameEntity = Boolean(tryCall(function () { return rawSource.equals(player) }, false))
+                    try { sameEntity = Boolean(rawSource.equals(player)) } catch (eEq) { }
                 }
                 if (!sameEntity) {
                     var u1 = extractPlayerUuid(rawSource)
@@ -1421,25 +1259,21 @@
     global.EpiphyPermissionValve = valveApi
     global.PermissionValve       = valveApi
 
-    function handleAuthScopeCommand(ctx, Arguments, isGrant, rawScope) {
-        var players = Arguments.PLAYERS.getResult(ctx, 'targets')
-        var srv     = resolveServer(ctx.source, ctx.source.player)
+    function handleAuthScopeCommand(source, playersArr, isGrant, rawScope) {
+        var srv     = resolveServer(source, source.player)
         var scope   = normalizeScope(rawScope)
         var cnt     = 0
-        if (players != null && typeof players.iterator === 'function') {
-            var it = players.iterator()
-            while (it.hasNext()) {
-                var ok = isGrant
-                    ? grantPlayer(srv, it.next(), scope, ctx.source)
-                    : revokePlayer(srv, it.next(), scope)
-                if (ok) cnt++
-            }
+        for (var i = 0; i < playersArr.length; i++) {
+            var ok = isGrant
+                ? grantPlayer(srv, playersArr[i], scope, source)
+                : revokePlayer(srv, playersArr[i], scope)
+            if (ok) cnt++
         }
         var targetLabel = (scope === '*') ? '全部 /epiphy 子命令权限 (*)' : ('[/epiphy ' + scope + '] 权限')
         var msg = isGrant
             ? ('§a[Epiphy 权限阀] 已授予 ' + cnt + ' 名玩家' + targetLabel + '并记录审计信息。')
             : ('§e[Epiphy 权限阀] 已撤销 ' + cnt + ' 名玩家的' + targetLabel + '并同步至当前存档。')
-        sendSourceMessage(ctx.source, msg)
+        sendSourceMessage(source, msg)
         return cnt
     }
 
@@ -1454,74 +1288,61 @@
             global.EpiphyCommandRegistryQueue.length = 0
         }
 
-        var root = Commands.literal(ROOT_LITERAL)
-            .executes(function (ctx) {
-                return sendAggregatedHelp(ctx.source, null)
+        var b = BASE.createCommandBuilder({
+            event:          event,
+            Commands:       Commands,
+            Arguments:      Arguments,
+            canSee:         function (source, branchPolicy) { return canSeeSubcommand(source, 'auth', branchPolicy) },
+            guardExecution: function (pol, fn) { return guardExecution('auth', pol, fn) }
+        })
+
+        function makeAuthScopeMutator(litName, isGrant) {
+            return b.literal(litName, {
+                chain: [
+                    [{ name: 'targets', type: 'players' }, { name: 'scope', type: 'word' }],
+                    function (ctx, args) {
+                        return handleAuthScopeCommand(ctx.source, args.targets, isGrant, args.scope || '*')
+                    },
+                    { minArgs: 1, policy: POLICY_PRESETS.admin }
+                ]
             })
-            .then(
-                Commands.literal('help')
-                    .executes(function (ctx) {
-                        return sendAggregatedHelp(ctx.source, null)
-                    })
-                    .then(
-                        Commands.argument('topic', Arguments.WORD.create(event))
-                            .executes(function (ctx) {
-                                var topic = Arguments.WORD.getResult(ctx, 'topic')
-                                return sendAggregatedHelp(ctx.source, topic)
-                            })
-                    )
-            )
-            .then(
-                Commands.literal('auth')
-                    .requires(function (source) {
-                        return canSeeSubcommand(source, 'auth', POLICY_PRESETS.admin)
-                    })
-                    .then(
-                        Commands.literal('list')
-                            .executes(guardExecution('auth', POLICY_PRESETS.admin, function (ctx) {
-                                var srv     = resolveServer(ctx.source, ctx.source.player)
-                                var info    = resolveWorldStorageInfo(srv)
-                                var entries = listGrantedEntries(srv)
-                                var cheats  = isWorldCheatsEnabled(srv, ctx.source.player)
-                                sendSourceMessage(ctx.source, '§b[Epiphy 权限阀] §7世界作弊状态: ' + (cheats ? '§a已开启' : '§c未开启') + ' §7| 授权用户数: §e' + entries.length)
-                                sendSourceMessage(ctx.source, '§7当前存档授权文件: §8' + info.filePath)
-                                for (var eIdx = 0; eIdx < entries.length; eIdx++) {
-                                    sendSourceMessage(ctx.source, '§7  • §f' + entries[eIdx])
-                                }
-                                return 1
-                            }))
-                    )
-                    .then(
-                        Commands.literal('grant')
-                            .then(
-                                Commands.argument('targets', Arguments.PLAYERS.create(event))
-                                    .executes(guardExecution('auth', POLICY_PRESETS.admin, function (ctx) {
-                                        return handleAuthScopeCommand(ctx, Arguments, true, '*')
-                                    }))
-                                    .then(
-                                        Commands.argument('scope', Arguments.WORD.create(event))
-                                            .executes(guardExecution('auth', POLICY_PRESETS.admin, function (ctx) {
-                                                return handleAuthScopeCommand(ctx, Arguments, true, Arguments.WORD.getResult(ctx, 'scope'))
-                                            }))
-                                    )
-                            )
-                    )
-                    .then(
-                        Commands.literal('revoke')
-                            .then(
-                                Commands.argument('targets', Arguments.PLAYERS.create(event))
-                                    .executes(guardExecution('auth', POLICY_PRESETS.admin, function (ctx) {
-                                        return handleAuthScopeCommand(ctx, Arguments, false, '*')
-                                    }))
-                                    .then(
-                                        Commands.argument('scope', Arguments.WORD.create(event))
-                                            .executes(guardExecution('auth', POLICY_PRESETS.admin, function (ctx) {
-                                                return handleAuthScopeCommand(ctx, Arguments, false, Arguments.WORD.getResult(ctx, 'scope'))
-                                            }))
-                                    )
-                            )
-                    )
-            )
+        }
+
+        var authNode = b.literal('auth', {
+            policy: POLICY_PRESETS.admin,
+            children: [
+                b.literal('list', {
+                    policy: POLICY_PRESETS.admin,
+                    exec: function (ctx) {
+                        var srv     = resolveServer(ctx.source, ctx.source.player)
+                        var info    = resolveWorldStorageInfo(srv)
+                        var entries = listGrantedEntries(srv)
+                        var cheats  = isWorldCheatsEnabled(srv, ctx.source.player)
+                        sendSourceMessage(ctx.source, '§b[Epiphy 权限阀] §7世界作弊状态: ' + (cheats ? '§a已开启' : '§c未开启') + ' §7| 授权用户数: §e' + entries.length)
+                        sendSourceMessage(ctx.source, '§7当前存档授权文件: §8' + info.filePath)
+                        for (var eIdx = 0; eIdx < entries.length; eIdx++) {
+                            sendSourceMessage(ctx.source, '§7  • §f' + entries[eIdx])
+                        }
+                        return 1
+                    }
+                }),
+                makeAuthScopeMutator('grant', true),
+                makeAuthScopeMutator('revoke', false)
+            ]
+        })
+
+        var helpNode = b.literal('help', {
+            chain: [
+                [{ name: 'topic', type: 'word' }],
+                function (ctx, args) { return sendAggregatedHelp(ctx.source, args.topic || null) },
+                { minArgs: 0 }
+            ]
+        })
+
+        var root = Commands.literal(ROOT_LITERAL)
+            .executes(function (ctx) { return sendAggregatedHelp(ctx.source, null) })
+            .then(helpNode)
+            .then(authNode)
 
         // 挂载各业务模块声明的子命令，并挂载安全包裹 try/catch 的 .requires(...) 以隐藏无权限玩家的 Tab 补全树
         for (var idx = 0; idx < subcmdOrder.length; idx++) {
@@ -1617,12 +1438,5 @@
             }]
         }
     }
-    if (typeof global !== 'undefined' && global != null) {
-        if (global.EpiphyDebug != null && typeof global.EpiphyDebug.registerProvider === 'function') {
-            global.EpiphyDebug.registerProvider(valveDebugProvider)
-        } else {
-            if (!Array.isArray(global.EpiphyDebugProviderQueue)) global.EpiphyDebugProviderQueue = []
-            global.EpiphyDebugProviderQueue.push(valveDebugProvider)
-        }
-    }
+    BASE.registerDebugProvider(valveDebugProvider)
 })()
