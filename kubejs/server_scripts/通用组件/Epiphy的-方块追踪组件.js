@@ -28,6 +28,8 @@
     var VERIFY_WINDOW_TICKS    = 20
     var SCAN_ENQ_INTERVAL      = 20
     var SCAN_SECTIONS_PER_TICK = 1
+    var MAX_SCANNED_SECTIONS   = 8192
+    var MAX_SCAN_QUEUE_SIZE    = 512
 
     var SERVER_REF         = null
     var loadedPersistSrv   = null
@@ -47,6 +49,7 @@
     var trackedBlocks     = new Map()
     var scannedSections   = new Set()
     var scanQueue         = []
+    var scanQueueHead     = 0
     var migratedKeys      = new Set()
     var pendingMigrations = []
 
@@ -457,7 +460,7 @@
         loadedPersistSrv   = SERVER_REF
         trackedBlocks.clear()
         scannedSections.clear()
-        scanQueue.length   = 0
+        resetScanQueue()
         migratedKeys.clear()
         persistDirty       = false
         lastFlushTick      = -9999
@@ -606,8 +609,39 @@
         }
     }
 
+    // 真 LRU 缓存维护：命中时 delete + add 迁至 Set 尾部，防止玩家脚下已扫描区块段被 FIFO 淘汰引发重扫正反馈
+    function touchScannedSection(skey) {
+        if (scannedSections.has(skey)) {
+            scannedSections.delete(skey)
+        } else if (scannedSections.size >= MAX_SCANNED_SECTIONS) {
+            var oldestSkey = scannedSections.values().next().value
+            if (oldestSkey !== undefined) scannedSections.delete(oldestSkey)
+        }
+        scannedSections.add(skey)
+    }
+
+    function resetScanQueue() {
+        scanQueue.length = 0
+        scanQueueHead    = 0
+    }
+
+    function getPendingScanCount() {
+        return scanQueue.length - scanQueueHead
+    }
+
+    function getLoadedChunkSections(lv, chunkX, chunkZ) {
+        if (lv == null) return { loaded: false, sections: null, minBuildY: -64 }
+        var cs    = lv.getChunkSource()
+        var chunk = cs != null ? cs.getChunkNow(chunkX, chunkZ) : (lv.hasChunk(chunkX, chunkZ) ? lv.getChunk(chunkX, chunkZ) : null)
+        if (chunk == null) return { loaded: false, sections: null, minBuildY: -64 }
+        var sections  = chunk.getSections()
+        var minBuildY = typeof chunk.getMinBuildHeight === 'function' ? Number(chunk.getMinBuildHeight()) : -64
+        return { loaded: true, sections: sections, minBuildY: minBuildY }
+    }
+
     function enqueueNearbySections() {
         if (bindingsByBlockId.size === 0 || SERVER_REF == null) return
+        if (getPendingScanCount() >= MAX_SCAN_QUEUE_SIZE) return
         var maxRadius = 32
         bindingsByBlockId.forEach(function (bMap) {
             bMap.forEach(function (b) {
@@ -622,23 +656,51 @@
             var p   = typeof pList.get === 'function' ? pList.get(i) : pList[i]
             var pos = readPlayerPos(p)
             if (pos == null) continue
-            var dim = dimOfLevel(p.level) || 'minecraft:overworld'
+            var lv  = resolveLevel(p.level, null)
+            var dim = dimOfLevel(lv || p.level) || 'minecraft:overworld'
+            if (lv == null) lv = resolveLevel(dim, null)
             var minSX = Math.floor((pos.x - maxRadius) / 16)
             var maxSX = Math.floor((pos.x + maxRadius) / 16)
             var minSY = Math.floor((pos.y - maxRadius) / 16)
             var maxSY = Math.floor((pos.y + maxRadius) / 16)
             var minSZ = Math.floor((pos.z - maxRadius) / 16)
             var maxSZ = Math.floor((pos.z + maxRadius) / 16)
+            if (lv != null && typeof lv.getMinBuildHeight === 'function') {
+                var worldMinSY = Math.floor(Number(lv.getMinBuildHeight()) / 16)
+                if (minSY < worldMinSY) minSY = worldMinSY
+            }
+            if (lv != null && typeof lv.getMaxBuildHeight === 'function') {
+                var worldMaxSY = Math.floor((Number(lv.getMaxBuildHeight()) - 1) / 16)
+                if (maxSY > worldMaxSY) maxSY = worldMaxSY
+            }
             for (var sx = minSX; sx <= maxSX; sx++) {
-                for (var sy = minSY; sy <= maxSY; sy++) {
-                    for (var sz = minSZ; sz <= maxSZ; sz++) {
+                for (var sz = minSZ; sz <= maxSZ; sz++) {
+                    var col = null
+                    // 【catch 约定】Java 区块段能力探测：部分非标准 Level 若无 getChunkSource/getSections 则回退仅入队。
+                    try {
+                        col = getLoadedChunkSections(lv, sx, sz)
+                    } catch (eCol) {
+                        col = { loaded: true, sections: null, minBuildY: -64 }
+                    }
+                    if (!col.loaded) continue
+                    for (var sy = minSY; sy <= maxSY; sy++) {
                         var skey = dim + '|' + sx + ',' + sy + ',' + sz
-                        if (scannedSections.has(skey)) continue
-                        if (scannedSections.size >= 4096) {
-                            var oldestSkey = scannedSections.values().next().value
-                            if (oldestSkey !== undefined) scannedSections.delete(oldestSkey)
+                        if (scannedSections.has(skey)) {
+                            touchScannedSection(skey)
+                            continue
                         }
-                        scannedSections.add(skey)
+                        if (col.sections != null) {
+                            var secIdx = (sy * 16 - col.minBuildY) >> 4
+                            if (secIdx < 0 || secIdx >= col.sections.length) continue
+                            var sec = col.sections[secIdx]
+                            if (sec == null || sec.hasOnlyAir()) {
+                                // 纯空气段直接记入 LRU 缓存，不占用扫描队列预算（新放置方块由 BlockEvents.placed 实时捕获）
+                                touchScannedSection(skey)
+                                continue
+                            }
+                        }
+                        if (getPendingScanCount() >= MAX_SCAN_QUEUE_SIZE) return
+                        touchScannedSection(skey)
                         scanQueue.push({ dim: dim, sx: sx, sy: sy, sz: sz, skey: skey })
                     }
                 }
@@ -660,24 +722,31 @@
     }
 
     function processScanSlice() {
-        if (scanQueue.length === 0 || bindingsByBlockId.size === 0) return
+        if (scanQueueHead >= scanQueue.length || bindingsByBlockId.size === 0) return
         var processed = 0
         var dirty     = false
-        while (scanQueue.length > 0 && processed < SCAN_SECTIONS_PER_TICK) {
-            var task = scanQueue.shift()
+        while (scanQueueHead < scanQueue.length && processed < SCAN_SECTIONS_PER_TICK) {
+            var task = scanQueue[scanQueueHead]
+            scanQueue[scanQueueHead] = null
+            scanQueueHead++
+            if (scanQueueHead >= scanQueue.length) {
+                resetScanQueue()
+            } else if (scanQueueHead >= 256 && scanQueueHead * 2 >= scanQueue.length) {
+                scanQueue = scanQueue.slice(scanQueueHead)
+                scanQueueHead = 0
+            }
+            if (task == null) continue
             processed++
             var lv = resolveLevel(task.dim, null)
             if (lv == null) continue
             try {
-                var cs    = lv.getChunkSource()
-                var chunk = cs != null ? cs.getChunkNow(task.sx, task.sz) : (lv.hasChunk(task.sx, task.sz) ? lv.getChunk(task.sx, task.sz) : null)
-                if (chunk == null) {
+                var col = getLoadedChunkSections(lv, task.sx, task.sz)
+                if (!col.loaded) {
                     scannedSections.delete(task.skey)
                     continue
                 }
-                var sections  = chunk.getSections()
-                var minBuildY = typeof chunk.getMinBuildHeight === 'function' ? Number(chunk.getMinBuildHeight()) : -64
-                var secIdx    = (task.sy * 16 - minBuildY) >> 4
+                var sections = col.sections
+                var secIdx   = (task.sy * 16 - col.minBuildY) >> 4
                 if (sections == null || secIdx < 0 || secIdx >= sections.length) continue
                 var section = sections[secIdx]
                 if (section == null || section.hasOnlyAir()) continue
@@ -860,14 +929,16 @@
                 }
                 bMap.set(subId, meta)
                 scannedSections.clear()
+                resetScanQueue()
                 return true
             },
             unbind: unbindBlockForSub,
             scanNow: function () {
                 if (sub.destroyed) return 0
                 scannedSections.clear()
+                resetScanQueue()
                 enqueueNearbySections()
-                return scanQueue.length
+                return getPendingScanCount()
             },
             hasBinding: function (blockId) {
                 var bMap = bindingsByBlockId.get(String(blockId || '').trim())
@@ -983,12 +1054,20 @@
             if (patch.saveDebounceTicks != null && isFinite(Number(patch.saveDebounceTicks))) {
                 SAVE_DEBOUNCE_TICKS = Math.max(1, Math.floor(Number(patch.saveDebounceTicks)))
             }
+            if (patch.maxScannedSections != null && isFinite(Number(patch.maxScannedSections))) {
+                MAX_SCANNED_SECTIONS = Math.max(256, Math.floor(Number(patch.maxScannedSections)))
+            }
+            if (patch.maxScanQueue != null && isFinite(Number(patch.maxScanQueue))) {
+                MAX_SCAN_QUEUE_SIZE = Math.max(16, Math.floor(Number(patch.maxScanQueue)))
+            }
         }
         return {
             scanEnqInterval:     SCAN_ENQ_INTERVAL,
             scanSectionsPerTick: SCAN_SECTIONS_PER_TICK,
             verifyWindowTicks:   VERIFY_WINDOW_TICKS,
-            saveDebounceTicks:   SAVE_DEBOUNCE_TICKS
+            saveDebounceTicks:   SAVE_DEBOUNCE_TICKS,
+            maxScannedSections:  MAX_SCANNED_SECTIONS,
+            maxScanQueue:        MAX_SCAN_QUEUE_SIZE
         }
     }
 
