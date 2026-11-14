@@ -40,9 +40,8 @@
 
 ;(function () {
     var BASE = (typeof global !== 'undefined') ? global.EpiphyServerBase : null
-    var LOG  = (typeof global !== 'undefined') ? global.EpiphyLog        : null
-    if (!BASE || !LOG) {
-        throw new Error('[EpiphyPermissionValve] 缺少硬依赖 global.EpiphyServerBase / global.EpiphyLog')
+    if (!BASE) {
+        throw new Error('[EpiphyPermissionValve] 缺少硬依赖 global.EpiphyServerBase，请确认 server_scripts/通用组件/Epiphy的-服务端基础.js 已加载')
     }
 
     var LOGGER          = BASE.createLogger('EpiphyPermissionValve', 5000)
@@ -52,10 +51,10 @@
 
     var SERVER_REF = null
 
-    function logWarn(tag, msg) { LOG.warn('EpiphyPermissionValve', tag, msg) }
-    function logError(tag, msg) { LOG.error('EpiphyPermissionValve', tag, msg) }
+    function logWarn(tag, msg) { LOGGER.warn(tag, msg) }
+    function logError(tag, msg) { LOGGER.error(tag, msg) }
     function logCatch(tag, err) { LOGGER.catchWarn(tag, err) }
-    function logOnceWarn(key, msg) { LOG.once('warn', key, msg) }
+    function logOnceWarn(key, msg) { LOGGER.once('warn', key, msg) }
     function loadJavaClass(className) { return BASE.loadJavaClass(className, LOGGER) }
 
     var BaseCommandBlockClass  = loadJavaClass('net.minecraft.world.level.BaseCommandBlock')

@@ -1,26 +1,82 @@
-// priority: 1180
+// priority: 1200
 // ============================================================================
-// Epiphy 通用规范与纯逻辑基座 (EpiphySpec)
-//   所属阶段：startup_scripts（服务端与客户端共享）
-//   硬依赖  ：global.EpiphyProtocol (Epiphy的-协议常量.js, priority >= 1200)
-//   定位    ：收拢跨组件重复的数值/布尔/时长/颜色/字号/倾角/命令解析器与球簇合并几何算法
+// Epiphy 通用规范、共享协议契约与纯逻辑基座 (EpiphySpec + EpiphyProtocol)
+//   所属阶段：startup_scripts（服务端与客户端共享，单一前置加载项）
+//   职责说明：
+//     1. 定义并导出 global.EpiphyProtocol（频道名、版本号、PRIORITY_MAP、HUD_FORBIDDEN_PRESETS）；
+//     2. 收拢跨组件复用的数值/布尔/时长/颜色/字号/倾角/命令解析器与球簇合并几何算法，导出 global.EpiphySpec；
+//     3. 服务端业务组件以本文件 + EpiphyServerBase 为底座；客户端渲染器/播放器在缺失本文件时仍可降级运行内置 v5 协议常量。
 //   约束    ：严格 Rhino ES5（禁止 let/const、箭头函数、模板字符串、展开运算符）
 // ============================================================================
 
 ;(function () {
     'use strict';
 
-    var proto = (typeof global !== 'undefined') ? global.EpiphyProtocol : null;
-    if (!proto) {
-        throw new Error('[EpiphySpec] 缺少硬依赖 global.EpiphyProtocol，请确认 Epiphy的-协议常量.js 已加载');
+    // ------------------------------------------------------------------------
+    // 1. 共享协议常量与版本契约 (global.EpiphyProtocol)
+    // ------------------------------------------------------------------------
+    var PRIORITY_MAP = {
+        low: 1, minor: 1, '低': 1, '次要': 1,
+        normal: 2, medium: 2, default: 2, '中': 2, '普通': 2,
+        high: 3, major: 3, important: 3, '高': 3, '重要': 3,
+        critical: 4, fatal: 4, urgent: 4, boss: 4, '极高': 4, '致命': 4,
+        active: 5, sustain: 5, '持续': 5
+    };
+
+    var HUD_FORBIDDEN_PRESETS = {
+        minimap:   Object.freeze({ x: 0.74, y: 0.00, w: 0.26, h: 0.28 }),
+        hotbar:    Object.freeze({ x: 0.22, y: 0.80, w: 0.56, h: 0.20 }),
+        crosshair: Object.freeze({ x: 0.40, y: 0.38, w: 0.20, h: 0.22 }),
+        bossbar:   Object.freeze({ x: 0.25, y: 0.00, w: 0.50, h: 0.09 })
+    };
+
+    var DANMAKU_CHANNEL       = 'epiphy:screen_danmaku';
+    var DANMAKU_PROTO_VERSION = 5;
+
+    var AUDIO_CHANNEL         = 'epiphy:audio';
+    var AUDIO_PROTO_VERSION   = 5;
+    var AUDIO_SEMVER          = '5.2.0';
+
+    function isProtoCompatible(expectedVer, incomingVer) {
+        if (incomingVer === undefined || incomingVer === null) return false;
+        var n = Number(incomingVer);
+        return isFinite(n) && n === Number(expectedVer);
     }
 
-    var PRIORITY_MAP = proto.PRIORITY_MAP || {
-        normal:    0,
-        urgent:    1,
-        replace:   2,
-        interrupt: 2
+    function registerPriorityAlias(name, level) {
+        if (name == null) return false;
+        var key = String(name).trim().toLowerCase();
+        var lv  = Number(level);
+        if (!key || !isFinite(lv)) return false;
+        PRIORITY_MAP[key] = Math.max(0, Math.min(10, Math.round(lv)));
+        return true;
+    }
+
+    function registerHudPreset(name, rect) {
+        if (name == null || rect == null || typeof rect !== 'object') return false;
+        var key = String(name).trim().toLowerCase();
+        var x = Number(rect.x), y = Number(rect.y), w = Number(rect.w), h = Number(rect.h);
+        if (!key || !isFinite(x) || !isFinite(y) || !isFinite(w) || !isFinite(h)) return false;
+        HUD_FORBIDDEN_PRESETS[key] = Object.freeze({ x: x, y: y, w: w, h: h });
+        return true;
+    }
+
+    var PROTOCOL = {
+        DANMAKU_CHANNEL:       DANMAKU_CHANNEL,
+        DANMAKU_PROTO_VERSION: DANMAKU_PROTO_VERSION,
+        AUDIO_CHANNEL:         AUDIO_CHANNEL,
+        AUDIO_PROTO_VERSION:   AUDIO_PROTO_VERSION,
+        AUDIO_SEMVER:          AUDIO_SEMVER,
+        PRIORITY_MAP:          PRIORITY_MAP,
+        HUD_FORBIDDEN_PRESETS: HUD_FORBIDDEN_PRESETS,
+        isProtoCompatible:     isProtoCompatible,
+        registerPriorityAlias: registerPriorityAlias,
+        registerHudPreset:     registerHudPreset
     };
+
+    if (typeof global !== 'undefined') {
+        global.EpiphyProtocol = PROTOCOL;
+    }
 
     var SIZE_PRESETS = {
         tiny:   0.58,
@@ -677,9 +733,12 @@
 
     if (typeof global !== 'undefined') {
         global.EpiphySpec = {
+            PROTOCOL:                   PROTOCOL,
+            PROTO:                      PROTOCOL,
             COLOR_PRESETS:              COLOR_PRESETS,
             SIZE_PRESETS:               SIZE_PRESETS,
             PRIORITY_MAP:               PRIORITY_MAP,
+            isProtoCompatible:          isProtoCompatible,
             min2:                       min2,
             max2:                       max2,
             clampNum:                   clampNum,

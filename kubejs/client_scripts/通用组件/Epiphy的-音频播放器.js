@@ -8,9 +8,9 @@
 //    - kubejs/server_scripts/通用组件/Epiphy的-音频组件.js（服务端调度器 EpiphyAudio v5.2）
 //    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀）
 //
-//  依赖与缺失影响：
-//    - 硬依赖：kubejs/startup_scripts/通用组件/Epiphy的-协议常量.js (EpiphyProtocol, priority: 1200)
-//    - 硬依赖：kubejs/startup_scripts/通用组件/Epiphy的-Spec与通用工具.js (EpiphySpec, priority: 1180)
+//  依赖与缺失降级：
+//    - 可选前置：kubejs/startup_scripts/通用组件/Epiphy的-Spec与通用工具.js (EpiphySpec / EpiphyProtocol, priority: 1200)
+//      缺失时启动输出 console.warn 并降级至内置 v5 协议常量与基础数值工具；收包仍严格执行 fail-closed 版本校验。
 //    - 必需配套：kubejs/server_scripts/通用组件/Epiphy的-音频组件.js（缺失时客户端处于待命状态，无音频数据包驱动）
 //
 //  适用环境：Minecraft 1.20.1 / Forge 47.x / KubeJS 2001.6.x (ES6)
@@ -21,17 +21,18 @@
 // ============================================================================
 
 ;(() => {
-    var PROTO = (typeof global !== 'undefined' && global.EpiphyProtocol != null) ? global.EpiphyProtocol : null
     var SPEC  = (typeof global !== 'undefined' && global.EpiphySpec != null) ? global.EpiphySpec : null
-    if (!PROTO) {
-        throw new Error('[EpiphyAudioClient] 缺少硬依赖 global.EpiphyProtocol，请确认 startup_scripts/通用组件/Epiphy的-协议常量.js 已加载')
+    var PROTO = (typeof global !== 'undefined' && global.EpiphyProtocol != null)
+        ? global.EpiphyProtocol
+        : (SPEC && SPEC.PROTOCOL ? SPEC.PROTOCOL : null)
+    if (PROTO == null || SPEC == null) {
+        try {
+            console.warn('[EpiphyAudioClient] 未检测到 startup_scripts/通用组件/Epiphy的-Spec与通用工具.js，已启用内置 v5 协议常量与基础数值工具降级运行。')
+        } catch (eWarnInit) { }
     }
-    if (!SPEC) {
-        throw new Error('[EpiphyAudioClient] 缺少硬依赖 global.EpiphySpec，请确认 startup_scripts/通用组件/Epiphy的-Spec与通用工具.js 已加载')
-    }
-    var CHANNEL       = PROTO.AUDIO_CHANNEL
-    var PROTO_VERSION = PROTO.AUDIO_PROTO_VERSION
-    var VERSION       = PROTO.AUDIO_SEMVER
+    var CHANNEL       = (PROTO && PROTO.AUDIO_CHANNEL) || 'epiphy:audio'
+    var PROTO_VERSION = (PROTO && PROTO.AUDIO_PROTO_VERSION) || 5
+    var VERSION       = (PROTO && PROTO.AUDIO_SEMVER) || '5.2.0'
 
     var CONFIG = {
         sweepIntervalTicks:     10,   // 慢速巡检周期（负责死链清理、异常断流重连、超时判定）
@@ -89,9 +90,27 @@
 
     // ======================================================================== 基础工具
 
-    var min2     = SPEC.min2
-    var max2     = SPEC.max2
-    var clampNum = SPEC.clampNum
+    var min2     = (SPEC && typeof SPEC.min2 === 'function') ? SPEC.min2 : ((a, b) => (a < b ? a : b))
+    var max2     = (SPEC && typeof SPEC.max2 === 'function') ? SPEC.max2 : ((a, b) => (a > b ? a : b))
+    var clampNum = (SPEC && typeof SPEC.clampNum === 'function')
+        ? SPEC.clampNum
+        : ((v, lo, hi, defVal) => {
+            if (v === null || v === undefined || v === '' || typeof v === 'boolean' || Array.isArray(v)) {
+                return defVal !== undefined ? defVal : lo
+            }
+            var n = Number(v)
+            if (isNaN(n) || !isFinite(n)) return defVal !== undefined ? defVal : lo
+            return n < lo ? lo : (n > hi ? hi : n)
+        })
+
+    var checkProtoCompatible = (expectedVer, incomingVer) => {
+        if (PROTO && typeof PROTO.isProtoCompatible === 'function') {
+            return PROTO.isProtoCompatible(expectedVer, incomingVer)
+        }
+        if (incomingVer === undefined || incomingVer === null) return false
+        var n = Number(incomingVer)
+        return isFinite(n) && n === Number(expectedVer)
+    }
 
     var HAS_NANO_TIME = (SystemClass != null && typeof SystemClass.nanoTime === 'function')
     var monotonicNowMs = () => {
@@ -1031,7 +1050,7 @@
         try {
             var pkt = event.data
             var incomingProto = (pkt != null) ? pkt.proto : null
-            if (!PROTO.isProtoCompatible(PROTO_VERSION, incomingProto)) {
+            if (!checkProtoCompatible(PROTO_VERSION, incomingProto)) {
                 if (!protoMismatchWarned) {
                     protoMismatchWarned = true
                     console.error(`[EpiphyAudioClient] 协议校验失败（已拒收报文）：服务端 proto=${String(incomingProto)}，客户端预期 proto=${PROTO_VERSION}，请同步双端脚本。`)

@@ -6,7 +6,6 @@ var path   = require('path')
 var vm     = require('vm')
 
 var ROOT_DIR         = path.resolve(__dirname, '..')
-var PROTOCOL_PATH    = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的-协议常量.js')
 var SPEC_PATH        = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的-Spec与通用工具.js')
 var LOG_PATH         = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-日志.js')
 var SERVER_BASE_PATH = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-服务端基础.js')
@@ -61,7 +60,6 @@ function runScriptIn(sb, scriptPath) {
 }
 
 function loadStartupBase(sb) {
-    runScriptIn(sb, PROTOCOL_PATH)
     runScriptIn(sb, SPEC_PATH)
     return sb
 }
@@ -1910,11 +1908,14 @@ test('renderer: ModernUI TextLayout fast path caches layouts, skips PoseStack/gl
     assert.ok(Math.abs(drawCalls[1].z - 0.03) < 0.001, 'foreground pass must sit +0.03 Z in front of shadow pass')
 })
 
-test('EpiphySpec: missing EpiphyProtocol throws explicit hard-dependency error', function () {
+test('EpiphySpec: single startup script initializes both EpiphyProtocol and EpiphySpec together', function () {
     var sb = createKubeSandbox()
-    assert.throws(function () {
-        runScriptIn(sb, SPEC_PATH)
-    }, /EpiphyProtocol/)
+    runScriptIn(sb, SPEC_PATH)
+    assert.ok(sb.global.EpiphyProtocol && sb.global.EpiphyProtocol.DANMAKU_CHANNEL === 'epiphy:screen_danmaku')
+    assert.ok(sb.global.EpiphySpec && sb.global.EpiphySpec.PROTOCOL === sb.global.EpiphyProtocol)
+    assert.strictEqual(sb.global.EpiphyProtocol.isProtoCompatible(5, 5), true)
+    assert.strictEqual(sb.global.EpiphyProtocol.isProtoCompatible(5, 4), false)
+    assert.strictEqual(sb.global.EpiphySpec.isProtoCompatible(5, 5), true)
 })
 
 test('EpiphySpec: shared math, dim normalization, ticks, color, size and tilt parsers', function () {
@@ -2033,11 +2034,35 @@ test('EpiphySpec: computeSphereMergeClusters connects touching spheres by seq wi
     assert.strictEqual(clusters[1].maxX, 18)
 })
 
-test('EpiphyServerBase: missing hard dependencies throws explicit error', function () {
+test('EpiphyServerBase: degrades cleanly without EpiphyLog/EpiphySpec; Valve & BlockTracker keep running while heavy business modules require full base', function () {
     var sb = createKubeSandbox()
+    var warns = []
+    sb.console.warn = function (m) { warns.push(String(m)) }
+
+    // Without startup EpiphySpec or optional EpiphyLog, ServerBase + Valve + BlockTracker must NOT crash
+    runScriptIn(sb, SERVER_BASE_PATH)
+    runScriptIn(sb, VALVE_PATH)
+    runScriptIn(sb, TRACKER_PATH)
+
+    var B = sb.global.EpiphyServerBase
+    assert.ok(B && typeof B.normalizeDim === 'function')
+    assert.strictEqual(B.normalizeDim('the_nether'), 'minecraft:the_nether')
+    assert.strictEqual(B.makePosKey('overworld', 1.9, 64, -2.1), 'minecraft:overworld|1,64,-3')
+
+    var log = B.createLogger('TestDegraded', 0)
+    log.warn('probe', 'degraded warn works')
+    assert.ok(warns.some(function (w) { return w.indexOf('Epiphy的-Spec与通用工具.js') >= 0 }))
+    assert.ok(warns.some(function (w) { return w.indexOf('Epiphy的-日志.js') >= 0 }))
+    assert.ok(warns.some(function (w) { return w.indexOf('degraded warn works') >= 0 }))
+
+    assert.ok(sb.global.EpiphyPermissionValve.registerSubcommand({ name: 'demo', permission: 'public' }))
+    var tracker = sb.global.EpiphyBlockTracker.createTracker({ name: 't_degraded' })
+    assert.strictEqual(tracker.isFallback, undefined)
+
+    // Heavy business orchestrators still require EpiphySpec / EpiphyServerBase
     assert.throws(function () {
-        runScriptIn(sb, SERVER_BASE_PATH)
-    }, /EpiphyProtocol|EpiphySpec|EpiphyLog/)
+        runScriptIn(sb, DANMAKU_PATH)
+    }, /EpiphySpec|EpiphyServerBase/)
 })
 
 test('EpiphyServerBase: CommandBuilder enforces bottom-up Brigadier ordering, optional chain tails, and reply helpers', function () {
@@ -2358,28 +2383,101 @@ test('ScreenDanmaku & EpiphyAudio: buildNode builds converged Brigadier trees an
     assert.ok(audioOut.some(function (l) { return l.indexOf('0 个活动句柄') >= 0 }))
 })
 
-test('client modules: missing EpiphyProtocol/EpiphySpec throws explicit hard-dependency error', function () {
-    var sb1 = createKubeSandbox()
-    assert.throws(function () {
-        runScriptIn(sb1, AUDIO_CLIENT_PATH)
-    }, /EpiphyProtocol/)
+test('client modules: degrade gracefully when EpiphySpec/EpiphyProtocol is absent and still fail-closed reject mismatched packets', function () {
+    function makeClientDegradedSandbox() {
+        var warns  = []
+        var errors = []
+        var netHandlers   = {}
+        var paintHandlers = []
+        var tickHandlers  = []
+        var draws         = []
+        var noop          = function () {}
+        var sb = {
+            console: {
+                info:  noop,
+                warn:  function (m) { warns.push(String(m)) },
+                error: function (m) { errors.push(String(m)) },
+                debug: noop,
+                log:   noop
+            },
+            ClientEvents: {
+                loggedOut:   noop,
+                loggedIn:    noop,
+                paintScreen: function (fn) { paintHandlers.push(fn) },
+                tick:        function (fn) { tickHandlers.push(fn) }
+            },
+            NetworkEvents: {
+                dataReceived: function (ch, fn) { netHandlers[ch] = fn }
+            },
+            Java: { loadClass: function () { return null } },
+            Text: { of: function (s) { return { string: String(s), getVisualOrderText: function () { return String(s) } } } },
+            global: {}
+        }
+        sb.globalThis = sb
+        vm.createContext(sb)
+        return {
+            sb: sb,
+            warns: warns,
+            errors: errors,
+            netHandlers: netHandlers,
+            paintHandlers: paintHandlers,
+            tickHandlers: tickHandlers,
+            draws: draws
+        }
+    }
 
-    var sb2 = createKubeSandbox()
-    runScriptIn(sb2, PROTOCOL_PATH)
-    assert.throws(function () {
-        runScriptIn(sb2, AUDIO_CLIENT_PATH)
-    }, /EpiphySpec/)
+    // 1. 音频客户端无 startup 前置时平滑降级，仍严格拒收旧版本包
+    var auEnv = makeClientDegradedSandbox()
+    runScriptIn(auEnv.sb, AUDIO_CLIENT_PATH)
+    assert.ok(auEnv.warns.some(function (w) { return w.indexOf('Epiphy的-Spec与通用工具.js') >= 0 }))
+    assert.ok(auEnv.sb.global.EpiphyAudioClient != null)
+    assert.ok(typeof auEnv.netHandlers['epiphy:audio'] === 'function')
+    auEnv.netHandlers['epiphy:audio']({ data: { proto: 4, action: 'play', snd: 'minecraft:ui.button.click' } })
+    assert.strictEqual(auEnv.errors.length, 1, 'degraded audio client must fail-closed reject mismatched proto=4 packet')
+    auEnv.netHandlers['epiphy:audio']({ data: { proto: 5, action: 'play', h: 'degraded_h1', snd: 'minecraft:ui.button.click', vol: 1.2 } })
+    assert.strictEqual(auEnv.errors.length, 1, 'degraded audio client must accept valid proto=5 packet without errors')
+    assert.strictEqual(auEnv.sb.global.EpiphyAudioClient.count(), 1, 'degraded audio client must queue valid proto=5 action')
 
-    var sb3 = createKubeSandbox()
-    assert.throws(function () {
-        runScriptIn(sb3, RENDERER_PATH)
-    }, /EpiphyProtocol/)
+    // 2. 弹幕客户端无 startup 前置时可接收 v5 包并完成绘制，同时拒收错误版本包
+    var dmEnv = makeClientDegradedSandbox()
+    runScriptIn(dmEnv.sb, RENDERER_PATH)
+    assert.ok(dmEnv.warns.some(function (w) { return w.indexOf('Epiphy的-Spec与通用工具.js') >= 0 }))
+    assert.ok(dmEnv.sb.global.ScreenDanmakuClient != null)
+    assert.ok(typeof dmEnv.netHandlers['epiphy:screen_danmaku'] === 'function')
 
-    var sb4 = createKubeSandbox()
-    runScriptIn(sb4, PROTOCOL_PATH)
-    assert.throws(function () {
-        runScriptIn(sb4, RENDERER_PATH)
-    }, /EpiphySpec/)
+    // 错误版本包被 fail-closed 拒收，不入队
+    dmEnv.netHandlers['epiphy:screen_danmaku']({ data: { proto: 4, title: 'bad_proto' } })
+    assert.strictEqual(dmEnv.errors.length, 1, 'degraded renderer must fail-closed reject mismatched proto=4 packet')
+
+    var mockEvent = {
+        width: 854,
+        height: 480,
+        level: 'minecraft:overworld',
+        font: {
+            width: function (s) { return String(s || '').length * 6 },
+            drawInBatch: function (txt) { dmEnv.draws.push(String(txt && txt.string ? txt.string : txt)) }
+        },
+        text: function (txt) { dmEnv.draws.push(String(txt && txt.string ? txt.string : txt)) },
+        graphics: { bufferSource: function () { return {} }, flush: function () {} },
+        getMatrix: function () { return {} },
+        push: function () {},
+        pop: function () {},
+        translate: function () {},
+        scale: function () {},
+        rotateDeg: function () {},
+        blend: function () {}
+    }
+    dmEnv.paintHandlers[0](mockEvent)
+    assert.strictEqual(dmEnv.draws.length, 0, 'rejected proto=4 packet must produce 0 draws')
+
+    // 正常 v5 包可触发绘制（含字符串优先级与布尔字段解析）
+    dmEnv.netHandlers['epiphy:screen_danmaku']({
+        data: { proto: 5, title: 'DegradedOK', priority: 'urgent', typewriter: 'false', shadow: false, stay: 40 }
+    })
+    dmEnv.paintHandlers[0](mockEvent)
+    assert.strictEqual(dmEnv.errors.length, 1, 'degraded renderer must paint valid proto=5 danmaku without draw errors')
+    assert.ok(dmEnv.draws.length >= 1, 'degraded renderer must still render valid proto=5 danmaku')
+    assert.ok(dmEnv.draws.some(function (s) { return s.indexOf('DegradedOK') >= 0 }), 'degraded renderer must draw payload text')
 })
 
 var passed = 0

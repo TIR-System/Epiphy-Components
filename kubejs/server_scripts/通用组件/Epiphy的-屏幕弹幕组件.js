@@ -10,10 +10,10 @@
 //
 //  依赖与缺失降级行为：
 //    - 必需配套：kubejs/client_scripts/通用组件/Epiphy的-屏幕弹幕渲染器.js（缺失时服务端可正常调用 API，但客户端无接收与画面渲染）
-//    - 协议契约：kubejs/startup_scripts/通用组件/Epiphy的-协议常量.js (EpiphyProtocol, priority: 1200)
-//      缺失时启动输出 console.warn 并回退至内联兜底协议版本 (5)；若双端内联版本不一致，客户端将 fail-closed 拒收报文
+//    - 前置底座：kubejs/startup_scripts/通用组件/Epiphy的-Spec与通用工具.js (EpiphySpec / EpiphyProtocol, priority: 1200)
+//               与 kubejs/server_scripts/通用组件/Epiphy的-服务端基础.js (EpiphyServerBase, priority: 1080)
 //    - 可选依赖：kubejs/server_scripts/通用组件/Epiphy的-日志.js (EpiphyLog, priority: 1100)
-//      缺失时回退至内联 console.warn / console.error 兜底日志（失去统一限频与去重）
+//      缺失时由 EpiphyServerBase 自动回退至 console 限频降级输出（核心功能不受影响）
 //    - 可选依赖：kubejs/server_scripts/通用组件/Epiphy的-方块追踪组件.js (EpiphyBlockTracker, priority: 1050)
 //      缺失时 bindBlock 降级为基础事件兜底模式（仅支持新放置/破坏方块，无区块扫描与持久化），不影响常规弹幕 API
 //    - 可选依赖：kubejs/server_scripts/通用组件/Epiphy的-权限阀.js (EpiphyPermissionValve, priority: 1000)
@@ -67,11 +67,13 @@
 // ============================================================================
 
 ;(function () {
-    var PROTO         = (typeof global !== 'undefined') ? global.EpiphyProtocol : null
-    var SPEC          = (typeof global !== 'undefined') ? global.EpiphySpec : null
-    var BASE          = (typeof global !== 'undefined') ? global.EpiphyServerBase : null
-    if (!PROTO || !SPEC || !BASE) {
-        throw new Error('[ScreenDanmaku] 缺少硬依赖 (EpiphyProtocol / EpiphySpec / EpiphyServerBase)，请确认基础脚本已加载')
+    var SPEC  = (typeof global !== 'undefined') ? global.EpiphySpec : null
+    var BASE  = (typeof global !== 'undefined') ? global.EpiphyServerBase : null
+    var PROTO = (typeof global !== 'undefined' && global.EpiphyProtocol != null)
+        ? global.EpiphyProtocol
+        : (SPEC && SPEC.PROTOCOL ? SPEC.PROTOCOL : null)
+    if (!SPEC || !PROTO || !BASE) {
+        throw new Error('[ScreenDanmaku] 缺少硬依赖 (EpiphySpec / EpiphyServerBase)，请确认基础脚本已加载')
     }
     var LOGGER        = BASE.createLogger('ScreenDanmaku', 5000)
     var CHANNEL       = PROTO.DANMAKU_CHANNEL

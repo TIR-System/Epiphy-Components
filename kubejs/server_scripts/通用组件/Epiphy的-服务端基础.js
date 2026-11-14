@@ -2,8 +2,10 @@
 // ============================================================================
 // Epiphy 服务端通用基础设施 (EpiphyServerBase)
 //   所属阶段：server_scripts
-//   硬依赖  ：global.EpiphyProtocol, global.EpiphySpec, global.EpiphyLog
-//   定位    ：收拢服务端日志包装、Java 类缓存、MC 对象访问器、存档级磁盘路径定位、
+//   可选依赖：
+//     - global.EpiphySpec (Epiphy的-Spec与通用工具.js)：缺失时维度/数组工具自动使用内置精简降级实现
+//     - global.EpiphyLog (Epiphy的-日志.js)：缺失时自动降级为基础 console 限频日志，不阻断服务端模块加载
+//   定位    ：收拢服务端日志包装与降级、Java 类缓存、MC 对象访问器、存档级磁盘路径定位、
 //            权限阀子命令队列与统一 OP 提醒、Debug 提供者注册、单点兜底方块追踪与命令树 DSL
 //   约束    ：严格 Rhino ES5（禁止 let/const、箭头函数、模板字符串、展开运算符）
 // ============================================================================
@@ -11,18 +13,30 @@
 ;(function () {
     'use strict';
 
-    var proto = (typeof global !== 'undefined') ? global.EpiphyProtocol : null;
-    var spec  = (typeof global !== 'undefined') ? global.EpiphySpec     : null;
-    var log   = (typeof global !== 'undefined') ? global.EpiphyLog      : null;
-
-    if (!proto) {
-        throw new Error('[EpiphyServerBase] 缺少硬依赖 global.EpiphyProtocol，请确认 startup_scripts/通用组件/Epiphy的-协议常量.js 已加载');
-    }
+    var spec = (typeof global !== 'undefined' && global.EpiphySpec != null) ? global.EpiphySpec : null;
     if (!spec) {
-        throw new Error('[EpiphyServerBase] 缺少硬依赖 global.EpiphySpec，请确认 startup_scripts/通用组件/Epiphy的-Spec与通用工具.js 已加载');
+        try {
+            console.warn('[EpiphyServerBase] 未检测到 global.EpiphySpec (Epiphy的-Spec与通用工具.js)，维度归一化与类数组判断将启用内置降级。');
+        } catch (eSpecWarn) { }
     }
-    if (!log) {
-        throw new Error('[EpiphyServerBase] 缺少硬依赖 global.EpiphyLog，请确认 server_scripts/通用组件/Epiphy的-日志.js 已加载');
+
+    function isArrayLike(x) {
+        if (spec && typeof spec.isArrayLike === 'function') return spec.isArrayLike(x);
+        if (!x || typeof x !== 'object') return false;
+        if (Array.isArray(x)) return true;
+        return typeof x.length === 'number' && x.length >= 0 && isFinite(x.length) && Math.floor(x.length) === x.length;
+    }
+
+    function normalizeDim(dimOrKey) {
+        if (spec && typeof spec.normalizeDim === 'function') return spec.normalizeDim(dimOrKey);
+        if (dimOrKey == null) return null;
+        var s = String(dimOrKey).trim();
+        if (!s) return null;
+        var slashIdx = s.lastIndexOf('/');
+        if (slashIdx >= 0 && s.charAt(s.length - 1) === ']') {
+            s = s.slice(slashIdx + 1, -1).trim();
+        }
+        return s.indexOf(':') >= 0 ? s : ('minecraft:' + s);
     }
 
     var javaClassCache = {};
@@ -74,6 +88,45 @@
         }
     })();
 
+    var fallbackLogBuckets = {};
+    var fallbackOnceKeys = {};
+    var missingLogWarned = false;
+
+    function resolveEpiphyLog() {
+        return (typeof global !== 'undefined' && global.EpiphyLog != null) ? global.EpiphyLog : null;
+    }
+
+    function emitFallbackConsole(level, text) {
+        try {
+            if (level === 'error') console.error(text);
+            else if (level === 'info' || level === 'debug') console.info(text);
+            else console.warn(text);
+        } catch (e) { }
+    }
+
+    function fallbackRateLog(level, mod, tag, msg, notifyPlayer, intervalMs) {
+        if (!missingLogWarned) {
+            missingLogWarned = true;
+            emitFallbackConsole('warn', '[EpiphyServerBase] 未检测到 Epiphy的-日志.js (EpiphyLog)，日志已自动降级为内置 console 限频输出。');
+        }
+        var bKey = mod + '|' + level + '|' + tag;
+        var bucket = fallbackLogBuckets[bKey] || (fallbackLogBuckets[bKey] = { lastAt: 0, suppressed: 0 });
+        var iv = (intervalMs != null && isFinite(intervalMs) && intervalMs >= 0) ? intervalMs : 5000;
+        var now = Date.now();
+        if (iv === 0 || (now - bucket.lastAt) >= iv) {
+            var tail = bucket.suppressed > 0 ? (' (另有 ' + bucket.suppressed + ' 次同类日志被折叠)') : '';
+            bucket.lastAt = now;
+            bucket.suppressed = 0;
+            emitFallbackConsole(level, '[' + mod + ' ' + tag + '] ' + String(msg) + tail);
+        } else {
+            bucket.suppressed++;
+        }
+        if (notifyPlayer != null && typeof notifyPlayer.tell === 'function') {
+            try { notifyPlayer.tell('§c[' + mod + ' ' + tag + '] ' + String(msg)); } catch (eTell) { }
+        }
+        return null;
+    }
+
     var baseLogger = createLogger('EpiphyServerBase', 5000);
 
     function createLogger(moduleName, defaultIntervalMs) {
@@ -82,11 +135,40 @@
         var localCatches = 0;
         return {
             warn: function (tag, msg, notifyPlayer, intervalMs) {
-                return log.warn(mod, tag, msg, notifyPlayer || null, intervalMs != null ? intervalMs : defMs);
+                var logApi = resolveEpiphyLog();
+                var iv = intervalMs != null ? intervalMs : defMs;
+                if (logApi && typeof logApi.warn === 'function') {
+                    return logApi.warn(mod, tag, msg, notifyPlayer || null, iv);
+                }
+                return fallbackRateLog('warn', mod, String(tag || 'general'), msg, notifyPlayer, iv);
+            },
+            error: function (tag, msg, notifyPlayer, intervalMs) {
+                var logApi = resolveEpiphyLog();
+                var iv = intervalMs != null ? intervalMs : defMs;
+                if (logApi && typeof logApi.error === 'function') {
+                    return logApi.error(mod, tag, msg, notifyPlayer || null, iv);
+                }
+                return fallbackRateLog('error', mod, String(tag || 'general'), msg, notifyPlayer, iv);
             },
             catchWarn: function (tag, err, notifyPlayer, intervalMs) {
                 localCatches++;
-                return log.catchWarn(mod, tag, err, notifyPlayer || null, intervalMs != null ? intervalMs : defMs);
+                var logApi = resolveEpiphyLog();
+                var iv = intervalMs != null ? intervalMs : defMs;
+                if (logApi && typeof logApi.catchWarn === 'function') {
+                    return logApi.catchWarn(mod, tag, err, notifyPlayer || null, iv);
+                }
+                return fallbackRateLog('warn', mod, '异常:' + String(tag || 'unknown'), String(err), notifyPlayer, iv);
+            },
+            once: function (level, key, msg) {
+                var logApi = resolveEpiphyLog();
+                if (logApi && typeof logApi.once === 'function') {
+                    return logApi.once(level, key, msg);
+                }
+                var k = String(key || 'default');
+                if (fallbackOnceKeys[k]) return false;
+                fallbackOnceKeys[k] = true;
+                emitFallbackConsole(level || 'warn', String(msg));
+                return true;
             },
             getCatchCount: function () {
                 return localCatches;
@@ -116,7 +198,7 @@
         if (raw == null) return [];
         if (Array.isArray(raw)) return raw;
         var out = [];
-        if (spec.isArrayLike(raw)) {
+        if (isArrayLike(raw)) {
             for (var i = 0; i < raw.length; i++) out.push(raw[i]);
             return out;
         }
@@ -136,7 +218,7 @@
     function toSeqArray(raw) {
         if (raw == null) return null;
         if (Array.isArray(raw)) return raw;
-        if (spec.isArrayLike(raw)) {
+        if (isArrayLike(raw)) {
             var outA = [];
             for (var i = 0; i < raw.length; i++) outA.push(raw[i]);
             return outA;
@@ -221,10 +303,10 @@
         if (lv == null) return null;
         if (typeof lv.getDimension === 'function') {
             var gd = lv.getDimension();
-            if (gd != null) return spec.normalizeDim(String(gd));
+            if (gd != null) return normalizeDim(String(gd));
         }
-        if (typeof lv.dimension === 'function') return spec.normalizeDim(lv.dimension());
-        if (lv.dimension != null) return spec.normalizeDim(lv.dimension);
+        if (typeof lv.dimension === 'function') return normalizeDim(lv.dimension());
+        if (lv.dimension != null) return normalizeDim(lv.dimension);
         if (typeof lv.getLevel === 'function') {
             var inner = lv.getLevel();
             if (inner != null && inner !== lv) return dimOfLevel(inner);
@@ -239,7 +321,7 @@
         }
         var srv = resolveServer(preferServer);
         if (srv == null) return null;
-        var targetDim = spec.normalizeDim(levelOrDim) || 'minecraft:overworld';
+        var targetDim = normalizeDim(levelOrDim) || 'minecraft:overworld';
         if (typeof srv.getLevel === 'function') {
             var direct = srv.getLevel(targetDim);
             if (direct != null) return direct;
@@ -255,7 +337,7 @@
 
     function readPos(obj) {
         if (obj == null) return null;
-        if (spec.isArrayLike(obj) && obj.length >= 3) {
+        if (isArrayLike(obj) && obj.length >= 3) {
             if (obj[0] == null || obj[1] == null || obj[2] == null) return null;
             var ax = Number(obj[0]), ay = Number(obj[1]), az = Number(obj[2]);
             return (isFinite(ax) && isFinite(ay) && isFinite(az)) ? { x: ax, y: ay, z: az } : null;
@@ -289,7 +371,7 @@
     }
 
     function makePosKey(dim, x, y, z) {
-        return (spec.normalizeDim(dim) || 'minecraft:overworld') + '|' + Math.floor(x) + ',' + Math.floor(y) + ',' + Math.floor(z);
+        return (normalizeDim(dim) || 'minecraft:overworld') + '|' + Math.floor(x) + ',' + Math.floor(y) + ',' + Math.floor(z);
     }
 
     function extractBlockId(blockOrState) {
@@ -1004,6 +1086,8 @@
             loadJavaClass:                loadJavaClass,
             nowNano:                      nowNano,
             resolveServer:                resolveServer,
+            isArrayLike:                  isArrayLike,
+            normalizeDim:                 normalizeDim,
             toJsArray:                    toJsArray,
             toSeqArray:                   toSeqArray,
             readMapField:                 readMapField,

@@ -30,9 +30,8 @@
     var FALLBACK_DIR    = 'kubejs/config/epiphy_tracked_blocks'
 
     var BASE = (typeof global !== 'undefined') ? global.EpiphyServerBase : null
-    var SPEC = (typeof global !== 'undefined') ? global.EpiphySpec       : null
-    if (!BASE || !SPEC) {
-        throw new Error('[EpiphyBlockTracker] 缺少硬依赖 global.EpiphyServerBase / global.EpiphySpec')
+    if (!BASE) {
+        throw new Error('[EpiphyBlockTracker] 缺少硬依赖 global.EpiphyServerBase，请确认 server_scripts/通用组件/Epiphy的-服务端基础.js 已加载')
     }
     var LOGGER = BASE.createLogger('EpiphyBlockTracker', 5000)
 
@@ -94,7 +93,7 @@
         LOGGER.catchWarn(tag, err)
     }
 
-    var normalizeDim = SPEC.normalizeDim
+    var normalizeDim = BASE.normalizeDim
 
     function dimOfLevel(lv) { return BASE.dimOfLevel(lv) }
     function resolveLevel(levelOrDim, server) { return BASE.resolveLevel(levelOrDim, server || SERVER_REF) }

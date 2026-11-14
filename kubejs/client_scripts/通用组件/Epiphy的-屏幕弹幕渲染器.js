@@ -8,9 +8,9 @@
 //    - kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js（服务端调度器）
 //    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀）
 //
-//  依赖与缺失影响：
-//    - 硬依赖：kubejs/startup_scripts/通用组件/Epiphy的-协议常量.js (EpiphyProtocol, priority: 1200)
-//    - 硬依赖：kubejs/startup_scripts/通用组件/Epiphy的-Spec与通用工具.js (EpiphySpec, priority: 1180)
+//  依赖与缺失降级：
+//    - 可选前置：kubejs/startup_scripts/通用组件/Epiphy的-Spec与通用工具.js (EpiphySpec / EpiphyProtocol, priority: 1200)
+//      缺失时启动输出 console.warn 并降级至内置 v5 协议常量与精简数值/布尔工具；收包仍严格执行 fail-closed 版本校验。
 //    - 必需配套：kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js（缺失时客户端处于待命状态，无弹幕数据包驱动）
 //
 //  功能概述：
@@ -37,16 +37,17 @@
 // ============================================================================
 
 ;(function () {
-    var PROTO = (typeof global !== 'undefined' && global.EpiphyProtocol != null) ? global.EpiphyProtocol : null
     var SPEC  = (typeof global !== 'undefined' && global.EpiphySpec != null) ? global.EpiphySpec : null
-    if (!PROTO) {
-        throw new Error('[ScreenDanmakuClient] 缺少硬依赖 global.EpiphyProtocol，请确认 startup_scripts/通用组件/Epiphy的-协议常量.js 已加载')
+    var PROTO = (typeof global !== 'undefined' && global.EpiphyProtocol != null)
+        ? global.EpiphyProtocol
+        : (SPEC && SPEC.PROTOCOL ? SPEC.PROTOCOL : null)
+    if (PROTO == null || SPEC == null) {
+        try {
+            console.warn('[ScreenDanmakuClient] 未检测到 startup_scripts/通用组件/Epiphy的-Spec与通用工具.js，已启用内置 v5 协议常量与基础工具降级运行。')
+        } catch (eWarnInit) { }
     }
-    if (!SPEC) {
-        throw new Error('[ScreenDanmakuClient] 缺少硬依赖 global.EpiphySpec，请确认 startup_scripts/通用组件/Epiphy的-Spec与通用工具.js 已加载')
-    }
-    var CHANNEL       = PROTO.DANMAKU_CHANNEL
-    var PROTO_VERSION = PROTO.DANMAKU_PROTO_VERSION
+    var CHANNEL       = (PROTO && PROTO.DANMAKU_CHANNEL) || 'epiphy:screen_danmaku'
+    var PROTO_VERSION = (PROTO && PROTO.DANMAKU_PROTO_VERSION) || 5
 
     // 统一配置常量表（消除散落魔法数）
     var CONFIG = {
@@ -181,13 +182,44 @@
         }
     }
 
-    var PRIORITY_MAP = PROTO.PRIORITY_MAP
-    var min2         = SPEC.min2
-    var max2         = SPEC.max2
-    var clampNum     = SPEC.clampNum
+    var PRIORITY_MAP = (PROTO && PROTO.PRIORITY_MAP) || {
+        low: 1, minor: 1, '低': 1, '次要': 1,
+        normal: 2, medium: 2, default: 2, '中': 2, '普通': 2,
+        high: 3, major: 3, important: 3, '高': 3, '重要': 3,
+        critical: 4, fatal: 4, urgent: 4, boss: 4, '极高': 4, '致命': 4,
+        active: 5, sustain: 5, '持续': 5
+    }
+    var min2     = (SPEC && typeof SPEC.min2 === 'function') ? SPEC.min2 : function (a, b) { return a < b ? a : b }
+    var max2     = (SPEC && typeof SPEC.max2 === 'function') ? SPEC.max2 : function (a, b) { return a > b ? a : b }
+    var clampNum = (SPEC && typeof SPEC.clampNum === 'function')
+        ? SPEC.clampNum
+        : function (v, lo, hi, defVal) {
+            if (v === null || v === undefined || v === '' || typeof v === 'boolean' || Array.isArray(v)) {
+                return defVal !== undefined ? defVal : lo
+            }
+            var n = Number(v)
+            if (isNaN(n) || !isFinite(n)) return defVal !== undefined ? defVal : lo
+            return n < lo ? lo : (n > hi ? hi : n)
+        }
 
     function parsePriority(val, defVal) {
-        return SPEC.parsePriority(val, defVal, { map: PRIORITY_MAP, min: 0, max: 10, round: true })
+        if (SPEC && typeof SPEC.parsePriority === 'function') {
+            return SPEC.parsePriority(val, defVal, { map: PRIORITY_MAP, min: 0, max: 10, round: true })
+        }
+        if (val === undefined || val === null || val === '') return defVal
+        var key = String(val).trim().toLowerCase()
+        if (PRIORITY_MAP[key] !== undefined) return PRIORITY_MAP[key]
+        var n = Number(val)
+        return isFinite(n) ? clampNum(Math.round(n), 0, 10) : defVal
+    }
+
+    function checkProtoCompatible(expectedVer, incomingVer) {
+        if (PROTO && typeof PROTO.isProtoCompatible === 'function') {
+            return PROTO.isProtoCompatible(expectedVer, incomingVer)
+        }
+        if (incomingVer === undefined || incomingVer === null) return false
+        var n = Number(incomingVer)
+        return isFinite(n) && n === Number(expectedVer)
     }
 
     function sanitizeMaxWidth(val) {
@@ -448,8 +480,17 @@
     }
 
     function parseBool(val, defVal) {
-        var b = SPEC.parseBoolStrict(val)
-        return b !== null ? b : defVal
+        if (SPEC && typeof SPEC.parseBoolStrict === 'function') {
+            var b = SPEC.parseBoolStrict(val)
+            return b !== null ? b : defVal
+        }
+        if (typeof val === 'boolean') return val
+        if (typeof val === 'number') return val !== 0
+        if (val == null) return defVal
+        var s = String(val).trim().toLowerCase()
+        if (s === 'true' || s === '1' || s === 'yes' || s === 'on' || s === '是' || s === '开启') return true
+        if (s === 'false' || s === '0' || s === 'no' || s === 'off' || s === '否' || s === '关闭') return false
+        return defVal
     }
 
     function readBool(d, key, defVal) {
@@ -2551,7 +2592,7 @@
         try {
             var pkt = event.data
             var incomingProto = (pkt != null) ? pkt.proto : null
-            if (!PROTO.isProtoCompatible(PROTO_VERSION, incomingProto)) {
+            if (!checkProtoCompatible(PROTO_VERSION, incomingProto)) {
                 if (!protoMismatchWarned) {
                     protoMismatchWarned = true
                     console.error('[ScreenDanmakuClient] 协议校验失败（已拒收报文）：服务端 proto=' + String(incomingProto) + '，客户端预期 proto=' + PROTO_VERSION + '，请同步双端脚本。')
