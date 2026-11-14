@@ -15,6 +15,15 @@ A collection of shared server/client infrastructure modules, audiovisual present
 
 ### Layered Architecture Overview
 
+> Load order convention: `Startup` loads before `Server` / `Client`; within a stage, higher `Priority` values load earlier (`1200 -> 1100 -> 1080 -> 1050 -> 1000 -> 950 -> 900 -> 500`).
+
+| Layer | Stage | Member Modules | Core Responsibilities & Boundaries | Inter-Layer Interaction |
+| :--- | :--- | :--- | :--- | :--- |
+| **Layer 1 · Cross-Side Contracts & Registration** | `Startup` | `Epiphy的-Spec与通用工具.js`, `创造模式栏-epiphy.js`, item/block registration scripts | Shared protocol constants, pure parsers, geometry utilities, creative tab & content registrations | Exposes `global.EpiphySpec`, `EpiphyProtocol`, `EpiphyCreativeTab` to server and client |
+| **Layer 2 · Server Foundation** | `Server` | `日志`, `服务端基础`, `方块追踪组件`, `权限阀`, `调试组件`, `基础bug修复` | Rate-limited logging, Java/MC accessors & command DSL, chunk-section scanning, caller authorization, diagnostics & standalone fixes | Consumes Layer 1 `Spec`; exposes infrastructure services via `global.*` and registration queues |
+| **Layer 3 · Scheduling & Gameplay** | `Server` | `屏幕弹幕组件`, `音频组件`, `拆解台-混沌殉爆.v18.js`, recipe scripts | Manages danmaku/audio lifecycles and audience resolution, gameplay events, and recipe rules | Calls Layers 1–2 APIs; pushes packets to clients over KubeJS network channels |
+| **Layer 4 · Client Rendering & Audio** | `Client` | `屏幕弹幕渲染器`, `音频播放器`, `拆解台描述.js` | Screen layout & rendering (vanilla pipeline + ModernUI compatibility branch), 3D audio playback, reconnect backoff & tooltips | Passively consumes server packets; optionally reads Layer 1 protocol constants |
+
 ```text
 [Layer 1 · Startup Stage: Cross-Side Contracts & Registrations]
 ├── Epiphy的-Spec与通用工具.js          (P:1200) -> Exports EpiphySpec / EpiphyProtocol (shared source of truth)
@@ -42,8 +51,6 @@ A collection of shared server/client infrastructure modules, audiovisual present
 ├── Epiphy的-音频播放器.js                       <- Consumes epiphy:audio packets (optional startup: Spec)
 └── 拆解台描述.js                                <- Client item tooltip script
 ```
-
-> Load order convention: `Startup` loads before `Server` / `Client`; within a stage, higher `Priority` values load earlier (`1200 -> 1100 -> 1080 -> 1050 -> 1000 -> 950 -> 900 -> 500`).
 
 ### Module Dependency Matrix
 

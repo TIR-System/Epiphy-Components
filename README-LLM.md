@@ -10,16 +10,19 @@
 本项目当前过渡期运行底座为 **Minecraft 1.20.1 / Forge 47.x / KubeJS 2001.6.x** 内置的定制版 Rhino 引擎（`dev.latvian.mods.rhino`，纯 `Interpreter` 解释执行；后续版本将逐步迁往 Kotlin + Java 原生实现，当前所有脚本改动必须严格满足当前 Rhino 解释器语义）。
 
 ### 强制语法基准
-1. **变量声明全系使用 `var`**：
-   - 协议、服务端基础、权限、调试、修复及弹幕模块保持 **严格模式兼容的 ES5 子集**；
-   - 音频模块（`Epiphy的-音频组件.js` / `Epiphy的-音频播放器.js`）仅允许使用经实测稳定的 ES6 子集（`=>`、模板字符串、`for..of`、`Map`、`Set`），同样禁止 `let` / `const`。
-2. **禁止使用的语法与特性**：
+> **唯一权威依据**：所有语法可行性与运行时行为均以 [`docs/kube-mods-rhino-es5-es6-compatibility.md`](docs/kube-mods-rhino-es5-es6-compatibility.md) 中的实测结果与字节码分析为准。
+
+1. **主基调与可控扩展**：
+   - 全仓库以 **ES5 为主**；
+   - 若实测无语义偏移的 ES6 或其他受支持语法（例如箭头函数 `=>`、模板字符串、`for...of`、`Map`/`Set`、可选链 `?.`、`**`、`Object.entries`/`values`、`Array.from`/`includes` 等，详见兼容文档实测表）能使实现更整洁、可读性更高，允许使用；
+   - 变量声明统一使用 **`var`**，以彻底规避 `let`/`const` 在该引擎上的块级与循环绑定语义偏移。
+2. **明确禁用的高危/失效语法（禁止引入）**：
    - **`??`（空值合并运算符）**：`Interpreter.doNullishCoalescing` 未同步 Rhino 平行的 `double[]` 数字栈，`null ?? 9`、`undefined ?? 9` 等数值兜底会错误返回 **`0`** 或残留栈数值。必须显式编写 `(v !== null && v !== undefined) ? v : fallback` 或 `v != null ? v : fallback`。
    - **`let` / `const`**：无 TDZ；`for (let ...)` / `for (let ... of/in ...)` 无每次迭代独立词法绑定，循环内闭包会共享最终值；单语句 `if (true) let x = 1;` 向外部作用域泄漏；`const` 允许缺省初始值且非严格模式重赋值静默失效。
    - **对象简写与计算属性**：`{ x, y }`、`{ [k]: v }` 直接报 `SyntaxError`，必须书写完整键值 `{ x: x, y: y }`。
    - **展开/剩余语法与参数默认值**：`[...arr]`、`fn(...args)`、`function(a = 1)`、解构默认值（`var {a = 1} = obj`）均不可用。
    - **其他不支持特性**：`class` / `import` / `export`、`Promise` / `async` / `await`、`Proxy` / `Reflect`、`TypedArray` / `BigInt`、正则 `/u` 与 `/y` 标志。
-3. **语义偏移注意**：
+3. **内置语义偏移注意**：
    - `'use strict'` 下非方法调用的 `this` 仍为 `[object Object]`（非 `undefined`）；
    - `'use strict'` 下直接 `eval` 会泄漏 `var` 到外层函数，间接 `eval` 直接抛 `RuntimeException: eval is not allowed!`；
    - `JSON.stringify` 经 KubeJS 修改：对象上的 `undefined` 字段变为 `null`、函数成员被反射序列化为 Java 类成员列表、整数输出为 `1.0`。序列化前需显式清理非纯数据字段。
