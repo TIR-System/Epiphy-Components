@@ -22,7 +22,7 @@
 
     function isArrayLike(x) {
         if (spec && typeof spec.isArrayLike === 'function') return spec.isArrayLike(x);
-        if (!x || typeof x !== 'object') return false;
+        if (x == null || typeof x !== 'object') return false;
         if (Array.isArray(x)) return true;
         return typeof x.length === 'number' && x.length >= 0 && isFinite(x.length) && Math.floor(x.length) === x.length;
     }
@@ -44,6 +44,7 @@
     var HAS_NANO_TIME = false;
     var LEVEL_RESOURCE_ROOT = null;
     var JAVA_FILE_CLASS = null;
+    var KUBEJS_PATHS_CLASS = null;
     var SERVER_HOOKS_CLASS = null;
     var SUGGEST_PROVIDERS_CLASS = null;
 
@@ -79,6 +80,7 @@
     (function initCapabilities() {
         SYSTEM_CLASS = loadJavaClass('java.lang.System');
         HAS_NANO_TIME = Boolean(SYSTEM_CLASS && typeof SYSTEM_CLASS.nanoTime === 'function');
+        KUBEJS_PATHS_CLASS = loadJavaClass('dev.latvian.mods.kubejs.KubeJSPaths');
         JAVA_FILE_CLASS = loadJavaClass('java.io.File');
         SERVER_HOOKS_CLASS = loadJavaClass('net.minecraftforge.server.ServerLifecycleHooks');
         SUGGEST_PROVIDERS_CLASS = loadJavaClass('net.minecraft.commands.synchronization.SuggestionProviders');
@@ -425,9 +427,12 @@
                     var normRoot = (typeof rootPath.toAbsolutePath === 'function')
                         ? rootPath.toAbsolutePath().normalize()
                         : ((typeof rootPath.normalize === 'function') ? rootPath.normalize() : rootPath);
-                    var resolved = (typeof normRoot.resolve === 'function')
-                        ? normRoot.resolve(fileName).normalize()
-                        : (String(normRoot).replace(/[\\/]+$/, '') + '/' + fileName);
+                    var normStr = String(normRoot);
+                    var resolved = (normStr && normStr !== '[object Object]' && normStr.indexOf('undefined') !== 0)
+                        ? (normStr.replace(/\\/g, '/').replace(/(?:\/+\.)*\/*$/, '') + '/' + fileName)
+                        : ((typeof normRoot.resolve === 'function')
+                            ? String(normRoot.resolve(fileName).normalize()).replace(/\\/g, '/')
+                            : (normStr.replace(/[\\/]+$/, '') + '/' + fileName));
                     var fileStr = String(resolved).replace(/\\/g, '/');
                     return {
                         worldKey:    'path:' + fileStr.toLowerCase(),
@@ -451,7 +456,18 @@
     }
 
     function ensureParentDir(filePathStr, logger) {
-        if (!filePathStr || JAVA_FILE_CLASS == null) return false;
+        if (!filePathStr) return false;
+        var norm = String(filePathStr).replace(/\\/g, '/');
+        var slashIdx = norm.lastIndexOf('/');
+        if (slashIdx > 0 && KUBEJS_PATHS_CLASS != null && typeof KUBEJS_PATHS_CLASS.dir === 'function') {
+            try {
+                var parentDir = norm.slice(0, slashIdx);
+                if (parentDir && KUBEJS_PATHS_CLASS.dir(parentDir) != null) {
+                    return true;
+                }
+            } catch (eKj) { }
+        }
+        if (JAVA_FILE_CLASS == null) return false;
         try {
             var f = new JAVA_FILE_CLASS(String(filePathStr));
             var parent = f.getParentFile();

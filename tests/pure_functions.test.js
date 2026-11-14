@@ -1359,9 +1359,9 @@ test('audio: syncAll skips 0-handle ticks, arbitrates conflicts & merges block c
 })
 
 // ----------------------------------------------------------------------------
-// 18. client renderer: batched glow (16-angle) & stroke (8-angle) outline passes and negative Z ordering
+// 18. client renderer: batched glow (4-diag) & stroke (8+4) outline passes and negative Z ordering
 // ----------------------------------------------------------------------------
-test('renderer: batched glow (6 hex) and stroke (8+4) emit circular passes with negative Z', function () {
+test('renderer: batched glow (4-diag) and stroke (8+4) emit circular passes with negative Z', function () {
     function MockMatrix4f() {
         this.z = 0
     }
@@ -1456,10 +1456,10 @@ test('renderer: batched glow (6 hex) and stroke (8+4) emit circular passes with 
     })
     paintHandlers[0](mockEvent)
 
-    // Expect 6 symmetric hex outline draws + 1 foreground core = 7 draws
-    assert.strictEqual(draws.length, 7)
-    var glowOutlines = draws.slice(0, 6)
-    var glowCore     = draws[6]
+    // Expect 4 symmetric diagonal outline draws + 1 foreground core = 5 draws
+    assert.strictEqual(draws.length, 5)
+    var glowOutlines = draws.slice(0, 4)
+    var glowCore     = draws[4]
     assert.strictEqual(glowCore.rgb, 0x8CE6FF)
     assert.strictEqual(glowCore.alpha, 255)
     assert.strictEqual(glowCore.z, 0)
@@ -1746,6 +1746,7 @@ test('renderer: ModernUI TextLayout fast path caches layouts, skips PoseStack/gl
         return {
             key: key,
             hasColorEmoji: function () { emojiQueries++; return false },
+            equals: function (other) { return Boolean(other && other.key === key) },
             drawText: function (mat, bufSrc, x, y, r, g, b, a, shadow, mode) {
                 drawCalls.push({
                     key: key,
@@ -1766,7 +1767,9 @@ test('renderer: ModernUI TextLayout fast path caches layouts, skips PoseStack/gl
             if (!fakeLayoutsByStr[cacheKey]) {
                 fakeLayoutsByStr[cacheKey] = makeFakeLayout(cacheKey)
             }
-            return fakeLayoutsByStr[cacheKey]
+            var base = fakeLayoutsByStr[cacheKey]
+            // 模拟 KubeJS Rhino 每次返回新的 NativeJavaObject 包装实例，但 Java equals 相同
+            return Object.assign({}, base)
         },
         getTextRenderer: function () {
             return {
@@ -1839,9 +1842,9 @@ test('renderer: ModernUI TextLayout fast path caches layouts, skips PoseStack/gl
         stay: 100
     })
 
-    // 绘制第 1 帧：probe(1 canary) + frame0 canary(1) + 'A'(1) + 'B'(1) = 4 次 lookup（空格 0 次）；每可见字 6-hex glow + 1 core = 7 次 drawText -> 共 14 次
+    // 绘制第 1 帧：probe(1 canary) + frame0 canary(1) + 'A'(1) + 'B'(1) = 4 次 lookup（空格 0 次）；每可见字 4-diag glow + 1 core = 5 次 drawText -> 共 10 次
     paintHandlers[0](ev)
-    assert.strictEqual(drawCalls.length, 14, 'A and B only (spaces culled) * 7 passes (6 hex glow + 1 core) = 14 TextLayout.drawText calls')
+    assert.strictEqual(drawCalls.length, 10, 'A and B only (spaces culled) * 5 passes (4 diag glow + 1 core) = 10 TextLayout.drawText calls')
     assert.strictEqual(pushCalls, 0, 'zero PoseStack.push JNI calls when Matrix4f supports rotateZ/scale')
     assert.strictEqual(popCalls, 0, 'zero PoseStack.pop JNI calls')
     assert.strictEqual(rotateDegCalls, 0, 'zero PoseStack.rotateDeg JNI calls')
@@ -1849,14 +1852,14 @@ test('renderer: ModernUI TextLayout fast path caches layouts, skips PoseStack/gl
     assert.strictEqual(flushCalls, 1)
     assert.ok(drawCalls.every(function (d) { return d.mode === 1 }), 'all glow & core passes must share MODE_SDF_FILL(1) to prevent BufferSource batch breaks')
 
-    // 2. 连续绘制第 2~5 帧：cf._muiLayout 与 _muiHasEmoji 均应命中缓存，只有每帧 1 次 canary 检查，0 次多余 lookup / hasColorEmoji JNI 调用
+    // 2. 连续绘制第 2~5 帧：canary 虽然每次返回新包装但 .equals 为 true，故 _muiEpoch 不应误递增，cf._muiLayout 与 _muiHasEmoji 均应命中缓存
     var lookupsAfterFrame1 = lookupCount
     var emojiQueriesAfterFrame1 = emojiQueries
     drawCalls.length = 0
     for (var fi = 0; fi < 4; fi++) {
         paintHandlers[0](ev)
     }
-    assert.strictEqual(drawCalls.length, 14 * 4)
+    assert.strictEqual(drawCalls.length, 10 * 4)
     assert.strictEqual(lookupCount - lookupsAfterFrame1, 4, 'only 1 canary check per frame, 0 redundant glyph layout lookups')
     assert.strictEqual(emojiQueries - emojiQueriesAfterFrame1, 0, '_muiHasEmoji must be cached on unit alongside _muiLayout')
 
@@ -1864,7 +1867,7 @@ test('renderer: ModernUI TextLayout fast path caches layouts, skips PoseStack/gl
     currentEpochObj.ver = 2
     drawCalls.length = 0
     paintHandlers[0](ev)
-    assert.strictEqual(drawCalls.length, 14)
+    assert.strictEqual(drawCalls.length, 10)
     assert.ok(drawCalls.every(function (d) { return d.key.indexOf('2:') === 0 }), 'must immediately switch to post-reload TextLayout epoch 2')
 
     // 4. stroke 模式（shadow:false）在 ModernUI SDF 下（outlineWidth=1.05 <= 1.15）仅需 8 外圈 + 1 主体 = 9 次 drawText
@@ -2739,6 +2742,179 @@ test('EpiphyBugfix: zero hard dependencies, optional EpiphyLog, server-authorita
         hFb2.handlers.death[di]({ server: hFb2.serverObj, entity: pDaveFast })
     }
     assert.strictEqual(hFb2.api.getRecord('uuid-p4'), null, 'EntityEvents.death must purge saved logout HP')
+})
+
+test('regressions: Rhino ServerPlayer null-check, WindowsPath string-join + KubeJSPaths.dir, Sheets Mojmap probe & blur+glow fade reduction', function () {
+    // 1. Rhino 中对未解包 Java 对象执行 !x 会触发 Invalid JavaScript value InternalError：
+    //    验证 isArrayLike/isJavaListLike 直接采用 == null 且源码无 !x，并完整跑通 EpiphyAudio.play + snapshotPlayers
+    assert.ok(!/function isArrayLike[\s\S]*?!x\b/.test(fs.readFileSync(SPEC_PATH, 'utf8')), 'SPEC.isArrayLike must not coerce object via !x')
+    assert.ok(!/function isJavaListLike[\s\S]*?x\s*&&/.test(fs.readFileSync(SPEC_PATH, 'utf8')), 'SPEC.isJavaListLike must not coerce object via x &&')
+    assert.ok(!/function isArrayLike[\s\S]*?!x\b/.test(fs.readFileSync(SERVER_BASE_PATH, 'utf8')), 'BASE.isArrayLike must not coerce object via !x')
+
+    var dirCalls = []
+    var fakeKubeJsPaths = { dir: function (p) { dirCalls.push(String(p)); return { toString: function () { return String(p) } } } }
+    var audioSb = createKubeSandbox(function (cls) {
+        if (cls === 'net.minecraft.world.level.storage.LevelResource') return { ROOT: 'ROOT' }
+        if (cls === 'dev.latvian.mods.kubejs.KubeJSPaths') return fakeKubeJsPaths
+        return null // java.io.File deliberately blocked by ClassFilter!
+    })
+    var fakePlayerSent = []
+    var fakePlayerObj = {
+        uuid: { toString: function () { return 'uuid-rhino-p1' } },
+        username: 'EpiphyPlayer',
+        x: 10.5, y: 64.0, z: -2.25,
+        health: 45, maxHealth: 60,
+        isAlive: function () { return true },
+        level: { dimension: 'minecraft:overworld' },
+        isRemoved: function () { return false },
+        sendData: function (ch, payload) { fakePlayerSent.push({ ch: ch, payload: payload }) }
+    }
+    var winPathMock = {
+        toAbsolutePath: function () { return this },
+        normalize: function () { return this },
+        toString: function () { return 'E:\\Minecraft\\[1.20.1-测试]\\.minecraft\\saves\\New World\\.' },
+        resolve: function () { throw new Error('Rhino overload ambiguity on WindowsPath.resolve(String)') }
+    }
+    audioSb.server = {
+        players: [fakePlayerObj],
+        persistentData: { getString: function () { return '' }, putString: function () {} },
+        getWorldPath: function () { return winPathMock },
+        getAllLevels: function () { return [{ dimension: 'minecraft:overworld', players: [fakePlayerObj] }] },
+        getPlayerList: function () { return { getPlayers: function () { return [fakePlayerObj] }, getPlayerByName: function () { return fakePlayerObj } } }
+    }
+    var serverTicks = []
+    var logoutHandlers = []
+    var jsonWritePaths = []
+    audioSb.ServerEvents.tick = function (fn) { serverTicks.push(fn) }
+    audioSb.ServerEvents.loaded = function () {}
+    audioSb.ServerEvents.commandRegistry = function () {}
+    audioSb.ServerEvents.command = function () {}
+    audioSb.PlayerEvents.loggedOut = function (fn) { logoutHandlers.push(fn) }
+    audioSb.PlayerEvents.respawned = function () {}
+    audioSb.EntityEvents = { death: function () {} }
+    audioSb.NetworkEvents = { dataReceived: function () {} }
+    audioSb.JsonIO = { read: function () { return null }, write: function (p) { jsonWritePaths.push(String(p)) } }
+
+    loadServerBase(audioSb)
+    runScriptIn(audioSb, BUGFIX_PATH)
+    runScriptIn(audioSb, AUDIO_PATH)
+
+    assert.strictEqual(audioSb.global.EpiphySpec.isArrayLike(fakePlayerObj), false)
+    var pPos = audioSb.global.EpiphyServerBase.readPos(fakePlayerObj)
+    assert.ok(pPos != null && pPos.x === 10.5 && pPos.y === 64.0 && pPos.z === -2.25)
+
+    // WindowsPath.resolve 绝不能再被调用；ensureParentDir 应通过 KubeJSPaths.dir 成功建目录（无 java.io.File）
+    var st = audioSb.global.EpiphyServerBase.resolveWorldStorageInfo(audioSb.server, 'kubejs_tracked_blocks.json', 'kubejs/data/epiphy_block_tracker')
+    assert.strictEqual(st.isWorldRoot, true)
+    assert.strictEqual(st.filePath, 'E:/Minecraft/[1.20.1-测试]/.minecraft/saves/New World/kubejs_tracked_blocks.json')
+    assert.strictEqual(audioSb.global.EpiphyServerBase.ensureParentDir(st.filePath), true)
+    for (var li = 0; li < logoutHandlers.length; li++) {
+        logoutHandlers[li]({ server: audioSb.server, player: fakePlayerObj })
+    }
+    assert.ok(jsonWritePaths.indexOf('E:/Minecraft/[1.20.1-测试]/.minecraft/saves/New World/kubejs_epiphy_bugfix_hp.json') >= 0, 'EpiphyBugfix must resolve world path without WindowsPath.resolve')
+    assert.ok(dirCalls.length >= 2 && dirCalls.every(function (d) { return d === 'E:/Minecraft/[1.20.1-测试]/.minecraft/saves/New World' }))
+
+    // EpiphyAudio.play 对真实玩家位置不应因 !ServerPlayer 崩溃，能正确向玩家发包
+    for (var ti = 0; ti < serverTicks.length; ti++) {
+        serverTicks[ti]({ server: audioSb.server })
+    }
+    var hAudio = audioSb.global.EpiphyAudio.play({
+        sound: 'epiphy:children_of_the_city',
+        at: [10, 64, -2],
+        dim: 'minecraft:overworld',
+        range: 30,
+        loop: true
+    })
+    assert.ok(hAudio > 0, 'EpiphyAudio.play must succeed with online ServerPlayer')
+    for (var ti2 = 0; ti2 < serverTicks.length; ti2++) {
+        serverTicks[ti2]({ server: audioSb.server })
+    }
+    assert.ok(fakePlayerSent.length >= 1, 'online player in range must receive start packet')
+
+    // 2. Sheets Mojmap 优先探测 + bufSrc.endBatch 优先探测：访问 m_110787_ / m_109912_ 时抛错也不得产生 WARN/ERROR
+    var cliWarns = []
+    var sheetsProbeThrows = {
+        translucentCullBlockSheet: function () { return { sheet: 'emoji' } }
+    }
+    Object.defineProperty(sheetsProbeThrows, 'm_110787_', {
+        get: function () { throw new Error('InternalError: m_110787_ missing on NativeJavaClass') }
+    })
+    var endBatchCalls = 0
+    var bufSrcMojmap = {
+        endBatch: function () { endBatchCalls++ }
+    }
+    Object.defineProperty(bufSrcMojmap, 'm_109912_', {
+        get: function () { throw new Error('InternalError: m_109912_ missing') }
+    })
+    function M4() { this.z = 0 }
+    M4.prototype.set = function (o) { this.z = o ? o.z : 0; return this }
+    M4.prototype.translate = function (dx, dy, dz) { this.z += (dz || 0); return this }
+    M4.prototype.rotateZ = function () { return this }
+    M4.prototype.scale = function () { return this }
+    var rDraws = []
+    var fakeLayoutEmoji = {
+        hasColorEmoji: function () { return true },
+        equals: function (o) { return Boolean(o && o._k === 'e') },
+        _k: 'e',
+        drawText: function (mat, b, x, y, r, g, bl, a, shd, mode) { rDraws.push({ x: x, y: y, a: a, mode: mode }) }
+    }
+    var rPaints = []
+    var rNow = 1000
+    var rCliSb = {
+        console: { info: function () {}, warn: function (m) { cliWarns.push(String(m)) }, error: function (m) { cliWarns.push(String(m)) }, debug: function () {}, log: function () {} },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function (fn) { rPaints.push(fn) } },
+        NetworkEvents: { dataReceived: function () {} },
+        Java: {
+            loadClass: function (cls) {
+                if (cls === 'java.lang.System') return { nanoTime: function () { return rNow * 1000000 } }
+                if (cls === 'net.minecraft.client.gui.Font$DisplayMode') return { NORMAL: 'NORMAL' }
+                if (cls === 'org.joml.Matrix4f') return M4
+                if (cls === 'net.minecraft.client.renderer.Sheets') return sheetsProbeThrows
+                if (cls === 'icyllis.modernui.mc.text.TextLayoutEngine') return {
+                    getInstance: function () {
+                        return {
+                            lookupFormattedLayout: function () { return fakeLayoutEmoji },
+                            getTextRenderer: function () { return { chooseMode: function () { return 4 } } }
+                        }
+                    }
+                }
+                if (cls === 'icyllis.modernui.mc.text.ModernTextRenderer') return { sAllowSDFTextIn2D: true }
+                return null
+            }
+        },
+        Text: { of: function (s) { return { string: String(s), getVisualOrderText: function () { return String(s) } } } },
+        global: {}
+    }
+    rCliSb.globalThis = rCliSb
+    vm.createContext(rCliSb)
+    loadStartupBase(rCliSb)
+    runScriptIn(rCliSb, RENDERER_PATH)
+    var rClient = rCliSb.global.ScreenDanmakuClient
+    rClient.push({
+        title: 'A',
+        typewriter: false,
+        outlineMode: 'glow',
+        shadow: false,
+        fadeStyle: 'blur',
+        stay: 20,    // total 1000ms (fade [500..1000])
+        fadeOut: 10  // 500ms
+    })
+    var rEv = {
+        width: 854, height: 480, level: 'minecraft:overworld',
+        font: { width: function () { return 6 } },
+        graphics: { bufferSource: function () { return bufSrcMojmap }, flush: function () {} },
+        getMatrix: function () { return new M4() }
+    }
+    rPaints[0](rEv)
+    assert.strictEqual(cliWarns.length, 0, 'Sheets Mojmap-first probe must produce zero warnings')
+    assert.ok(endBatchCalls >= 1, 'bufSrc.endBatch Mojmap-first must succeed for emoji layouts')
+    assert.strictEqual(rDraws.length, 5, 'alive frame: 4 diag glow + 1 core')
+
+    // 推进至 blur fade 60%（t=1000+800 -> fadeProgress = 300/500 = 0.60 >= 0.42）：glow 提前收起，仅绘制 2 对角虚影 + 1 核心 = 3 passes
+    rNow = 1000 + 800
+    rDraws.length = 0
+    rPaints[0](rEv)
+    assert.strictEqual(rDraws.length, 3, 'late blur fade (>=42%) skips glow and draws 2 diag mist + 1 core = 3 passes')
 })
 
 var passed = 0

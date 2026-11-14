@@ -53,6 +53,8 @@
     var LEVEL_RESOURCE_ROOT   = null
     var JAVA_FILE_PROBED      = false
     var JAVA_FILE_CLASS       = null
+    var KUBEJS_PATHS_PROBED   = false
+    var KUBEJS_PATHS_CLASS    = null
     var JAVA_UUID_PROBED      = false
     var JAVA_UUID_CLASS       = null
     var FAKE_PLAYER_PROBED    = false
@@ -158,6 +160,14 @@
             JAVA_FILE_CLASS = probeJavaClass('java.io.File')
         }
         return JAVA_FILE_CLASS
+    }
+
+    function getKubeJsPathsClass() {
+        if (!KUBEJS_PATHS_PROBED) {
+            KUBEJS_PATHS_PROBED = true
+            KUBEJS_PATHS_CLASS = probeJavaClass('dev.latvian.mods.kubejs.KubeJSPaths')
+        }
+        return KUBEJS_PATHS_CLASS
     }
 
     function getJavaUuidClass() {
@@ -397,8 +407,14 @@
                     var normRoot = (typeof rootPath.toAbsolutePath === 'function')
                         ? rootPath.toAbsolutePath().normalize()
                         : ((typeof rootPath.normalize === 'function') ? rootPath.normalize() : rootPath)
-                    if (normRoot != null && typeof normRoot.resolve === 'function') {
-                        return String(normRoot.resolve(WORLD_FILE_NAME).normalize()).replace(/\\/g, '/')
+                    if (normRoot != null) {
+                        var normStr = String(normRoot)
+                        if (normStr && normStr !== '[object Object]' && normStr.indexOf('undefined') !== 0) {
+                            return normStr.replace(/\\/g, '/').replace(/(?:\/+\.)*\/*$/, '') + '/' + WORLD_FILE_NAME
+                        }
+                        if (typeof normRoot.resolve === 'function') {
+                            return String(normRoot.resolve(WORLD_FILE_NAME).normalize()).replace(/\\/g, '/')
+                        }
                     }
                 }
             }
@@ -409,8 +425,18 @@
     }
 
     function ensureParentDir(filePathStr) {
+        if (!filePathStr) return false
+        var norm = String(filePathStr).replace(/\\/g, '/')
+        var slashIdx = norm.lastIndexOf('/')
+        var kjPaths = getKubeJsPathsClass()
+        if (slashIdx > 0 && kjPaths != null && typeof kjPaths.dir === 'function') {
+            try {
+                var parentDir = norm.slice(0, slashIdx)
+                if (parentDir && kjPaths.dir(parentDir) != null) return true
+            } catch (eKj) { }
+        }
         var fileCls = getJavaFileClass()
-        if (!filePathStr || fileCls == null) return false
+        if (fileCls == null) return false
         try {
             var f = new fileCls(String(filePathStr))
             var p = f.getParentFile()

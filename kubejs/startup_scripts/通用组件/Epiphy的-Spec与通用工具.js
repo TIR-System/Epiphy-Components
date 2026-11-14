@@ -130,13 +130,13 @@
     }
 
     function isArrayLike(x) {
-        if (!x || typeof x !== 'object') return false;
+        if (x == null || typeof x !== 'object') return false;
         if (Array.isArray(x)) return true;
         return typeof x.length === 'number' && x.length >= 0 && isFinite(x.length) && Math.floor(x.length) === x.length;
     }
 
     function isJavaListLike(x) {
-        return Boolean(x && typeof x === 'object' && typeof x.size === 'function' && typeof x.get === 'function');
+        return x != null && typeof x === 'object' && typeof x.size === 'function' && typeof x.get === 'function';
     }
 
     function readPairBounds(val) {
