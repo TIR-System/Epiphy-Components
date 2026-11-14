@@ -81,14 +81,20 @@
         return false
     }
 
-    var subcommands       = {}
-    var subcmdOrder       = []
+    var subcommands          = {}
+    var subcmdOrder          = []
+    var RESERVED_SUBCOMMANDS = {
+        auth: true,
+        help: true
+    }
     // 按存档隔离的内存缓存：
     // { '<worldKey>': { loaded: true, filePath: '...', grants: { '<playerKey>': { displayName: '...', scopes: { '<scope>': { by: '...', at: '...' } } } } } }
-    var worldAuthStore    = {}
-    var declarationStack  = []
+    var worldAuthStore       = {}
+    var declarationStack     = []
     // 已注册的内部调用方白名单：{ '<callerId>': { '<subcmd>': true } }（严禁无参数默认全权 '*'）
-    var registeredCallers = {}
+    var registeredCallers    = {}
+    // 与 registeredCallers 一一对应的不可伪造能力令牌（按引用比对，禁止仅凭字符串触发声明调用）
+    var callerTokensById     = {}
 
     // 预置权限策略模板（冻结防外部篡改，且 normalizePermissionPolicy 永远返回浅拷贝）
     var POLICY_PRESETS = {
@@ -247,20 +253,23 @@
             var s = rawPolicy.trim().toLowerCase()
             if (s === 'public' || s === 'all' || s === 'none' || s === 'everyone' || s === '公开') return clonePolicy(POLICY_PRESETS.public)
             if (s === 'cheats' || s === 'cheat' || s === '仅作弊') return clonePolicy(POLICY_PRESETS.cheats)
-            if (s === 'authorized' || s === 'auth' || s === 'cheat_or_auth' || s === '授权') return clonePolicy(POLICY_PRESETS.authorized)
+            if (s === 'authorized' || s === 'cheat_or_auth' || s === '授权') return clonePolicy(POLICY_PRESETS.authorized)
             if (s === 'admin' || s === 'op' || s === 'operator' || s === '管理员') return clonePolicy(POLICY_PRESETS.admin)
-            return clonePolicy(base)
+            var failClosed = (fallbackPolicy && s !== 'auth') ? fallbackPolicy : POLICY_PRESETS.admin
+            logWarn('normalizePermissionPolicy', '未知权限策略 "' + rawPolicy + '"（注意：\'auth\' 是保留子命令名而非策略预设名，请改用 "authorized"），已按最小权限原则回退为 "' + failClosed.mode + '"。')
+            return clonePolicy(failClosed)
         }
         if (typeof rawPolicy === 'object') {
-            var presetKey = rawPolicy.mode || rawPolicy.type || rawPolicy.preset
-            var seed = (presetKey && typeof presetKey === 'string')
-                ? normalizePermissionPolicy(presetKey, base)
+            var presetKey  = rawPolicy.mode || rawPolicy.type || rawPolicy.preset
+            var presetNorm = (typeof presetKey === 'string') ? presetKey.trim().toLowerCase() : ''
+            var seed = (presetNorm && presetNorm !== 'custom')
+                ? normalizePermissionPolicy(presetKey, (presetNorm === 'auth') ? POLICY_PRESETS.admin : base)
                 : clonePolicy(base)
             var callerWhitelist = rawPolicy.allowedCallers !== undefined
                 ? normalizeAllowedCallersList(rawPolicy.allowedCallers)
                 : seed.allowedCallers
             return {
-                mode:                 String(presetKey || 'custom'),
+                mode:                 String((presetNorm === 'custom') ? 'custom' : (presetNorm ? seed.mode : 'custom')),
                 label:                String(rawPolicy.label || seed.label),
                 requireCheats:        rawPolicy.requireCheats !== undefined ? Boolean(rawPolicy.requireCheats) : seed.requireCheats,
                 requireOp:            rawPolicy.requireOp !== undefined ? Boolean(rawPolicy.requireOp) : seed.requireOp,
@@ -518,7 +527,8 @@
         var reqLv = (minOpLevel != null && isFinite(minOpLevel) && minOpLevel > 0) ? Math.round(minOpLevel) : 2
         if (typeof player.isOp === 'function' && player.isOp()) return true
         if (playerHasPermLevel(player, reqLv)) return true
-        if (source != null && typeof source.hasPermission === 'function' && source.hasPermission(reqLv)) return true
+        // 严禁读取 source.hasPermission(reqLv)：Forge/Vanilla 的 CommandSourceStack.withPermission(int)
+        // 可在保持 source.source === ServerPlayer 的前提下临时抬高栈 permissionLevel，必须以真实玩家/OP 列表为准。
         if (srv != null) {
             var prof  = (typeof player.getProfile === 'function') ? player.getProfile()
                 : ((typeof player.getGameProfile === 'function') ? player.getGameProfile() : player.profile)
@@ -560,9 +570,10 @@
 
     function isPlayerAuthorized(server, player, subCommandName) {
         if (player == null) return false
+        var scope = normalizeScope(subCommandName)
+        if (RESERVED_SUBCOMMANDS[scope]) return false
         var srv     = server || resolveServer(null, player)
         var entry   = getOrLoadWorldGrants(srv)
-        var scope   = normalizeScope(subCommandName)
         var rawName = extractPlayerName(player)
         var nameKey = normalizeKey(rawName)
         var uuidKey = normalizeKey(extractPlayerUuid(player))
@@ -625,9 +636,13 @@
 
     function mutatePlayerGrant(server, playerOrName, isGrant, subCommandScope, grantedBySourceOrName) {
         if (playerOrName == null) return false
+        var scope = normalizeScope(subCommandScope)
+        if (RESERVED_SUBCOMMANDS[scope]) {
+            logWarn('mutatePlayerGrant', '拒绝修改系统保留作用域 "' + scope + '" 的玩家授权记录。')
+            return false
+        }
         var srv   = server || (typeof playerOrName === 'object' ? resolveServer(null, playerOrName) : SERVER_REF)
         var entry = getOrLoadWorldGrants(srv)
-        var scope = normalizeScope(subCommandScope)
         var auditMeta = isGrant ? {
             by: extractActorLabel(grantedBySourceOrName),
             at: formatTimestampNow()
@@ -706,37 +721,136 @@
 
     // 显式注册受信任脚本调用方及其允许调用的子命令列表：
     //   严禁省略 allowedScopes 默认给 '*'！调用方必须明确传入非空的子命令名称数组（如 ['danmaku']），且禁止声明 'auth'。
+    function isSameJavaRef(a, b) {
+        if (a == null || b == null) return false
+        if (a === b) return true
+        try {
+            if (typeof a.equals === 'function' && Boolean(a.equals(b))) return true
+        } catch (eEq) { }
+        return false
+    }
+
+    function looksLikeUnsafeRunner(runnerObj) {
+        if (runnerObj == null) return true
+        if (ServerPlayerClass != null && isJavaInstance(ServerPlayerClass, runnerObj)) return true
+        if (typeof runnerObj.getUuid === 'function' && typeof runnerObj.hasPermissions === 'function') return true
+        if (BaseCommandBlockClass != null && isJavaInstance(BaseCommandBlockClass, runnerObj)) return true
+        try {
+            var rawInner = runnerObj.source !== undefined ? runnerObj.source : null
+            if (rawInner != null) {
+                if (ServerPlayerClass != null && isJavaInstance(ServerPlayerClass, rawInner)) return true
+                if (BaseCommandBlockClass != null && isJavaInstance(BaseCommandBlockClass, rawInner)) return true
+            }
+            if (typeof runnerObj.isPlayer === 'function' && Boolean(runnerObj.isPlayer())) return true
+            var innerP = (typeof runnerObj.getPlayer === 'function') ? runnerObj.getPlayer() : runnerObj.player
+            if (innerP != null && typeof innerP !== 'boolean') return true
+        } catch (eChk) { }
+        return false
+    }
+
+    function resolveDeclarationToken(tokenObj, apiName) {
+        if (tokenObj == null || typeof tokenObj !== 'object' || tokenObj.__isEpiphyDeclToken !== true) {
+            logWarn(apiName || 'declaration', '必须传入 declareCaller(...) 返回的能力令牌对象，禁止传入字符串或伪造声明对象。')
+            return null
+        }
+        var id = normalizeKey(tokenObj.callerId)
+        if (!id || !registeredCallers[id] || callerTokensById[id] !== tokenObj) {
+            logWarn(apiName || 'declaration', '声明令牌校验失败（未注册或非原始授权令牌）: "' + String(tokenObj.callerId) + '"。')
+            return null
+        }
+        return id
+    }
+
+    function resolveFrameScopes(allowedScopeSet, targetScopes) {
+        if (allowedScopeSet == null) return null
+        var copy  = {}
+        var count = 0
+        if (targetScopes == null) {
+            for (var k in allowedScopeSet) {
+                if (allowedScopeSet[k] && !RESERVED_SUBCOMMANDS[k]) {
+                    copy[k] = true
+                    count++
+                }
+            }
+            return count > 0 ? copy : null
+        }
+        var reqList = Array.isArray(targetScopes)
+            ? targetScopes
+            : (typeof targetScopes === 'string' && targetScopes.trim().length > 0 ? [targetScopes] : [])
+        for (var i = 0; i < reqList.length; i++) {
+            var sc = normalizeKey(reqList[i])
+            if (sc && !RESERVED_SUBCOMMANDS[sc] && allowedScopeSet[sc]) {
+                copy[sc] = true
+                count++
+            }
+        }
+        return count > 0 ? copy : null
+    }
+
+    function parseDeclaredCommandTarget(commandStr) {
+        if (typeof commandStr !== 'string') return null
+        if (/[\r\n\0]/.test(commandStr)) return null
+        var trimmed = String(commandStr).replace(/^\s+|\s+$/g, '')
+        if (!trimmed) return null
+        var cmd = trimmed.replace(/^\/+/, '')
+        var re  = new RegExp('^' + ROOT_LITERAL + '\\s+([A-Za-z0-9_:-]+)(?:\\s|$)')
+        var m   = re.exec(cmd)
+        if (!m) return null
+        var subcmd = normalizeKey(m[1])
+        if (!subcmd || RESERVED_SUBCOMMANDS[subcmd]) return null
+        return {
+            cmd:    cmd,
+            subcmd: subcmd
+        }
+    }
+
     function declareCaller(callerId, allowedScopes) {
         var id = normalizeKey(callerId)
-        if (!id) return false
+        if (!id) return null
+        if (registeredCallers[id]) {
+            logWarn('declareCaller', '调用方 "' + id + '" 已注册，出于 write-once 安全策略禁止重复注册或扩容权限作用域。')
+            return null
+        }
         var list = Array.isArray(allowedScopes)
             ? allowedScopes
             : (typeof allowedScopes === 'string' && allowedScopes.trim().length > 0 ? [allowedScopes] : [])
         var scopeSet = {}
-        var count = 0
+        var count    = 0
         for (var i = 0; i < list.length; i++) {
             var sc = normalizeKey(list[i])
-            if (sc && sc !== '*' && sc !== 'all' && sc !== 'auth') {
+            if (sc && sc !== '*' && sc !== 'all' && !RESERVED_SUBCOMMANDS[sc]) {
                 scopeSet[sc] = true
                 count++
             }
         }
         if (count === 0) {
-            logWarn('declareCaller', 'declareCaller("' + id + '") 必须显式指定具体子命令白名单（如 ["danmaku"]），不支持空列表或通配符 "*"。')
-            return false
-        }
-        registeredCallers[id] = scopeSet
-        return true
-    }
-
-    function withDeclaration(callerId, fn) {
-        var id = normalizeKey(callerId)
-        if (!id || typeof fn !== 'function') return null
-        if (!registeredCallers[id]) {
-            logWarn('withDeclaration', '调用方 "' + id + '" 尚未通过 declareCaller(callerId, allowedScopes) 注册白名单，withDeclaration 已拒绝。')
+            logWarn('declareCaller', 'declareCaller("' + id + '") 必须显式指定具体合法子命令白名单（如 ["danmaku"]），不支持空列表、保留名或 "*"。')
             return null
         }
-        declarationStack.push(id)
+        var token = Object.freeze({
+            __isEpiphyDeclToken: true,
+            callerId:            id
+        })
+        registeredCallers[id] = scopeSet
+        callerTokensById[id]  = token
+        return token
+    }
+
+    function withDeclaration(callerToken, fn, targetScopes) {
+        var id = resolveDeclarationToken(callerToken, 'withDeclaration')
+        if (!id || typeof fn !== 'function') return null
+        var frameScopes = resolveFrameScopes(registeredCallers[id], targetScopes)
+        if (!frameScopes) {
+            logWarn('withDeclaration', '调用方 "' + id + '" 请求的作用域未在已注册白名单内，withDeclaration 已拒绝。')
+            return null
+        }
+        declarationStack.push({
+            callerId:        id,
+            effectiveScopes: frameScopes,
+            runner:          null,
+            maxDispatches:   0,
+            dispatchesUsed:  0
+        })
         try {
             return fn()
         } finally {
@@ -744,37 +858,76 @@
         }
     }
 
-    // 显式绑定调用方身份，供跨 Tick 调度或异步回调安全使用（不依赖隐式全局同步栈）
-    function bindDeclaration(callerId, fn) {
-        var id = normalizeKey(callerId)
-        if (!id || typeof fn !== 'function') return fn
+    // 显式绑定调用方能力令牌，供跨 Tick 调度或异步回调安全使用（支持 targetScopes 收窄）
+    function bindDeclaration(callerToken, fn, targetScopes) {
+        var id = resolveDeclarationToken(callerToken, 'bindDeclaration')
+        if (!id || typeof fn !== 'function') {
+            return function () { return null }
+        }
+        var frameScopes = resolveFrameScopes(registeredCallers[id], targetScopes)
+        if (!frameScopes) {
+            logWarn('bindDeclaration', '调用方 "' + id + '" 请求的作用域未在已注册白名单内，bindDeclaration 已拒绝。')
+            return function () { return null }
+        }
         return function () {
             var args = arguments
-            return withDeclaration(id, function () {
+            return withDeclaration(callerToken, function () {
                 return fn.apply(null, args)
-            })
+            }, targetScopes)
         }
     }
 
-    function runDeclaredCommand(runnerObj, callerId, commandStr, silent) {
+    function runDeclaredCommand(runnerObj, callerToken, commandStr, silent) {
+        var id = resolveDeclarationToken(callerToken, 'runDeclaredCommand')
+        if (!id) return 0
         if (runnerObj == null || !commandStr) return 0
-        var looksLikePlayer = (ServerPlayerClass != null && isJavaInstance(ServerPlayerClass, runnerObj))
-            || (typeof runnerObj.getUuid === 'function' && typeof runnerObj.hasPermissions === 'function')
-        if (looksLikePlayer) {
-            logWarn('runDeclaredCommand', '出于安全边界禁止将玩家对象作为 runDeclaredCommand 的提权执行代理，已拦截。')
+        if (looksLikeUnsafeRunner(runnerObj)) {
+            logWarn('runDeclaredCommand', '出于安全边界禁止将玩家、玩家命令栈或命令方块作为 runDeclaredCommand 的提权执行代理，已拦截。')
             return 0
         }
-        var cmd = String(commandStr).replace(/^\//, '')
-        var res = withDeclaration(callerId, function () {
-            if (silent !== false && typeof runnerObj.runCommandSilent === 'function') {
-                return runnerObj.runCommandSilent(cmd)
-            }
-            if (typeof runnerObj.runCommand === 'function') {
-                return runnerObj.runCommand(cmd)
-            }
+        var parsed = parseDeclaredCommandTarget(commandStr)
+        if (!parsed) {
+            logWarn('runDeclaredCommand', '出于最小权限约束，runDeclaredCommand 仅允许执行单条 /' + ROOT_LITERAL + ' <合法子命令> ... 指令，已拦截。')
             return 0
+        }
+        var allowedSet = registeredCallers[id]
+        if (!allowedSet || !allowedSet[parsed.subcmd]) {
+            logWarn('runDeclaredCommand', '调用方 "' + id + '" 未获准调用子命令 /' + ROOT_LITERAL + ' ' + parsed.subcmd + '，runDeclaredCommand 已拒绝。')
+            return 0
+        }
+        for (var fi = 0; fi < declarationStack.length; fi++) {
+            var outerFrame = declarationStack[fi]
+            if (!outerFrame || !outerFrame.effectiveScopes || !outerFrame.effectiveScopes[parsed.subcmd]) {
+                logWarn('runDeclaredCommand', '外层声明上下文 "' + (outerFrame && outerFrame.callerId) + '" 不允许调用 /' + ROOT_LITERAL + ' ' + parsed.subcmd + '，已阻止。')
+                return 0
+            }
+            if (outerFrame.maxDispatches > 0 && outerFrame.dispatchesUsed >= outerFrame.maxDispatches) {
+                logWarn('runDeclaredCommand', '外层单次声明配额已耗尽，禁止嵌套链式派发。')
+                return 0
+            }
+        }
+        var singleScope = {}
+        singleScope[parsed.subcmd] = true
+        declarationStack.push({
+            callerId:        id,
+            effectiveScopes: singleScope,
+            runner:          runnerObj,
+            maxDispatches:   1,
+            dispatchesUsed:  0
         })
-        return res != null ? res : 0
+        try {
+            var res = null
+            if (silent !== false && typeof runnerObj.runCommandSilent === 'function') {
+                res = runnerObj.runCommandSilent(parsed.cmd)
+            } else if (typeof runnerObj.runCommand === 'function') {
+                res = runnerObj.runCommand(parsed.cmd)
+            } else {
+                res = 0
+            }
+            return res != null ? res : 0
+        } finally {
+            declarationStack.pop()
+        }
     }
 
     // 严格通过 Java Class.isInstance 识别 CommandSourceStack 的底层数据类型（彻底移除类名字符串 indexOf 模糊匹配）
@@ -833,20 +986,35 @@
             }
         }
 
-        // 3. 在排除玩家与命令方块后，检查当前调用栈是否处于已注册白名单的 withDeclaration 块内；
-        //    同时探测物理底层是否为控制台（MinecraftServer / RconConsoleSource），
-        //    确保即使在声明块内调用 server.runCommand，也不会绕过 policy.allowConsole === false。
+        // 3. 在排除玩家与命令方块后，检查当前调用栈是否处于已注册白名单的 withDeclaration / runDeclaredCommand 块内；
+        //    严禁在无控制台载体、且未命中绑定 runner 时仅凭 declarationStack 将任意 untrusted_other（如 CommandSource.NULL / {}）静默提权。
         var consoleCarrierCls = classifyConsoleRawSource(rawSource, rawCls)
         if (declarationStack.length > 0) {
-            var topId = declarationStack[declarationStack.length - 1]
-            if (topId && registeredCallers[topId]) {
-                return {
-                    kind: 'declared_function',
-                    callerId: topId,
-                    player: null,
-                    rawSource: rawSource,
-                    isConsoleCarrier: consoleCarrierCls != null,
-                    className: 'Declared:' + topId
+            var topFrame = declarationStack[declarationStack.length - 1]
+            if (topFrame && topFrame.callerId && registeredCallers[topFrame.callerId]) {
+                var hasPinnedRunner = false
+                var pinnedRunnerOk  = true
+                for (var fi = 0; fi < declarationStack.length; fi++) {
+                    var f = declarationStack[fi]
+                    if (f && f.runner != null) {
+                        hasPinnedRunner = true
+                        var matchesF = isSameJavaRef(rawSource, f.runner) || isSameJavaRef(source, f.runner)
+                        if (!matchesF && consoleCarrierCls == null) {
+                            pinnedRunnerOk = false
+                            break
+                        }
+                    }
+                }
+                var allowDeclaredCarrier = hasPinnedRunner ? pinnedRunnerOk : (consoleCarrierCls != null)
+                if (allowDeclaredCarrier) {
+                    return {
+                        kind:             'declared_function',
+                        callerId:         topFrame.callerId,
+                        player:           null,
+                        rawSource:        rawSource,
+                        isConsoleCarrier: consoleCarrierCls != null,
+                        className:        'Declared:' + topFrame.callerId
+                    }
                 }
             }
         }
@@ -893,7 +1061,7 @@
     }
 
     // 评估当前 CommandSourceStack 是否有权执行指定子命令
-    function evaluateSourceAccess(source, subCommandName, policyOverride) {
+    function evaluateSourceAccessCore(source, subCommandName, policyOverride, consumeDispatch) {
         if (source == null) {
             return { allowed: false, reason: '无效的指令执行源。' }
         }
@@ -914,24 +1082,42 @@
             return { allowed: true, sourceKind: 'command_block', player: null }
         }
 
-        // 分支 2：已声明的内部函数调用 (declared_function) -> 同时校验 caller scope、allowDeclaredCallers/allowedCallers 与底层控制台策略
+        // 分支 2：已声明的内部函数调用 (declared_function) -> 逐帧校验全栈调用方权限交集、策略白名单、控制台策略及单次派发配额
         if (srcInfo.kind === 'declared_function') {
-            var callerId    = srcInfo.callerId
-            var callerGates = registeredCallers[callerId]
-            if (!subKey || subKey === 'auth' || policy.allowDeclaredCallers === false) {
+            if (!subKey || RESERVED_SUBCOMMANDS[subKey] || policy.allowDeclaredCallers === false) {
                 return { allowed: false, reason: '子命令 /epiphy ' + subKey + ' 禁止通过脚本声明代调。' }
             }
             if (srcInfo.isConsoleCarrier) {
                 var declaredConsoleDeny = checkConsoleCarrierPermission(source, subKey, policy, true)
                 if (declaredConsoleDeny) return declaredConsoleDeny
             }
-            if (!callerGates || !callerGates[subKey]) {
-                return { allowed: false, reason: '调用方 "' + callerId + '" 未获准调用子命令 /epiphy ' + subKey + '。' }
+            if (declarationStack.length === 0) {
+                return { allowed: false, reason: '缺少有效的声明调用栈上下文。' }
             }
-            if (policy.allowedCallers != null && !policy.allowedCallers[callerId]) {
-                return { allowed: false, reason: '子命令 /epiphy ' + subKey + ' 的白名单未包含调用方 "' + callerId + '"。' }
+            for (var si = 0; si < declarationStack.length; si++) {
+                var frame             = declarationStack[si]
+                var fCallerId         = frame != null ? frame.callerId : ''
+                var fRegisteredScopes = fCallerId ? registeredCallers[fCallerId] : null
+                var fEffectiveScopes  = frame != null ? frame.effectiveScopes : null
+                if (!fCallerId || !fRegisteredScopes || !fRegisteredScopes[subKey] || !fEffectiveScopes || !fEffectiveScopes[subKey]) {
+                    return { allowed: false, reason: '调用方 "' + (fCallerId || 'unknown') + '" 未获准调用子命令 /epiphy ' + subKey + '。' }
+                }
+                if (policy.allowedCallers != null && !policy.allowedCallers[fCallerId]) {
+                    return { allowed: false, reason: '子命令 /epiphy ' + subKey + ' 的白名单未包含调用方 "' + fCallerId + '"。' }
+                }
+                if (frame.maxDispatches > 0 && frame.dispatchesUsed >= frame.maxDispatches) {
+                    return { allowed: false, reason: '声明调用 ("' + fCallerId + '") 的单次指令配额已耗尽，禁止二次/链式派发。' }
+                }
             }
-            return { allowed: true, sourceKind: 'declared_function', callerId: callerId, player: null }
+            if (consumeDispatch !== false) {
+                for (var ci = 0; ci < declarationStack.length; ci++) {
+                    var cFrame = declarationStack[ci]
+                    if (cFrame && cFrame.maxDispatches > 0) {
+                        cFrame.dispatchesUsed++
+                    }
+                }
+            }
+            return { allowed: true, sourceKind: 'declared_function', callerId: srcInfo.callerId, player: null }
         }
 
         // 分支 3：服务器控制台数据类型 (MinecraftServer / RconConsoleSource) -> 进入权限查询
@@ -995,6 +1181,10 @@
         }
     }
 
+    function evaluateSourceAccess(source, subCommandName, policyOverride) {
+        return evaluateSourceAccessCore(source, subCommandName, policyOverride, true)
+    }
+
     function sendSourceMessage(source, textStr) {
         if (source == null) return
         try {
@@ -1017,7 +1207,7 @@
     function canSeeSubcommand(source, subCommandName, policyOverride) {
         if (source == null) return false
         try {
-            var res = evaluateSourceAccess(source, subCommandName, policyOverride)
+            var res = evaluateSourceAccessCore(source, subCommandName, policyOverride, false)
             return Boolean(res && res.allowed)
         } catch (e) {
             var errKey = normalizeKey(subCommandName) || 'unknown'
@@ -1045,9 +1235,14 @@
         if (spec == null || !spec.name) return false
         var name = normalizeKey(spec.name)
         if (!name) return false
-        var rawPerm = spec.permission !== undefined
-            ? spec.permission
-            : (spec.policy !== undefined ? spec.policy : spec.auth)
+        if (RESERVED_SUBCOMMANDS[name]) {
+            logWarn('registerSubcommand', '拒绝注册保留子命令名 "/' + ROOT_LITERAL + ' ' + name + '"。')
+            return false
+        }
+        if (spec.auth !== undefined) {
+            logWarn('registerSubcommand', '子命令 /' + ROOT_LITERAL + ' ' + name + ' 使用了已废弃的 spec.auth 字段，已忽略；请改用 spec.permission。')
+        }
+        var rawPerm = spec.permission !== undefined ? spec.permission : spec.policy
         if (rawPerm == null) {
             logWarn('registerSubcommand', '子命令 /' + ROOT_LITERAL + ' ' + name + ' 未声明 permission，已按最小权限原则默认设为 admin (仅 OP)。')
         }
@@ -1100,7 +1295,7 @@
                 sendSourceMessage(source, '§c[Epiphy 指令中心] 未找到名为 [' + key + '] 的子模块。输入 §f/epiphy help §c查看已加载模块列表。')
                 return 0
             }
-            var access = evaluateSourceAccess(source, key, target.policy)
+            var access = evaluateSourceAccessCore(source, key, target.policy, false)
             var statusTag = access.allowed ? '§a[已就绪/可执行]' : ('§c[受限: ' + access.reason + ']')
             sendSourceMessage(source, '§e• 模块 [' + target.name + '] ' + statusTag + ' §7(权限策略: §b' + target.policy.label + '§7)')
             var detailLines = resolveSubcommandHelpLines(target)
@@ -1110,7 +1305,7 @@
             return 1
         }
 
-        var authAccess = evaluateSourceAccess(source, 'auth', POLICY_PRESETS.admin)
+        var authAccess = evaluateSourceAccessCore(source, 'auth', POLICY_PRESETS.admin, false)
         var authStatus = authAccess.allowed ? '§a[可执行]' : '§8[仅管理员]'
 
         var header = [
@@ -1133,7 +1328,7 @@
                 var sName = subcmdOrder[s]
                 var entry = subcommands[sName]
                 if (entry == null) continue
-                var subAccess = evaluateSourceAccess(source, sName, entry.policy)
+                var subAccess = evaluateSourceAccessCore(source, sName, entry.policy, false)
                 var badge     = subAccess.allowed ? '§a[可用]' : '§c[未授权]'
                 sendSourceMessage(
                     source,
@@ -1262,6 +1457,10 @@
     function handleAuthScopeCommand(source, playersArr, isGrant, rawScope) {
         var srv     = resolveServer(source, source.player)
         var scope   = normalizeScope(rawScope)
+        if (RESERVED_SUBCOMMANDS[scope]) {
+            sendSourceMessage(source, '§c[Epiphy 权限阀] "' + scope + '" 为系统保留子命令，禁止通过 /epiphy auth 授权或撤销。')
+            return 0
+        }
         var cnt     = 0
         for (var i = 0; i < playersArr.length; i++) {
             var ok = isGrant

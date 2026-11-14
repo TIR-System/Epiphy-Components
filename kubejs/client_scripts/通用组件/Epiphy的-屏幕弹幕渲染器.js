@@ -117,14 +117,15 @@
     var FRAME_BATCH_CTX         = null
 
     // 环形外圈预计算采样表：
-    //   - OUTLINE_8：0° 步进 45° 的 8 向主环
-    //   - GLOW_OUTER：错相 22.5° 的 8 向外环
-    //   - CARDINAL_4：glow 内环 4 向正交桥接（避免 0.5px 内环 8 次重叠冗余，视觉柔光效果等价）
+    //   - OUTLINE_8：0° 步进 45° 的 8 向实心描边环
+    //   - GLOW_HEX：0° 步进 60° 的 6 向正六边形柔光环（相邻采样重叠自然形成由内至外梯度衰减，较 12 pass 减少 50% 绘制）
+    //   - CARDINAL_4：大半径 stroke 时的 4 向内环桥接
     var DIAG_INV_SQRT2 = 0.7071067811865476
+    var HEX_HALF_SQRT3 = 0.8660254037844386
     var OUTLINE_8_DX   = [1.0, DIAG_INV_SQRT2, 0.0, -DIAG_INV_SQRT2, -1.0, -DIAG_INV_SQRT2, 0.0, DIAG_INV_SQRT2]
     var OUTLINE_8_DY   = [0.0, DIAG_INV_SQRT2, 1.0, DIAG_INV_SQRT2, 0.0, -DIAG_INV_SQRT2, -1.0, -DIAG_INV_SQRT2]
-    var GLOW_OUTER_DX  = [0.9238795325, 0.3826834324, -0.3826834324, -0.9238795325, -0.9238795325, -0.3826834324, 0.3826834324, 0.9238795325]
-    var GLOW_OUTER_DY  = [0.3826834324, 0.9238795325, 0.9238795325, 0.3826834324, -0.3826834324, -0.9238795325, -0.9238795325, -0.3826834324]
+    var GLOW_HEX_DX    = [1.0, 0.5, -0.5, -1.0, -0.5, 0.5]
+    var GLOW_HEX_DY    = [0.0, HEX_HALF_SQRT3, HEX_HALF_SQRT3, 0.0, -HEX_HALF_SQRT3, -HEX_HALF_SQRT3]
     var CARDINAL_4_DX  = [1.0, 0.0, -1.0, 0.0]
     var CARDINAL_4_DY  = [0.0, 1.0, 0.0, -1.0]
     // rendertype_text.fsh 会直接丢弃 alpha < 0.1 (~26/255) 的片元；外圈跳过低于 28 的极微弱描边，避免双线性采样在阈值边缘切出硬锯齿
@@ -1038,15 +1039,18 @@
             var matItem = null
             var matUnit = null
             var matOut  = null
+            var matFg   = null
             if (Matrix4fClass != null) {
                 try {
                     matItem = new Matrix4fClass()
                     matUnit = new Matrix4fClass()
                     matOut  = new Matrix4fClass()
+                    matFg   = new Matrix4fClass()
                 } catch (eM) {
                     matItem = null
                     matUnit = null
                     matOut  = null
+                    matFg   = null
                 }
             }
             var canDirect = (matItem != null && matUnit != null &&
@@ -1075,6 +1079,7 @@
                 itemMat:         null,
                 unitMat:         matUnit,
                 outMat:          matOut,
+                fgMat:           matFg,
                 drawn:           0,
                 nowMs:           now || 0,
                 needBlendRestore:false,
@@ -1164,8 +1169,9 @@
         try {
             var layout = batchCtx.muiEngine.lookupFormattedLayout(seq, 0)
             if (ownerObj != null && layout != null) {
-                ownerObj._muiLayout = layout
-                ownerObj._muiEpoch  = MUI_EPOCH
+                ownerObj._muiLayout   = layout
+                ownerObj._muiEpoch    = MUI_EPOCH
+                ownerObj._muiHasEmoji = (typeof layout.hasColorEmoji === 'function') ? Boolean(layout.hasColorEmoji()) : false
                 // 按字符序号错峰刷新，避免多字在同一帧集中到期刷新导致抖动
                 var staggerMs = ((ownerObj.visIndex || 0) & 15) * 60
                 ownerObj._muiCheckMs = now - staggerMs
@@ -1178,10 +1184,14 @@
         }
     }
 
-    function flushEmojiSheetIfNeeded(batchCtx, layout) {
+    function flushEmojiSheetIfNeeded(batchCtx, layout, ownerObj) {
         if (batchCtx.muiEndBatchFn == null || batchCtx.muiEmojiSheet == null) return
+        if (ownerObj != null && ownerObj._muiHasEmoji === false) return
         try {
-            if (typeof layout.hasColorEmoji === 'function' && layout.hasColorEmoji()) {
+            var hasEmoji = (ownerObj != null && ownerObj._muiHasEmoji != null)
+                ? ownerObj._muiHasEmoji
+                : (typeof layout.hasColorEmoji === 'function' && layout.hasColorEmoji())
+            if (hasEmoji) {
                 batchCtx.muiEndBatchFn.call(batchCtx.bufSrc, batchCtx.muiEmojiSheet)
             }
         } catch (eEmoji) { }
@@ -1192,8 +1202,13 @@
         if (preferSdf) return 1
         if (batchCtx.muiRenderer != null && typeof batchCtx.muiRenderer.chooseMode === 'function') {
             var chosen = batchCtx.muiRenderer.chooseMode(mat, batchCtx.displayMode)
-            // mode 4 (UNIFORM_SCALE) 需要配合投影重缩放；在直接传完整 Matrix4f 时改走 SDF(1) 或标准位图(0)
-            return chosen === 4 ? 0 : chosen
+            if (chosen === 4) {
+                if (mat != null && typeof mat.m00 === 'function' && Math.abs(mat.m00() - 1.0) < 0.02) {
+                    return 0
+                }
+                return batchCtx.muiAllowSdf ? 1 : 0
+            }
+            return chosen
         }
         return 1
     }
@@ -1202,11 +1217,27 @@
         if (batchCtx == null || !batchCtx.muiActive || layout == null || mat == null) return false
         try {
             var a = (argb >>> 24) & 0xFF
+            if (a <= 2) a = 255
             var r = (argb >>> 16) & 0xFF
             var g = (argb >>> 8) & 0xFF
             var b = argb & 0xFF
-            layout.drawText(mat, batchCtx.bufSrc, x, y, r, g, b, a, shadow, drawMode, false, 1.0, 0, 15728880)
-            batchCtx.drawn++
+            var allowShadow = Boolean(shadow) && (ModernTextRendererClass == null || ModernTextRendererClass.sAllowShadow !== false)
+            if (allowShadow) {
+                // TextLayout.drawText 第 9 参是 isShadow（是否为阴影层），非 dropShadow；
+                // 必须先以 RGB 右移 2 位 (25% 亮度) + isShadow=true 绘制阴影，再沿 +Z (+0.03) 以 isShadow=false 绘制全亮度主字。
+                layout.drawText(mat, batchCtx.bufSrc, x, y, r >>> 2, g >>> 2, b >>> 2, a, true, drawMode, false, 1.0, 0, 15728880)
+                var fgMat = mat
+                if (batchCtx.fgMat != null && typeof batchCtx.fgMat.set === 'function' && typeof batchCtx.fgMat.translate === 'function') {
+                    batchCtx.fgMat.set(mat)
+                    batchCtx.fgMat.translate(0.0, 0.0, 0.03)
+                    fgMat = batchCtx.fgMat
+                }
+                layout.drawText(fgMat, batchCtx.bufSrc, x, y, r, g, b, a, false, drawMode, false, 1.0, 0, 15728880)
+                batchCtx.drawn += 2
+            } else {
+                layout.drawText(mat, batchCtx.bufSrc, x, y, r, g, b, a, false, drawMode, false, 1.0, 0, 15728880)
+                batchCtx.drawn++
+            }
             return true
         } catch (eMuiDraw) {
             batchCtx.muiActive = false
@@ -1618,7 +1649,7 @@
         }
     }
 
-    // 增量 Z 分层辅助：每组外圈仅 set(baseMat) + translate(startZ) 1 次，后续仅原地递增 +dz，减少约 50% 矩阵 JNI 调用
+    // 负 Z 分层辅助：每组外圈/虚化环仅设置 1 次负 Z 矩阵，避免逐 pass 多次 translate JNI 调用
     function startOutlineZMat(batchCtx, baseMat, zStart) {
         if (batchCtx != null && batchCtx.outMat != null && baseMat != null) {
             try {
@@ -1634,45 +1665,19 @@
         return baseMat
     }
 
-    function stepOutlineZMat(batchCtx, dz, fallbackMat) {
-        if (batchCtx != null && batchCtx.outMat != null) {
-            try {
-                batchCtx.outMat.translate(0.0, 0.0, dz)
-                return batchCtx.outMat
-            } catch (eZStep) {
-                batchCtx.outMat = null
-            }
-        }
-        return fallbackMat
-    }
-
     // 合批路径外圈采样：
-    //   - glow：8 向错相外环 + 4 向正交内环桥接 (12 pass，当 oRad <= 0.65 时仅 8 向外环)，单调负 Z 消除 Z-fighting
+    //   - glow：6 向正六边形柔和光晕 (0.85 * oRad, alpha ~0.29)，仅设 1 次负 Z 矩阵
     //   - stroke：8 向外环轮廓 + 大半径时 4 向内环桥接 (ModernUI SDF 模式下 1.15px 以下 8 向已无缝闭合)
     function drawBatchedOutline(batchCtx, effSeq, preLayout, outlineMuiMode, gx, gy, mat, outMode, oColRgb, oRad, baseA) {
         if (outMode === 'glow') {
-            var outerByte = Math.round(0.18 * baseA * 255)
-            if (outerByte >= OUTLINE_ALPHA_CUTOFF) {
-                var outerCol = packArgb(oColRgb, outerByte)
-                var oMat = startOutlineZMat(batchCtx, mat, -0.090)
-                for (var oi = 0; oi < 8; oi++) {
-                    if (oi > 0) oMat = stepOutlineZMat(batchCtx, 0.003, mat)
-                    if (!drawBatchedGlyph(batchCtx, effSeq, gx + GLOW_OUTER_DX[oi] * oRad, gy + GLOW_OUTER_DY[oi] * oRad, outerCol, false, oMat, preLayout, outlineMuiMode)) {
+            var glowByte = Math.round(0.29 * baseA * 255)
+            if (glowByte >= OUTLINE_ALPHA_CUTOFF) {
+                var glowCol = packArgb(oColRgb, glowByte)
+                var glowRad = oRad * 0.85
+                var gMat = startOutlineZMat(batchCtx, mat, -0.055)
+                for (var gi = 0; gi < 6; gi++) {
+                    if (!drawBatchedGlyph(batchCtx, effSeq, gx + GLOW_HEX_DX[gi] * glowRad, gy + GLOW_HEX_DY[gi] * glowRad, glowCol, false, gMat, preLayout, outlineMuiMode)) {
                         return false
-                    }
-                }
-            }
-            if (oRad > 0.65) {
-                var innerByte = Math.round(0.42 * baseA * 255)
-                if (innerByte >= OUTLINE_ALPHA_CUTOFF) {
-                    var innerCol = packArgb(oColRgb, innerByte)
-                    var innerRad = oRad * 0.48
-                    var iMat = startOutlineZMat(batchCtx, mat, -0.050)
-                    for (var ii = 0; ii < 4; ii++) {
-                        if (ii > 0) iMat = stepOutlineZMat(batchCtx, 0.003, mat)
-                        if (!drawBatchedGlyph(batchCtx, effSeq, gx + CARDINAL_4_DX[ii] * innerRad, gy + CARDINAL_4_DY[ii] * innerRad, innerCol, false, iMat, preLayout, outlineMuiMode)) {
-                            return false
-                        }
                     }
                 }
             }
@@ -1685,7 +1690,6 @@
         var strokeCol = packArgb(oColRgb, strokeByte)
         var sMat = startOutlineZMat(batchCtx, mat, -0.045)
         for (var si = 0; si < 8; si++) {
-            if (si > 0) sMat = stepOutlineZMat(batchCtx, 0.003, mat)
             if (!drawBatchedGlyph(batchCtx, effSeq, gx + OUTLINE_8_DX[si] * oRad, gy + OUTLINE_8_DY[si] * oRad, strokeCol, false, sMat, preLayout, outlineMuiMode)) {
                 return false
             }
@@ -1695,7 +1699,6 @@
             var midRad = oRad * 0.48
             var bMat = startOutlineZMat(batchCtx, mat, -0.018)
             for (var bi = 0; bi < 4; bi++) {
-                if (bi > 0) bMat = stepOutlineZMat(batchCtx, 0.003, mat)
                 drawBatchedGlyph(batchCtx, effSeq, gx + CARDINAL_4_DX[bi] * midRad, gy + CARDINAL_4_DY[bi] * midRad, strokeCol, false, bMat, preLayout, outlineMuiMode)
             }
         }
@@ -1709,7 +1712,7 @@
 
         var preLayout = resolveUnitMuiLayout(batchCtx, effSeq, ownerObj)
         if (preLayout != null && batchCtx.muiActive) {
-            flushEmojiSheetIfNeeded(batchCtx, preLayout)
+            flushEmojiSheetIfNeeded(batchCtx, preLayout, ownerObj)
         }
 
         var sc = (charScale != null && isFinite(charScale) && charScale > 0.2) ? charScale : 1.0
@@ -1728,10 +1731,11 @@
             var spreadPxS    = 0.65 + fadeProgress * 2.85
             if (haloAlphaS >= OUTLINE_ALPHA_CUTOFF) {
                 var hColB = packArgb(rgbColor, haloAlphaS)
-                if (!drawBatchedGlyph(batchCtx, effSeq, floatX - spreadPxS, floatY, hColB, false, startOutlineZMat(batchCtx, baseItemMat, -0.024), preLayout, outlineMuiMode)) return false
-                drawBatchedGlyph(batchCtx, effSeq, floatX + spreadPxS, floatY, hColB, false, stepOutlineZMat(batchCtx, 0.003, baseItemMat), preLayout, outlineMuiMode)
-                drawBatchedGlyph(batchCtx, effSeq, floatX, floatY - spreadPxS * 0.78, hColB, false, stepOutlineZMat(batchCtx, 0.003, baseItemMat), preLayout, outlineMuiMode)
-                drawBatchedGlyph(batchCtx, effSeq, floatX, floatY + spreadPxS * 0.78, hColB, false, stepOutlineZMat(batchCtx, 0.003, baseItemMat), preLayout, outlineMuiMode)
+                var hMatS = startOutlineZMat(batchCtx, baseItemMat, -0.024)
+                if (!drawBatchedGlyph(batchCtx, effSeq, floatX - spreadPxS, floatY, hColB, false, hMatS, preLayout, outlineMuiMode)) return false
+                drawBatchedGlyph(batchCtx, effSeq, floatX + spreadPxS, floatY, hColB, false, hMatS, preLayout, outlineMuiMode)
+                drawBatchedGlyph(batchCtx, effSeq, floatX, floatY - spreadPxS * 0.78, hColB, false, hMatS, preLayout, outlineMuiMode)
+                drawBatchedGlyph(batchCtx, effSeq, floatX, floatY + spreadPxS * 0.78, hColB, false, hMatS, preLayout, outlineMuiMode)
             }
             return drawBatchedGlyph(batchCtx, effSeq, floatX, floatY, packArgb(rgbColor, coreEffByteS), Boolean(shadow) && fadeProgress < 0.42, baseItemMat, preLayout, outlineMuiMode)
         }
@@ -1740,22 +1744,21 @@
         try {
             var mat, gx, gy
             if (needUnitTransform) {
+                var hw = halfW || 0
                 if (batchCtx.canDirectMatrix) {
                     var uMat = batchCtx.unitMat
-                    var hw = halfW || 0
                     uMat.set(baseItemMat)
                     uMat.translate(floatX + hw, floatY + 4.0, 0.0)
                     if (hasUnitRot) uMat.rotateZ(unitRotDegSafeValue * DEG_TO_RAD)
                     if (hasUnitScale) uMat.scale(sc, sc, 1.0)
-                    uMat.translate(-hw, -4.0, 0.0)
                     mat = uMat
-                    gx  = 0.0
-                    gy  = 0.0
+                    gx  = -hw
+                    gy  = -4.0
                 } else {
                     ensureItemPosePushed(event)
                     event.push()
                     unitPushed = true
-                    var cx = floatX + (halfW || 0)
+                    var cx = floatX + hw
                     var cy = floatY + 4.0
                     event.translate(cx, cy)
                     if (hasUnitRot && typeof event.rotateDeg === 'function') {
@@ -1768,10 +1771,9 @@
                             event.scale(sc, sc, 1.0)
                         }
                     }
-                    event.translate(-(halfW || 0), -4.0)
                     mat = (typeof event.getMatrix === 'function') ? event.getMatrix() : event.matrix
-                    gx  = 0.0
-                    gy  = 0.0
+                    gx  = -hw
+                    gy  = -4.0
                 }
             } else {
                 mat = baseItemMat
@@ -1798,10 +1800,11 @@
                 if (mistEffB >= OUTLINE_ALPHA_CUTOFF) {
                     var mistCol = packArgb(rgbColor, mistEffB)
                     var blurY   = blurRad * 0.6
-                    if (!drawBatchedGlyph(batchCtx, effSeq, gx - blurRad, gy - blurY, mistCol, false, startOutlineZMat(batchCtx, mat, -0.020), preLayout, outlineMuiMode)) return false
-                    drawBatchedGlyph(batchCtx, effSeq, gx + blurRad, gy - blurY, mistCol, false, stepOutlineZMat(batchCtx, 0.003, mat), preLayout, outlineMuiMode)
-                    drawBatchedGlyph(batchCtx, effSeq, gx - blurRad, gy + blurY, mistCol, false, stepOutlineZMat(batchCtx, 0.003, mat), preLayout, outlineMuiMode)
-                    drawBatchedGlyph(batchCtx, effSeq, gx + blurRad, gy + blurY, mistCol, false, stepOutlineZMat(batchCtx, 0.003, mat), preLayout, outlineMuiMode)
+                    var mMatB   = startOutlineZMat(batchCtx, mat, -0.020)
+                    if (!drawBatchedGlyph(batchCtx, effSeq, gx - blurRad, gy - blurY, mistCol, false, mMatB, preLayout, outlineMuiMode)) return false
+                    drawBatchedGlyph(batchCtx, effSeq, gx + blurRad, gy - blurY, mistCol, false, mMatB, preLayout, outlineMuiMode)
+                    drawBatchedGlyph(batchCtx, effSeq, gx - blurRad, gy + blurY, mistCol, false, mMatB, preLayout, outlineMuiMode)
+                    drawBatchedGlyph(batchCtx, effSeq, gx + blurRad, gy + blurY, mistCol, false, mMatB, preLayout, outlineMuiMode)
                 }
                 var coreBlurUnit = clampNum(invP * invP * (1.0 - fadeProgress * 0.35), 0.03, 1.0)
                 var coreEffB     = clampNum(Math.round(coreBlurUnit * 255), 5, 255)
@@ -1831,7 +1834,7 @@
         if (baseA <= 0.025) return
 
         if (!isFinite(floatX) || !isFinite(floatY)) return
-        var hasUnitRot = (unitRotDeg != null && isFinite(unitRotDeg) && Math.abs(unitRotDeg) > 0.05)
+        var hasUnitRot = (unitRotDeg != null && isFinite(unitRotDeg) && Math.abs(unitRotDeg) > 0.15)
         if (hasUnitRot) unitRotDegSafeValue = unitRotDeg
 
         if (batchCtx != null && !BATCH_FAILED) {
@@ -1902,22 +1905,25 @@
                 event.translate(floatX, floatY)
             }
 
-            // 1. 外圈绘制（回退路径同步采用 8 向圆周轮廓与增量平移，消除内层 push/pop 与数组分配）
+            // 1. 外圈绘制（回退路径与合批路径一致：glow 6 向六边形柔光，stroke 8 向轮廓，增量平移消除内层 push/pop）
             if (outMode === 'stroke' || outMode === 'glow') {
                 var oColRgb = (outColor != null && outColor >= 0)
                     ? outColor
                     : (outMode === 'glow' ? rgbColor : 0x050A10)
-                var oRad = clampNum(outWidth || (outMode === 'glow' ? 0.85 : 0.72), 0.25, 2.5)
-                var outAlphaUnit = (outMode === 'glow' ? 0.26 : 0.92) * baseA
+                var isGlowFb = (outMode === 'glow')
+                var oRad = clampNum(outWidth || (isGlowFb ? 0.85 : 0.72), 0.25, 2.5) * (isGlowFb ? 0.85 : 1.0)
+                var outAlphaUnit = (isGlowFb ? 0.29 : 0.92) * baseA
                 var outAlphaByte = Math.round(outAlphaUnit * 255)
                 if (outAlphaByte >= OUTLINE_ALPHA_CUTOFF) {
                     var packedOutCol = packArgb(oColRgb, outAlphaByte)
                     setShaderAlphaSafe(event, outAlphaUnit)
+                    var dxTbl = isGlowFb ? GLOW_HEX_DX : OUTLINE_8_DX
+                    var dyTbl = isGlowFb ? GLOW_HEX_DY : OUTLINE_8_DY
                     var curDx = 0.0
                     var curDy = 0.0
-                    for (var fi = 0; fi < 8; fi++) {
-                        var nx = OUTLINE_8_DX[fi] * oRad
-                        var ny = OUTLINE_8_DY[fi] * oRad
+                    for (var fi = 0; fi < dxTbl.length; fi++) {
+                        var nx = dxTbl[fi] * oRad
+                        var ny = dyTbl[fi] * oRad
                         event.translate(nx - curDx, ny - curDy)
                         curDx = nx
                         curDy = ny

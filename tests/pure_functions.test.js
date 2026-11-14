@@ -293,7 +293,9 @@ test('normalizePermissionPolicy: booleans, numbers, functions, strings & objects
 
     assert.strictEqual(Valve.normalizePermissionPolicy('公开').mode, 'public')
     assert.strictEqual(Valve.normalizePermissionPolicy('仅作弊').mode, 'cheats')
-    assert.strictEqual(Valve.normalizePermissionPolicy('auth').mode, 'authorized')
+    assert.strictEqual(Valve.normalizePermissionPolicy('authorized').mode, 'authorized')
+    assert.strictEqual(Valve.normalizePermissionPolicy('auth').mode, 'admin', '"auth" must NOT alias authorized; unknown string must fail closed to admin')
+    assert.strictEqual(Valve.normalizePermissionPolicy({ mode: 'auth' }).mode, 'admin', 'object mode:"auth" must also fail closed to admin')
     assert.strictEqual(Valve.normalizePermissionPolicy('管理员').mode, 'admin')
 
     var merged = Valve.normalizePermissionPolicy({
@@ -313,16 +315,17 @@ test('permission valve classifyCommandSource: player source cannot escalate via 
     var fakePlayerSource = {
         player: { username: 'Steve', hasPermissions: function () { return false } }
     }
-    Valve.declareCaller('test_caller', ['danmaku'])
+    var callerTok = Valve.declareCaller('test_caller', ['danmaku'])
+    assert.ok(callerTok && callerTok.__isEpiphyDeclToken === true)
     var resultInfo = null
-    Valve.withDeclaration('test_caller', function () {
+    Valve.withDeclaration(callerTok, function () {
         resultInfo = Valve.classifyCommandSource(fakePlayerSource)
     })
     assert.strictEqual(resultInfo.kind, 'player')
     assert.strictEqual(Valve.classifyCommandSource(null).kind, 'untrusted_other')
 })
 
-test('permission valve evaluateSourceAccess: declared server.runCommand cannot bypass allowConsole=false', function () {
+test('permission valve evaluateSourceAccess: declared server.runCommand cannot bypass allowConsole=false or ambient carriers', function () {
     function MockMinecraftServer() {}
     function MockServerPlayer() {}
     var isoSandbox = createKubeSandbox(function (clsName) {
@@ -333,7 +336,8 @@ test('permission valve evaluateSourceAccess: declared server.runCommand cannot b
     loadServerBase(isoSandbox)
     runScriptIn(isoSandbox, VALVE_PATH)
     var IsoValve = isoSandbox.global.EpiphyPermissionValve
-    IsoValve.declareCaller('danmaku_script', ['danmaku'])
+    var callerTok = IsoValve.declareCaller('danmaku_script', ['danmaku'])
+    assert.ok(callerTok && callerTok.__isEpiphyDeclToken === true)
 
     var serverSource = {
         source: new MockMinecraftServer(),
@@ -353,7 +357,7 @@ test('permission valve evaluateSourceAccess: declared server.runCommand cannot b
         false
     )
 
-    // Console carrier inside withDeclaration: respects BOTH allowConsole & allowDeclaredCallers
+    // Console carrier inside withDeclaration: respects BOTH allowConsole & allowDeclaredCallers; ambient {} is denied
     var clsInside = null
     var resNoConsole = null
     var resLowPerm = null
@@ -361,7 +365,7 @@ test('permission valve evaluateSourceAccess: declared server.runCommand cannot b
     var resNoDeclared = null
     var resAbstractCarrier = null
 
-    IsoValve.withDeclaration('danmaku_script', function () {
+    IsoValve.withDeclaration(callerTok, function () {
         clsInside = IsoValve.classifyCommandSource(serverSource)
         resNoConsole = IsoValve.evaluateSourceAccess(serverSource, 'danmaku', {
             mode: 'custom', allowConsole: false, allowDeclaredCallers: true
@@ -387,7 +391,118 @@ test('permission valve evaluateSourceAccess: declared server.runCommand cannot b
     assert.strictEqual(resAllowed.allowed, true)
     assert.strictEqual(resAllowed.sourceKind, 'declared_function')
     assert.strictEqual(resNoDeclared.allowed, false)
-    assert.strictEqual(resAbstractCarrier.allowed, true)
+    assert.strictEqual(resAbstractCarrier.allowed, false, 'ambient {} / CommandSource.NULL must NOT gain declared_function inside withDeclaration')
+})
+
+test('permission valve hardening: reserved auth/help names, token anti-forgery, write-once, stack intersection, runDeclaredCommand & withPermission(4)', function () {
+    function MockMinecraftServer() {}
+    function MockServerPlayer(name, uuid, op) {
+        this._name = name
+        this._uuid = uuid
+        this._op   = !!op
+    }
+    MockServerPlayer.prototype.isOp           = function () { return this._op }
+    MockServerPlayer.prototype.hasPermissions = function (lv) { return this._op && lv <= 4 }
+    MockServerPlayer.prototype.getProfile     = function () { return { name: this._name, id: this._uuid } }
+    MockServerPlayer.prototype.getStringUUID  = function () { return this._uuid }
+
+    var iso = createKubeSandbox(function (clsName) {
+        if (clsName === 'net.minecraft.server.MinecraftServer') return MockMinecraftServer
+        if (clsName === 'net.minecraft.server.level.ServerPlayer') return MockServerPlayer
+        return null
+    })
+    loadServerBase(iso)
+    runScriptIn(iso, VALVE_PATH)
+    var IV = iso.global.EpiphyPermissionValve
+
+    // 2A: reserved subcommand names & removed spec.auth fallback
+    assert.strictEqual(IV.registerSubcommand({ name: 'auth', permission: 'public' }), false)
+    assert.strictEqual(IV.registerSubcommand({ name: 'help', permission: 'public' }), false)
+    assert.strictEqual(IV.registerSubcommand({ name: 'spec_auth_legacy', auth: 'public' }), true)
+    assert.strictEqual(IV.grantPlayer(null, 'Steve', 'auth', 'admin'), false, 'cannot grant reserved "auth" scope')
+    assert.strictEqual(IV.grantPlayer(null, 'Steve', 'help', 'admin'), false, 'cannot grant reserved "help" scope')
+
+    var mockSrv = {
+        getPlayerList: function () { return { isOp: function () { return false }, isAllowCheatsForAllPlayers: function () { return true } } }
+    }
+    var nonOpPlayer = new MockServerPlayer('Noop', '00000000-0000-0000-0000-000000000099', false)
+    nonOpPlayer.server = mockSrv
+    // 2C: CommandSourceStack.withPermission(4) keeps source === player while stack source.hasPermission(4) === true
+    var elevatedStack = {
+        source:        nonOpPlayer,
+        server:        mockSrv,
+        isPlayer:      function () { return true },
+        getPlayer:     function () { return nonOpPlayer },
+        hasPermission: function (lv) { return lv <= 4 }
+    }
+    assert.strictEqual(IV.classifyCommandSource(elevatedStack).kind, 'player')
+    assert.strictEqual(IV.isPlayerAdmin(mockSrv, nonOpPlayer, elevatedStack, 2), false, 'withPermission(4) stack must NOT elevate non-OP player to admin')
+    assert.strictEqual(IV.evaluateSourceAccess(elevatedStack, 'spec_auth_legacy').allowed, false, 'legacy spec.auth must default to admin & deny withPermission(4) player')
+
+    // 2B: token anti-forgery, write-once, nested frame intersection, targetScopes narrowing & runDeclaredCommand
+    assert.strictEqual(IV.declareCaller('auth_only', ['auth', 'help']), null, 'reserved scopes only -> declareCaller rejected')
+    var tokA = IV.declareCaller('caller_alpha', ['danmaku', 'audio'])
+    var tokB = IV.declareCaller('caller_beta', ['audio', 'debug'])
+    assert.ok(tokA && tokA.__isEpiphyDeclToken === true)
+    assert.ok(tokB && tokB.__isEpiphyDeclToken === true)
+    assert.strictEqual(IV.declareCaller('caller_alpha', ['danmaku', 'debug']), null, 'write-once must block widening re-registration')
+
+    var srvSource = {
+        source: new MockMinecraftServer(),
+        hasPermission: function (lv) { return lv <= 4 }
+    }
+
+    // String spoofing & structurally forged object spoofing blocked
+    assert.strictEqual(IV.withDeclaration('caller_alpha', function () { return 'pwn' }), null)
+    assert.strictEqual(IV.withDeclaration({ __isEpiphyDeclToken: true, callerId: 'caller_alpha' }, function () { return 'pwn' }), null)
+    var spoofBound = IV.bindDeclaration('caller_alpha', function () { return 'pwn' })
+    assert.strictEqual(spoofBound(), null)
+
+    // targetScopes narrowing & nested intersection (alpha:[danmaku,audio] + beta:[audio,debug] -> audio only)
+    var narrowDanmaku = false
+    var narrowAudio   = false
+    var interDanmaku  = false
+    var interAudio    = false
+    var interDebug    = false
+    IV.withDeclaration(tokA, function () {
+        narrowDanmaku = IV.evaluateSourceAccess(srvSource, 'danmaku', 'authorized').allowed
+        narrowAudio   = IV.evaluateSourceAccess(srvSource, 'audio', 'authorized').allowed
+    }, ['danmaku'])
+    IV.withDeclaration(tokA, function () {
+        IV.withDeclaration(tokB, function () {
+            interDanmaku = IV.evaluateSourceAccess(srvSource, 'danmaku', 'authorized').allowed
+            interAudio   = IV.evaluateSourceAccess(srvSource, 'audio', 'authorized').allowed
+            interDebug   = IV.evaluateSourceAccess(srvSource, 'debug', 'authorized').allowed
+        })
+    })
+    assert.strictEqual(narrowDanmaku, true)
+    assert.strictEqual(narrowAudio, false)
+    assert.strictEqual(interDanmaku, false, 'outer+inner intersection excludes danmaku')
+    assert.strictEqual(interAudio, true, 'outer+inner intersection preserves common scope audio')
+    assert.strictEqual(interDebug, false, 'outer+inner intersection prevents escalating to inner debug')
+
+    // runDeclaredCommand hardening: blocks non-/epiphy, reserved /epiphy auth, out-of-scope subcommand, player runner & 2nd chained dispatch
+    var executedCmds = []
+    var runner = {
+        runCommandSilent: function (cmd) {
+            executedCmds.push(cmd)
+            var r1 = IV.evaluateSourceAccess({ source: runner }, 'danmaku', 'authorized')
+            var r2 = IV.evaluateSourceAccess({ source: runner }, 'danmaku', 'authorized')
+            var rAmbient = IV.evaluateSourceAccess({}, 'danmaku', 'authorized')
+            assert.strictEqual(r1.allowed, true, 'first bound dispatch succeeds')
+            assert.strictEqual(r2.allowed, false, 'second chained dispatch in same runDeclaredCommand must be denied')
+            assert.strictEqual(rAmbient.allowed, false, 'unrelated {} carrier inside runDeclaredCommand must be denied')
+            return 1
+        }
+    }
+    assert.strictEqual(IV.runDeclaredCommand(runner, 'caller_alpha', '/epiphy danmaku'), 0, 'string token rejected')
+    assert.strictEqual(IV.runDeclaredCommand(runner, tokA, '/op Noop'), 0, 'non-epiphy command blocked')
+    assert.strictEqual(IV.runDeclaredCommand(runner, tokA, '/epiphy auth grant Noop *'), 0, 'reserved /epiphy auth blocked')
+    assert.strictEqual(IV.runDeclaredCommand(runner, tokA, '/epiphy debug'), 0, 'out-of-scope /epiphy debug blocked')
+    assert.strictEqual(IV.runDeclaredCommand(nonOpPlayer, tokA, '/epiphy danmaku'), 0, 'player runner blocked')
+    assert.strictEqual(executedCmds.length, 0)
+    assert.strictEqual(IV.runDeclaredCommand(runner, tokA, '/epiphy danmaku title=ok'), 1)
+    assert.strictEqual(executedCmds.length, 1)
 })
 
 // ----------------------------------------------------------------------------
@@ -1247,7 +1362,7 @@ test('audio: syncAll skips 0-handle ticks, arbitrates conflicts & merges block c
 // ----------------------------------------------------------------------------
 // 18. client renderer: batched glow (16-angle) & stroke (8-angle) outline passes and negative Z ordering
 // ----------------------------------------------------------------------------
-test('renderer: batched glow (8 outer + 4 inner) and stroke (8-angle) emit smooth circular passes with negative monotonic Z', function () {
+test('renderer: batched glow (6 hex) and stroke (8+4) emit circular passes with negative Z', function () {
     function MockMatrix4f() {
         this.z = 0
     }
@@ -1342,10 +1457,10 @@ test('renderer: batched glow (8 outer + 4 inner) and stroke (8-angle) emit smoot
     })
     paintHandlers[0](mockEvent)
 
-    // Expect 12 outline draws (8 outer @ 22.5deg + 4 cardinal inner) + 1 foreground core = 13 draws
-    assert.strictEqual(draws.length, 13)
-    var glowOutlines = draws.slice(0, 12)
-    var glowCore     = draws[12]
+    // Expect 6 symmetric hex outline draws + 1 foreground core = 7 draws
+    assert.strictEqual(draws.length, 7)
+    var glowOutlines = draws.slice(0, 6)
+    var glowCore     = draws[6]
     assert.strictEqual(glowCore.rgb, 0x8CE6FF)
     assert.strictEqual(glowCore.alpha, 255)
     assert.strictEqual(glowCore.z, 0)
@@ -1353,9 +1468,6 @@ test('renderer: batched glow (8 outer + 4 inner) and stroke (8-angle) emit smoot
         assert.strictEqual(glowOutlines[gi].rgb, 0xD82038)
         assert.ok(glowOutlines[gi].alpha >= 28, 'outline alpha must stay safely above MC 0.1 alpha cutoff')
         assert.ok(glowOutlines[gi].z < 0, 'outline z must be strictly negative behind core')
-        if (gi > 0) {
-            assert.ok(glowOutlines[gi].z > glowOutlines[gi - 1].z, 'outline z must increase monotonically toward core')
-        }
     }
 
     // Clear and test 'stroke' mode (outlineWidth=1.05 > 0.82 -> 8 outer + 4 mid bridge + 1 core = 13 draws)
@@ -1621,6 +1733,7 @@ test('renderer: ModernUI TextLayout fast path caches layouts, skips PoseStack/gl
 
     var paintHandlers = []
     var lookupCount   = 0
+    var emojiQueries  = 0
     var drawCalls     = []
     var glBlendQueries = 0
     var pushCalls     = 0
@@ -1633,7 +1746,7 @@ test('renderer: ModernUI TextLayout fast path caches layouts, skips PoseStack/gl
     function makeFakeLayout(key) {
         return {
             key: key,
-            hasColorEmoji: function () { return false },
+            hasColorEmoji: function () { emojiQueries++; return false },
             drawText: function (mat, bufSrc, x, y, r, g, b, a, shadow, mode) {
                 drawCalls.push({
                     key: key,
@@ -1727,9 +1840,9 @@ test('renderer: ModernUI TextLayout fast path caches layouts, skips PoseStack/gl
         stay: 100
     })
 
-    // 绘制第 1 帧：probe(1 canary) + frame0 canary(1) + 'A'(1) + 'B'(1) = 4 次 lookup（空格 0 次）；每可见字 13 次 drawText -> 共 26 次
+    // 绘制第 1 帧：probe(1 canary) + frame0 canary(1) + 'A'(1) + 'B'(1) = 4 次 lookup（空格 0 次）；每可见字 6-hex glow + 1 core = 7 次 drawText -> 共 14 次
     paintHandlers[0](ev)
-    assert.strictEqual(drawCalls.length, 26, 'A and B only (spaces culled) * 13 passes = 26 TextLayout.drawText calls')
+    assert.strictEqual(drawCalls.length, 14, 'A and B only (spaces culled) * 7 passes (6 hex glow + 1 core) = 14 TextLayout.drawText calls')
     assert.strictEqual(pushCalls, 0, 'zero PoseStack.push JNI calls when Matrix4f supports rotateZ/scale')
     assert.strictEqual(popCalls, 0, 'zero PoseStack.pop JNI calls')
     assert.strictEqual(rotateDegCalls, 0, 'zero PoseStack.rotateDeg JNI calls')
@@ -1737,23 +1850,25 @@ test('renderer: ModernUI TextLayout fast path caches layouts, skips PoseStack/gl
     assert.strictEqual(flushCalls, 1)
     assert.ok(drawCalls.every(function (d) { return d.mode === 1 }), 'all glow & core passes must share MODE_SDF_FILL(1) to prevent BufferSource batch breaks')
 
-    // 2. 连续绘制第 2~5 帧：cf._muiLayout 应命中缓存，只有每帧 1 次 canary 检查，无多余 lookupFormattedLayout
+    // 2. 连续绘制第 2~5 帧：cf._muiLayout 与 _muiHasEmoji 均应命中缓存，只有每帧 1 次 canary 检查，0 次多余 lookup / hasColorEmoji JNI 调用
     var lookupsAfterFrame1 = lookupCount
+    var emojiQueriesAfterFrame1 = emojiQueries
     drawCalls.length = 0
     for (var fi = 0; fi < 4; fi++) {
         paintHandlers[0](ev)
     }
-    assert.strictEqual(drawCalls.length, 26 * 4)
+    assert.strictEqual(drawCalls.length, 14 * 4)
     assert.strictEqual(lookupCount - lookupsAfterFrame1, 4, 'only 1 canary check per frame, 0 redundant glyph layout lookups')
+    assert.strictEqual(emojiQueries - emojiQueriesAfterFrame1, 0, '_muiHasEmoji must be cached on unit alongside _muiLayout')
 
     // 3. 模拟 F3+T 资源重载（TextLayoutEngine 返回新 canary 实例）：应立即递增 MUI_EPOCH 并刷新单位缓存
     currentEpochObj.ver = 2
     drawCalls.length = 0
     paintHandlers[0](ev)
-    assert.strictEqual(drawCalls.length, 26)
+    assert.strictEqual(drawCalls.length, 14)
     assert.ok(drawCalls.every(function (d) { return d.key.indexOf('2:') === 0 }), 'must immediately switch to post-reload TextLayout epoch 2')
 
-    // 4. stroke 模式在 ModernUI SDF 下（outlineWidth=1.05 <= 1.15）仅需 8 外圈 + 1 主体 = 9 次 drawText
+    // 4. stroke 模式（shadow:false）在 ModernUI SDF 下（outlineWidth=1.05 <= 1.15）仅需 8 外圈 + 1 主体 = 9 次 drawText
     Client.clear('*')
     drawCalls.length = 0
     Client.push({
@@ -1763,10 +1878,36 @@ test('renderer: ModernUI TextLayout fast path caches layouts, skips PoseStack/gl
         outlineMode: 'stroke',
         outlineColor: 0x050A10,
         outlineWidth: 1.05,
+        shadow: false,
         stay: 100
     })
     paintHandlers[0](ev)
     assert.strictEqual(drawCalls.length, 9)
+
+    // 5. ModernUI shadow 2-pass 回归测试：启用 shadow 时必须先绘阴影通道 (r>>2,g>>2,b>>2,isShadow=true,z=0)，
+    //    再于 +0.03f Z 绘制全亮度前景通道 (r,g,b,isShadow=false,z=+0.03)，防止仅传 isShadow=true 导致 25% 亮度变黑
+    Client.clear('*')
+    drawCalls.length = 0
+    Client.push({
+        title: '§c警告',
+        typewriter: false,
+        color: 0xFF8040,
+        outlineMode: 'none',
+        shadow: true,
+        stay: 100
+    })
+    paintHandlers[0](ev)
+    assert.strictEqual(drawCalls.length, 2, 'shadow:true ModernUI line must emit 2 drawText calls (shadow + foreground)')
+    assert.strictEqual(drawCalls[0].shadow, true)
+    assert.strictEqual(drawCalls[0].r, 63)
+    assert.strictEqual(drawCalls[0].g, 32)
+    assert.strictEqual(drawCalls[0].b, 16)
+    assert.strictEqual(drawCalls[0].z, 0)
+    assert.strictEqual(drawCalls[1].shadow, false)
+    assert.strictEqual(drawCalls[1].r, 255)
+    assert.strictEqual(drawCalls[1].g, 128)
+    assert.strictEqual(drawCalls[1].b, 64)
+    assert.ok(Math.abs(drawCalls[1].z - 0.03) < 0.001, 'foreground pass must sit +0.03 Z in front of shadow pass')
 })
 
 test('EpiphySpec: missing EpiphyProtocol throws explicit hard-dependency error', function () {
