@@ -42,18 +42,19 @@
         resumeMinDelayTicks:    10,   // 循环音源意外中断后的初始退避重连间隔 (tick)
         resumeMaxDelayTicks:    200,  // 循环音源退避重连最大间隔 (tick)
         stableTicks:            80,   // 音源连续稳定播放超过该时长后重置退避计数 (tick)
+        missingSoundGraceTicks: 100,  // 资源包重载或登录初期 getSoundEvent 尚未就绪时的容错等待窗口 (tick)
         maxEntries:             128,  // 客户端同时维护的最大句柄数
         defaultFadeOutTicks:    12,   // 默认软停止淡出时长 (tick)
         errorLogIntervalMs:     5000  // 限频错误日志间隔 (ms)
     }
+
+    var warnedKeys = new Set()
 
     var warnOnce = (key, msg) => {
         if (warnedKeys.has(key)) return
         warnedKeys.add(key)
         console.warn(`[EpiphyAudioClient] ${msg}`)
     }
-
-    var warnedKeys = new Set()
 
     var loadJavaClass = (name) => {
         if (typeof Java === 'undefined' || Java == null || typeof Java.loadClass !== 'function') return null
@@ -74,9 +75,21 @@
     var Vec3Class           = loadJavaClass('net.minecraft.world.phys.Vec3')
     var SystemClass         = loadJavaClass('java.lang.System')
 
-    var RANDOM             = RandomSource != null ? RandomSource.create() : null
+    var createRandomSource = () => {
+        if (RandomSource == null) return null
+        try {
+            if (typeof RandomSource.create === 'function') return RandomSource.create()
+            if (typeof RandomSource.m_216327_ === 'function') return RandomSource.m_216327_()
+        } catch (eRnd) {
+            warnOnce('randomSource', `RandomSource.create 调用失败: ${eRnd}`)
+        }
+        return null
+    }
+
+    var RANDOM             = createRandomSource()
     var entries            = new Map() // handleId (number) -> entry
-    var attCache           = new Map() // soundId -> attenuation_distance
+    var attCache           = new Map() // soundId -> attenuation_distance (仅缓存有效正值)
+    var missingSoundUntil  = new Map() // soundId -> 下次重探 getSoundEvent 的 tick（避免永久毒化 attCache）
     var duckedMusicInsts   = new Set() // 被 duckMusic 暂停的原版/第三方 MUSIC 频道 SoundInstance
     var pendingActions     = []
     var session              = null
@@ -268,33 +281,52 @@
         return null
     }
 
-    var MC_PAUSED_CAP   = { probed: false, kind: 'none', name: null }
-    var MC_ACTIVE_CAP   = { probed: false, kind: 'none', name: null }
-    var MC_SCREEN_CAP   = { probed: false, kind: 'none', name: null }
-    var CLI_SCREEN_CAP  = { probed: false, kind: 'none', name: null }
-    var MC_SM_CAP       = { probed: false, kind: 'none', name: null }
-    var MC_MM_CAP       = { probed: false, kind: 'none', name: null }
-    var MC_OPTS_CAP     = { probed: false, kind: 'none', name: null }
-    var CLI_LEVEL_CAP   = { probed: false, kind: 'none', name: null }
-    var CLI_PLAYER_CAP  = { probed: false, kind: 'none', name: null }
-    var CHANNEL_OPS     = {}
-    var MC_GET_FAILED   = false
+    var MC_PAUSED_CAP      = { probed: false, kind: 'none', name: null }
+    var MC_ACTIVE_CAP      = { probed: false, kind: 'none', name: null }
+    var MC_SCREEN_CAP      = { probed: false, kind: 'none', name: null }
+    var CLI_SCREEN_CAP     = { probed: false, kind: 'none', name: null }
+    var MC_SM_CAP          = { probed: false, kind: 'none', name: null }
+    var MC_MM_CAP          = { probed: false, kind: 'none', name: null }
+    var MC_OPTS_CAP        = { probed: false, kind: 'none', name: null }
+    var CLI_LEVEL_CAP      = { probed: false, kind: 'none', name: null }
+    var CLI_PLAYER_CAP     = { probed: false, kind: 'none', name: null }
+    var CHANNEL_OPS        = {}
+    var SOUND_MANAGER_OPS  = {}
+    var WEIGHED_OPS        = {}
+    var SOUND_OPS          = {}
+    var OPTIONS_OPS        = {}
+    var INST_OPS           = {}
+    var MC_GET_FAILED      = false
+    var MC_GET_FN          = null
 
     var getMc = () => {
         if (Minecraft != null && !MC_GET_FAILED) {
             try {
-                return Minecraft.getInstance()
+                if (MC_GET_FN == null) {
+                    if (typeof Minecraft.getInstance === 'function') MC_GET_FN = 'getInstance'
+                    else if (typeof Minecraft.m_91087_ === 'function') MC_GET_FN = 'm_91087_'
+                }
+                if (MC_GET_FN != null) {
+                    var mcInst = Minecraft[MC_GET_FN]()
+                    if (mcInst != null) return mcInst
+                }
             } catch (e) {
                 MC_GET_FAILED = true
                 warnOnce('mcGet', `Minecraft.getInstance 调用失败，回退 Client: ${e}`)
             }
         }
-        return (typeof Client !== 'undefined' && Client != null) ? Client : null
+        if (typeof Client !== 'undefined' && Client != null) {
+            try {
+                if (Client.minecraft != null) return Client.minecraft
+            } catch (eCliMc) {}
+            return Client
+        }
+        return null
     }
 
     var isClientPaused = () => {
         var m = getMc()
-        var v = probeMember(m, ['isPaused'], ['paused'], MC_PAUSED_CAP)
+        var v = probeMember(m, ['isPaused', 'm_91104_'], ['paused'], MC_PAUSED_CAP)
         return v !== undefined ? Boolean(v) : false
     }
 
@@ -317,43 +349,59 @@
 
     var getSoundManager = () => {
         var m = getMc()
-        var sm = probeMember(m, ['getSoundManager'], ['soundManager'], MC_SM_CAP)
+        if (m == null) return null
+        var sm = probeMember(m, ['getSoundManager', 'm_91106_'], ['soundManager', 'f_91042_'], MC_SM_CAP)
+        if (sm == null) {
+            sm = readJavaField(m, ['soundManager', 'f_91042_'], fieldCacheMcSoundMgr)
+        }
         return sm !== undefined ? sm : null
     }
 
     var resolveClientLevel = (event) => {
         if (event != null) {
-            var elv = typeof event.getLevel === 'function' ? event.getLevel() : event.level
-            if (elv != null) return elv
+            try {
+                var elv = typeof event.getLevel === 'function' ? event.getLevel() : event.level
+                if (elv != null) return elv
+            } catch (eLv0) {}
         }
         if (typeof Client !== 'undefined' && Client != null) {
-            var clv = probeMember(Client, ['getCurrentLevel'], ['level'], CLI_LEVEL_CAP)
+            var clv = probeMember(Client, ['getCurrentLevel', 'getLevel'], ['level'], CLI_LEVEL_CAP)
             if (clv != null) return clv
         }
         var m = getMc()
-        if (m != null && typeof m.getCameraEntity === 'function') {
-            var cam = m.getCameraEntity()
-            if (cam != null) {
-                var camLv = typeof cam.level === 'function' ? cam.level() : cam.level
-                if (camLv != null) return camLv
-            }
+        if (m != null) {
+            try {
+                if (typeof m.getCameraEntity === 'function') {
+                    var cam = m.getCameraEntity()
+                    if (cam != null) {
+                        var camLv = typeof cam.level === 'function' ? cam.level() : cam.level
+                        if (camLv != null) return camLv
+                    }
+                }
+            } catch (eCamLv) {}
         }
         return null
     }
 
     var resolveClientPlayer = (event) => {
         if (event != null) {
-            var ep = typeof event.getPlayer === 'function' ? event.getPlayer() : event.player
-            if (ep != null) return ep
+            try {
+                var ep = typeof event.getPlayer === 'function' ? event.getPlayer() : event.player
+                if (ep != null) return ep
+            } catch (ePl0) {}
         }
         if (typeof Client !== 'undefined' && Client != null) {
             var cp = probeMember(Client, null, ['player'], CLI_PLAYER_CAP)
             if (cp != null) return cp
         }
         var m = getMc()
-        if (m != null && typeof m.getCameraEntity === 'function') {
-            var cam = m.getCameraEntity()
-            if (cam != null) return cam
+        if (m != null) {
+            try {
+                if (typeof m.getCameraEntity === 'function') {
+                    var cam = m.getCameraEntity()
+                    if (cam != null) return cam
+                }
+            } catch (eCamPl) {}
         }
         return null
     }
@@ -423,27 +471,36 @@
 
     var getAttenuationDistance = (soundId) => {
         if (attCache.has(soundId)) return attCache.get(soundId)
-        var att = 16
         var sm = getSoundManager()
-        if (sm != null && ResourceLocation != null) {
-            try {
-                var weighed = sm.getSoundEvent(new ResourceLocation(String(soundId)))
-                if (weighed == null) {
-                    att = -1
-                } else if (RANDOM != null && typeof weighed.getSound === 'function') {
-                    var snd = weighed.getSound(RANDOM)
-                    if (snd != null && typeof snd.getAttenuationDistance === 'function') {
-                        var a = Number(snd.getAttenuationDistance())
+        if (sm == null || ResourceLocation == null) return 16
+        var missUntil = missingSoundUntil.get(soundId)
+        if (missUntil != null && clientTicks < missUntil) return -1
+        var att = 16
+        try {
+            var getEvtFn = probeMethodName(sm, ['getSoundEvent', 'm_120384_'], SOUND_MANAGER_OPS, 'getEvtFn')
+            var weighed  = getEvtFn != null ? sm[getEvtFn](new ResourceLocation(String(soundId))) : null
+            if (getEvtFn != null && weighed == null) {
+                missingSoundUntil.set(soundId, clientTicks + 40)
+                return -1
+            }
+            missingSoundUntil.delete(soundId)
+            if (weighed != null && RANDOM != null) {
+                var getSndFn = probeMethodName(weighed, ['getSound', 'm_213718_'], WEIGHED_OPS, 'getSndFn')
+                var snd      = getSndFn != null ? weighed[getSndFn](RANDOM) : null
+                if (snd != null) {
+                    var getAttFn = probeMethodName(snd, ['getAttenuationDistance', 'm_119800_'], SOUND_OPS, 'getAttFn')
+                    if (getAttFn != null) {
+                        var a = Number(snd[getAttFn]())
                         if (isFinite(a) && a > 0) att = a
                     }
                 }
-            } catch (e) {
-                warnOnce(`att:${soundId}`, `读取音效衰减距离失败 (${soundId})，使用默认值 16: ${e}`)
-                att = 16
             }
+            if (getEvtFn != null) attCache.set(soundId, att)
+            return att
+        } catch (e) {
+            warnOnce(`att:${soundId}`, `读取音效衰减距离失败 (${soundId})，使用默认值 16: ${e}`)
+            return 16
         }
-        attCache.set(soundId, att)
-        return att
     }
 
     // ======================================================================== 距离可听度判定与音源启停
@@ -488,6 +545,9 @@
     }
 
     var fieldCacheSoundEngine = { cls: null, field: null, prop: null }
+    var fieldCacheMcSoundMgr  = { cls: null, field: null, prop: null }
+    var fieldCacheMcGui       = { cls: null, field: null, prop: null }
+    var fieldCacheMcOptions   = { cls: null, field: null, prop: null }
     var fieldCacheChannelMap  = { cls: null, field: null, prop: null }
     var fieldCacheListeners   = { cls: null, field: null, prop: null }
     var fieldCacheSubOverlay  = { cls: null, field: null, prop: null }
@@ -584,17 +644,18 @@
     var syncSoundInstanceVolume = (inst, gain) => {
         if (inst == null) return
         // 原版 SoundEngine.m_174988_ 遇到 calculateVolume <= 0 会直接调 Channel.stop() 摧毁流！
-        // 因此更新 SimpleSoundInstance.volume (f_119573_) 时下限保底为 0.0001（静音时由 OpenAL pause/setVolume 控制），
+        // Forge 1.20.1 SRG 中 AbstractSoundInstance.volume 为 f_119572_（f_119573_ 为 pitch），下限保底 0.0001，
         // 同时消除 buildSoundInstance 首帧 fadeIn=0.02 残留导致暂停/切屏/重算音量后回落至 0.02 的问题。
         var instVol = clampNum(gain > 0.0001 ? gain : 0.0001, 0.0001, 2.0)
-        setJavaNumberField(inst, ['volume', 'f_119573_'], fieldCacheInstVolume, instVol, false)
+        setJavaNumberField(inst, ['volume', 'f_119572_'], fieldCacheInstVolume, instVol, false)
     }
 
     var syncSoundInstancePos = (inst, x, y, z) => {
         if (inst == null) return
-        setJavaNumberField(inst, ['x', 'f_119575_'], fieldCacheInstX, x, true)
-        setJavaNumberField(inst, ['y', 'f_119576_'], fieldCacheInstY, y, true)
-        setJavaNumberField(inst, ['z', 'f_119577_'], fieldCacheInstZ, z, true)
+        // AbstractSoundInstance 坐标字段在 Forge 1.20.1 SRG 中为 f_119574_ (x) / f_119575_ (y) / f_119576_ (z)
+        setJavaNumberField(inst, ['x', 'f_119574_'], fieldCacheInstX, x, true)
+        setJavaNumberField(inst, ['y', 'f_119575_'], fieldCacheInstY, y, true)
+        setJavaNumberField(inst, ['z', 'f_119576_'], fieldCacheInstZ, z, true)
     }
 
     var getSoundEngine = (sm) => {
@@ -604,11 +665,18 @@
 
     var getCategoryGainMultiplier = (catObj) => {
         var m = getMc()
-        if (m == null) return 1.0
-        var opts = probeMember(m, ['getOptions'], ['options'], MC_OPTS_CAP)
-        if (opts != null && typeof opts.getSoundSourceVolume === 'function') {
-            var masterVol = Number(opts.getSoundSourceVolume(SoundSource.MASTER))
-            var catVol    = catObj != null ? Number(opts.getSoundSourceVolume(catObj)) : 1.0
+        var opts = m != null ? probeMember(m, ['getOptions'], ['options', 'f_91066_'], MC_OPTS_CAP) : null
+        if (opts == null && m != null) {
+            opts = readJavaField(m, ['options', 'f_91066_'], fieldCacheMcOptions)
+        }
+        var volFn = opts != null ? probeMethodName(opts, ['getSoundSourceVolume', 'm_92147_'], OPTIONS_OPS, 'getVolFn') : null
+        if (volFn == null && typeof Client !== 'undefined' && Client != null && Client.options != null) {
+            opts  = Client.options
+            volFn = probeMethodName(opts, ['getSoundSourceVolume', 'm_92147_'], OPTIONS_OPS, 'getVolFn')
+        }
+        if (opts != null && volFn != null) {
+            var masterVol = Number(opts[volFn](SoundSource.MASTER))
+            var catVol    = catObj != null ? Number(opts[volFn](catObj)) : 1.0
             if (isFinite(masterVol) && isFinite(catVol)) {
                 return clampNum(masterVol * catVol, 0.0, 1.0)
             }
@@ -630,7 +698,7 @@
         var mul = getCategoryGainMultiplier(entry.catObj)
         entry.lastCatMul = mul
         var finalGain = clampNum(gain * mul, 0.0, 2.0)
-        var shouldPauseMute = Boolean(entry.spec.loop && (mul <= 0.0001 || (finalGain <= 0.0001 && entry.spec.omode === 'mute')))
+        var shouldPauseMute = Boolean(entry.spec.loop && (mul <= 0.0001 || (finalGain <= 0.0001 && entry.spec.outMode === 'mute')))
         var shouldUnpause   = Boolean(!shouldPauseMute && (forceUnpause || entry._pausedByMute))
         try {
             chHandle.execute((ch) => {
@@ -684,7 +752,13 @@
 
     var buildSoundInstance = (entry, lv, localPlayer) => {
         var spec = entry.spec
+        if (Attenuation == null || ResourceLocation == null || SimpleSoundInstance == null) {
+            return null
+        }
         if (getAttenuationDistance(spec.snd) < 0) {
+            if ((clientTicks - (entry.created || clientTicks)) < CONFIG.missingSoundGraceTicks) {
+                return { wait: true }
+            }
             warnOnce(`missing:${spec.snd}`, `音频 "${spec.snd}" 未在 sounds.json 中定义，已跳过播放`)
             return null
         }
@@ -753,7 +827,8 @@
         var sm = getSoundManager()
         if (sm != null) {
             try {
-                sm.stop(entry.inst)
+                var stopFn = probeMethodName(sm, ['stop', 'm_120400_'], SOUND_MANAGER_OPS, 'stopFn')
+                if (stopFn != null) sm[stopFn](entry.inst)
             } catch (e) {
                 logErrorThrottled('sm.stop error', e)
             }
@@ -802,7 +877,7 @@
         if (!entry.fadingOut && entry.spec != null && entry.spec.loop) {
             var curMul  = getCategoryGainMultiplier(entry.catObj)
             var curGain = computeAudibleGain(entry, getEntityPos(localPlayer))
-            if (curMul <= 0.0001 || (curGain <= 0.0001 && entry.spec.omode === 'mute')) {
+            if (curMul <= 0.0001 || (curGain <= 0.0001 && entry.spec.outMode === 'mute')) {
                 entry._standbyMuted = true
                 return true
             }
@@ -841,7 +916,12 @@
         var sm = getSoundManager()
         if (sm != null) {
             try {
-                sm.play(entry.inst)
+                var playFn = probeMethodName(sm, ['play', 'm_120367_'], SOUND_MANAGER_OPS, 'playFn')
+                if (playFn != null) {
+                    sm[playFn](entry.inst)
+                } else {
+                    warnOnce(`playNoFn:${entry.spec.snd}`, 'SoundManager 缺少 play / m_120367_ 方法，无法播放音频')
+                }
             } catch (e) {
                 warnOnce(`play:${entry.spec.snd}`, `调用 SoundManager.play 失败 (${entry.spec.snd}): ${e}`)
             }
@@ -854,6 +934,19 @@
     // 原版 SoundEngine.play(SoundInstance) 在检查 volume <= 0 之前就会先通知所有 SoundEventListener (含 SubtitleOverlay)，
     // 且当 !canStartSilent() && volume <= 0 时会在通知完 SubtitleOverlay 后立即返回，不分配任何 OpenAL 通道或解码音频流！
     // 因此每 24 tick (1.2s) 发送一次 volume=0.0、带 3D 坐标与 LINEAR 衰减的 SimpleSoundInstance，即可零开销保持右下角字幕常驻并实时更新 < > 方向！
+    var invokeOnPlaySound = (lsn, inst, weighed) => {
+        if (lsn == null) return false
+        if (typeof lsn.onPlaySound === 'function') {
+            lsn.onPlaySound(inst, weighed)
+            return true
+        }
+        if (typeof lsn.m_7761_ === 'function') {
+            lsn.m_7761_(inst, weighed)
+            return true
+        }
+        return false
+    }
+
     var refreshSubtitleForEntry = (entry, sm) => {
         if (entry == null || entry.inst == null || entry.fadingOut || entry.muted) return
         if (!entry.spec.loop) return
@@ -862,8 +955,9 @@
 
         entry.lastSubPingTick = clientTicks
         try {
-            var resLoc  = new ResourceLocation(entry.spec.snd)
-            var weighed = sm.getSoundEvent(resLoc)
+            var resLoc   = new ResourceLocation(entry.spec.snd)
+            var getEvtFn = probeMethodName(sm, ['getSoundEvent', 'm_120384_'], SOUND_MANAGER_OPS, 'getEvtFn')
+            var weighed  = getEvtFn != null ? sm[getEvtFn](resLoc) : null
             if (weighed == null) return
 
             var notified = false
@@ -875,10 +969,11 @@
                     var it = listeners.iterator()
                     while (it.hasNext()) {
                         var lsn = it.next()
-                        if (lsn != null && typeof lsn.onPlaySound === 'function') {
+                        if (lsn != null) {
                             try {
-                                lsn.onPlaySound(entry.inst, weighed)
-                                notified = true
+                                if (invokeOnPlaySound(lsn, entry.inst, weighed)) {
+                                    notified = true
+                                }
                             } catch (eLsn) {
                                 logErrorThrottled('subtitleListener error', eLsn)
                             }
@@ -888,13 +983,12 @@
             }
 
             if (!notified) {
-                var mc = getMc()
-                var gui = mc != null ? mc.gui : null
+                var mc  = getMc()
+                // Minecraft.gui 在 Forge 1.20.1 SRG 中为 f_91065_
+                var gui = mc != null ? readJavaField(mc, ['gui', 'f_91065_'], fieldCacheMcGui) : null
                 // Gui.subtitleOverlay 在 Forge 1.20.1 SRG 中为 f_92996_
                 var subOv = gui != null ? readJavaField(gui, ['subtitleOverlay', 'f_92996_'], fieldCacheSubOverlay) : null
-                if (subOv != null && typeof subOv.onPlaySound === 'function') {
-                    subOv.onPlaySound(entry.inst, weighed)
-                }
+                invokeOnPlaySound(subOv, entry.inst, weighed)
             }
         } catch (e) {
             logErrorThrottled('refreshSubtitle error', e)
@@ -938,7 +1032,7 @@
         var m = getMc()
         if (m != null) {
             try {
-                var mm = probeMember(m, ['getMusicManager'], ['musicManager'], MC_MM_CAP)
+                var mm = probeMember(m, ['getMusicManager', 'm_91107_'], ['musicManager', 'f_91043_'], MC_MM_CAP)
                 if (mm != null && typeof mm.stopPlaying === 'function') {
                     mm.stopPlaying()
                 }
@@ -962,7 +1056,8 @@
                         var inst     = kv != null ? kv.getKey() : null
                         var chHandle = kv != null ? kv.getValue() : null
                         if (inst == null || chHandle == null || ownInsts.has(inst)) continue
-                        var srcCat = (typeof inst.getSource === 'function') ? inst.getSource() : null
+                        var srcFn  = probeMethodName(inst, ['getSource', 'm_7492_'], INST_OPS, 'srcFn')
+                        var srcCat = srcFn != null ? inst[srcFn]() : null
                         if (srcCat == null || (srcCat !== SoundSource.MUSIC && String(srcCat) !== String(SoundSource.MUSIC))) {
                             continue
                         }
@@ -1034,12 +1129,14 @@
         if (ses != null && ses !== session) {
             clearAllNow()
             attCache.clear()
+            missingSoundUntil.clear()
             session = ses
         }
 
         if (act === 'reset') {
             clearAllNow()
             attCache.clear()
+            missingSoundUntil.clear()
             return
         }
 
@@ -1112,7 +1209,8 @@
                     var stillActive = true
                     if (sm != null) {
                         try {
-                            stillActive = Boolean(sm.isActive(cur.inst))
+                            var activeFn = probeMethodName(sm, ['isActive', 'm_120404_'], SOUND_MANAGER_OPS, 'activeFn')
+                            if (activeFn != null) stillActive = Boolean(sm[activeFn](cur.inst))
                         } catch (e) {
                             logErrorThrottled('sm.isActive error', e)
                         }
@@ -1207,6 +1305,8 @@
     // ======================================================================== 客户端 Tick 驱动与巡检
 
     var prepareEntriesForResume = () => {
+        attCache.clear()
+        missingSoundUntil.clear()
         for (var e of entries.values()) {
             if (e == null) continue
             e.lastSentAlGain    = -1.0
@@ -1307,7 +1407,8 @@
                 active = false
             } else {
                 try {
-                    active = Boolean(sm.isActive(entry.inst))
+                    var activeFnSweep = probeMethodName(sm, ['isActive', 'm_120404_'], SOUND_MANAGER_OPS, 'activeFn')
+                    if (activeFnSweep != null) active = Boolean(sm[activeFnSweep](entry.inst))
                 } catch (e) {
                     logErrorThrottled('sweep sm.isActive error', e)
                     active = true
@@ -1327,7 +1428,7 @@
 
             // 循环音源意外中断（如切换音频设备、F3+T 重载资源包或切屏被底层回收）：静音待命时不空转重连，恢复可听后再重启
             var curMulSweep = getCategoryGainMultiplier(entry.catObj)
-            var isMutedStandby = (curMulSweep <= 0.0001) || ((entry.currentAlGain || 0) <= 0.0001 && entry.spec.omode === 'mute')
+            var isMutedStandby = (curMulSweep <= 0.0001) || ((entry.currentAlGain || 0) <= 0.0001 && entry.spec.outMode === 'mute')
             stopSoundInstance(entry)
             if (isMutedStandby) {
                 entry._standbyMuted = true
@@ -1416,6 +1517,8 @@
 
     var resetClientState = () => {
         clearAllNow()
+        attCache.clear()
+        missingSoundUntil.clear()
         pendingActions.length = 0
         lastLevelKey          = ''
         wasPaused             = false

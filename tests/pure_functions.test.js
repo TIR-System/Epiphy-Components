@@ -1643,7 +1643,7 @@ test('audio-client: ESC pause and window focus resume resyncs gain, unpauses cha
         player: playerObj
     }
     function MockSoundInstance(res, cat, vol, pit, rnd, loop, delay, att, x, y, z, rel) {
-        this.res = res; this.f_119573_ = vol; this.pit = pit; this.loop = loop
+        this.res = res; this.f_119572_ = vol; this.f_119573_ = pit; this.f_119574_ = x; this.f_119575_ = y; this.f_119576_ = z; this.f_119577_ = Boolean(loop)
     }
 
     var cliSandbox = {
@@ -1660,7 +1660,7 @@ test('audio-client: ESC pause and window focus resume resyncs gain, unpauses cha
         Java: {
             loadClass: function (cls) {
                 if (cls === 'net.minecraft.client.Minecraft') return { getInstance: function () { return mockMc } }
-                if (cls === 'net.minecraft.resources.ResourceLocation') return function (s) { return String(s) }
+                if (cls === 'net.minecraft.resources.ResourceLocation') return function (s) { this._id = String(s); this.toString = function () { return this._id } }
                 if (cls === 'net.minecraft.sounds.SoundSource') return { MASTER: 'MASTER', RECORDS: 'RECORDS', MUSIC: 'MUSIC', valueOf: function (n) { return n } }
                 if (cls === 'net.minecraft.util.RandomSource') return { create: function () { return {} } }
                 if (cls === 'net.minecraft.client.resources.sounds.SimpleSoundInstance') return MockSoundInstance
@@ -1689,7 +1689,8 @@ test('audio-client: ESC pause and window focus resume resyncs gain, unpauses cha
     })
     for (var i = 0; i < 30; i++) tickHandlers[0]({})
     assert.strictEqual(playCalls.length, 1)
-    assert.ok(playCalls[0].f_119573_ > 0.7, 'SimpleSoundInstance Java volume (f_119573_) must sync past initial fadeIn 0.02')
+    assert.ok(playCalls[0].f_119572_ > 0.7, 'SimpleSoundInstance Java volume (f_119572_) must sync past initial fadeIn 0.02')
+    assert.strictEqual(playCalls[0].f_119573_, 1.0, 'SimpleSoundInstance Java pitch (f_119573_) must not be overwritten by volume')
 
     // 2. 模拟 ESC 暂停 + 切屏失焦，再回到游戏（玩家坐标全程未移动）
     volCalls.length = 0
@@ -3915,7 +3916,7 @@ test('P1 regressions (audio client & server): ducking pause/restore, 3D Channel 
         Java: {
             loadClass: function (cls) {
                 if (cls === 'net.minecraft.client.Minecraft') return { getInstance: function () { return mockMc } }
-                if (cls === 'net.minecraft.resources.ResourceLocation') return function (s) { return String(s) }
+                if (cls === 'net.minecraft.resources.ResourceLocation') return function (s) { this._id = String(s); this.toString = function () { return this._id } }
                 if (cls === 'net.minecraft.sounds.SoundSource') return { MASTER: 'MASTER', RECORDS: 'RECORDS', MUSIC: 'MUSIC', valueOf: function (n) { return n } }
                 if (cls === 'net.minecraft.util.RandomSource') return { create: function () { return {} } }
                 if (cls === 'net.minecraft.client.resources.sounds.SimpleSoundInstance') return MockSoundInst
@@ -4255,6 +4256,279 @@ test('permission layering: individual danmaku.self grant, child revoke override 
     assert.strictEqual(authNode._children.scopes._exec({ source: opSrc }), 1)
     assert.ok(opOut.some(function (l) { return l.indexOf('danmaku.self') >= 0 }), 'auth scopes output lists danmaku.self')
     assert.ok(opOut.some(function (l) { return l.indexOf('audio.broadcast') >= 0 }), 'auth scopes output lists audio.broadcast')
+})
+
+// ----------------------------------------------------------------------------
+// 35. Audio Forge 1.20.1 SRG-only production runtime + Epiphy的小玩意_功能测试 e2e
+// ----------------------------------------------------------------------------
+test('Epiphy的小玩意_功能测试 & EpiphyAudioClient: SRG-only Forge runtime, subtitle m_7761_ & attCache recovery', function () {
+    var TEST_BLOCK_PATH = path.resolve(__dirname, '../kubejs/startup_scripts/通用组件/Epiphy的小玩意_功能测试.js')
+
+    // 1. Load startup (Spec + Epiphy的小玩意_功能测试.js) + server (Base + BlockTracker + Audio)
+    var registeredSounds = []
+    var registeredBlocks = []
+    var placedCbs = []
+    var brokenCbs = []
+    var serverTicks = []
+    var playerPos = { x: 10, y: 64, z: 10 }
+    var worldBlocks = {}
+    var srvPlayer = {
+        username: 'Tester',
+        uuid: '00000000-0000-4000-8000-0000000000f1',
+        getId: function () { return 77 },
+        getName: function () { return { getString: function () { return 'Tester' } } },
+        getStringUUID: function () { return '00000000-0000-4000-8000-0000000000f1' },
+        isOp: function () { return true },
+        getX: function () { return playerPos.x },
+        getY: function () { return playerPos.y },
+        getZ: function () { return playerPos.z },
+        getLevel: function () { return srvLevel },
+        level: null,
+        sendData: function (ch, pkt) { this._sent.push({ ch: ch, pkt: pkt }) },
+        _sent: []
+    }
+    var srvLevel = {
+        getDimension: function () { return 'minecraft:overworld' },
+        dimension: 'minecraft:overworld',
+        hasChunk: function () { return true },
+        isLoaded: function () { return true },
+        getBlock: function (x, y, z) {
+            return worldBlocks[Math.floor(x) + ',' + Math.floor(y) + ',' + Math.floor(z)] || { id: 'minecraft:air' }
+        },
+        getPlayers: function () { return [srvPlayer] }
+    }
+    srvPlayer.level = srvLevel
+    var srvObj = {
+        getWorldData: function () { return { getLevelName: function () { return 'TestBlockSrg' }, getAllowCommands: function () { return true } } },
+        getLevel: function () { return srvLevel },
+        getAllLevels: function () { return [srvLevel] },
+        getPlayerList: function () { return { getPlayers: function () { return [srvPlayer] } } },
+        players: [srvPlayer],
+        overworld: function () { return srvLevel },
+        persistentData: {}
+    }
+
+    var svSb = {
+        console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+        StartupEvents: {
+            registry: function (kind, fn) {
+                fn({
+                    create: function (id) {
+                        if (kind === 'sound_event') registeredSounds.push(id)
+                        if (kind === 'block') registeredBlocks.push(id)
+                        var b = {
+                            displayName: function () { return b }, soundType: function () { return b },
+                            hardness: function () { return b }, resistance: function () { return b },
+                            textureAll: function () { return b }, texture: function () { return b }
+                        }
+                        return b
+                    }
+                })
+            }
+        },
+        ServerEvents: {
+            loaded: function (fn) { fn({ server: srvObj }) },
+            tick: function (fn) { serverTicks.push(fn) },
+            commandRegistry: function () {}
+        },
+        BlockEvents: {
+            placed: function (fn) { placedCbs.push(fn) },
+            broken: function (fn) { brokenCbs.push(fn) }
+        },
+        PlayerEvents: { loggedIn: function () {}, loggedOut: function () {} },
+        Java: { loadClass: function () { return null } },
+        global: {}
+    }
+    var svCon = attachConsoleCapture(svSb)
+    svSb.globalThis = svSb
+    vm.createContext(svSb)
+    loadStartupBase(svSb)
+    runScriptIn(svSb, TEST_BLOCK_PATH)
+    runScriptIn(svSb, SERVER_BASE_PATH)
+    runScriptIn(svSb, TRACKER_PATH)
+    runScriptIn(svSb, AUDIO_PATH)
+
+    assert.ok(registeredSounds.indexOf('epiphy:children_of_the_city') >= 0, '功能测试 must register epiphy:children_of_the_city')
+    assert.ok(registeredBlocks.indexOf('epiphy:rnfmabj_test') >= 0, '功能测试 must register epiphy:rnfmabj_test')
+
+    // Step initial server ticks past login grace, then place epiphy:rnfmabj_test block
+    for (var st = 0; st < 12; st++) {
+        for (var sti = 0; sti < serverTicks.length; sti++) serverTicks[sti]({ server: srvObj })
+    }
+    srvPlayer._sent.length = 0
+    var placedBlock = {
+        id: 'epiphy:rnfmabj_test',
+        x: 12, y: 64, z: 10,
+        getId: function () { return 'epiphy:rnfmabj_test' },
+        getX: function () { return 12 }, getY: function () { return 64 }, getZ: function () { return 10 },
+        getLevel: function () { return srvLevel },
+        level: srvLevel
+    }
+    worldBlocks['12,64,10'] = placedBlock
+    for (var pci = 0; pci < placedCbs.length; pci++) {
+        placedCbs[pci]({ block: placedBlock, level: srvLevel, server: srvObj, player: srvPlayer })
+    }
+    var playPkts = srvPlayer._sent.filter(function (item) { return item.ch === 'epiphy:audio' && item.pkt && item.pkt.act === 'play' })
+    assert.strictEqual(playPkts.length, 1, 'placing epiphy:rnfmabj_test must emit epiphy:children_of_the_city play packet')
+    assert.strictEqual(playPkts[0].pkt.snd, 'epiphy:children_of_the_city')
+
+    // 2. Load EpiphyAudioClient in STRICT Forge 1.20.1 SRG-only sandbox (zero Mojmap names on vanilla classes!)
+    var srgTick = null
+    var srgNet  = null
+    var srgLoggedIn = null
+    var srgPlayed = []
+    var srgStopped = []
+    var srgSubs = []
+    var srgGuiSubs = []
+    var srgChanVols = []
+    var srgPaused = 0
+    var srgUnpaused = 0
+    var srgPosMoved = []
+    var srgActive = new Set()
+    var srgChanMap = new Map()
+    var soundEventReady = false // initially null -> simulates cold resource reload!
+
+    function SrgSoundInstance(res, cat, vol, pit, rnd, loop, delay, att, x, y, z, rel) {
+        assert.ok(rnd != null, 'RandomSource created via m_216327_ must be non-null')
+        this.res = res; this.cat = cat
+        this.f_119572_ = vol // volume
+        this.f_119573_ = pit // pitch
+        this.f_119574_ = x   // x
+        this.f_119575_ = y   // y
+        this.f_119576_ = z   // z
+        this.f_119577_ = Boolean(loop) // boolean looping
+        this.rel = rel
+    }
+    SrgSoundInstance.prototype.m_7492_ = function () { return this.cat }
+
+    var srgSubtitleListener = {
+        m_7761_: function (inst, weighed) { srgSubs.push({ snd: String(inst.res), weighed: weighed }) }
+    }
+    var srgGuiFallbackSub = {
+        m_7761_: function (inst, weighed) { srgGuiSubs.push({ snd: String(inst.res), weighed: weighed }) }
+    }
+    var srgListenerList = [srgSubtitleListener]
+    srgListenerList.iterator = function () {
+        var idx = 0
+        var arr = this
+        return {
+            hasNext: function () { return idx < arr.length },
+            next: function () { return arr[idx++] }
+        }
+    }
+    var srgSoundManager = {
+        f_120349_: { f_120226_: srgChanMap, f_120231_: srgListenerList },
+        m_120384_: function (resLoc) {
+            if (!soundEventReady) return null
+            if (String(resLoc) !== 'epiphy:children_of_the_city') return null
+            return {
+                m_213718_: function () {
+                    return { m_119800_: function () { return 64 } }
+                }
+            }
+        },
+        m_120367_: function (inst) {
+            srgPlayed.push(inst)
+            srgActive.add(inst)
+            var ch = {
+                m_83666_: function (v) { srgChanVols.push(v) },
+                m_83677_: function () { srgPaused++ },
+                m_83678_: function () { srgUnpaused++ },
+                m_83680_: function () { return false },
+                m_83654_: function (vec) { srgPosMoved.push([vec.x, vec.y, vec.z]) }
+            }
+            srgChanMap.set(inst, { execute: function (fn) { fn(ch) } })
+        },
+        m_120400_: function (inst) { srgStopped.push(inst); srgActive.delete(inst); srgChanMap.delete(inst) },
+        m_120404_: function (inst) { return srgActive.has(inst) }
+    }
+    var cliPlayer = {
+        getId: function () { return 77 },
+        getX: function () { return playerPos.x },
+        getY: function () { return playerPos.y },
+        getZ: function () { return playerPos.z }
+    }
+    var rawSrgMc = {
+        m_91104_: function () { return false }, // isPaused
+        m_91294_: function () { return true },  // isWindowActive
+        f_91080_: null,                          // screen
+        m_91106_: function () { return srgSoundManager }, // getSoundManager
+        f_91065_: { f_92996_: srgGuiFallbackSub }, // gui.subtitleOverlay
+        f_91066_: { m_92147_: function () { return 1.0 } }, // options.getSoundSourceVolume
+        m_91107_: function () { return {} } // getMusicManager
+    }
+    // KubeJS Client wrapper has Client.minecraft = rawSrgMc, NOT SoundManager!
+    var kubeClientWrapper = {
+        minecraft: rawSrgMc,
+        level: { getDimension: function () { return 'minecraft:overworld' } },
+        player: cliPlayer,
+        getCurrentScreen: function () { return null },
+        getCurrentLevel: function () { return kubeClientWrapper.level }
+    }
+
+    var srgCliSb = {
+        console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+        ClientEvents: {
+            tick: function (fn) { srgTick = fn },
+            loggedOut: function () {},
+            loggedIn: function (fn) { srgLoggedIn = fn }
+        },
+        NetworkEvents: {
+            dataReceived: function (ch, fn) { if (ch === 'epiphy:audio') srgNet = fn }
+        },
+        Client: kubeClientWrapper,
+        Java: {
+            loadClass: function (cls) {
+                if (cls === 'net.minecraft.client.Minecraft') return { m_91087_: function () { return rawSrgMc } }
+                if (cls === 'net.minecraft.resources.ResourceLocation') return function (s) { this._id = String(s); this.toString = function () { return this._id } }
+                if (cls === 'net.minecraft.sounds.SoundSource') return { MASTER: 'MASTER', RECORDS: 'RECORDS', MUSIC: 'MUSIC', valueOf: function (n) { return n } }
+                if (cls === 'net.minecraft.util.RandomSource') return { m_216327_: function () { return { _srgRandom: true } } }
+                if (cls === 'net.minecraft.client.resources.sounds.SimpleSoundInstance') return SrgSoundInstance
+                if (cls === 'net.minecraft.client.resources.sounds.SoundInstance$Attenuation') return { NONE: 'NONE', LINEAR: 'LINEAR' }
+                if (cls === 'net.minecraft.world.phys.Vec3') return function (x, y, z) { return { x: x, y: y, z: z } }
+                return null
+            }
+        },
+        global: {}
+    }
+    var srgCliCon = attachConsoleCapture(srgCliSb)
+    srgCliSb.globalThis = srgCliSb
+    vm.createContext(srgCliSb)
+    loadStartupBase(srgCliSb)
+    runScriptIn(srgCliSb, AUDIO_CLIENT_PATH)
+    assert.ok(srgCliSb.global.EpiphyAudioClient != null, 'EpiphyAudioClient must load in SRG-only runtime')
+
+    // Dispatch real server play packet while SoundManager is transiently not ready for 2 ticks
+    srgNet({ data: playPkts[0].pkt })
+    srgTick({}); srgTick({})
+    assert.strictEqual(srgPlayed.length, 0)
+    assert.strictEqual(srgCliSb.global.EpiphyAudioClient.count(), 1, 'transient null getSoundEvent must wait instead of deleting entry or poisoning attCache')
+
+    // Resource reload finishes -> after missingSoundUntil (40t) retry expires, plays and refreshes bottom-right subtitle (m_7761_) every 24t
+    soundEventReady = true
+    for (var ct = 0; ct < 80; ct++) srgTick({})
+    assert.strictEqual(srgPlayed.length, 1, 'SRG SoundManager.m_120367_ must play after transient soundEventReady delay')
+    assert.ok(srgPlayed[0].f_119572_ > 0.7, 'volume (f_119572_) must ramp up cleanly')
+    assert.strictEqual(srgPlayed[0].f_119573_, 1.0, 'pitch (f_119573_) must not be overwritten by volume')
+    assert.strictEqual(srgPlayed[0].f_119577_, true, 'looping (f_119577_) must stay boolean true')
+    assert.ok(srgSubs.length >= 1, 'bottom-right SubtitleOverlay.m_7761_ must receive subtitle ping in SRG mode')
+
+    // Also verify Gui.f_92996_ (subtitleOverlay) fallback when SoundEngine.f_120231_ is empty
+    srgSoundManager.f_120349_.f_120231_.length = 0
+    for (var gt = 0; gt < 30; gt++) srgTick({})
+    assert.ok(srgGuiSubs.length >= 1, 'Gui.f_92996_ subtitleOverlay.m_7761_ fallback must trigger when listeners empty')
+
+    // Move out of range (rng=30, move x=100) -> outMode='mute' (NOT omode) must trigger Channel.pause (m_83677_)!
+    playerPos.x = 100
+    for (var ot = 0; ot < 40; ot++) srgTick({})
+    assert.ok(srgPaused >= 1, 'outMode=mute must pause channel when distance > range')
+
+    // Move back into range -> resumes via Channel.unpause (m_83678_)
+    playerPos.x = 12
+    for (var rt = 0; rt < 15; rt++) srgTick({})
+    assert.ok(srgUnpaused >= 1, 'returning in range must unpause muted channel')
+    assert.strictEqual(srgCliCon.errors.length, 0, 'SRG audio pipeline must emit zero errors')
+    assert.strictEqual(svCon.errors.length, 0, 'server audio block test must emit zero errors')
 })
 
 var passed = 0
