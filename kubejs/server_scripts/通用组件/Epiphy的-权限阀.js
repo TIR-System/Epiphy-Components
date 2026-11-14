@@ -1,13 +1,13 @@
 // priority: 1000
 // ============================================================================
-//  通用指令权限阀与 /epiphy 根命令注册中心 (EpiphyPermissionValve v5)
+//  通用指令权限阀与 /epiphy 根命令注册中心 (EpiphyPermissionValve v5.1)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/server_scripts/通用组件/Epiphy的-权限阀.js
 //
 //  职责说明：
-//    1. 统一接管 `/epiphy` 根指令树，向各业务组件提供子命令挂载与 `/epiphy help` 帮助聚合（总览仅显示各模块一句话 summary，输入 `/epiphy help <模块>` 查看详情）；
+//    1. 统一接管 `/epiphy` 根指令树，向各业务组件提供子命令挂载、细粒度分层权限域 (`module` / `module.action` / `exactScopeOnly` 广播特权)、`/epiphy auth scopes [模块]` 查看与 `/epiphy help` 帮助聚合（总览仅显示各模块一句话 summary，输入 `/epiphy help <模块>` 查看详情）；
 //    2. 外部统一持久化、防回滚墓碑与 Fail-Closed 按名备用模式：
 //       - 将每个世界的授权与撤销数据落盘至独立外部目录 `epiphy-data/worlds/<世界slug>__<短worldId>/`（`permissions.json`、`revocations.json`、`auth_mode.json`），首次升级支持从旧 `saves/<存档>/kubejs_epiphy_permissions.json` 一次性迁移；
 //       - 若检测到存档被复制导致 `lastWorldPath` 变化，由 `EpiphyServerBase` 自动分叉新世界目录并在 OP 进服时提醒手动清理旧目录；
@@ -213,7 +213,42 @@
 
     function normalizeScope(scope) {
         var s = normalizeKey(scope)
+        if (!s || s === 'all' || s === '*') return '*'
+        s = s.replace(/[\/:]+/g, '.').replace(/\.+/g, '.').replace(/^\.+|\.+$/g, '')
         return (!s || s === 'all' || s === '*') ? '*' : s
+    }
+
+    function isReservedScope(scope) {
+        var s = normalizeScope(scope)
+        if (RESERVED_SUBCOMMANDS[s]) return true
+        return s.indexOf('auth.') === 0 || s.indexOf('help.') === 0
+    }
+
+    function buildScopeHierarchy(scope) {
+        var norm = normalizeScope(scope)
+        if (norm === '*') return ['*']
+        var out = []
+        var cur = norm
+        while (cur) {
+            out.push(cur)
+            var dot = cur.lastIndexOf('.')
+            if (dot <= 0) break
+            cur = cur.substring(0, dot)
+        }
+        out.push('*')
+        return out
+    }
+
+    function scopeMatchesSet(scopeSet, targetScope, exactScopeOnly) {
+        if (scopeSet == null) return false
+        var chain = buildScopeHierarchy(targetScope)
+        if (exactScopeOnly) {
+            return Boolean(scopeSet[chain[0]] || scopeSet['*'])
+        }
+        for (var i = 0; i < chain.length; i++) {
+            if (scopeSet[chain[i]]) return true
+        }
+        return false
     }
 
     function normalizeAllowedCallersList(rawList) {
@@ -289,6 +324,7 @@
             var callerWhitelist = rawPolicy.allowedCallers !== undefined
                 ? normalizeAllowedCallersList(rawPolicy.allowedCallers)
                 : seed.allowedCallers
+            var rawScopeStr = rawPolicy.scope != null ? String(rawPolicy.scope).trim() : ''
             return {
                 mode:                 String((presetNorm === 'custom') ? 'custom' : (presetNorm ? seed.mode : 'custom')),
                 label:                String(rawPolicy.label || seed.label),
@@ -300,6 +336,9 @@
                 allowConsole:         rawPolicy.allowConsole !== undefined ? Boolean(rawPolicy.allowConsole) : seed.allowConsole,
                 allowDeclaredCallers: rawPolicy.allowDeclaredCallers !== undefined ? Boolean(rawPolicy.allowDeclaredCallers) : seed.allowDeclaredCallers,
                 allowedCallers:       callerWhitelist,
+                scope:                rawScopeStr ? normalizeScope(rawScopeStr) : (seed.scope || ''),
+                exactScopeOnly:       rawPolicy.exactScopeOnly !== undefined ? Boolean(rawPolicy.exactScopeOnly) : Boolean(seed.exactScopeOnly),
+                allowSubScopes:       rawPolicy.allowSubScopes !== undefined ? Boolean(rawPolicy.allowSubScopes) : Boolean(seed.allowSubScopes),
                 customCheck:          typeof rawPolicy.customCheck === 'function' ? rawPolicy.customCheck : null
             }
         }
@@ -846,16 +885,53 @@
         return false
     }
 
-    function checkScopeInRecord(rec, targetScope, revocationsMap, userKey) {
-        if (rec == null || rec.scopes == null) return false
-        var starMeta = rec.scopes['*']
-        if (starMeta && !isGrantSupersededByRevocation(revocationsMap, userKey, '*', starMeta.atMs)) {
-            return true
-        }
-        if (targetScope) {
-            var scMeta = rec.scopes[targetScope]
-            if (scMeta && !isGrantSupersededByRevocation(revocationsMap, userKey, targetScope, scMeta.atMs)) {
+    function isChildScopeRevokedSince(revocationsMap, userKey, chain, parentIdx, grantAtMs) {
+        if (!revocationsMap || !userKey) return false
+        var rec = revocationsMap[userKey]
+        if (!rec) return false
+        var gTs = (grantAtMs != null && isFinite(Number(grantAtMs))) ? Number(grantAtMs) : 0
+        for (var j = 0; j < parentIdx; j++) {
+            var childScope = chain[j]
+            var childRev = rec[childScope]
+            if (childRev && Number(childRev.revokedAtMs || 0) >= gTs) {
                 return true
+            }
+        }
+        return false
+    }
+
+    function checkScopeInRecord(rec, targetScope, revocationsMap, userKey, opts) {
+        if (rec == null || rec.scopes == null) return false
+        var normTarget = normalizeScope(targetScope)
+        var exactOnly  = Boolean(opts && opts.exactScopeOnly)
+        var allowSubs  = Boolean(opts && opts.allowSubScopes)
+        var chain      = buildScopeHierarchy(normTarget)
+        var checkOrder = exactOnly
+            ? (chain[0] === '*' ? ['*'] : [chain[0], '*'])
+            : chain
+
+        for (var i = 0; i < checkOrder.length; i++) {
+            var cand = checkOrder[i]
+            var meta = rec.scopes[cand]
+            if (meta && !isGrantSupersededByRevocation(revocationsMap, userKey, cand, meta.atMs)) {
+                var chainIdx = exactOnly ? (cand === '*' ? chain.length - 1 : 0) : i
+                if (!isChildScopeRevokedSince(revocationsMap, userKey, chain, chainIdx, meta.atMs)) {
+                    return true
+                }
+            }
+        }
+
+        if (allowSubs && normTarget && normTarget !== '*') {
+            var prefix = normTarget + '.'
+            for (var sc in rec.scopes) {
+                if (!Object.prototype.hasOwnProperty.call(rec.scopes, sc)) continue
+                var sNorm = normalizeScope(sc)
+                if (sNorm.indexOf(prefix) === 0) {
+                    var sMeta = rec.scopes[sc]
+                    if (sMeta && !isGrantSupersededByRevocation(revocationsMap, userKey, sNorm, sMeta.atMs)) {
+                        return true
+                    }
+                }
             }
         }
         return false
@@ -889,10 +965,10 @@
         return true
     }
 
-    function isPlayerAuthorized(server, player, subCommandName) {
+    function isPlayerAuthorized(server, player, subCommandName, opts) {
         if (player == null) return false
         var scope = normalizeScope(subCommandName)
-        if (RESERVED_SUBCOMMANDS[scope]) return false
+        if (isReservedScope(scope)) return false
         var srv        = server || resolveServer(null, player)
         var entry      = getOrLoadWorldGrants(srv)
         var rawName    = extractPlayerName(player)
@@ -907,13 +983,17 @@
             }
         }
 
-        if (uuidKey && checkScopeInRecord(entry.grants[uuidKey], scope, entry.revocations, uuidKey)) {
+        if (uuidKey && checkScopeInRecord(entry.grants[uuidKey], scope, entry.revocations, uuidKey, opts)) {
             return true
         }
-        if (allowName && nameKey && checkScopeInRecord(entry.grants[nameKey], scope, entry.revocations, nameKey)) {
+        if (allowName && nameKey && checkScopeInRecord(entry.grants[nameKey], scope, entry.revocations, nameKey, opts)) {
             return true
         }
         return false
+    }
+
+    function hasPlayerScope(server, player, scope, opts) {
+        return isPlayerAuthorized(server, player, scope, opts)
     }
 
     function refreshPlayerCommandTree(server, player) {
@@ -1009,7 +1089,7 @@
     function mutatePlayerGrant(server, playerOrName, isGrant, subCommandScope, grantedBySourceOrName) {
         if (playerOrName == null) return false
         var scope = normalizeScope(subCommandScope)
-        if (RESERVED_SUBCOMMANDS[scope]) {
+        if (isReservedScope(scope)) {
             logWarn('mutatePlayerGrant', '拒绝修改系统保留作用域 "' + scope + '" 的玩家授权记录。')
             return false
         }
@@ -1358,7 +1438,7 @@
         var count = 0
         if (targetScopes == null) {
             for (var k in allowedScopeSet) {
-                if (allowedScopeSet[k] && !RESERVED_SUBCOMMANDS[k]) {
+                if (allowedScopeSet[k] && !isReservedScope(k)) {
                     copy[k] = true
                     count++
                 }
@@ -1369,8 +1449,8 @@
             ? targetScopes
             : (typeof targetScopes === 'string' && targetScopes.trim().length > 0 ? [targetScopes] : [])
         for (var i = 0; i < reqList.length; i++) {
-            var sc = normalizeKey(reqList[i])
-            if (sc && !RESERVED_SUBCOMMANDS[sc] && allowedScopeSet[sc]) {
+            var sc = normalizeScope(reqList[i])
+            if (sc && !isReservedScope(sc) && scopeMatchesSet(allowedScopeSet, sc, false)) {
                 copy[sc] = true
                 count++
             }
@@ -1408,8 +1488,8 @@
         var scopeSet = {}
         var count    = 0
         for (var i = 0; i < list.length; i++) {
-            var sc = normalizeKey(list[i])
-            if (sc && sc !== '*' && sc !== 'all' && !RESERVED_SUBCOMMANDS[sc]) {
+            var sc = normalizeScope(list[i])
+            if (sc && sc !== '*' && sc !== 'all' && !isReservedScope(sc)) {
                 scopeSet[sc] = true
                 count++
             }
@@ -1675,7 +1755,8 @@
 
         // 分支 2：已声明的内部函数调用 (declared_function) -> 逐帧校验全栈调用方权限交集、策略白名单、控制台策略及单次派发配额
         if (srcInfo.kind === 'declared_function') {
-            if (!subKey || RESERVED_SUBCOMMANDS[subKey] || policy.allowDeclaredCallers === false) {
+            var effScope = normalizeScope((policy.scope && policy.scope !== '*') ? policy.scope : subKey)
+            if (!subKey || isReservedScope(effScope) || policy.allowDeclaredCallers === false) {
                 return { allowed: false, reason: '子命令 /epiphy ' + subKey + ' 禁止通过脚本声明代调。' }
             }
             if (srcInfo.isConsoleCarrier) {
@@ -1690,8 +1771,8 @@
                 var fCallerId         = frame != null ? frame.callerId : ''
                 var fRegisteredScopes = fCallerId ? registeredCallers[fCallerId] : null
                 var fEffectiveScopes  = frame != null ? frame.effectiveScopes : null
-                if (!fCallerId || !fRegisteredScopes || !fRegisteredScopes[subKey] || !fEffectiveScopes || !fEffectiveScopes[subKey]) {
-                    return { allowed: false, reason: '调用方 "' + (fCallerId || 'unknown') + '" 未获准调用子命令 /epiphy ' + subKey + '。' }
+                if (!fCallerId || !scopeMatchesSet(fRegisteredScopes, effScope, policy.exactScopeOnly) || !scopeMatchesSet(fEffectiveScopes, effScope, policy.exactScopeOnly)) {
+                    return { allowed: false, reason: '调用方 "' + (fCallerId || 'unknown') + '" 未获准调用作用域 [' + effScope + ']。' }
                 }
                 if (policy.allowedCallers != null && !policy.allowedCallers[fCallerId]) {
                     return { allowed: false, reason: '子命令 /epiphy ' + subKey + ' 的白名单未包含调用方 "' + fCallerId + '"。' }
@@ -1722,6 +1803,7 @@
         if (srcInfo.kind === 'player' && srcInfo.player != null) {
             var player = srcInfo.player
             var server = resolveServer(source, player)
+            var playerScope = normalizeScope((policy.scope && policy.scope !== '*') ? policy.scope : subKey)
 
             if (typeof policy.customCheck === 'function') {
                 try {
@@ -1730,12 +1812,13 @@
                         player:     player,
                         server:     server,
                         subcommand: subKey,
+                        scope:      playerScope,
                         valve:      valveApi
                     })
                     if (customRes === true) return { allowed: true, sourceKind: 'player', player: player }
                     if (typeof customRes === 'string') return { allowed: false, player: player, reason: customRes }
                     if (customRes && typeof customRes === 'object') return customRes
-                    return { allowed: false, player: player, reason: '未通过子命令 /epiphy ' + subKey + ' 的自定义权限校验。' }
+                    return { allowed: false, player: player, reason: '未通过作用域 [' + playerScope + '] 的自定义权限校验。' }
                 } catch (eCustom) {
                     return { allowed: false, player: player, reason: '权限校验异常: ' + eCustom }
                 }
@@ -1751,13 +1834,16 @@
 
             if (policy.requireOp) {
                 var isAdmin = isPlayerAdmin(server, player, source, policy.opLevel)
-                var isAuth  = policy.allowAuthorized && isPlayerAuthorized(server, player, subKey)
+                var isAuth  = policy.allowAuthorized && isPlayerAuthorized(server, player, playerScope, {
+                    exactScopeOnly: policy.exactScopeOnly,
+                    allowSubScopes: policy.allowSubScopes
+                })
                 if (!isAdmin && !isAuth) {
-                    var reqDesc = policy.allowAuthorized ? '管理员 (OP) 或已被管理员授权的对象' : '管理员 (OP)'
+                    var reqDesc = policy.allowAuthorized ? '管理员 (OP) 或已被授权作用域 [' + playerScope + '] 的对象' : '管理员 (OP)'
                     return {
                         allowed: false,
                         player:  player,
-                        reason:  '权限不足：/epiphy ' + subKey + ' 需要【' + reqDesc + '】方可执行。'
+                        reason:  '权限不足：需要【' + reqDesc + '】方可执行。'
                     }
                 }
             }
@@ -1822,6 +1908,23 @@
         }
     }
 
+    function normalizeDeclaredScopes(name, rawScopes) {
+        var out = []
+        if (!Array.isArray(rawScopes)) return out
+        for (var i = 0; i < rawScopes.length; i++) {
+            var it = rawScopes[i]
+            if (it == null) continue
+            if (typeof it === 'string') {
+                var scStr = normalizeScope(it)
+                if (scStr && scStr !== '*') out.push({ scope: scStr, desc: '' })
+            } else if (typeof it === 'object' && it.scope) {
+                var scObj = normalizeScope(it.scope)
+                if (scObj && scObj !== '*') out.push({ scope: scObj, desc: it.desc ? String(it.desc) : '' })
+            }
+        }
+        return out
+    }
+
     function registerSubcommand(spec) {
         if (spec == null || !spec.name) return false
         var name = normalizeKey(spec.name)
@@ -1847,6 +1950,7 @@
             policy:    policy,
             summary:   spec.summary ? String(spec.summary) : ('/epiphy ' + name + ' 子命令'),
             helpLines: spec.helpLines || [],
+            scopes:    normalizeDeclaredScopes(name, spec.scopes),
             buildNode: typeof spec.buildNode === 'function' ? spec.buildNode : null
         }
         return true
@@ -1866,6 +1970,12 @@
         return Array.isArray(entry.helpLines) ? entry.helpLines : []
     }
 
+    function makeModuleRootPolicy(policy) {
+        var copy = clonePolicy(policy || POLICY_PRESETS.admin)
+        copy.allowSubScopes = true
+        return copy
+    }
+
     function sendAggregatedHelp(source, targetSubName) {
         if (targetSubName) {
             var key = normalizeKey(targetSubName)
@@ -1873,13 +1983,12 @@
                 sendSourceMessage(source, '§3§l----------------------------------------------------')
                 sendSourceMessage(source, '§b§l  [ Epiphy 权限阀核心 // /epiphy auth 帮助手册 ]')
                 sendSourceMessage(source, '§3§l----------------------------------------------------')
-                sendSourceMessage(source, '§e1. 查看授权与模式状态： §f/epiphy auth list | /epiphy auth where | /epiphy auth reload')
+                sendSourceMessage(source, '§e1. 查看状态与作用域：   §f/epiphy auth list | scopes [模块] | where | reload')
                 sendSourceMessage(source, '§e2. 授予玩家全部权限：   §f/epiphy auth grant <玩家> §7(默认按在线 UUID)')
-                sendSourceMessage(source, '§e3. 授予玩家单模块权限： §f/epiphy auth grant <玩家> <模块名(如 danmaku)>')
-                sendSourceMessage(source, '§e4. 撤销玩家全部权限：   §f/epiphy auth revoke <玩家> §7(同步写外置撤销墓碑)')
-                sendSourceMessage(source, '§e5. 撤销玩家单模块权限： §f/epiphy auth revoke <玩家> <模块名(如 danmaku)>')
-                sendSourceMessage(source, '§e6. 按名字授权备用模式： §f/epiphy auth namegrant <status|enable|confirm <code>|disable> §7(仅真OP/控制台)')
-                sendSourceMessage(source, '§e7. 文本名/离线授权操作： §f/epiphy auth grantname <名> [作用域] | /epiphy auth revokename <名> [作用域]')
+                sendSourceMessage(source, '§e3. 授予模块/子命令权：  §f/epiphy auth grant <玩家> <作用域(如 danmaku 或 danmaku.self)>')
+                sendSourceMessage(source, '§e4. 撤销玩家全部/细分权： §f/epiphy auth revoke <玩家> [作用域] §7(同步写外置撤销墓碑)')
+                sendSourceMessage(source, '§e5. 按名字授权备用模式： §f/epiphy auth namegrant <status|enable|confirm <code>|disable> §7(仅真OP/控制台)')
+                sendSourceMessage(source, '§e6. 文本名/离线授权操作： §f/epiphy auth grantname <名> [作用域] | /epiphy auth revokename <名> [作用域]')
                 sendSourceMessage(source, '§3§l----------------------------------------------------')
                 return 1
             }
@@ -1888,7 +1997,7 @@
                 sendSourceMessage(source, '§c[Epiphy 指令中心] 未找到名为 [' + key + '] 的子模块。输入 §f/epiphy help §c查看已加载模块列表。')
                 return 0
             }
-            var access = evaluateSourceAccessCore(source, key, target.policy, false)
+            var access = evaluateSourceAccessCore(source, key, makeModuleRootPolicy(target.policy), false)
             var statusTag = access.allowed ? '§a[已就绪/可执行]' : ('§c[受限: ' + access.reason + ']')
             sendSourceMessage(source, '§e• 模块 [' + target.name + '] ' + statusTag + ' §7(权限策略: §b' + target.policy.label + '§7)')
             var detailLines = resolveSubcommandHelpLines(target)
@@ -1921,7 +2030,7 @@
                 var sName = subcmdOrder[s]
                 var entry = subcommands[sName]
                 if (entry == null) continue
-                var subAccess = evaluateSourceAccessCore(source, sName, entry.policy, false)
+                var subAccess = evaluateSourceAccessCore(source, sName, makeModuleRootPolicy(entry.policy), false)
                 var badge     = subAccess.allowed ? '§a[可用]' : '§c[未授权]'
                 sendSourceMessage(
                     source,
@@ -1959,8 +2068,9 @@
 
         var targetSpec = subcommands[headWord]
         if (targetSpec != null) {
-            if (!canSeeSubcommand(source, headWord, targetSpec.policy)) {
-                checkSourceOrReject(source, headWord, targetSpec.policy)
+            var rootCheckPolicy = makeModuleRootPolicy(targetSpec.policy)
+            if (!canSeeSubcommand(source, headWord, rootCheckPolicy)) {
+                checkSourceOrReject(source, headWord, rootCheckPolicy)
                 return true
             }
         }
@@ -2033,6 +2143,8 @@
         grantPlayer:               grantPlayer,
         revokePlayer:              revokePlayer,
         isPlayerAuthorized:        isPlayerAuthorized,
+        hasPlayerScope:            hasPlayerScope,
+        normalizeScope:            normalizeScope,
         isPlayerAdmin:             isPlayerAdmin,
         isWorldCheatsEnabled:      isWorldCheatsEnabled,
         requestNameGrantEnable:    requestNameGrantEnable,
@@ -2099,7 +2211,7 @@
     function handleAuthScopeCommand(source, playersArr, isGrant, rawScope) {
         var srv     = resolveServer(source, source.player)
         var scope   = normalizeScope(rawScope)
-        if (RESERVED_SUBCOMMANDS[scope]) {
+        if (isReservedScope(scope)) {
             sendSourceMessage(source, '§c[Epiphy 权限阀] "' + scope + '" 为系统保留子命令，禁止通过 /epiphy auth 授权或撤销。')
             return 0
         }
@@ -2178,6 +2290,30 @@
                         return 1
                     }
                 }),
+                b.literal('scopes', {
+                    chain: [
+                        [{ name: 'module', type: 'word' }],
+                        function (ctx, args) {
+                            var filterMod = args.module ? normalizeKey(args.module) : ''
+                            sendSourceMessage(ctx.source, '§b[Epiphy 权限阀 // 可授权作用域列表]')
+                            for (var si = 0; si < subcmdOrder.length; si++) {
+                                var mName = subcmdOrder[si]
+                                if (filterMod && mName !== filterMod) continue
+                                var mSpec = subcommands[mName]
+                                if (mSpec == null) continue
+                                sendSourceMessage(ctx.source, '§6  ▸ §f' + mName + ' §8(' + mSpec.policy.label + ')')
+                                if (Array.isArray(mSpec.scopes) && mSpec.scopes.length > 0) {
+                                    for (var sci = 0; sci < mSpec.scopes.length; sci++) {
+                                        var scEntry = mSpec.scopes[sci]
+                                        sendSourceMessage(ctx.source, '§7     - §b' + scEntry.scope + (scEntry.desc ? (' §8: ' + scEntry.desc) : ''))
+                                    }
+                                }
+                            }
+                            return 1
+                        },
+                        { minArgs: 0, policy: POLICY_PRESETS.admin }
+                    ]
+                }),
                 b.literal('where', {
                     policy: POLICY_PRESETS.admin,
                     exec: function (ctx) {
@@ -2210,7 +2346,7 @@
                         function (ctx, args) {
                             var srv   = resolveServer(ctx.source, ctx.source.player)
                             var scope = normalizeScope(args.scope || '*')
-                            if (RESERVED_SUBCOMMANDS[scope]) {
+                            if (isReservedScope(scope)) {
                                 sendSourceMessage(ctx.source, '§c[Epiphy 权限阀] "' + scope + '" 为系统保留子命令，禁止授权。')
                                 return 0
                             }
@@ -2344,8 +2480,9 @@
                     })
                     if (subNode != null) {
                         if (typeof subNode.requires === 'function') {
+                            var rootVisPolicy = makeModuleRootPolicy(boundSpec.policy)
                             subNode = subNode.requires(function (source) {
-                                return canSeeSubcommand(source, boundName, boundSpec.policy)
+                                return canSeeSubcommand(source, boundName, rootVisPolicy)
                             })
                         }
                         root = root.then(subNode)

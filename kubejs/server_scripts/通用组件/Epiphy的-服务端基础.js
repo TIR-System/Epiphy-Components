@@ -1,13 +1,14 @@
 // priority: 1080
 // ============================================================================
-// Epiphy 服务端通用基础设施 (EpiphyServerBase v2)
+// Epiphy 服务端通用基础设施 (EpiphyServerBase v2.1)
+//   许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //   所属阶段：server_scripts
 //   可选依赖：
 //     - global.EpiphySpec (Epiphy的-Spec与通用工具.js)：缺失时维度/数组工具自动使用内置精简降级实现
 //     - global.EpiphyLog (Epiphy的-日志.js)：缺失时自动降级为基础 console 限频日志，不阻断服务端模块加载
-//   定位    ：收拢服务端日志包装与降级、Java 类缓存、MC 对象访问器、外部统一数据根 `epiphy-data/`
-//            （config/worlds/players/events/logs/presets/backups）、`.tmp`+`.bak` 原子读写、
-//            `lastWorldPath` 复制档自动分叉、权限阀子命令队列与统一 OP 提醒、Debug 注册与命令树 DSL
+//   定位    ：收拢服务端日志包装与降级、Java 类缓存、MC 对象访问器（`resolveLevel` 无效维度 fail-closed 拒绝回落主世界）、
+//            外部统一数据根 `epiphy-data/`（config/worlds/players/events/logs/presets/backups）、`.tmp`+`.bak` 原子读写、
+//            `lastWorldPath` 复制档自动分叉、权限阀子命令队列与统一 OP 提醒、Debug 注册与命令树 DSL（支持分支 `scope` 权限分层传播）
 //   约束    ：严格 Rhino ES5（禁止 let/const、箭头函数、模板字符串、展开运算符）
 // ============================================================================
 
@@ -329,13 +330,15 @@
     }
 
     function resolveLevel(levelOrDim, preferServer) {
-        if (levelOrDim != null && typeof levelOrDim === 'object'
+        if (levelOrDim == null || levelOrDim === '') return null;
+        if (typeof levelOrDim === 'object'
             && (typeof levelOrDim.getBlock === 'function' || levelOrDim.players != null)) {
             return levelOrDim;
         }
         var srv = resolveServer(preferServer);
         if (srv == null) return null;
-        var targetDim = normalizeDim(levelOrDim) || 'minecraft:overworld';
+        var targetDim = normalizeDim(levelOrDim);
+        if (!targetDim) return null;
         if (typeof srv.getLevel === 'function') {
             var direct = srv.getLevel(targetDim);
             if (direct != null) return direct;
@@ -1563,9 +1566,12 @@
 
         function guard(policyOrFn, maybeFn) {
             if (typeof guardFn === 'function') {
-                return (maybeFn !== undefined)
-                    ? guardFn(policyOrFn, maybeFn)
-                    : guardFn(policyOrFn);
+                if (maybeFn !== undefined) {
+                    return (guardFn.length >= 2)
+                        ? guardFn(policyOrFn, maybeFn)
+                        : guardFn(maybeFn);
+                }
+                return guardFn(policyOrFn);
             }
             return maybeFn !== undefined ? maybeFn : policyOrFn;
         }
@@ -1660,32 +1666,75 @@
             return parentNode;
         }
 
+        function resolveBranchPolicy(cfg) {
+            if (!cfg) return undefined;
+            if (cfg.policy !== undefined) {
+                if (!cfg.scope) return cfg.policy;
+                if (cfg.policy != null && typeof cfg.policy === 'object') {
+                    var merged = {};
+                    for (var pk in cfg.policy) {
+                        if (Object.prototype.hasOwnProperty.call(cfg.policy, pk)) merged[pk] = cfg.policy[pk];
+                    }
+                    merged.scope = cfg.scope;
+                    return merged;
+                }
+                return cfg.policy;
+            }
+            if (!cfg.scope) return undefined;
+            var out = {};
+            if (defPolicy != null && typeof defPolicy === 'object') {
+                for (var dk in defPolicy) {
+                    if (Object.prototype.hasOwnProperty.call(defPolicy, dk)) out[dk] = defPolicy[dk];
+                }
+            } else {
+                out.mode = 'authorized';
+                out.requireCheats = true;
+                out.requireOp = true;
+                out.allowAuthorized = true;
+                out.opLevel = 2;
+            }
+            out.scope = cfg.scope;
+            return out;
+        }
+
+        function withChainBranchPolicy(chOpts, branchPolicy) {
+            if (branchPolicy === undefined || (chOpts && chOpts.policy !== undefined)) return chOpts;
+            var copy = {};
+            if (chOpts != null && typeof chOpts === 'object') {
+                for (var k in chOpts) {
+                    if (Object.prototype.hasOwnProperty.call(chOpts, k)) copy[k] = chOpts[k];
+                }
+            }
+            copy.policy = branchPolicy;
+            return copy;
+        }
+
         function literal(name, cfgOrFn) {
             var node = Commands.literal(name);
             if (typeof cfgOrFn === 'function') {
                 return node.executes(guard(cfgOrFn));
             }
             var cfg = cfgOrFn || {};
-            if (cfg.policy !== undefined && typeof canSeeFn === 'function' && typeof node.requires === 'function') {
-                var reqPolicy = cfg.policy;
-                node = node.requires(function (src) { return canSeeFn(src, reqPolicy); });
+            var branchPolicy = resolveBranchPolicy(cfg);
+            if (branchPolicy !== undefined && typeof canSeeFn === 'function' && typeof node.requires === 'function') {
+                node = node.requires(function (src) { return canSeeFn(src, branchPolicy); });
             } else if (defPolicy !== undefined && cfg.inheritRequires && typeof canSeeFn === 'function' && typeof node.requires === 'function') {
                 node = node.requires(function (src) { return canSeeFn(src, defPolicy); });
             }
             if (typeof cfg.exec === 'function') {
-                node = node.executes(cfg.policy !== undefined ? guard(cfg.policy, cfg.exec) : guard(cfg.exec));
+                node = node.executes(branchPolicy !== undefined ? guard(branchPolicy, cfg.exec) : guard(cfg.exec));
             } else if (cfg.helpLines) {
                 var lines = cfg.helpLines;
                 var helpExec = function (ctx) { return sendLines(ctx, lines); };
-                node = node.executes(cfg.policy !== undefined ? guard(cfg.policy, helpExec) : guard(helpExec));
+                node = node.executes(branchPolicy !== undefined ? guard(branchPolicy, helpExec) : guard(helpExec));
             }
             if (cfg.chain) {
-                node = attachChain(node, cfg.chain[0], cfg.chain[1], cfg.chain[2]);
+                node = attachChain(node, cfg.chain[0], cfg.chain[1], withChainBranchPolicy(cfg.chain[2], branchPolicy));
             }
             if (cfg.chains) {
                 for (var c = 0; c < cfg.chains.length; c++) {
                     var ch = cfg.chains[c];
-                    node = attachChain(node, ch[0], ch[1], ch[2]);
+                    node = attachChain(node, ch[0], ch[1], withChainBranchPolicy(ch[2], branchPolicy));
                 }
             }
             if (cfg.children) {

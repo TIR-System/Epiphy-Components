@@ -1,11 +1,11 @@
 // ============================================================================
-//  通用屏幕弹幕与泛用文本显示组件 —— 客户端渲染引擎 (ScreenDanmakuClient v5.1)
+//  通用屏幕弹幕与泛用文本显示组件 —— 客户端渲染引擎 (ScreenDanmakuClient v5.2)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-屏幕弹幕渲染器.js
 //  配套服务端组件：
-//    - kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js（服务端调度器 ScreenDanmaku v5.1）
+//    - kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js（服务端调度器 ScreenDanmaku v5.2）
 //    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀）
 //
 //  依赖与缺失降级：
@@ -53,6 +53,12 @@
     var CONFIG = {
         maxOverlays:                  120,
         maxPlayerOverlaysPerNamespace: 16,    // 单个玩家指令命名空间 (u:<uuid>) 同屏最多保留条数
+        maxPendingActions:            256,    // 未消费入队动作上限（防单帧包洪泛 OOM）
+        maxPendingPerFrame:           64,     // 单帧最多消费入队动作数
+        frameBudgetMs:                12.0,   // 单帧弹幕渲染耗时预算 (ms)
+        maxTitleChars:                2048,   // 客户端主标题安全截断长度
+        maxSubChars:                  1024,   // 客户端副标题安全截断长度
+        maxScale:                     8.0,    // 客户端缩放倍率先天上限
         lineStepPx:                   11,     // 单行步进高度 (px)
         minBlockHeightPx:      10,     // 最小文本块高度 (px)
         defaultWrapScreenPct:  0.86,   // maxWidth=0 时默认折行占屏宽比例
@@ -106,6 +112,9 @@
     var lastErrorLogAt          = 0
     var suppressedErrors        = 0
     var BATCH_FAILED            = false
+    var BATCH_RETRY_AT_MS       = 0
+    var BATCH_RETRY_COOLDOWN_MS = 10000
+    var MUI_RETRY_COOLDOWN_MS   = 10000
     var BATCH_MODE_PROBED       = false
     var FONT_DISPLAY_NORMAL     = null
     var MUI_PROBED              = false
@@ -437,8 +446,14 @@
             var fnContains = d['contains(java.lang.String)']
             if (typeof fnContains === 'function') return Boolean(fnContains.call(d, String(key)))
             if (typeof d.contains === 'function') return Boolean(d.contains(String(key)))
-        } catch (e) { }
-        return true
+        } catch (e) {
+            return false
+        }
+        try {
+            return d[key] !== undefined && d[key] !== null
+        } catch (e2) {
+            return false
+        }
     }
 
     function readStr(d, key, defVal) {
@@ -1096,7 +1111,12 @@
     }
 
     function ensureFrameBatchCtx(event, fontObj, now) {
-        if (BATCH_FAILED || fontObj == null || event == null) return null
+        var nowMs = now || monotonicNowMs()
+        if (BATCH_FAILED) {
+            if (nowMs < BATCH_RETRY_AT_MS) return null
+            BATCH_FAILED = false
+        }
+        if (fontObj == null || event == null) return null
         var gfx = event.graphics
         if (gfx == null || typeof gfx.bufferSource !== 'function' || typeof gfx.flush !== 'function') return null
         if (typeof event.getMatrix !== 'function' && event.matrix == null) return null
@@ -1112,7 +1132,8 @@
         if (FRAME_BATCH_CTX == null) {
             var modeNormal = probeDisplayModeNormal()
             if (modeNormal == null) {
-                BATCH_FAILED = true
+                BATCH_FAILED      = true
+                BATCH_RETRY_AT_MS = nowMs + BATCH_RETRY_COOLDOWN_MS
                 return null
             }
             var matItem = null
@@ -1147,6 +1168,7 @@
                 bufSrc:          bufSrc,
                 displayMode:     modeNormal,
                 muiActive:       false,
+                muiRetryAtMs:    0,
                 muiEngine:       MUI_ENGINE,
                 muiRenderer:     MUI_RENDERER,
                 muiAllowSdf:     true,
@@ -1201,6 +1223,10 @@
             ctx.drawFn           = drawFn
             ctx.useDirectSrgDraw = useDirectSrgDraw
             ctx.muiActive        = muiReady
+            ctx.muiRetryAtMs     = 0
+        } else if (!ctx.muiActive && MUI_ENGINE != null && nowMs >= (ctx.muiRetryAtMs || 0)) {
+            ctx.muiActive    = true
+            ctx.muiRetryAtMs = 0
         }
 
         if (ctx.muiEmojiSheet != null && ctx.muiEndBatchFn == null) {
@@ -1229,10 +1255,21 @@
                     ctx.muiAllowSdf = (ModernTextRendererClass.sAllowSDFTextIn2D !== false)
                 }
             } catch (eCanary) {
-                ctx.muiActive = false
+                markMuiDegraded(ctx)
             }
         }
         return ctx
+    }
+
+    function markMuiDegraded(batchCtx) {
+        if (batchCtx == null) return
+        batchCtx.muiActive    = false
+        batchCtx.muiRetryAtMs = (batchCtx.nowMs || monotonicNowMs()) + MUI_RETRY_COOLDOWN_MS
+    }
+
+    function markBatchFailed(batchCtx) {
+        BATCH_FAILED      = true
+        BATCH_RETRY_AT_MS = ((batchCtx && batchCtx.nowMs) || monotonicNowMs()) + BATCH_RETRY_COOLDOWN_MS
     }
 
     function flushFrameBatchCtx(batchCtx) {
@@ -1264,7 +1301,7 @@
             }
             return layout
         } catch (eLookup) {
-            batchCtx.muiActive = false
+            markMuiDegraded(batchCtx)
             logErrorThrottled('ModernUI lookupFormattedLayout fallback', eLookup)
             return null
         }
@@ -1322,7 +1359,7 @@
             }
             return true
         } catch (eMuiDraw) {
-            batchCtx.muiActive = false
+            markMuiDegraded(batchCtx)
             logErrorThrottled('ModernUI TextLayout.drawText fallback', eMuiDraw)
             return false
         }
@@ -1355,7 +1392,7 @@
             batchCtx.drawn++
             return true
         } catch (eDrawBatch) {
-            BATCH_FAILED = true
+            markBatchFailed(batchCtx)
             logErrorThrottled('drawInBatch fallback', eDrawBatch)
             return false
         }
@@ -2142,10 +2179,14 @@
             var sliced  = (localKeep < ln.vis) ? sliceVisibleChars(ln.text, localKeep) : ln.text
             var dropped = (localSkip > 0) ? dropFirstVisibleChars(sliced, localSkip, fontObj, letterSpacingPx, spacingMode) : { text: sliced, offsetPx: 0 }
             if (dropped.text && dropped.text.length > 0) {
+                var endPx = (localKeep >= ln.vis)
+                    ? ((ln.widthPx || 0) + (letterSpacingPx > 0 ? computeClusterSpacing(9, letterSpacingPx, spacingMode) : 0))
+                    : dropFirstVisibleChars(sliced, 999999, fontObj, letterSpacingPx, spacingMode).offsetPx
                 out.push({
                     text:      dropped.text,
                     fullW:     ln.widthPx,
                     offsetPx:  dropped.offsetPx,
+                    endPx:     endPx,
                     lineIndex: i
                 })
                 lastActiveIdx = out.length - 1
@@ -2347,18 +2388,25 @@
             return
         }
 
-        // 3. 批量数组推送
-        try {
-            if (raw.items != null && raw.items.length > 0) {
-                for (var bIdx = 0; bIdx < raw.items.length; bIdx++) {
-                    applyDanmakuNow(raw.items[bIdx], now)
+        // 3. 批量数组推送（单条隔离报错，且无论是否为空/异常都不降格为单条渲染）
+        if (raw.items != null) {
+            try {
+                var batchLen = Number(raw.items.length || 0)
+                for (var bIdx = 0; bIdx < batchLen; bIdx++) {
+                    try {
+                        applyDanmakuNow(raw.items[bIdx], now)
+                    } catch (eBatchItem) {
+                        logErrorThrottled('applyDanmaku batch item error', eBatchItem)
+                    }
                 }
-                return
+            } catch (eBatch) {
+                logErrorThrottled('applyDanmaku batch error', eBatch)
             }
-        } catch (eBatch) { }
+            return
+        }
 
-        var title = readStr(raw, 'title', readStr(raw, 'text', ''))
-        var sub   = readStr(raw, 'sub', readStr(raw, 'subtitle', ''))
+        var title = truncateSafeText(readStr(raw, 'title', readStr(raw, 'text', '')), CONFIG.maxTitleChars)
+        var sub   = truncateSafeText(readStr(raw, 'sub', readStr(raw, 'subtitle', '')), CONFIG.maxSubChars)
         if (title.length === 0 && sub.length === 0) return
 
         var titleVis   = countVisibleChars(title)
@@ -2449,9 +2497,11 @@
             for (var kIdx = 0; kIdx < activeOverlays.length; kIdx++) {
                 var exist = activeOverlays[kIdx]
                 if (exist.key === key) {
-                    exist.priority  = priority
-                    exist.namespace = namespace
-                    exist.slotId    = slotId
+                    exist.tier         = tier
+                    exist.maxGroupSize = maxGroupSize
+                    exist.priority     = priority
+                    exist.namespace    = namespace
+                    exist.slotId       = slotId
                     if (exist.title !== title || exist.sub !== sub || exist.maxWidth !== maxWidth || exist.wrap !== wrapEnabled || exist.letterSpacing !== letterSpacing || exist.letterSpacingMode !== letterSpacingMode) {
                         exist.title             = title
                         exist.sub               = sub
@@ -2479,7 +2529,7 @@
                         exist.angle = readNum(raw, 'angle', exist.angle)
                     }
                     if (!isRandScale) {
-                        var nextScale = readNonNegNum(raw, 'scale', exist.scale, 0.2)
+                        var nextScale = clampNum(readNonNegNum(raw, 'scale', exist.scale, 0.2), 0.2, CONFIG.maxScale)
                         if (exist.scale !== nextScale) {
                             exist.scale             = nextScale
                             exist.wrapKey           = ''
@@ -2546,6 +2596,7 @@
                     exist.expire         = renewSched.expireAt
                     exist.frozenVis      = null
                     exist.drawErrors     = 0
+                    enforceOverlayCaps(now, group, tier, namespace, maxGroupSize)
                     return
                 }
             }
@@ -2575,7 +2626,7 @@
             rx:                clampNum(readNum(raw, 'rx', 0.5), 0.0, 1.0),
             ry:                clampNum(readNum(raw, 'ry', 0.35), 0.0, 1.0),
             angle:             readNum(raw, 'angle', 0.0),
-            scale:             readNonNegNum(raw, 'scale', 1.0, 0.2),
+            scale:             clampNum(readNonNegNum(raw, 'scale', 1.0, 0.2), 0.2, CONFIG.maxScale),
             color:             readNum(raw, 'color', 0xFF5555),
             subColor:          readNum(raw, 'subColor', 0xFFCC44),
             shadow:            readBool(raw, 'shadow', true),
@@ -2622,11 +2673,26 @@
             expire:            initSched.expireAt,
             drawErrors:        0
         })
+        enforceOverlayCaps(now, group, tier, namespace, maxGroupSize)
+    }
 
+    function truncateSafeText(s, maxLen) {
+        if (!s || s.length <= maxLen) return s
+        var cut = s.substring(0, maxLen)
+        if (cut.length > 0) {
+            var lastCode = cut.charCodeAt(cut.length - 1)
+            if ((lastCode >= 0xD800 && lastCode <= 0xDBFF) || lastCode === 167) {
+                cut = cut.substring(0, cut.length - 1)
+            }
+        }
+        return cut
+    }
+
+    function enforceOverlayCaps(now, group, tier, namespace, maxGroupSize) {
         // 若指定了同分组最大并发条数 maxGroupSize：
         //   优先将该分组内最早的非淡出弹幕平滑转入淡出 (applyStopToOverlay)，避免硬性直接消失跳过淡出动画；
         //   仅当含正在淡出的同组总条数超过 maxGroupSize + 1 时才移除最早的一条兜底。
-        if (maxGroupSize > 0 && group.length > 0) {
+        if (maxGroupSize > 0 && group && group.length > 0) {
             var activeGrpList = []
             var allGrpIndices = []
             for (var gCheckIdx = 0; gCheckIdx < activeOverlays.length; gCheckIdx++) {
@@ -2700,13 +2766,28 @@
     // 外部调用与网络包统一入队，由 paintScreen 帧首在渲染线程一次性出队消费，避免遍历 activeOverlays 期间发生并发/重入修改
     function enqueueDanmaku(raw) {
         if (raw == null) return
+        if (pendingActions.length >= CONFIG.maxPendingActions) {
+            var incomingCtrl = hasKeyInTag(raw, 'stop') || hasKeyInTag(raw, 'clear')
+            var dropQIdx = 0
+            if (incomingCtrl) {
+                for (var qi = 0; qi < pendingActions.length; qi++) {
+                    var qItem = pendingActions[qi]
+                    if (qItem != null && !hasKeyInTag(qItem, 'stop') && !hasKeyInTag(qItem, 'clear')) {
+                        dropQIdx = qi
+                        break
+                    }
+                }
+            }
+            pendingActions.splice(dropQIdx, 1)
+            logErrorThrottled('pendingActions overflow', '待处理弹幕队列已达上限 (' + CONFIG.maxPendingActions + ')，已淘汰最早的低优先级消息。')
+        }
         pendingActions.push(raw)
     }
 
     function flushPendingActions(now) {
         if (pendingActions.length === 0) return
-        var batch = pendingActions
-        pendingActions = []
+        var budget = min2(pendingActions.length, CONFIG.maxPendingPerFrame)
+        var batch  = pendingActions.splice(0, budget)
         for (var i = 0; i < batch.length; i++) {
             try {
                 applyDanmakuNow(batch[i], now)
@@ -2918,12 +2999,45 @@
         }
     }
 
+    function drawTypewriterCursor(event, item, blinkCursor, cursorX, cursorY, color, shdBool, outMode, outCol, outWid, inFade, fadeProgress, batchCtx) {
+        if (!blinkCursor || blinkCursor.length === 0) return
+        if (item._cursorText !== blinkCursor || item._cursorComp == null) {
+            item._cursorText  = blinkCursor
+            item._cursorComp  = Text.of(blinkCursor)
+            item._cursorSeq   = resolveVisualSeq(item._cursorComp)
+            item._cursorOwner = { _muiLayout: null, _muiEpoch: -1, _muiCheckMs: 0 }
+        }
+        drawRichUnit(
+            event,
+            item._cursorComp,
+            cursorX,
+            cursorY,
+            3.0,
+            color,
+            shdBool,
+            outMode,
+            outCol,
+            outWid,
+            1.0,
+            item.fadeStyle,
+            inFade,
+            fadeProgress,
+            0.0,
+            batchCtx,
+            item._cursorSeq,
+            item._cursorOwner
+        )
+    }
+
     ClientEvents.paintScreen(function (event) {
         var curLevelKey = resolveCurrentLevelKey(event)
         if (curLevelKey === '') {
             if (activeOverlays.length > 0) activeOverlays.length = 0
             if (pendingActions.length > 0) pendingActions.length = 0
-            LAST_LEVEL_KEY = ''
+            LAST_LEVEL_KEY    = ''
+            BATCH_FAILED      = false
+            BATCH_RETRY_AT_MS = 0
+            if (FRAME_BATCH_CTX != null) FRAME_BATCH_CTX.muiRetryAtMs = 0
             return
         }
         if (curLevelKey != null) {
@@ -2938,13 +3052,15 @@
 
         if (activeOverlays.length === 0) return
 
-        var sw         = Number(event.width) || 854
-        var sh         = Number(event.height) || 480
-        var guiBlocked = isBlockingGuiOpen(event)
-        var fontObj    = null
-        var batchCtx   = null
-        var batchTried = false
-        var baseFrameM = null
+        var sw          = Number(event.width) || 854
+        var sh          = Number(event.height) || 480
+        var guiBlocked  = isBlockingGuiOpen(event)
+        var fontObj     = null
+        var batchCtx    = null
+        var batchTried  = false
+        var baseFrameM  = null
+        var frameStartMs = now
+        var drawnCount   = 0
 
         try {
             for (var i = 0; i < activeOverlays.length; i++) {
@@ -2958,6 +3074,11 @@
             if (guiBlocked && !item.showInGui) {
                 continue
             }
+
+            if (drawnCount >= 1 && (monotonicNowMs() - frameStartMs) >= CONFIG.frameBudgetMs) {
+                break
+            }
+            drawnCount++
 
             if (fontObj === null) {
                 fontObj = getClientFont(event, now)
@@ -3314,35 +3435,24 @@
                     }
 
                     if (blinkCursor.length > 0 && lastVisCf != null) {
-                        if (item._cursorText !== blinkCursor || item._cursorComp == null) {
-                            item._cursorText  = blinkCursor
-                            item._cursorComp  = Text.of(blinkCursor)
-                            item._cursorSeq   = resolveVisualSeq(item._cursorComp)
-                            item._cursorOwner = { _muiLayout: null, _muiEpoch: -1, _muiCheckMs: 0 }
-                        }
-                        drawRichUnit(
+                        drawTypewriterCursor(
                             event,
-                            item._cursorComp,
+                            item,
+                            blinkCursor,
                             lastVisCf.baseX + lastVisCf.w + (itemSpacing || 0),
                             lastVisCf.baseY,
-                            3.0,
                             lastVisCf.color,
                             cShdBool,
                             defOutMod,
                             defOutCol,
                             defOutWid,
-                            1.0,
-                            item.fadeStyle,
                             inFade,
                             fadeProgress,
-                            0.0,
-                            batchCtx,
-                            item._cursorSeq,
-                            item._cursorOwner
+                            batchCtx
                         )
                     }
                 } else {
-                    var lineCacheKey = curWrapKey + '|s:' + startSkipVis + '|k:' + keepEndVis + '|c:' + blinkCursor + '|y:' + startY
+                    var lineCacheKey = curWrapKey + '|s:' + startSkipVis + '|k:' + keepEndVis + '|y:' + startY
                     var lCache       = item._lineRenderCache
                     if (lCache == null || lCache.key !== lineCacheKey) {
                         var titleSkip = min2(item.titleVis, startSkipVis)
@@ -3350,22 +3460,21 @@
                         var subSkip   = max2(0, startSkipVis - item.titleVis)
                         var subKeep   = max2(0, keepEndVis - item.titleVis)
 
-                        var cursorOnTitle = (blinkCursor.length > 0 && shownVis <= item.titleVis)
-                        var cursorOnSub   = (blinkCursor.length > 0 && shownVis > item.titleVis)
-
-                        var renderTitleLines = buildRenderedLines(item.titleLines, titleSkip, titleKeep, cursorOnTitle ? blinkCursor : '', fontObj, itemSpacing, itemSpacingMode)
-                        var renderSubLines   = buildRenderedLines(item.subLines, subSkip, subKeep, cursorOnSub ? blinkCursor : '', fontObj, itemSpacing, itemSpacingMode)
+                        var renderTitleLines = buildRenderedLines(item.titleLines, titleSkip, titleKeep, '', fontObj, itemSpacing, itemSpacingMode)
+                        var renderSubLines   = buildRenderedLines(item.subLines, subSkip, subKeep, '', fontObj, itemSpacing, itemSpacingMode)
 
                         var tItems = []
                         for (var tIdx = 0; tIdx < renderTitleLines.length; tIdx++) {
                             var rLine1 = renderTitleLines[tIdx]
                             var tComp  = Text.of(rLine1.text)
+                            var tBaseX = -Math.floor((rLine1.fullW || 0) * 0.5)
                             tItems.push({
-                                comp:  tComp,
-                                seq:   resolveVisualSeq(tComp),
-                                x:     -Math.floor((rLine1.fullW || 0) * 0.5) + (rLine1.offsetPx || 0),
-                                y:     startY + (rLine1.lineIndex || 0) * lineStep,
-                                halfW: (rLine1.fullW || 0) * 0.5,
+                                comp:    tComp,
+                                seq:     resolveVisualSeq(tComp),
+                                x:       tBaseX + (rLine1.offsetPx || 0),
+                                endX:    tBaseX + (rLine1.endPx || 0),
+                                y:       startY + (rLine1.lineIndex || 0) * lineStep,
+                                halfW:   (rLine1.fullW || 0) * 0.5,
                                 _muiLayout:  null,
                                 _muiEpoch:   -1,
                                 _muiCheckMs: 0
@@ -3375,18 +3484,30 @@
                         for (var sIdx = 0; sIdx < renderSubLines.length; sIdx++) {
                             var rLine2 = renderSubLines[sIdx]
                             var sComp  = Text.of(rLine2.text)
+                            var sBaseX = -Math.floor((rLine2.fullW || 0) * 0.5)
                             sItems.push({
-                                comp:  sComp,
-                                seq:   resolveVisualSeq(sComp),
-                                x:     -Math.floor((rLine2.fullW || 0) * 0.5) + (rLine2.offsetPx || 0),
-                                y:     startY + (titleLineCount + (rLine2.lineIndex || 0)) * lineStep,
-                                halfW: (rLine2.fullW || 0) * 0.5,
+                                comp:    sComp,
+                                seq:     resolveVisualSeq(sComp),
+                                x:       sBaseX + (rLine2.offsetPx || 0),
+                                endX:    sBaseX + (rLine2.endPx || 0),
+                                y:       startY + (titleLineCount + (rLine2.lineIndex || 0)) * lineStep,
+                                halfW:   (rLine2.fullW || 0) * 0.5,
                                 _muiLayout:  null,
                                 _muiEpoch:   -1,
                                 _muiCheckMs: 0
                             })
                         }
-                        lCache = { key: lineCacheKey, tItems: tItems, sItems: sItems }
+                        var cursorAnchor = null
+                        if (shownVis <= item.titleVis) {
+                            if (tItems.length > 0) {
+                                var lastT = tItems[tItems.length - 1]
+                                cursorAnchor = { x: lastT.endX, y: lastT.y, isSub: false }
+                            }
+                        } else if (sItems.length > 0) {
+                            var lastS = sItems[sItems.length - 1]
+                            cursorAnchor = { x: lastS.endX, y: lastS.y, isSub: true }
+                        }
+                        lCache = { key: lineCacheKey, tItems: tItems, sItems: sItems, cursorAnchor: cursorAnchor }
                         item._lineRenderCache = lCache
                     }
 
@@ -3404,6 +3525,24 @@
                     for (var si = 0; si < lCache.sItems.length; si++) {
                         var sEntry = lCache.sItems[si]
                         drawRichUnit(event, sEntry.comp, sEntry.x, sEntry.y, sEntry.halfW, rawSubCol, shdBool, lOutMode, lOutCol, lOutWid, 1.0, item.fadeStyle, inFade, fadeProgress, 0.0, batchCtx, sEntry.seq, sEntry)
+                    }
+                    if (blinkCursor.length > 0 && lCache.cursorAnchor != null) {
+                        var ca = lCache.cursorAnchor
+                        drawTypewriterCursor(
+                            event,
+                            item,
+                            blinkCursor,
+                            ca.x,
+                            ca.y,
+                            ca.isSub ? rawSubCol : rawMainCol,
+                            shdBool,
+                            lOutMode,
+                            lOutCol,
+                            lOutWid,
+                            inFade,
+                            fadeProgress,
+                            batchCtx
+                        )
                     }
                 }
                 item.drawErrors = 0

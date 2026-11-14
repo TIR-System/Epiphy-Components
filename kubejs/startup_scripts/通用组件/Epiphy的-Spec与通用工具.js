@@ -1,6 +1,7 @@
 // priority: 1200
 // ============================================================================
 // Epiphy 通用规范、共享协议契约与纯逻辑基座 (EpiphySpec + EpiphyProtocol)
+//   许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //   所属阶段：startup_scripts（服务端与客户端共享，单一前置加载项）
 //   职责说明：
 //     1. 定义并导出 global.EpiphyProtocol（频道名、版本号、PRIORITY_MAP、HUD_FORBIDDEN_PRESETS）；
@@ -35,7 +36,7 @@
 
     var AUDIO_CHANNEL         = 'epiphy:audio';
     var AUDIO_PROTO_VERSION   = 5;
-    var AUDIO_SEMVER          = '5.3.0';
+    var AUDIO_SEMVER          = '5.4.0';
 
     function isProtoCompatible(expectedVer, incomingVer) {
         if (incomingVer === undefined || incomingVer === null) return false;
@@ -703,8 +704,11 @@
                     var br = Number(b.r) || 0;
                     var sumR = ar + br;
                     var dx = a.cx - b.cx;
+                    if (dx > sumR || dx < -sumR) continue;
                     var dy = a.cy - b.cy;
+                    if (dy > sumR || dy < -sumR) continue;
                     var dz = a.cz - b.cz;
+                    if (dz > sumR || dz < -sumR) continue;
                     if ((dx * dx + dy * dy + dz * dz) <= (sumR * sumR + 1e-6)) {
                         visited[j] = true;
                         queue.push(j);

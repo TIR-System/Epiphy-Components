@@ -1,20 +1,20 @@
 // ============================================================================
-//  通用空间音频与流式声场组件 —— 客户端播放引擎 (EpiphyAudioClient v5.3, ES6)
+//  通用空间音频与流式声场组件 —— 客户端播放引擎 (EpiphyAudioClient v5.4, ES6)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-音频播放器.js
 //  配套服务端组件：
-//    - kubejs/server_scripts/通用组件/Epiphy的-音频组件.js（服务端调度器 EpiphyAudio v5.3）
+//    - kubejs/server_scripts/通用组件/Epiphy的-音频组件.js（服务端调度器 EpiphyAudio v5.4）
 //    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀）
-//
+
 //  依赖与缺失降级：
 //    - 可选前置：kubejs/startup_scripts/通用组件/Epiphy的-Spec与通用工具.js (EpiphySpec / EpiphyProtocol, priority: 1200)
 //      缺失时启动输出 console.warn 并降级至内置 v5 协议常量与基础数值工具；收包仍严格执行 fail-closed 版本校验。
 //    - 必需配套：kubejs/server_scripts/通用组件/Epiphy的-音频组件.js（缺失时客户端处于待命状态，无音频数据包驱动）
-//
+
 //  适用环境：Minecraft 1.20.1 / Forge 47.x / KubeJS 2001.6.x (ES6)
-//
+
 //  [Rhino 语法兼容性约定] KubeJS 2001.6.x 内置 Rhino 对 ES6 支持不完整且存在语义偏差（如 `let`/`const`
 //    的 TDZ 与循环闭包语义偏差）。故本播放器仅使用经本服实测稳定的 ES6 子集（`=>` / 模板字符串 /
 //    `for..of` / `Map` / `Set`），所有变量声明统一使用 `var`；同系列弹幕客户端与服务端底座维持 ES5。请勿引入 `let`/`const`。
@@ -32,7 +32,7 @@
     }
     var CHANNEL       = (PROTO && PROTO.AUDIO_CHANNEL) || 'epiphy:audio'
     var PROTO_VERSION = (PROTO && PROTO.AUDIO_PROTO_VERSION) || 5
-    var VERSION       = (PROTO && PROTO.AUDIO_SEMVER) || '5.3.0'
+    var VERSION       = (PROTO && PROTO.AUDIO_SEMVER) || '5.4.0'
 
     var CONFIG = {
         sweepIntervalTicks:     10,   // 慢速巡检周期（负责死链清理、异常断流重连、超时判定）
@@ -71,12 +71,14 @@
     var RandomSource        = loadJavaClass('net.minecraft.util.RandomSource')
     var SimpleSoundInstance = loadJavaClass('net.minecraft.client.resources.sounds.SimpleSoundInstance')
     var Attenuation         = loadJavaClass('net.minecraft.client.resources.sounds.SoundInstance$Attenuation')
+    var Vec3Class           = loadJavaClass('net.minecraft.world.phys.Vec3')
     var SystemClass         = loadJavaClass('java.lang.System')
 
-    var RANDOM          = RandomSource != null ? RandomSource.create() : null
-    var entries         = new Map() // handleId (number) -> entry
-    var attCache        = new Map() // soundId -> attenuation_distance
-    var pendingActions    = []
+    var RANDOM             = RandomSource != null ? RandomSource.create() : null
+    var entries            = new Map() // handleId (number) -> entry
+    var attCache           = new Map() // soundId -> attenuation_distance
+    var duckedMusicInsts   = new Set() // 被 duckMusic 暂停的原版/第三方 MUSIC 频道 SoundInstance
+    var pendingActions     = []
     var session              = null
     var clientTicks          = 0
     var wasPaused            = false
@@ -490,6 +492,9 @@
     var fieldCacheListeners   = { cls: null, field: null, prop: null }
     var fieldCacheSubOverlay  = { cls: null, field: null, prop: null }
     var fieldCacheInstVolume  = { cls: null, field: null, prop: null }
+    var fieldCacheInstX       = { cls: null, field: null, prop: null }
+    var fieldCacheInstY       = { cls: null, field: null, prop: null }
+    var fieldCacheInstZ       = { cls: null, field: null, prop: null }
 
     var readJavaField = (obj, names, cacheSlot) => {
         if (obj == null) return null
@@ -534,31 +539,31 @@
         return null
     }
 
-    var syncSoundInstanceVolume = (inst, gain) => {
-        if (inst == null) return
-        // 原版 SoundEngine.m_174988_ 遇到 calculateVolume <= 0 会直接调 Channel.stop() 摧毁流！
-        // 因此更新 SimpleSoundInstance.volume (f_119573_) 时下限保底为 0.0001（由 OpenAL ch.setVolume 精确置 0.0 静音），
-        // 同时消除 buildSoundInstance 首帧 fadeIn=0.02 残留导致暂停/切屏/重算音量后回落至 0.02 的问题。
-        var instVol = clampNum(gain > 0.0001 ? gain : 0.0001, 0.0001, 2.0)
+    var setJavaNumberField = (obj, names, cacheSlot, numVal, isDouble) => {
+        if (obj == null) return false
+        var val = Number(numVal)
         try {
-            if (fieldCacheInstVolume.field != null) {
-                fieldCacheInstVolume.field.setFloat(inst, instVol)
-                return
+            if (cacheSlot != null && cacheSlot.field != null) {
+                if (isDouble) cacheSlot.field.setDouble(obj, val)
+                else cacheSlot.field.setFloat(obj, val)
+                return true
             }
         } catch (eCached) {}
-        var names = ['volume', 'f_119573_']
         try {
-            if (typeof inst.getClass === 'function') {
-                var cls = inst.getClass()
+            if (typeof obj.getClass === 'function') {
+                var cls = obj.getClass()
                 while (cls != null) {
                     for (var i = 0; i < names.length; i++) {
                         try {
                             var fld = cls.getDeclaredField(names[i])
                             fld.setAccessible(true)
-                            fieldCacheInstVolume.cls   = cls
-                            fieldCacheInstVolume.field = fld
-                            fld.setFloat(inst, instVol)
-                            return
+                            if (cacheSlot != null) {
+                                cacheSlot.cls   = cls
+                                cacheSlot.field = fld
+                            }
+                            if (isDouble) fld.setDouble(obj, val)
+                            else fld.setFloat(obj, val)
+                            return true
                         } catch (e1) {}
                     }
                     cls = cls.getSuperclass()
@@ -567,12 +572,29 @@
         } catch (e2) {}
         for (var j = 0; j < names.length; j++) {
             try {
-                if (inst[names[j]] !== undefined) {
-                    inst[names[j]] = instVol
-                    return
+                if (obj[names[j]] !== undefined) {
+                    obj[names[j]] = val
+                    return true
                 }
             } catch (e3) {}
         }
+        return false
+    }
+
+    var syncSoundInstanceVolume = (inst, gain) => {
+        if (inst == null) return
+        // 原版 SoundEngine.m_174988_ 遇到 calculateVolume <= 0 会直接调 Channel.stop() 摧毁流！
+        // 因此更新 SimpleSoundInstance.volume (f_119573_) 时下限保底为 0.0001（静音时由 OpenAL pause/setVolume 控制），
+        // 同时消除 buildSoundInstance 首帧 fadeIn=0.02 残留导致暂停/切屏/重算音量后回落至 0.02 的问题。
+        var instVol = clampNum(gain > 0.0001 ? gain : 0.0001, 0.0001, 2.0)
+        setJavaNumberField(inst, ['volume', 'f_119573_'], fieldCacheInstVolume, instVol, false)
+    }
+
+    var syncSoundInstancePos = (inst, x, y, z) => {
+        if (inst == null) return
+        setJavaNumberField(inst, ['x', 'f_119575_'], fieldCacheInstX, x, true)
+        setJavaNumberField(inst, ['y', 'f_119576_'], fieldCacheInstY, y, true)
+        setJavaNumberField(inst, ['z', 'f_119577_'], fieldCacheInstZ, z, true)
     }
 
     var getSoundEngine = (sm) => {
@@ -606,26 +628,57 @@
         if (chHandle == null || typeof chHandle.execute !== 'function') return
 
         var mul = getCategoryGainMultiplier(entry.catObj)
+        entry.lastCatMul = mul
         var finalGain = clampNum(gain * mul, 0.0, 2.0)
-        var shouldUnpause = Boolean(forceUnpause)
+        var shouldPauseMute = Boolean(entry.spec.loop && (mul <= 0.0001 || (finalGain <= 0.0001 && entry.spec.omode === 'mute')))
+        var shouldUnpause   = Boolean(!shouldPauseMute && (forceUnpause || entry._pausedByMute))
         try {
             chHandle.execute((ch) => {
                 if (ch == null) return
                 var stopFn    = probeMethodName(ch, ['stopped', 'm_83680_'], CHANNEL_OPS, 'stopFn')
                 var volFn     = probeMethodName(ch, ['setVolume', 'm_83666_'], CHANNEL_OPS, 'volFn')
+                var pauseFn   = probeMethodName(ch, ['pause', 'm_83677_'], CHANNEL_OPS, 'pauseFn')
                 var unpauseFn = probeMethodName(ch, ['unpause', 'm_83678_'], CHANNEL_OPS, 'unpauseFn')
                 if (stopFn != null && ch[stopFn]()) {
                     entry._channelStopped = true
                     return
                 }
                 if (volFn != null) ch[volFn](finalGain)
-                if (shouldUnpause && unpauseFn != null) {
+                if (shouldPauseMute && pauseFn != null) {
+                    if (!entry._pausedByMute) {
+                        ch[pauseFn]()
+                        entry._pausedByMute = true
+                    }
+                } else if (shouldUnpause && unpauseFn != null) {
                     // Channel.unpause() / m_83678_() 仅在源处于 AL_PAUSED(4115) 时执行 alSourcePlay，天然幂等
                     ch[unpauseFn]()
+                    entry._pausedByMute = false
                 }
             })
         } catch (e1) {
             logErrorThrottled('applyChannelGain error', e1)
+        }
+    }
+
+    var applyChannelPosition = (sm, entry, x, y, z) => {
+        if (sm == null || entry == null || entry.inst == null || entry.is2D) return
+        syncSoundInstancePos(entry.inst, x, y, z)
+        var se = getSoundEngine(sm)
+        if (se == null) return
+        var chanMap = readJavaField(se, ['instanceToChannel', 'f_120226_'], fieldCacheChannelMap)
+        if (chanMap == null || typeof chanMap.get !== 'function') return
+        var chHandle = chanMap.get(entry.inst)
+        if (chHandle == null || typeof chHandle.execute !== 'function') return
+        try {
+            chHandle.execute((ch) => {
+                if (ch == null) return
+                var posFn = probeMethodName(ch, ['setSelfPosition', 'm_83654_'], CHANNEL_OPS, 'posFn')
+                if (posFn != null && Vec3Class != null) {
+                    ch[posFn](new Vec3Class(Number(x), Number(y), Number(z)))
+                }
+            })
+        } catch (ePos) {
+            logErrorThrottled('applyChannelPosition error', ePos)
         }
     }
 
@@ -716,6 +769,7 @@
     }
 
     var clearAllNow = () => {
+        restoreDuckedVanillaMusic()
         for (var entry of entries.values()) {
             stopSoundInstance(entry)
         }
@@ -742,6 +796,18 @@
             if (entry.waitSince == null) entry.waitSince = clientTicks
             return true
         }
+        if (entry.catObj == null && entry.spec != null) {
+            entry.catObj = resolveSoundSource(entry.spec.cat)
+        }
+        if (!entry.fadingOut && entry.spec != null && entry.spec.loop) {
+            var curMul  = getCategoryGainMultiplier(entry.catObj)
+            var curGain = computeAudibleGain(entry, getEntityPos(localPlayer))
+            if (curMul <= 0.0001 || (curGain <= 0.0001 && entry.spec.omode === 'mute')) {
+                entry._standbyMuted = true
+                return true
+            }
+        }
+        entry._standbyMuted = false
         stopSoundInstance(entry)
         entry.startTick = clientTicks
 
@@ -765,7 +831,12 @@
         entry.is2D            = built.is2D
         entry.lastSubPingTick = clientTicks
         entry._channelStopped = false
+        entry._pausedByMute   = false
         entry.lastSentAlGain  = -1.0
+        entry.lastCatMul      = -1.0
+        entry.lastSentPos     = isFinite(entry.curX)
+            ? { x: Number(entry.curX), y: Number(entry.curY || 0), z: Number(entry.curZ || 0) }
+            : null
 
         var sm = getSoundManager()
         if (sm != null) {
@@ -830,9 +901,39 @@
         }
     }
 
-    // 当存在开启了 duckMusic 的自定义 BGM 正在可听范围内播放时，令原版背景音乐自动避让
+    var restoreDuckedVanillaMusic = () => {
+        if (duckedMusicInsts.size === 0) return
+        var sm = getSoundManager()
+        var se = sm != null ? getSoundEngine(sm) : null
+        var chanMap = se != null ? readJavaField(se, ['instanceToChannel', 'f_120226_'], fieldCacheChannelMap) : null
+        if (chanMap != null && typeof chanMap.get === 'function') {
+            for (var dInst of duckedMusicInsts) {
+                try {
+                    var chHandle = chanMap.get(dInst)
+                    if (chHandle != null && typeof chHandle.execute === 'function') {
+                        chHandle.execute((ch) => {
+                            if (ch == null) return
+                            var stopFn    = probeMethodName(ch, ['stopped', 'm_83680_'], CHANNEL_OPS, 'stopFn')
+                            var unpauseFn = probeMethodName(ch, ['unpause', 'm_83678_'], CHANNEL_OPS, 'unpauseFn')
+                            if ((stopFn == null || !ch[stopFn]()) && unpauseFn != null) {
+                                ch[unpauseFn]()
+                            }
+                        })
+                    }
+                } catch (eUnpause) {
+                    logErrorThrottled('duckMusic unpause error', eUnpause)
+                }
+            }
+        }
+        duckedMusicInsts.clear()
+    }
+
+    // 当存在开启了 duckMusic 的自定义 BGM 正在可听范围内播放时，温和暂停原版/第三方 MUSIC 频道（停播后自动恢复）
     var tickVanillaMusicDucking = (hasAudibleDuckingBgm) => {
-        if (!hasAudibleDuckingBgm) return
+        if (!hasAudibleDuckingBgm) {
+            restoreDuckedVanillaMusic()
+            return
+        }
         if ((clientTicks % CONFIG.musicDuckIntervalTicks) !== 0) return
         var m = getMc()
         if (m != null) {
@@ -847,11 +948,38 @@
         }
         if (SoundSource != null && SoundSource.MUSIC != null) {
             var sm = getSoundManager()
-            if (sm != null) {
+            var se = sm != null ? getSoundEngine(sm) : null
+            var chanMap = se != null ? readJavaField(se, ['instanceToChannel', 'f_120226_'], fieldCacheChannelMap) : null
+            if (chanMap != null && typeof chanMap.entrySet === 'function') {
+                var ownInsts = new Set()
+                for (var ent of entries.values()) {
+                    if (ent != null && ent.inst != null) ownInsts.add(ent.inst)
+                }
                 try {
-                    sm.stop(null, SoundSource.MUSIC)
+                    var it = chanMap.entrySet().iterator()
+                    while (it.hasNext()) {
+                        var kv       = it.next()
+                        var inst     = kv != null ? kv.getKey() : null
+                        var chHandle = kv != null ? kv.getValue() : null
+                        if (inst == null || chHandle == null || ownInsts.has(inst)) continue
+                        var srcCat = (typeof inst.getSource === 'function') ? inst.getSource() : null
+                        if (srcCat == null || (srcCat !== SoundSource.MUSIC && String(srcCat) !== String(SoundSource.MUSIC))) {
+                            continue
+                        }
+                        if (!duckedMusicInsts.has(inst) && typeof chHandle.execute === 'function') {
+                            chHandle.execute((ch) => {
+                                if (ch == null) return
+                                var stopFn  = probeMethodName(ch, ['stopped', 'm_83680_'], CHANNEL_OPS, 'stopFn')
+                                var pauseFn = probeMethodName(ch, ['pause', 'm_83677_'], CHANNEL_OPS, 'pauseFn')
+                                if ((stopFn == null || !ch[stopFn]()) && pauseFn != null) {
+                                    ch[pauseFn]()
+                                }
+                            })
+                            duckedMusicInsts.add(inst)
+                        }
+                    }
                 } catch (e) {
-                    logErrorThrottled('duckMusic stopSource error', e)
+                    logErrorThrottled('duckMusic pauseSource error', e)
                 }
             }
         }
@@ -1125,7 +1253,20 @@
             entry.currentAlGain = entry.smoothGain
 
             if (sm != null) {
-                if (forceSync || Math.abs(entry.currentAlGain - (entry.lastSentAlGain != null ? entry.lastSentAlGain : -1)) > 0.004 || entry.currentAlGain === 0.0) {
+                if (!entry.is2D && entry.inst != null && isFinite(entry.curX)) {
+                    var lp = entry.lastSentPos
+                    var posChanged = forceSync || lp == null ||
+                        ((entry.curX - lp.x) * (entry.curX - lp.x) +
+                         (entry.curY - lp.y) * (entry.curY - lp.y) +
+                         (entry.curZ - lp.z) * (entry.curZ - lp.z)) > 0.01
+                    if (posChanged) {
+                        applyChannelPosition(sm, entry, entry.curX, entry.curY, entry.curZ)
+                        entry.lastSentPos = { x: Number(entry.curX), y: Number(entry.curY || 0), z: Number(entry.curZ || 0) }
+                    }
+                }
+                var curCatMul = getCategoryGainMultiplier(entry.catObj)
+                var mulChanged = Math.abs(curCatMul - (entry.lastCatMul != null ? entry.lastCatMul : -1)) > 0.004
+                if (forceSync || mulChanged || Math.abs(entry.currentAlGain - (entry.lastSentAlGain != null ? entry.lastSentAlGain : -1)) > 0.004 || (entry.currentAlGain === 0.0 && entry.lastSentAlGain !== 0.0)) {
                     applyChannelGain(sm, entry, entry.currentAlGain, forceSync)
                     entry.lastSentAlGain = entry.currentAlGain
                 }
@@ -1150,7 +1291,7 @@
             if (entry == null) continue
 
             if (entry.inst == null) {
-                if (entry.waitSince != null && (clientTicks - entry.waitSince) > CONFIG.pendingTimeoutTicks) {
+                if (!entry._standbyMuted && entry.waitSince != null && (clientTicks - entry.waitSince) > CONFIG.pendingTimeoutTicks) {
                     removeEntryNow(h)
                 } else if (clientTicks >= entry.retryAt) {
                     tryStartEntry(entry, lv, localPlayer)
@@ -1184,8 +1325,16 @@
                 continue
             }
 
-            // 循环音源意外中断（如切换音频设备、F3+T 重载资源包或切屏被底层回收）：立即重连恢复
+            // 循环音源意外中断（如切换音频设备、F3+T 重载资源包或切屏被底层回收）：静音待命时不空转重连，恢复可听后再重启
+            var curMulSweep = getCategoryGainMultiplier(entry.catObj)
+            var isMutedStandby = (curMulSweep <= 0.0001) || ((entry.currentAlGain || 0) <= 0.0001 && entry.spec.omode === 'mute')
             stopSoundInstance(entry)
+            if (isMutedStandby) {
+                entry._standbyMuted = true
+                entry.retryAt       = clientTicks + 10
+                entry.retryDelay    = CONFIG.resumeMinDelayTicks
+                continue
+            }
             if (entry.spec.resume) {
                 var resumeImmediate = (clientTicks <= postResumeResyncUntil && !entry._resumeReconnected)
                 var quickFail = !resumeImmediate && (clientTicks - entry.startTick) < CONFIG.stableTicks
@@ -1249,7 +1398,11 @@
 
             flushPendingActions(lv, localPlayer)
 
-            if (entries.size === 0 || lv == null) return
+            if (entries.size === 0) {
+                restoreDuckedVanillaMusic()
+                return
+            }
+            if (lv == null) return
 
             var inResumeWindow = (clientTicks <= postResumeResyncUntil)
             tickActiveEntries(lv, localPlayer, inResumeWindow)

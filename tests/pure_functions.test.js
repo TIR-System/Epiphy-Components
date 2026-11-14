@@ -1,3 +1,4 @@
+// 许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 'use strict'
 
 var assert = require('assert')
@@ -3719,6 +3720,541 @@ test('P0 regressions: CompoundTag numeric priority, per-char space alignment & m
     assert.strictEqual(collectTextAt(5320), 'AB', 'at 320ms (vis=4) reveals A and B, not C')
     assert.strictEqual(collectTextAt(5520), 'ABC', 'at 520ms (vis=6) reveals A, B, and C')
     assert.strictEqual(p0Warns.length, 0, 'P0 client regression checks must produce zero warnings/errors')
+})
+
+// ----------------------------------------------------------------------------
+// 31. P1 regressions: Renderer (renewal tier/maxGroup sync, caps, batch recovery, cursor cache, hasKeyInTag)
+// ----------------------------------------------------------------------------
+test('P1 regressions (renderer): renewal sync, caps, batch error isolation & recovery, cursor cache, fail-closed tag read', function () {
+    var warns = []
+    var paints = []
+    var nowMs = 10000
+    function FakeCompoundTag(map, throwOnKey) {
+        this._m = map || {}
+        this._throwKey = throwOnKey || null
+    }
+    FakeCompoundTag.prototype.contains = function (k) {
+        if (k === this._throwKey) throw new Error('Simulated tag read failure')
+        return Object.prototype.hasOwnProperty.call(this._m, k)
+    }
+    FakeCompoundTag.prototype.getString = function (k) {
+        var v = this._m[k]
+        return (typeof v === 'string') ? v : ''
+    }
+    FakeCompoundTag.prototype.getDouble = function (k) {
+        var v = this._m[k]
+        return (typeof v === 'number') ? v : 0
+    }
+    FakeCompoundTag.prototype.getBoolean = function (k) {
+        return Boolean(this._m[k])
+    }
+
+    var cliSb = {
+        console: { info: function () {}, warn: function (m) { warns.push(String(m)) }, error: function (m) { warns.push(String(m)) }, debug: function () {}, log: function () {} },
+        Date: { now: function () { return nowMs } },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function (fn) { paints.push(fn) } },
+        NetworkEvents: { dataReceived: function () {} },
+        Java: { loadClass: function () { return null } },
+        Text: { of: function (s) { return { string: String(s), getVisualOrderText: function () { return String(s) } } } },
+        global: {}
+    }
+    cliSb.globalThis = cliSb
+    vm.createContext(cliSb)
+    loadStartupBase(cliSb)
+    runScriptIn(cliSb, RENDERER_PATH)
+
+    var cli = cliSb.global.ScreenDanmakuClient
+    var rEv = {
+        width: 854, height: 480, level: 'minecraft:overworld',
+        font: { width: function (s) { return String(s || '').length * 6 }, drawInBatch: function () {} },
+        text: function () {},
+        graphics: { bufferSource: function () { return { endBatch: function () {} } }, flush: function () {} },
+        getMatrix: function () { return {} },
+        push: function () {}, pop: function () {}, translate: function () {}, scale: function () {}, rotate: function () {}
+    }
+
+    // 1. P1-1: Renewal must sync tier & maxGroupSize (preserving matching key namespace prefix 'mod:demo:renew_k')
+    cli.push({ key: 'renew_k', tier: 'system', ns: 'mod:demo', group: 'grpA', maxGroup: 5, title: 'V1', stay: 200 })
+    cli.push({ key: 'renew_k', tier: 'player', ns: 'mod:demo', group: 'grpA', maxGroup: 1, title: 'V2', stay: 200 })
+    paints[0](rEv)
+    var snap1 = cli.list ? cli.list() : []
+    if (snap1.length > 0) {
+        assert.strictEqual(snap1[0].tier, 'player', 'renewal must update tier')
+    }
+    cli.push({ key: 'other_k', tier: 'player', ns: 'mod:demo', group: 'grpA', maxGroup: 1, title: 'V3', stay: 200 })
+    paints[0](rEv)
+    cli.push({ action: 'clear', tier: 'player', ns: 'mod:demo', group: 'grpA', maxPriority: 5 })
+    paints[0](rEv)
+    assert.strictEqual(cli.count(), 0, 'synced player tier on renewal must allow player clear on mod:demo')
+
+    // 2. P1-6: hasKeyInTag throwing CompoundTag.contains fails closed -> keeps safe fallback priority 5 instead of reading 0!
+    cli.push(new FakeCompoundTag({ action: 'push', key: 'tag_pri', lifeMode: 'active', title: 'TagPri', stay: 200 }, 'priority'))
+    cli.push({ action: 'clear', group: '*', maxPriority: 3 })
+    paints[0](rEv)
+    assert.strictEqual(cli.count(), 1, 'corrupt tag throwing on priority must fail closed to default active priority 5 (>3), not read 0')
+    cli.clear('*')
+    paints[0](rEv)
+
+    // 3. P1-2 & P1-3: Queue cap preserves control packets; batch mid-throw isolates broken item without downgrading batch
+    for (var qi = 0; qi < 270; qi++) {
+        cli.push({ title: 'Flood_' + qi, stay: 40 })
+    }
+    cli.push({ action: 'clear', group: '*' })
+    for (var fl = 0; fl < 5; fl++) {
+        nowMs += 50
+        paints[0](rEv)
+    }
+    assert.strictEqual(cli.count(), 0, 'control clear pushed after queue saturation must survive cap & clear flood')
+
+    var badTagItem = new FakeCompoundTag({ title: 'Bad' }, 'title')
+    cli.push({
+        items: [
+            { title: 'Good1', stay: 200, scale: 99 },
+            badTagItem,
+            { title: 'Good2', stay: 200 }
+        ]
+    })
+    paints[0](rEv)
+    assert.strictEqual(cli.count(), 2, 'batch must keep valid items around a single throwing item without aborting or single-item fallback')
+    cli.clear('*')
+    paints[0](rEv)
+
+    // 4. P1-5: Cursor blink during typewriter must NOT bust lineCacheKey across 300ms..900ms
+    nowMs = 20000
+    cli.push({ key: 'tw_cache', title: 'Hello World', typewriter: true, charMs: 2000, stay: 200, scale: 1.0 })
+    paints[0](rEv)
+    var beforeBlinkKey = (cli.list && cli.list()[0]) ? cli.list()[0].lineCacheKey : null
+    nowMs = 20600 // toggled blink phase, same shownVis=1 (charMs=2000)
+    paints[0](rEv)
+    var afterBlinkKey = (cli.list && cli.list()[0]) ? cli.list()[0].lineCacheKey : null
+    if (beforeBlinkKey != null) {
+        assert.strictEqual(afterBlinkKey, beforeBlinkKey, 'blinkCursor phase change alone must NOT bust lineCacheKey')
+    }
+})
+
+// ----------------------------------------------------------------------------
+// 32. P1 regressions: Audio client & server (duck pause/restore, 3D channel pos, mul=0 standby, server quotas/reset/scan/dim)
+// ----------------------------------------------------------------------------
+test('P1 regressions (audio client & server): ducking pause/restore, 3D Channel pos, configure validation, pendingReset & dirty scan', function () {
+    // --- Part A: Audio client (P1-13, P1-14, P1-15) ---
+    var tickHandlers = []
+    var netHandlers = {}
+    var activeSet = new Set()
+    var chanMap = new Map()
+    var stopCalls = []
+    var musicPaused = 0
+    var musicUnpaused = 0
+    var movedPositions = []
+    var musicCh = {
+        m_83666_: function () {},
+        m_83677_: function () { musicPaused++ },
+        m_83678_: function () { musicUnpaused++ },
+        m_83680_: function () { return false }
+    }
+    var musicInst = { source: 'MUSIC', getSource: function () { return 'MUSIC' }, isStopped: function () { return false } }
+    activeSet.add(musicInst)
+    chanMap.set(musicInst, { execute: function (fn) { fn(musicCh) } })
+    // Simulate Java java.util.Map.entrySet().iterator() on chanMap
+    chanMap.entrySet = function () {
+        var arr = []
+        chanMap.forEach(function (val, key) {
+            arr.push({ getKey: function () { return key }, getValue: function () { return val } })
+        })
+        return {
+            iterator: function () {
+                var idx = 0
+                return { hasNext: function () { return idx < arr.length }, next: function () { return arr[idx++] } }
+            }
+        }
+    }
+
+    function MockSoundInst(res, cat, vol, pit, rnd, loop, delay, att, x, y, z) {
+        this.res = res; this.f_119573_ = vol; this.f_119575_ = x; this.f_119576_ = y; this.f_119577_ = z
+    }
+    var catVol = { RECORDS: 1.0, MUSIC: 1.0, MASTER: 1.0 }
+    var acStoppedCount = 0
+    var acPausedCount = 0
+    var acPlayCount = 0
+    var soundManager = {
+        f_120349_: { f_120226_: chanMap, f_120231_: [] },
+        getSoundEvent: function () { return { getSound: function () { return { getAttenuationDistance: function () { return 16 } } } } },
+        play: function (inst) {
+            acPlayCount++
+            activeSet.add(inst)
+            var ch = {
+                m_83666_: function () {},
+                m_83677_: function () { acPausedCount++ },
+                m_83678_: function () {},
+                m_83674_: function () { acStoppedCount++ },
+                m_83680_: function () { return false },
+                m_83654_: function (vec) { movedPositions.push([vec.x, vec.y, vec.z]) }
+            }
+            chanMap.set(inst, { execute: function (fn) { fn(ch) } })
+        },
+        stop: function (inst) {
+            stopCalls.push(inst)
+            if (inst != null) { activeSet.delete(inst); chanMap.delete(inst) }
+        },
+        isActive: function (inst) { return activeSet.has(inst) }
+    }
+    var playerObj = { getId: function () { return 1 }, getX: function () { return 0 }, getY: function () { return 64 }, getZ: function () { return 0 } }
+    var mockMc = {
+        isPaused: function () { return false },
+        isWindowActive: function () { return true },
+        getCurrentScreen: function () { return null },
+        getSoundManager: function () { return soundManager },
+        options: { getSoundSourceVolume: function (c) { return catVol[c] != null ? catVol[c] : 1.0 } },
+        level: { getDimension: function () { return 'minecraft:overworld' } },
+        player: playerObj
+    }
+    var acSb = {
+        console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+        ClientEvents: { tick: function (fn) { tickHandlers.push(fn) }, loggedOut: function () {}, loggedIn: function () {} },
+        NetworkEvents: { dataReceived: function (ch, fn) { netHandlers[ch] = fn } },
+        Client: mockMc,
+        Java: {
+            loadClass: function (cls) {
+                if (cls === 'net.minecraft.client.Minecraft') return { getInstance: function () { return mockMc } }
+                if (cls === 'net.minecraft.resources.ResourceLocation') return function (s) { return String(s) }
+                if (cls === 'net.minecraft.sounds.SoundSource') return { MASTER: 'MASTER', RECORDS: 'RECORDS', MUSIC: 'MUSIC', valueOf: function (n) { return n } }
+                if (cls === 'net.minecraft.util.RandomSource') return { create: function () { return {} } }
+                if (cls === 'net.minecraft.client.resources.sounds.SimpleSoundInstance') return MockSoundInst
+                if (cls === 'net.minecraft.client.resources.sounds.SoundInstance$Attenuation') return { NONE: 'NONE', LINEAR: 'LINEAR' }
+                if (cls === 'net.minecraft.world.phys.Vec3') return function (x, y, z) { return { x: x, y: y, z: z } }
+                return null
+            }
+        },
+        global: {}
+    }
+    acSb.globalThis = acSb
+    vm.createContext(acSb)
+    loadStartupBase(acSb)
+    runScriptIn(acSb, AUDIO_CLIENT_PATH)
+
+    netHandlers['epiphy:audio']({
+        data: { proto: 5, act: 'play', ses: 1, h: 10, snd: 'test:duck', cat: 'RECORDS', vol: 1.0, pit: 1.0, loop: 1, mode: 'smooth', duck: 1, anc: 'pos', x: 1, y: 64, z: 2, rng: 32 }
+    })
+    for (var dt = 0; dt < 12; dt++) tickHandlers[0]({})
+    assert.ok(musicPaused >= 1, 'duckMusic must pause external MUSIC channel')
+    assert.strictEqual(stopCalls.some(function (x) { return x === null || x === musicInst }), false, 'duckMusic must NOT call sm.stop on external MUSIC')
+
+    // P1-14: Position update syncs Channel.setSelfPosition(Vec3) and instance coords
+    netHandlers['epiphy:audio']({
+        data: { proto: 5, act: 'update', ses: 1, h: 10, x: 12, y: 68, z: -5 }
+    })
+    tickHandlers[0]({})
+    assert.ok(movedPositions.some(function (p) { return p[0] === 12 && p[1] === 68 && p[2] === -5 }), 'position update must sync Channel 3D selfPosition')
+
+    // P1-15: Setting RECORDS volume to 0 pauses via m_83677_ without calling Channel.stop() or recreating stream
+    catVol.RECORDS = 0
+    tickHandlers[0]({})
+    assert.ok(acPausedCount >= 1, 'category mute (mul=0) must pause channel instead of killing stream')
+    assert.strictEqual(acPlayCount, 1, 'mul=0 mute must NOT cause stop->reconnect loop')
+
+    // Stop ducking handle -> external vanilla MUSIC is unpaused via m_83678_
+    catVol.RECORDS = 1.0
+    netHandlers['epiphy:audio']({ data: { proto: 5, act: 'stop', ses: 1, h: 10, fout: 0 } })
+    tickHandlers[0]({})
+    assert.ok(musicUnpaused >= 1, 'ending ducking must unpause ducked external MUSIC')
+
+    // --- Part B: Audio server (P1-7..P1-12, P1-16..P1-17) ---
+    var svTick = []
+    var svWarns = []
+    var throwNextList = true
+    var p1 = { username: 'A1', uuid: '00000000-0000-4000-8000-0000000000a1', getId: function () { return 1 }, getName: function () { return { getString: function () { return 'A1' } } }, getStringUUID: function () { return '00000000-0000-4000-8000-0000000000a1' }, isOp: function () { return false }, hasPermissions: function () { return true }, getX: function () { return 0 }, getY: function () { return 64 }, getZ: function () { return 0 }, getLevel: function () { return lv }, level: null, sendData: function (ch, pkt) { this._sent.push(pkt) }, _sent: [] }
+    var p2 = { username: 'A2', uuid: '00000000-0000-4000-8000-0000000000a2', getId: function () { return 2 }, getName: function () { return { getString: function () { return 'A2' } } }, getStringUUID: function () { return '00000000-0000-4000-8000-0000000000a2' }, isOp: function () { return false }, getX: function () { return 1 }, getY: function () { return 64 }, getZ: function () { return 0 }, getLevel: function () { return lv }, level: null, sendData: function (ch, pkt) { this._sent.push(pkt) }, _sent: [] }
+    var blkStore = {}
+    var lv = {
+        getDimension: function () { return 'minecraft:overworld' },
+        dimension: 'minecraft:overworld',
+        hasChunk: function () { return true },
+        getBlock: function (x, y, z) { return blkStore[x + ',' + y + ',' + z] || { id: 'minecraft:air' } }
+    }
+    p1.level = lv; p2.level = lv
+    var srv = {
+        getWorldData: function () { return { getLevelName: function () { return 'AuP1' }, getAllowCommands: function () { return true } } },
+        getLevel: function (d) { return String(d) === 'minecraft:overworld' ? lv : null },
+        getAllLevels: function () { return [lv] },
+        getPlayerList: function () { if (throwNextList) { throwNextList = false; throw new Error('Transient playerList failure') } return { getPlayers: function () { return [p1, p2] } } },
+        getEntities: function () { return [] },
+        overworld: function () { return lv }
+    }
+    var svSb = {
+        console: { info: function () {}, warn: function (m) { svWarns.push(String(m)) }, error: function (m) { svWarns.push(String(m)) }, debug: function () {}, log: function () {} },
+        ServerEvents: { loaded: function (fn) { fn({ server: srv }) }, unloaded: function () {}, tick: function (fn) { svTick.push(fn) }, commandRegistry: function () {}, command: function () {} },
+        PlayerEvents: { loggedIn: function () {}, loggedOut: function () {} },
+        BlockEvents: { placed: function () {}, broken: function () {} },
+        LevelEvents: { loaded: function () {} },
+        Utils: { server: srv },
+        server: srv,
+        global: {}
+    }
+    svSb.globalThis = svSb
+    vm.createContext(svSb)
+    loadStartupBase(svSb)
+    loadServerBase(svSb)
+    // Intentionally omit VALVE_PATH to test P1-12 fail-closed without Valve
+    runScriptIn(svSb, AUDIO_PATH)
+
+    var Audio = svSb.global.EpiphyAudio
+    // P1-9: pendingReset must survive transient exception during first tick and retry on tick 2
+    svTick[0]({ server: srv })
+    assert.strictEqual(p1._sent.length, 0, 'tick 1 threw before reset send completes')
+    svTick[0]({ server: srv })
+    assert.ok(p1._sent.some(function (pk) { return pk.act === 'reset' }), 'failed pendingReset broadcast must retry on next tick')
+    assert.ok(p2._sent.some(function (pk) { return pk.act === 'reset' }), 'failed pendingReset broadcast must reach all players on retry')
+
+    // P1-11: configure rejects syncIntervalTicks=0 without breaking tick
+    Audio.configure({ syncIntervalTicks: 0, maxMergeClusterSize: 'bad' })
+    assert.ok(svWarns.some(function (w) { return w.indexOf('syncIntervalTicks') >= 0 }), 'configure must warn and reject syncIntervalTicks=0')
+
+    // Play a handle that requires startCond -> unstarted cleanup (P1-8)
+    var ghostEnt = { isRemoved: function () { return false }, isAlive: function () { return true }, getX: function () { return 0 }, getY: function () { return 64 }, getZ: function () { return 0 }, getLevel: function () { return lv }, level: lv }
+    var hUnstarted = Audio.onEntity(ghostEnt, 'test:wait', { startCond: function () { return false }, startTimeout: 5, audience: 'all' })
+    for (var tk = 0; tk < 12; tk++) svTick[0]({ server: srv })
+    assert.strictEqual(Audio.isPlaying(hUnstarted), false, 'unstarted handle must expire after startTimeout ticks')
+
+    // P1-16: update block anchor updates bx/by/bz and P1-7 countedListeners decrements cleanly
+    function stepSv(n) { for (var k = 0; k < n; k++) svTick[0]({ server: srv }) }
+    blkStore['5,64,5'] = { id: 'minecraft:jukebox' }
+    blkStore['9,64,9'] = { id: 'minecraft:jukebox' }
+    var hBlk = Audio.atBlock({ id: 'minecraft:jukebox', level: lv, pos: { x: 5, y: 64, z: 5 }, x: 5, y: 64, z: 5 }, 'test:loop', { loop: true, stopOnBlockBreak: true, fadeOut: 0 })
+    stepSv(6)
+    Audio.update(hBlk, { x: 9.5, y: 64.5, z: 9.5 })
+    stepSv(6)
+    // Old block turns to air -> must NOT stop; new block turns to air -> MUST stop
+    blkStore['5,64,5'] = { id: 'minecraft:air' }
+    stepSv(6)
+    assert.strictEqual(Audio.isPlaying(hBlk), true, 'removing old block after anchor update must NOT stop handle')
+    blkStore['9,64,9'] = { id: 'minecraft:air' }
+    stepSv(6)
+    assert.strictEqual(Audio.isPlaying(hBlk), false, 'removing moved block after anchor update MUST stop handle')
+    assert.strictEqual(Audio.list().length, 0, 'ended handle must clean up all active handles')
+
+    // P1-7: endHandle with merge cluster + maxSoundsPerPlayer=1 must accurately release listenCount without leaking quota
+    Audio.configure({ maxSoundsPerPlayer: 1 })
+    var m1 = Audio.at(0, 64, 0, 'minecraft:overworld', 'test:merge_bgm', { key: 'm1', group: 'mgrp', loop: true, conflict: 'merge', fadeOut: 0 })
+    var m2 = Audio.at(1, 64, 0, 'minecraft:overworld', 'test:merge_bgm', { key: 'm2', group: 'mgrp', loop: true, conflict: 'merge', fadeOut: 0 })
+    stepSv(6)
+    Audio.stopAll(0)
+    stepSv(6)
+    var mAfter = Audio.toPlayer(p1, 'test:after_release', { loop: true })
+    stepSv(6)
+    assert.strictEqual(Audio.isPlaying(mAfter), true, 'player listenCount quota must be fully released after endHandle')
+    Audio.stopAll(0)
+    Audio.configure({ maxSoundsPerPlayer: 8 })
+})
+
+// ----------------------------------------------------------------------------
+// 33. P1 regressions: Danmaku server (block clear isolation, invalid dim fail-closed, missing myIdx, packet bounds)
+// ----------------------------------------------------------------------------
+test('P1 regressions (danmaku server): scoped block clear, invalid dim fail-closed, missing myIdx & packet bounds', function () {
+    var warns = []
+    var overworld = { dimension: 'minecraft:overworld', getDimension: function () { return 'minecraft:overworld' }, players: [] }
+    var pl = {
+        username: 'DmTest', uuid: '00000000-0000-4000-8000-0000000000dd',
+        level: overworld, block: { x: 1, y: 64, z: 1 },
+        isOp: function () { return false },
+        sendData: function (ch, pkt) { this._sent.push(pkt) },
+        _sent: []
+    }
+    overworld.players = [pl]
+    var srv = {
+        getWorldData: function () { return { getLevelName: function () { return 'DmP1' }, getAllowCommands: function () { return true } } },
+        getLevel: function (d) { return String(d) === 'minecraft:overworld' ? overworld : null },
+        getAllLevels: function () { return [overworld] },
+        getPlayerList: function () { return { getPlayers: function () { return [pl] } } },
+        overworld: function () { return overworld }
+    }
+    var hookPlace = null
+    var hookBreak = null
+    var sb = {
+        console: { info: function () {}, warn: function (m) { warns.push(String(m)) }, error: function (m) { warns.push(String(m)) }, debug: function () {}, log: function () {} },
+        ServerEvents: { loaded: function (fn) { fn({ server: srv }) }, unloaded: function () {}, tick: function () {}, commandRegistry: function () {}, command: function () {} },
+        PlayerEvents: { loggedIn: function () {}, loggedOut: function () {} },
+        BlockEvents: { placed: function (fn) { hookPlace = fn }, broken: function (fn) { hookBreak = fn } },
+        LevelEvents: { loaded: function () {} },
+        Utils: { server: srv },
+        server: srv,
+        global: {}
+    }
+    sb.globalThis = sb
+    vm.createContext(sb)
+    loadStartupBase(sb)
+    loadServerBase(sb)
+    runScriptIn(sb, DANMAKU_PATH)
+
+    var Base = sb.global.EpiphyServerBase
+    var Dm = sb.global.ScreenDanmaku
+    // P1-19: resolveLevel fails closed on invalid dim & clearNear(null) does NOT hit overworld
+    assert.strictEqual(Base.resolveLevel('minecraft:nonexistent', srv), null, 'invalid dim must fail closed to null')
+    assert.strictEqual(Dm.clearNear('minecraft:nonexistent', 0, 64, 0, 100), 0, 'clearNear on invalid dim must send 0 packets')
+    assert.strictEqual(Dm.deactivateNear(null, 0, 64, 0, 100), 0, 'deactivateNear on null dim must send 0 packets')
+    assert.strictEqual(pl._sent.length, 0)
+
+    // P1-22: script API packet size bounds
+    Dm.toPlayer(pl, { title: new Array(6000).join('Z'), scale: 500 })
+    assert.ok(pl._sent.length === 1 && pl._sent[0].title.length === 4096 && pl._sent[0].scale <= 8.0, 'SYSTEM_PACKET_LIMITS must clamp giant title and scale')
+
+    // P1-18: Block break clear is isolated to block namespace & priority
+    pl._sent.length = 0
+    Dm.bindBlock('test:beacon_warn', { group: 'alerts', radius: 16, mode: 'once', title: 'BeaconWarn', priority: 3 })
+    if (hookPlace) {
+        hookPlace({ level: overworld, block: { id: 'test:beacon_warn', x: 2, y: 64, z: 2 } })
+    }
+    if (hookBreak) {
+        hookBreak({ level: overworld, block: { id: 'test:beacon_warn', x: 2, y: 64, z: 2 } })
+    }
+    var clrPkts = pl._sent.filter(function (pk) { return pk.action === 'clear' })
+    assert.ok(clrPkts.length >= 1, 'breaking bound block emits scoped clear')
+    assert.strictEqual(clrPkts[0].namespace, 'blk:test:beacon_warn', 'bound block clear must stay scoped to block namespace')
+    assert.strictEqual(clrPkts[0].maxPriority, 3, 'bound block clear must include maxSeenPriority')
+})
+
+// ----------------------------------------------------------------------------
+// 34. Permission layering: fine-grained scopes (danmaku.self, audio.play, child revoke vs parent grant, *.broadcast, auth scopes)
+// ----------------------------------------------------------------------------
+test('permission layering: individual danmaku.self grant, child revoke override & broadcast gate', function () {
+    function MockMinecraftServer() {}
+    var sb = createKubeSandbox(function (cls) {
+        if (cls === 'net.minecraft.server.MinecraftServer') return MockMinecraftServer
+        return null
+    })
+    var cmdCallbacks = []
+    var tickHandlers = []
+    sb.ServerEvents.commandRegistry = function (fn) { cmdCallbacks.push(fn) }
+    sb.ServerEvents.command = function (fn) { cmdCallbacks.push(fn) }
+    sb.ServerEvents.tick = function (fn) { tickHandlers.push(fn) }
+
+    function makePl(name, uuid, isOp) {
+        var sent = []
+        return {
+            username: name, uuid: uuid, _op: Boolean(isOp), _sent: sent,
+            getName: function () { return { getString: function () { return name } } },
+            getUuid: function () { return uuid },
+            isOp: function () { return Boolean(isOp) },
+            hasPermissions: function () { return Boolean(isOp) },
+            getX: function () { return 0 }, getY: function () { return 64 }, getZ: function () { return 0 },
+            sendData: function (ch, pkt) { sent.push({ ch: ch, pkt: pkt }) }
+        }
+    }
+    var opPl   = makePl('LayerOp',    '00000000-0000-4000-8000-0000000000e1', true)
+    var selfPl = makePl('SelfOnly',   '00000000-0000-4000-8000-0000000000e2', false)
+    var modPl  = makePl('ParentMod',  '00000000-0000-4000-8000-0000000000e3', false)
+    var p3     = makePl('Crowd3',     '00000000-0000-4000-8000-0000000000e4', false)
+    var p4     = makePl('Crowd4',     '00000000-0000-4000-8000-0000000000e5', false)
+    var p5     = makePl('Crowd5',     '00000000-0000-4000-8000-0000000000e6', false)
+    var p6     = makePl('Crowd6',     '00000000-0000-4000-8000-0000000000e7', false)
+    var allPls = [opPl, selfPl, modPl, p3, p4, p5, p6]
+
+    var overworld = { dimension: 'minecraft:overworld', getDimension: function () { return 'minecraft:overworld' }, players: allPls }
+    var nether = { dimension: 'minecraft:the_nether', getDimension: function () { return 'minecraft:the_nether' }, players: [] }
+    allPls.forEach(function (pl) { pl.level = overworld })
+    var srv = new MockMinecraftServer()
+    srv.getWorldData = function () { return { getLevelName: function () { return 'PermLayer' }, getAllowCommands: function () { return true } } }
+    srv.getLevel = function (d) { return String(d) === 'minecraft:the_nether' ? nether : (String(d) === 'minecraft:overworld' ? overworld : null) }
+    srv.getAllLevels = function () { return [overworld, nether] }
+    srv.getPlayerList = function () { return { getPlayers: function () { return allPls }, getPlayerByName: function (n) { return allPls.find(function (x) { return x.username === n }) || null } } }
+    sb.server = srv
+
+    loadServerBase(sb)
+    runScriptIn(sb, VALVE_PATH)
+    runScriptIn(sb, DANMAKU_PATH)
+    runScriptIn(sb, AUDIO_PATH)
+
+    var Valve = sb.global.EpiphyPermissionValve
+    // Grant ONLY 'danmaku.self' and 'audio.play' to selfPl; grant parent 'danmaku' to modPl then revoke 'danmaku.pos'
+    Valve.grantPlayer(srv, selfPl, 'danmaku.self', 'Admin')
+    Valve.grantPlayer(srv, selfPl, 'audio.play', 'Admin')
+    Valve.grantPlayer(srv, modPl, 'danmaku', 'Admin')
+    Valve.revokePlayer(srv, modPl, 'danmaku.pos', 'Admin')
+
+    function FakeNode(kind, name) {
+        this._kind = kind; this._name = name; this._children = {}; this._exec = null; this._req = null
+    }
+    FakeNode.prototype.then = function (child) { if (child) this._children[child._name] = child; return this }
+    FakeNode.prototype.executes = function (fn) { this._exec = fn; return this }
+    FakeNode.prototype.requires = function (fn) { this._req = fn; return this }
+    FakeNode.prototype.suggests = function () { return this }
+    var regRoot = null
+    var argValues = {}
+    function makeArgType(defFn) {
+        return { create: function () { return {} }, getResult: defFn || function (c, k) { return argValues[k] } }
+    }
+    var regEv = {
+        commands: { literal: function (n) { return new FakeNode('lit', n) }, argument: function (n) { return new FakeNode('arg', n) } },
+        arguments: {
+            GREEDY_STRING: makeArgType(), STRING: makeArgType(), WORD: makeArgType(), INTEGER: makeArgType(),
+            DOUBLE: makeArgType(), FLOAT: makeArgType(), PLAYERS: makeArgType(),
+            DIMENSION: makeArgType(function () { return argValues.dim || 'minecraft:overworld' }),
+            VEC3: makeArgType(), RESOURCE_LOCATION: makeArgType(), ENTITY: makeArgType()
+        },
+        register: function (r) { regRoot = r }
+    }
+    for (var ci = 0; ci < cmdCallbacks.length; ci++) cmdCallbacks[ci](regEv)
+
+    function mkSrc(pl, outArr) {
+        return {
+            source: pl, player: pl, getPlayer: function () { return pl }, getServer: function () { return srv },
+            level: overworld, position: { x: 0, y: 64, z: 0 },
+            sendSuccess: function (m) { if (outArr) outArr.push('OK:' + String(m)) },
+            sendFailure: function (m) { if (outArr) outArr.push('ERR:' + String(m)) }
+        }
+    }
+
+    var dmNode = regRoot._children.danmaku
+    var auNode = regRoot._children.audio
+    var authNode = regRoot._children.auth
+    var selfSrc = mkSrc(selfPl)
+    var modSrc  = mkSrc(modPl)
+    var opOut   = []
+    var opSrc   = mkSrc(opPl, opOut)
+
+    // 1. Hierarchical visibility for selfPl ('danmaku.self' & 'audio.play' only)
+    assert.strictEqual(dmNode._req(selfSrc), true, 'danmaku.self grant lets player see danmaku root')
+    assert.strictEqual(dmNode._children.self._req(selfSrc), true, 'selfPl sees danmaku self')
+    assert.strictEqual(dmNode._children.player._req(selfSrc), false, 'selfPl must NOT see danmaku player')
+    assert.strictEqual(dmNode._children.here._req(selfSrc), false, 'selfPl must NOT see danmaku here')
+    assert.strictEqual(auNode._req(selfSrc), true, 'audio.play grant lets player see audio root')
+    assert.strictEqual(auNode._children.play._req(selfSrc), true, 'selfPl sees audio play')
+    assert.strictEqual(auNode._children.all._req(selfSrc), false, 'selfPl must NOT see audio all')
+
+    // Execute /epiphy danmaku self -> sends ONLY to selfPl
+    selfPl._sent.length = 0; p3._sent.length = 0
+    argValues = { spec: 'text="SelfBanner"' }
+    dmNode._children.self._children.spec._exec({ source: selfSrc })
+    assert.strictEqual(selfPl._sent.length, 1, 'danmaku self sends to caller')
+    assert.strictEqual(selfPl._sent[0].pkt.namespace, 'u:00000000-0000-4000-8000-0000000000e2')
+    assert.strictEqual(p3._sent.length, 0, 'danmaku self never leaks to other players')
+
+    // 2. Child revocation overrides parent module grant (modPl has 'danmaku' minus 'danmaku.pos')
+    assert.strictEqual(dmNode._children.player._req(modSrc), true, 'parent danmaku grant allows danmaku.player')
+    assert.strictEqual(dmNode._children.pos._req(modSrc), false, 'explicit child revoke danmaku.pos must beat parent danmaku grant')
+
+    // 3. Parent grant does NOT imply exactScopeOnly *.broadcast -> >4 targets blocked until danmaku.broadcast granted
+    var modOut = []
+    var modCtx = { source: mkSrc(modPl, modOut) }
+    argValues = { targets: [selfPl, p3, p4, p5, p6], spec: 'text="MassSpam"' }
+    var resDenied = dmNode._children.player._children.targets._children.spec._exec(modCtx)
+    assert.strictEqual(resDenied, 0, '5 non-self targets must be rejected without danmaku.broadcast')
+    assert.strictEqual(p6._sent.length, 0)
+
+    // P1-20: rapid clear rate-limit blocks second immediate clear
+    argValues = { targets: [modPl] }
+    dmNode._children.clear._children.targets._exec(modCtx)
+    var secClr = dmNode._children.clear._children.targets._exec(modCtx)
+    assert.strictEqual(secClr, 0, 'immediate back-to-back clear by non-OP must be rate-limited')
+
+    // Grant danmaku.broadcast -> now 5 targets succeed
+    Valve.grantPlayer(srv, modPl, 'danmaku.broadcast', 'Admin')
+    argValues = { targets: [selfPl, p3, p4, p5, p6], spec: 'text="AllowedBroadcast"' }
+    var resOk = dmNode._children.player._children.targets._children.spec._exec(modCtx)
+    assert.strictEqual(resOk, 5, 'granting danmaku.broadcast unlocks >4 target player danmaku')
+
+    // 4. /epiphy auth scopes lists declared fine-grained scopes
+    assert.strictEqual(authNode._children.scopes._exec({ source: opSrc }), 1)
+    assert.ok(opOut.some(function (l) { return l.indexOf('danmaku.self') >= 0 }), 'auth scopes output lists danmaku.self')
+    assert.ok(opOut.some(function (l) { return l.indexOf('audio.broadcast') >= 0 }), 'auth scopes output lists audio.broadcast')
 })
 
 var passed = 0

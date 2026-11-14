@@ -1,11 +1,11 @@
 // priority: 500
 // ============================================================================
-//  通用空间音频与流式声场组件 —— 服务端调度器 (EpiphyAudio v5.3, ES6)
+//  通用空间音频与流式声场组件 —— 服务端调度器 (EpiphyAudio v5.4, ES6)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/server_scripts/通用组件/Epiphy的-音频组件.js
-//  配套客户端播放器：kubejs/client_scripts/通用组件/Epiphy的-音频播放器.js (EpiphyAudioClient v5.3)
+//  配套客户端播放器：kubejs/client_scripts/通用组件/Epiphy的-音频播放器.js (EpiphyAudioClient v5.4)
 //  配套权限阀组件：kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（管理 /epiphy 根命令、执行权限与 actorTier 资源分级）
 //
 //  依赖与缺失降级行为：
@@ -74,6 +74,7 @@
         maxRange:            512,
         defaultOneShotTicks: 20 * 60 * 3,    // 非循环且未给 duration 时的句柄最大兜底保留时长 (3分钟)
         defaultActiveHold:   30,             // lifeMode='active' 心跳续期单次默认维持窗口 (tick)
+        unstartedTimeoutTicks: 20 * 60 * 5,  // 挂起等待启动条件的最长保留时长 (tick, 0=不超时)
         anchorGraceTicks:    100,            // 实体锚点因区块卸载暂时丢失后的宽限等待 (tick)
         maxHandles:          512,            // 全服句柄上限；超出时按层级与优先级淘汰
         maxPlayerHandles:    64,             // 非OP授权玩家指令创建句柄的全服总上限
@@ -81,6 +82,7 @@
         maxHandlesPerPlayer: 12,             // 单名玩家同时收听的句柄上限
         maxPlayerHandlesPerListener: 8,      // 单名玩家收听槽中允许 player 层级占用的上限（预留 >=4 槽给 system/OP/脚本）
         playerMaxPriority:   3,              // 非OP授权玩家指令允许的最高优先级
+        maxBroadcastTargets: 4,              // 未授予 audio.broadcast 时非OP单次最多影响的在线人数
         maxKeyLength:        160,
         listMaxLines:        20,
         errorLogIntervalMs:  5000            // 限频警告日志最小间隔 (ms)
@@ -638,6 +640,16 @@
                              startConditions.startOnEnter ||
                              startConditions.requireRedstone ||
                              (startConditions.predicate != null)
+        var unstartedWaitTicks = 0
+        if (hasStartGate) {
+            var rawWait = spec.startTimeout !== undefined ? spec.startTimeout : spec.maxWaitTicks
+            if (rawWait !== undefined) {
+                var parsedWait = parseTicks(rawWait, false)
+                unstartedWaitTicks = (parsedWait != null && parsedWait > 0) ? parsedWait : 0
+            } else {
+                unstartedWaitTicks = max2(0, CONFIG.unstartedTimeoutTicks || 0)
+            }
+        }
 
         var effectiveSpanTicks = isActiveMode
             ? activeHoldTicks
@@ -700,11 +712,12 @@
                 listenerCount:   0,
                 triggerCount:    0,
                 hadListenerOnce: false,
-                bornTick:        tickCounter,
-                activeHoldTicks: activeHoldTicks,
-                spanTicks:       effectiveSpanTicks,
-                endTick:         (!hasStartGate && effectiveSpanTicks > 0) ? (tickCounter + effectiveSpanTicks) : 0,
-                graceTicks:      max2(0, parseFiniteNum(spec.anchorGraceTicks, CONFIG.anchorGraceTicks)),
+                bornTick:            tickCounter,
+                activeHoldTicks:     activeHoldTicks,
+                spanTicks:           effectiveSpanTicks,
+                endTick:             (!hasStartGate && effectiveSpanTicks > 0) ? (tickCounter + effectiveSpanTicks) : 0,
+                unstartedExpireTick: (hasStartGate && unstartedWaitTicks > 0) ? (tickCounter + unstartedWaitTicks) : 0,
+                graceTicks:          max2(0, parseFiniteNum(spec.anchorGraceTicks, CONFIG.anchorGraceTicks)),
                 endWithAnchor:   parseBool(spec.endWithAnchor, true),
                 startCond:       startConditions,
                 stopCond:        stopConditions,
@@ -1079,32 +1092,35 @@
         emit('join', h, rec.p)
     }
 
+    var releasePlayerListenCount = (h, uuid) => {
+        var wasCounted = Boolean(h.countedListeners && h.countedListeners[uuid])
+        if (h.countedListeners) delete h.countedListeners[uuid]
+        if (!wasCounted) return
+        var nextOwner = (h.conflictMode === 'merge') ? findOtherActiveMergeSibling(h, uuid) : null
+        if (nextOwner != null) {
+            if (!nextOwner.countedListeners) nextOwner.countedListeners = {}
+            nextOwner.countedListeners[uuid] = true
+        } else if (listenCount.has(uuid)) {
+            var next = listenCount.get(uuid) - 1
+            if (next <= 0) listenCount.delete(uuid)
+            else listenCount.set(uuid, next)
+        }
+    }
+
     var removeListener = (h, uuid, rec, reason, customFadeOut) => {
         if (!h.listeners[uuid]) return
         if (rec != null) {
             sendPacket(rec.p, buildStopPacket(h, customFadeOut))
         }
-        var wasCounted = Boolean(h.countedListeners && h.countedListeners[uuid])
         delete h.listeners[uuid]
         if (h.mutedListeners) delete h.mutedListeners[uuid]
         if (h.listenerEnteredSeq) delete h.listenerEnteredSeq[uuid]
         if (h.listenerInRange) delete h.listenerInRange[uuid]
         if (h.listenerInRangeSeq) delete h.listenerInRangeSeq[uuid]
-        if (h.countedListeners) delete h.countedListeners[uuid]
         if (h.listenerAnchorKey) delete h.listenerAnchorKey[uuid]
         if (h.listenerSentPos) delete h.listenerSentPos[uuid]
         h.listenerCount = max2(0, h.listenerCount - 1)
-        if (wasCounted) {
-            var nextOwner = (h.conflictMode === 'merge') ? findOtherActiveMergeSibling(h, uuid) : null
-            if (nextOwner != null) {
-                if (!nextOwner.countedListeners) nextOwner.countedListeners = {}
-                nextOwner.countedListeners[uuid] = true
-            } else if (listenCount.has(uuid)) {
-                var next = listenCount.get(uuid) - 1
-                if (next <= 0) listenCount.delete(uuid)
-                else listenCount.set(uuid, next)
-            }
-        }
+        releasePlayerListenCount(h, uuid)
         emit('leave', h, rec != null ? rec.p : null, reason)
     }
 
@@ -1316,7 +1332,33 @@
     }
 
     var activateHandle = (h, snap) => {
-        if (!checkStartConditionMet(h, snap)) return true
+        if (h.anchor.kind === 'entity') {
+            if (!refreshEntityAnchor(h.anchor, snap)) {
+                h.anchor.missingTicks += CONFIG.syncIntervalTicks
+                if (h.stopCond.stopOnEntityDeath || (h.endWithAnchor && h.anchor.missingTicks >= h.graceTicks)) {
+                    endHandle(h, 'anchor_lost', snap)
+                    return false
+                }
+                if (h.unstartedExpireTick > 0 && tickCounter >= h.unstartedExpireTick) {
+                    endHandle(h, 'start_timeout', snap)
+                    return false
+                }
+                return true
+            }
+            h.anchor.missingTicks = 0
+        }
+        var preStopReason = checkStopConditionTriggered(h)
+        if (preStopReason != null) {
+            endHandle(h, preStopReason, snap)
+            return false
+        }
+        if (!checkStartConditionMet(h, snap)) {
+            if (h.unstartedExpireTick > 0 && tickCounter >= h.unstartedExpireTick) {
+                endHandle(h, 'start_timeout', snap)
+                return false
+            }
+            return true
+        }
         h.started = true
         if (h.spanTicks > 0) {
             h.endTick = tickCounter + h.spanTicks
@@ -1332,11 +1374,13 @@
     }
 
     var syncAll = () => {
-        if (handles.size === 0) return
-        var hadHandles = true
+        if (handles.size === 0 && dirtyMergeScopes.size === 0) return
+        var hadHandles = handles.size > 0
         var t0Ns = nowNano()
         try {
             var snap             = snapshotPlayers()
+            flushDirtyMergeScopes(snap)
+            if (handles.size === 0) return
             var noOnlinePlayers  = (snap.list.length === 0)
             var needsArbitration = false
             handles.forEach((h) => {
@@ -1563,16 +1607,17 @@
         for (var u of uuids) {
             var rec = s.byUuid[u]
             if (rec != null) sendPacket(rec.p, pkt)
-            if (listenCount.has(u)) {
-                var next = listenCount.get(u) - 1
-                if (next <= 0) listenCount.delete(u)
-                else listenCount.set(u, next)
-            }
+            releasePlayerListenCount(h, u)
         }
-        h.listeners         = {}
-        h.listenerAnchorKey = {}
-        h.listenerSentPos   = {}
-        h.listenerCount     = 0
+        h.listeners          = {}
+        h.mutedListeners     = {}
+        h.listenerEnteredSeq = {}
+        h.listenerInRange    = {}
+        h.listenerInRangeSeq = {}
+        h.countedListeners   = {}
+        h.listenerAnchorKey  = {}
+        h.listenerSentPos    = {}
+        h.listenerCount      = 0
         handles.delete(h.id)
         if (h.key != null && keyIndex.get(h.key) === h.id) {
             keyIndex.delete(h.key)
@@ -2060,6 +2105,11 @@
             h.anchor.x = parseFiniteNum(patch.x, h.anchor.x)
             h.anchor.y = parseFiniteNum(patch.y, h.anchor.y)
             h.anchor.z = parseFiniteNum(patch.z, h.anchor.z)
+            if (h.anchor.kind === 'block') {
+                h.anchor.bx = Math.floor(h.anchor.x)
+                h.anchor.by = Math.floor(h.anchor.y)
+                h.anchor.bz = Math.floor(h.anchor.z)
+            }
             needLiveUpd = true
         }
         if (patch.category != null) {
@@ -2147,6 +2197,21 @@
     var boundAudioSeqCounter = 0
     var boundAudioSeqByKey   = new Map() // posKey -> monotonic seq
     var mergeBoundSources    = new Map() // audioKey -> { audioKey, key, blockId, dim, bx, by, bz, cx, cy, cz, range, scopeKey, seq, playSpec }
+    var dirtyMergeScopes     = new Set() // scopeKey -> 待合并重算的维度声场作用域
+
+    var flushDirtyMergeScopes = (snapOpt) => {
+        if (dirtyMergeScopes.size === 0) return 0
+        var snap = snapOpt != null ? snapOpt : (serverRef != null ? snapshotPlayers() : null)
+        var scopes = Array.from(dirtyMergeScopes)
+        dirtyMergeScopes.clear()
+        var reconciled = 0
+        for (var i = 0; i < scopes.length; i++) {
+            if (reconcileAudioMergeScope(scopes[i], snap, null)) {
+                reconciled++
+            }
+        }
+        return reconciled
+    }
 
     var ensureBoundAudioSeq = (rec) => {
         if (rec == null) return 0
@@ -2354,7 +2419,7 @@
         stopKey(audioKey, fadeOut)
     }
 
-    var startBoundBlockAudio = (rec, binding, lv, curBlock) => {
+    var startBoundBlockAudio = (rec, binding, lv, curBlock, foundSource) => {
         if (binding == null) binding = audioBlockTracker != null ? audioBlockTracker.getBinding(rec.blockId) : null
         if (binding == null) return false
         if (lv == null) lv = resolveServerLevel(rec.dim)
@@ -2403,6 +2468,10 @@
                     seq:      seq,
                     playSpec: playSpec
                 })
+                if (foundSource === 'scan') {
+                    dirtyMergeScopes.add(scopeKey)
+                    return true
+                }
                 return reconcileAudioMergeScope(scopeKey, null, null)
             }
         } else if (mergeBoundSources.has(rec.audioKey)) {
@@ -2422,15 +2491,15 @@
             makeRecordExtra: function (blockId, dim, ix, iy, iz) {
                 return { audioKey: makeBoundAudioKey(blockId, dim, ix, iy, iz) }
             },
-            onFound: function (rec, binding) {
+            onFound: function (rec, binding, foundSource) {
                 ensureBoundAudioSeq(rec)
                 if (findActiveClusterHandleForKey(rec.audioKey) == null) {
-                    startBoundBlockAudio(rec, binding, null, null)
+                    startBoundBlockAudio(rec, binding, null, null, foundSource)
                 }
             },
             onTick: function (rec, binding, tickNum, lv, curBlock) {
                 if (findActiveClusterHandleForKey(rec.audioKey) == null) {
-                    startBoundBlockAudio(rec, binding, lv, curBlock)
+                    startBoundBlockAudio(rec, binding, lv, curBlock, 'tick')
                 }
             },
             onRemoved: function (rec, binding, reason, fadeOut) {
@@ -2471,14 +2540,20 @@
         }
         var stopped = tracker.unbind(idStr, fadeOut)
         var affectedScopes = new Set()
-        for (var [ak, src] of Array.from(mergeBoundSources.entries())) {
+        var removeEntries  = []
+        mergeBoundSources.forEach((src, ak) => {
             if (src != null && src.blockId === idStr) {
                 affectedScopes.add(src.scopeKey)
-                mergeBoundSources.delete(ak)
-                if (src.key != null) boundAudioSeqByKey.delete(src.key)
+                removeEntries.push({ ak: ak, key: src.key })
             }
+        })
+        for (var ri = 0; ri < removeEntries.length; ri++) {
+            var rm = removeEntries[ri]
+            mergeBoundSources.delete(rm.ak)
+            if (rm.key != null) boundAudioSeqByKey.delete(rm.key)
         }
         for (var sk of affectedScopes) {
+            dirtyMergeScopes.delete(sk)
             reconcileAudioMergeScope(sk, null, fadeOut)
         }
         return stopped
@@ -2518,7 +2593,6 @@
             if (event.server != null) serverRef = event.server
             tickCounter++
             if (pendingReset && serverRef != null) {
-                pendingReset = false
                 absorbGlobalBlockBindings()
                 for (var p of onlinePlayers()) {
                     var pu = uuidOf(p)
@@ -2528,8 +2602,9 @@
                     }
                     sendPacket(p, { proto: PROTO_VERSION, act: 'reset', ses: SESSION })
                 }
+                pendingReset = false
             }
-            if (tickCounter % CONFIG.syncIntervalTicks === 0) {
+            if ((tickCounter % CONFIG.syncIntervalTicks) === 0 || dirtyMergeScopes.size > 0) {
                 syncAll()
             }
         } catch (e) {
@@ -2568,13 +2643,53 @@
         }
     })
 
+    var CONFIG_INT_LIMITS = {
+        syncIntervalTicks:           { min: 1, max: 1200 },
+        scanEnqInterval:             { min: 1, max: 1200 },
+        scanSectionsPerTick:         { min: 1, max: 64 },
+        defaultOneShotTicks:         { min: 1, max: 720000 },
+        defaultActiveHold:           { min: 1, max: 12000 },
+        unstartedTimeoutTicks:       { min: 0, max: 720000 },
+        anchorGraceTicks:            { min: 0, max: 72000 },
+        maxHandles:                  { min: 1, max: 8192 },
+        maxPlayerHandles:            { min: 1, max: 4096 },
+        maxCreatedHandlesPerPlayer:  { min: 1, max: 512 },
+        maxHandlesPerPlayer:         { min: 1, max: 256 },
+        maxPlayerHandlesPerListener: { min: 1, max: 256 },
+        playerMaxPriority:           { min: 0, max: 10 },
+        maxBroadcastTargets:         { min: 1, max: 256 },
+        maxKeyLength:                { min: 16, max: 512 },
+        listMaxLines:                { min: 1, max: 200 },
+        errorLogIntervalMs:          { min: 0, max: 600000 }
+    }
+    var CONFIG_NUM_LIMITS = {
+        rangeHysteresis: { min: 0, max: 256 },
+        defaultRange:    { min: 1, max: 4096 },
+        minRange:        { min: 0.5, max: 2048 },
+        maxRange:        { min: 1, max: 4096 }
+    }
+
     var configure = (patch) => {
         if (patch != null && typeof patch === 'object') {
             var cfgPatch = (patch.CONFIG && typeof patch.CONFIG === 'object') ? patch.CONFIG : patch
             for (var k of Object.keys(cfgPatch)) {
-                if (Object.prototype.hasOwnProperty.call(CONFIG, k) && cfgPatch[k] !== undefined) {
+                if (!Object.prototype.hasOwnProperty.call(CONFIG, k) || cfgPatch[k] === undefined) continue
+                var intRule = CONFIG_INT_LIMITS[k]
+                var numRule = CONFIG_NUM_LIMITS[k]
+                if (intRule != null || numRule != null) {
+                    var n = Number(cfgPatch[k])
+                    var rule = intRule || numRule
+                    if (!isFinite(n) || n < rule.min || n > rule.max) {
+                        reportWarning('configure', `配置项 CONFIG.${k}=${cfgPatch[k]} 超出有效范围 [${rule.min}, ${rule.max}]，已拒绝修改`)
+                        continue
+                    }
+                    CONFIG[k] = intRule ? Math.floor(n) : n
+                } else {
                     CONFIG[k] = cfgPatch[k]
                 }
+            }
+            if (CONFIG.maxRange < CONFIG.minRange) {
+                CONFIG.maxRange = CONFIG.minRange
             }
         }
         return CONFIG
@@ -2759,7 +2874,8 @@
         if (source != null) {
             var pl = (typeof source.getPlayer === 'function') ? source.getPlayer() : source.player
             if (pl != null) {
-                var isOp = (typeof pl.hasPermissions === 'function' && pl.hasPermissions(2))
+                // 权限阀缺失时 Fail-Closed：绝不信任 bare hasPermissions(2)
+                var isOp = Boolean(typeof pl.isOp === 'function' && pl.isOp())
                 var u = uuidOf(pl)
                 return {
                     tier:     isOp ? 'system' : 'player',
@@ -2826,12 +2942,45 @@
             return affected
         }
 
+        var hasAudioBroadcastGrant = (actor) => {
+            if (actor == null || actor.tier !== 'player') return true
+            var valve = (typeof global !== 'undefined') ? global.EpiphyPermissionValve : null
+            if (valve == null || actor.player == null) return false
+            if (typeof valve.hasPlayerScope === 'function') {
+                return Boolean(valve.hasPlayerScope(serverRef, actor.player, 'audio.broadcast', { exactScopeOnly: true }))
+            }
+            return false
+        }
+
         var runPlayCommand = (source, fields, optionStr) => {
             var parsed = parseOptions(optionStr)
             if (parsed.error) return cmdErr(source, parsed.error)
             var merged = withFields(parsed.opts, fields)
             var actor  = resolveAudioActorTier(source)
             if (actor.tier === 'player') {
+                var srcDim = dimOfLevel(levelOf(actor.player))
+                var aud    = merged.audience || ''
+                var needBroadcast = false
+                if (Array.isArray(merged.players) && merged.players.length > CONFIG.maxBroadcastTargets) {
+                    needBroadcast = true
+                } else if (aud === 'all' && onlinePlayers().length > CONFIG.maxBroadcastTargets) {
+                    needBroadcast = true
+                } else if (aud === 'dim') {
+                    var targetDim = resolveDimId(merged.dim)
+                    var dimCount  = 0
+                    for (var dp of onlinePlayers()) {
+                        if (dimOfLevel(levelOf(dp)) === targetDim) dimCount++
+                    }
+                    if ((srcDim && targetDim && srcDim !== targetDim) || dimCount > CONFIG.maxBroadcastTargets) {
+                        needBroadcast = true
+                    }
+                } else if (merged.at != null && merged.dim != null) {
+                    var posDim = resolveDimId(merged.dim)
+                    if (srcDim && posDim && srcDim !== posDim) needBroadcast = true
+                }
+                if (needBroadcast && !hasAudioBroadcastGrant(actor)) {
+                    return cmdErr(source, `权限不足：影响超过 ${CONFIG.maxBroadcastTargets} 名玩家或跨维度的音频广播需要额外授予 [audio.broadcast] 作用域`)
+                }
                 merged._sourceTier = 'player'
                 merged._ownerUuid  = actor.uuid
             } else {
@@ -2880,19 +3029,22 @@
         return cb.literal('audio', {
             helpLines: AUDIO_HELP_LINES,
             children: [
-                cb.literal('help', { helpLines: AUDIO_HELP_LINES }),
+                cb.literal('help', { scope: 'audio.help', helpLines: AUDIO_HELP_LINES }),
                 cb.literal('play', {
+                    scope: 'audio.play',
                     chain: soundChain([{ name: 'targets', type: 'players' }], (ctx, v, opt) => {
                         if (v.targets.length === 0) return cmdErr(ctx.source, '未匹配到任何在线玩家')
                         return runPlayCommand(ctx.source, { sound: v.sound, players: v.targets }, opt)
                     })
                 }),
                 cb.literal('follow', {
+                    scope: 'audio.follow',
                     chain: soundChain([{ name: 'entity', type: 'entity' }], (ctx, v, opt) =>
                         runPlayCommand(ctx.source, { sound: v.sound, entity: v.entity }, opt)
                     )
                 }),
                 cb.literal('at', {
+                    scope: 'audio.at',
                     chain: soundChain([{ name: 'pos', type: 'vec3' }], (ctx, v, opt) => {
                         var lv = typeof ctx.source.getLevel === 'function' ? ctx.source.getLevel() : ctx.source.level
                         var dim = dimOfLevel(lv)
@@ -2901,6 +3053,7 @@
                     })
                 }),
                 cb.literal('pos', {
+                    scope: 'audio.pos',
                     chain: soundChain([
                         { name: 'dimension', type: 'dim' },
                         { name: 'pos', type: 'vec3' }
@@ -2910,17 +3063,20 @@
                     })
                 }),
                 cb.literal('dim', {
+                    scope: 'audio.dim',
                     chain: soundChain([{ name: 'dimension', type: 'dim' }], (ctx, v, opt) => {
                         if (v.dimension == null) return cmdErr(ctx.source, '无法解析目标维度')
                         return runPlayCommand(ctx.source, { sound: v.sound, dim: v.dimension, audience: 'dim' }, opt)
                     })
                 }),
                 cb.literal('all', {
+                    scope: 'audio.all',
                     chain: soundChain([], (ctx, v, opt) =>
                         runPlayCommand(ctx.source, { sound: v.sound, audience: 'all' }, opt)
                     )
                 }),
                 cb.literal('update', {
+                    scope: 'audio.update',
                     chain: [[
                         { name: 'ref', type: 'string' },
                         { name: 'options', type: 'greedy' }
@@ -2942,6 +3098,7 @@
                     }]
                 }),
                 cb.literal('stop', {
+                    scope: 'audio.stop',
                     chain: [[
                         { name: 'ref', type: 'string' },
                         { name: 'fadeOut', type: 'word' }
@@ -2976,6 +3133,7 @@
                     }, { minArgs: 1 }]
                 }),
                 cb.literal('stopkey', {
+                    scope: 'audio.stopkey',
                     chain: [[{ name: 'key', type: 'string' }], (ctx, v) => {
                         var actor = resolveAudioActorTier(ctx.source)
                         if (actor.tier === 'player') {
@@ -2988,6 +3146,7 @@
                     }]
                 }),
                 cb.literal('stoptag', {
+                    scope: 'audio.stoptag',
                     chain: [[{ name: 'tag', type: 'string' }], (ctx, v) => {
                         var actor = resolveAudioActorTier(ctx.source)
                         if (actor.tier === 'player') {
@@ -3002,6 +3161,7 @@
                     }]
                 }),
                 cb.literal('stopsound', {
+                    scope: 'audio.stopsound',
                     chain: [[
                         { name: 'sound', type: 'sound' },
                         { name: 'targets', type: 'players' }
@@ -3027,6 +3187,7 @@
                     }, { minArgs: 1 }]
                 }),
                 cb.literal('stopfor', {
+                    scope: 'audio.stopfor',
                     chain: [[
                         { name: 'targets', type: 'players' },
                         { name: 'sound', type: 'sound' }
@@ -3041,6 +3202,7 @@
                     }, { minArgs: 1 }]
                 }),
                 cb.literal('stopall', {
+                    scope: 'audio.stopall',
                     chain: [[{ name: 'fadeOut', type: 'word' }], (ctx, v) => {
                         var actor = resolveAudioActorTier(ctx.source)
                         var hasFo = v._count >= 1
@@ -3056,6 +3218,7 @@
                     }, { minArgs: 0 }]
                 }),
                 cb.literal('list', {
+                    scope: 'audio.list',
                     exec: (ctx) => {
                         var all = list()
                         cb.replyOk(ctx.source, `§7当前活动音频句柄 ${all.length} 个${all.length > CONFIG.listMaxLines ? `（仅展示前 ${CONFIG.listMaxLines} 个）` : ''}`)
@@ -3066,6 +3229,7 @@
                     }
                 }),
                 cb.literal('info', {
+                    scope: 'audio.info',
                     chain: [[{ name: 'ref', type: 'string' }], (ctx, v) => {
                         var info = get(v.ref)
                         if (info == null) return cmdErr(ctx.source, `句柄或 key [${v.ref}] 不存在`)
@@ -3093,6 +3257,25 @@
             allowDeclaredCallers: true,
             allowedCallers:       null
         },
+        scopes: [
+            { scope: 'audio.play',      desc: '向指定目标玩家播放音频' },
+            { scope: 'audio.follow',    desc: '绑定实体移动播放音频' },
+            { scope: 'audio.at',        desc: '在当前维度指定坐标播放音频' },
+            { scope: 'audio.pos',       desc: '指定维度和坐标播放音频' },
+            { scope: 'audio.dim',       desc: '向指定维度播放音频' },
+            { scope: 'audio.all',       desc: '向全体玩家播放音频（超过 4 人需 audio.broadcast）' },
+            { scope: 'audio.broadcast', desc: '允许非 OP 超过 4 人或跨维度音频广播（需单独授予）' },
+            { scope: 'audio.update',    desc: '热更新音频句柄参数' },
+            { scope: 'audio.stop',      desc: '停止自己名下的音频句柄' },
+            { scope: 'audio.stopkey',   desc: '按 key 停止音频' },
+            { scope: 'audio.stoptag',   desc: '按 tag/group 停止音频' },
+            { scope: 'audio.stopsound', desc: '按 soundId 停止音频' },
+            { scope: 'audio.stopfor',   desc: '对指定玩家静默排除音频' },
+            { scope: 'audio.stopall',   desc: '停止自己名下全部音频' },
+            { scope: 'audio.list',      desc: '查看当前活动音频句柄列表' },
+            { scope: 'audio.info',      desc: '查看单个音频句柄详情' },
+            { scope: 'audio.help',      desc: '查看 /epiphy audio 帮助' }
+        ],
         summary:   '通用空间音频与流式声场调度指令 (/epiphy audio ...)',
         helpLines: AUDIO_HELP_LINES,
         buildNode: buildAudioCommandNode

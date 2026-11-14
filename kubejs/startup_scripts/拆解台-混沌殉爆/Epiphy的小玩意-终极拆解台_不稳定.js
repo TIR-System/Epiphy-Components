@@ -1,5 +1,6 @@
 // ============================================================================
 //  拆解台 · 混沌殉爆 —— 失稳阶段方块注册 & 硬度修改 (KubeJS 1.20.1 / 2001.6.5)
+//  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/startup_scripts/拆解台-混沌殉爆/Epiphy的小玩意-终极拆解台_不稳定.js
 //  资源加载位置（命名空间 epiphy；KubeJS 的加载根为 kubejs/assets/，无法用脚本改写）：
 //    kubejs/assets/epiphy/textures/block/ultra_uncrafting_instability_1~5_*.png   ← 唯一必须的实体资源

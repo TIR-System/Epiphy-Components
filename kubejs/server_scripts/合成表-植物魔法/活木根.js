@@ -1,3 +1,4 @@
+// 许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 ServerEvents.recipes(event => {
     event.remove({output:'botania:livingwood_twig'})
      

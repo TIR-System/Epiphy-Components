@@ -85,6 +85,10 @@
 | 弹幕端侧 `CompoundTag` 数值 `priority`/`proto` 读取失效、含空格文本逐字错位与 `maxGroup` 跨层驱逐 | `Epiphy的-屏幕弹幕渲染器.js` / `Epiphy的-屏幕弹幕组件.js` | 新增 `readPriorityField` 并改用 `readNum` 解析 `proto`，避免 `IntTag`/`DoubleTag` 退化；`splitLineIntoFragments` 统一空白与可见字素 `visIndex` 对齐 `countVisibleChars`；玩家命令强制 `u:<uuid>:` 组前缀且端侧 `maxGroupSize` 仅统计/驱逐同玩家命名空间 | [x] |
 | 音频 `/epiphy audio list\|info` 缺 `describeHandle` 及端侧 `CompoundTag` `proto` 读取补齐 | `Epiphy的-音频组件.js` / `Epiphy的-音频播放器.js` | 在 `buildAudioCommandNode` 内补全 `describeHandle` 格式化函数，并将端侧 `dataReceived` 协议版本读取统一改为 `readNum(pkt, 'proto', null)` | [x] |
 | 单元测试 `requires`/三重加载/`console`/音频端侧包往返“假绿”盲区 | `tests/pure_functions.test.js` | 真测 Brigadier `_req` 权限门禁与命令执行；移除 Test 14 重复加载并严格断言单次加载 `ServerEvents.tick` 数量；全链路捕获并断言零意外 `console.warn`/`error`；补全服务端 `_sent` 包到 `EpiphyAudioClient` 的真实往返及 P0 回归测试 | [x] |
+| 渲染器 P1 缺陷群（续期漏同步 `tier`/`maxGroupSize`、无排队/帧预算/文本/scale 上限、batch 异常降格、永久降级、闪烁破坏缓存、`hasKeyInTag` fail-open） | `Epiphy的-屏幕弹幕渲染器.js` | 续期同步 `tier`/`maxGroupSize` 并复用 `enforceOverlayCaps`；增加 `maxPendingActions`/`maxPendingPerFrame`/`frameBudgetMs`/文本截断与 `maxScale` 上限；batch 按条目隔离 catch 且不降格单条；`BATCH_FAILED`/ModernUI 降级改为 `10s` 冷却恢复；移除 `blinkCursor` 缓存键并用几何绘制光标；`hasKeyInTag` 异常改 fail-closed 返回 `false` | [x] |
+| 音频 双端 P1 缺陷群（`countedListeners` 漏减、未启动僵尸句柄、`pendingReset` 先清零、扫描 O(n²) 重建、`syncIntervalTicks=0`、无阀回落 `hasPermissions(2)`、`duckMusic` 杀他模组 BGM、3D `Channel` 坐标静止、静音重连循环、`update` 漏同步 `bx/by/bz`、解构语法风险） | `Epiphy的-音频组件.js` / `Epiphy的-音频播放器.js` | 抽取 `releasePlayerListenCount`；增加未启动超时与实体丢失清理；先广播成功再置 `pendingReset=false`；扫描延迟合并至 `dirtyMergeScopes`；`configure` 校验整型/浮点边界；缺失阀改为仅认 `isOp()`；`duckMusic` 改为 `Channel.pause`/`unpause` 并于队列归零时恢复；同步 `Channel.setSelfPosition(Vec3)` 与 `AbstractSoundInstance` 坐标；`mul=0` 走 `pause` 待命；同步 `bx/by/bz` 并移除数组解构 | [x] |
+| 弹幕 P1 缺陷群（拆块无命名空间误清、`null`/无效维度回落主世界、`stop`/`clear` 无频控、`onFound('scan')` 全清缓存、API 无包上限、`myIdx` 缺失仲裁失效） | `Epiphy的-服务端基础.js` / `Spec与通用工具.js` / `Epiphy的-屏幕弹幕组件.js` | 绑块清理限定 `blk:<blockId>` + `maxSeenPriority`；`resolveLevel`/`clearNear`/`deactivateNear` 无效维度 fail-closed；为 `stop`/`clear` 增加独立分桶防刷频；`'scan'` 改定向清缓存与球簇 AABB 预过滤；增加 `SYSTEM_PACKET_LIMITS`；修复 `myIdx` 缺失时 `first`/`latest` 及 `stagger` 仲裁 | [x] |
+| 非 OP `authorized` 权限粒度过粗（可对 `@a` 全服广域广播）与单指令按需授权缺失，及全库 `RAL-1.6` 文件头补齐 | `权限阀` / `服务端基础` / `弹幕组件` / `音频组件` / 全仓 `.js` | 实现 `module` -> `module.action` 分层权限（子级明确撤销优先于父级授权）与 `exactScopeOnly` 广播门 (`danmaku.broadcast` / `audio.broadcast`，无权非 OP 限 `<=4` 名他者/不跨维度/半径 `<=32m`)；新增 `/epiphy danmaku self` 与 `/epiphy auth scopes`；全仓缺失脚本与测试文件补齐 `RAL-1.6` 头部声明 | [x] |
 
 ---
 
@@ -100,8 +104,9 @@
 2. **“按名字授权”备用模式与 Fail-Closed 边界**：
    - 默认严格 UUID 授权；在提示与配置注释中必须明示：**纯离线服（`online-mode=false`）在无 TrueUUID 类模组且无密码登录插件保护时，仅依靠 UUID 模式同样不安全**。
    - 仅限**真 OP / 控制台**可操作 `/epiphy auth namegrant enable|confirm <code>|disable`（8 位数字 + 随机大小写字母口令，2 分钟有效期）；`auth_mode.json` 须保留 `_warning` / `_consequences` 注释，缺失或异常值一律按 Fail-Closed 处理；关闭后保留未迁移纯名字记录但立即暂停生效。
-3. **`authorized` 非 OP 玩家资源隔离原则**：
-   - 必须通过 `EpiphyPermissionValve.getCommandActorTier(source)` 区分 `'system'`（JS API / 真 OP / 控制台 / 命令方块 / Declared Callers）与 `'player'`（非 OP `authorized` 玩家）。
+3. **`authorized` 非 OP 玩家资源隔离与分级权限域原则**：
+   - 必须通过 `EpiphyPermissionValve.getCommandActorTier(source)` 区分 `'system'`（JS API / 真 OP / 控制台 / 命令方块 / Declared Callers）与 `'player'`（非 OP `authorized` 玩家）；当权限阀未加载时仅认 `pl.isOp()`（严禁退化信任 `hasPermissions(2)`）。
+   - 支持细粒度分层 `scope`（如 `danmaku.self`、`audio.play`）独立授予非 OP；明确撤销子 `scope` 须覆盖父模块授权；标记 `exactScopeOnly` 的高危能力（如 `danmaku.broadcast` / `audio.broadcast`）不得从模块级授权继承。
    - 任何新增音频/弹幕能力不得允许 `'player'` 源绕过命名空间隔离、越权停止 `'system'` 或他人对象，也不得挤压系统演出配额/槽位；同时不得反向给脚本 API、OP、控制台或命令方块施压额外玩家限流。
 4. **长期原生化迁出计划**：
    - 本项目在脚本阶段功能与契约充分稳定后，将整体迁往 **Kotlin + Java** 原生模组，KubeJS 仅作此前过渡依赖。
@@ -112,7 +117,7 @@
 
 1. **Git 规范**：主仓库位于 `D:\Git-Epiphy`。重大重构或模块改动前须先提交当前可用基准；严禁将运行期生成的 `epiphy-data/`、`_backup_*/`、`probe/`、`*.log`、`*.tmp`、`*.bak`、`kubejs/config/epiphy_permissions/` 等提交进版本库。所有读写均须使用 **UTF-8** 编码。
 2. **文档与头部版本号同步规范（每次功能/架构改动必做）**：
-   - **更新脚本头部注释与版本号**：修改任意 `.js` 组件涉及职责、依赖、降级策略或接口行为变化时，提交前必须检查并同步更新该脚本顶部注释的版本号（如 `EpiphyLog v1.1`、`EpiphyServerBase v2`、`EpiphyPermissionValve v5`、`ScreenDanmaku v5.1`、`EpiphyAudio v5.3` 等）、职责列表与依赖说明；若涉及共享语义版本常量（如 `EpiphySpec` 中 `AUDIO_SEMVER` 与端侧兜底 `VERSION`），须双端同步递增（网络包 `PROTO_VERSION` 仅在不兼容包结构变更时递增）。不得删除或篡改与改动无关的已有注释。
+   - **更新脚本头部注释与版本号**：修改任意 `.js` 组件涉及职责、依赖、降级策略或接口行为变化时，提交前必须检查并同步更新该脚本顶部注释的版本号（如 `EpiphyLog v1.1`、`EpiphyServerBase v2.1`、`EpiphyPermissionValve v5.1`、`ScreenDanmaku v5.2`、`EpiphyAudio v5.4` 等）、职责列表与依赖说明；若涉及共享语义版本常量（如 `EpiphySpec` 中 `AUDIO_SEMVER` 与端侧兜底 `VERSION`），须双端同步递增（网络包 `PROTO_VERSION` 仅在不兼容包结构变更时递增）。不得删除或篡改与改动无关的已有注释。
    - **同步仓库文档**：须同步检查并更新 [`README.md`](README.md)、[`README_EN.md`](README_EN.md)（工程架构表、组件版本号、核心能力与指令/目录说明），以及本文档 [`README-LLM.md`](README-LLM.md) 第 4 节（已解决问题基线表打 `[x]`）与第 5 节（现行契约状态）。
 3. **测试定位**：`npm test`（`node tests/pure_functions.test.js`）运行在 Node.js V8 沙盒中，可回归纯函数与模拟命令/权限/音频/弹幕隔离链路，但**无法捕获 Rhino 引擎缺陷与客户端渲染问题**；涉及运行期或画面修改后必须进服核验。
 4. **许可证约束（RAL 1.6）**：本项目受 [`LICENSE.md`](LICENSE.md) 约束（作者：`Epiphy-iLLUMs + Gemini 4 系列 + Claude 5.5 系列`；吉祥物：`DeepSeek`）。修改代码须保留既有 `RAL-1.6` 文件头与署名；严禁切换为非官方修改/衍生许可证，严禁引入不可调和冲突协议（如 PolyForm Shield License 1.0.0）或绕开桥接隔离规范直接混编冲突组件。

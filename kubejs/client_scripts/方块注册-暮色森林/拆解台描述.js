@@ -1,3 +1,4 @@
+// 许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 ItemEvents.tooltip(event => {
   const LINES = [
     '可以将任何物品还原成它的材料...甚至一些更原始的东西。',

@@ -1,11 +1,11 @@
 // priority: 500
 // ============================================================================
-//  通用屏幕弹幕与泛用文本显示组件 —— 服务端调度器 (ScreenDanmaku v5.1)
+//  通用屏幕弹幕与泛用文本显示组件 —— 服务端调度器 (ScreenDanmaku v5.2)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js
-//  配套客户端渲染器：kubejs/client_scripts/通用组件/Epiphy的-屏幕弹幕渲染器.js (ScreenDanmakuClient v5.1)
+//  配套客户端渲染器：kubejs/client_scripts/通用组件/Epiphy的-屏幕弹幕渲染器.js (ScreenDanmakuClient v5.2)
 //  配套权限阀组件：kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（管理 /epiphy 根命令、执行权限与 actorTier 资源分级）
 //
 //  依赖与缺失降级行为：
@@ -966,6 +966,27 @@
         return optsOrText
     }
 
+    var SYSTEM_PACKET_LIMITS = {
+        maxTitleLen:     4096,
+        maxSubLen:       2048,
+        maxScale:        8.0,
+        maxStayTicks:    72000,
+        maxFadeOutTicks: 1200,
+        maxCharMs:       2000
+    }
+
+    function truncateSafeProtoText(str, maxLen) {
+        if (!str || str.length <= maxLen) return str
+        var cut = str.substring(0, maxLen)
+        if (cut.length > 0) {
+            var lastCode = cut.charCodeAt(cut.length - 1)
+            if ((lastCode >= 0xD800 && lastCode <= 0xDBFF) || lastCode === 167) {
+                cut = cut.substring(0, cut.length - 1)
+            }
+        }
+        return cut
+    }
+
     function buildValidatedPacket(optsOrText, notifyPlayer) {
         var opts = normalizeOptionsObject(optsOrText)
         if (opts == null || typeof opts !== 'object') {
@@ -1012,27 +1033,36 @@
             return reportConfigWarning('缺少必填参数 `text`（或 `title`）：弹幕主文本不能为空！', notifyPlayer)
         }
 
-        var titleStr = applyTargetStyleTags(
-            String(rawTitle).replace(/&([0-9a-fk-or])/gi, '§$1').replace(/\\n/g, '\n').replace(/\\\|/g, '|'),
-            opts
+        var titleStr = truncateSafeProtoText(
+            applyTargetStyleTags(
+                String(rawTitle).replace(/&([0-9a-fk-or])/gi, '§$1').replace(/\\n/g, '\n').replace(/\\\|/g, '|'),
+                opts
+            ),
+            SYSTEM_PACKET_LIMITS.maxTitleLen
         )
-        var subStr   = applyTargetStyleTags(
-            String(rawSub || '').replace(/&([0-9a-fk-or])/gi, '§$1').replace(/\\n/g, '\n').replace(/\\\|/g, '|'),
-            opts
+        var subStr = truncateSafeProtoText(
+            applyTargetStyleTags(
+                String(rawSub || '').replace(/&([0-9a-fk-or])/gi, '§$1').replace(/\\n/g, '\n').replace(/\\\|/g, '|'),
+                opts
+            ),
+            SYSTEM_PACKET_LIMITS.maxSubLen
         )
 
         var posInfo      = resolvePosition(opts)
         var sizeInfo     = parseSize(opts.size, opts.scale)
+        sizeInfo.scale   = Math.min(SYSTEM_PACKET_LIMITS.maxScale, sizeInfo.scale)
         var angleVal     = parseTilt(opts.tilt, opts.angle, posInfo.presetAngle)
         var colorInfo    = parseColor(opts.color, DEFAULTS.color)
         var subColInfo   = parseColor(opts.subColor, DEFAULTS.subColor)
         var outlineInfo  = resolveOutline(opts, colorInfo.color)
         var spacingVal   = Math.max(-2.0, Math.min(24.0, parseFiniteNum(pick(opts, ['letterSpacing', 'charSpacing', 'spacing'], null), DEFAULTS.letterSpacing)))
         var isChar       = resolveTypewriterMode(opts)
-        var charMsVal    = Math.round(parseNonNegNum(opts.charMs, DEFAULTS.charMs, 8))
+        var charMsVal    = Math.min(SYSTEM_PACKET_LIMITS.maxCharMs, Math.round(parseNonNegNum(opts.charMs, DEFAULTS.charMs, 8)))
         var shakeInfo    = resolveShake(opts)
         var fadeStyle    = resolveFadeStyle(opts)
         var lifeInfo     = resolveLifetime(opts)
+        lifeInfo.stay       = Math.min(SYSTEM_PACKET_LIMITS.maxStayTicks, lifeInfo.stay)
+        lifeInfo.activeHold = Math.min(SYSTEM_PACKET_LIMITS.maxStayTicks, lifeInfo.activeHold)
         var defPri       = (lifeInfo.lifeMode === 'active') ? DEFAULTS.activePriority : DEFAULTS.priority
         var priority     = parsePriority(pick(opts, ['priority', 'importance'], null), defPri)
         var groupStr     = String(pickNonEmpty(opts, ['group'], DEFAULTS.group))
@@ -1050,6 +1080,7 @@
         var maxGroupVal  = Math.round(parseNonNegNum(pick(opts, ['maxGroup', 'maxGroupSize', 'groupLimit', 'maxConcurrent'], null), DEFAULTS.maxGroup, 0))
         var fadeOutVal   = parseTicksOrSec(opts.fadeOut)
         if (fadeOutVal === null) fadeOutVal = DEFAULTS.fadeOut
+        fadeOutVal       = Math.min(SYSTEM_PACKET_LIMITS.maxFadeOutTicks, fadeOutVal)
         var baseShift    = parseNonNegNum(opts.charShakeShift, DEFAULTS.charShakeShift, 0.0)
 
         var pTier = (opts._sourceTier === 'player' || opts.tier === 'player' || nsStr.indexOf('u:') === 0) ? 'player' : 'system'
@@ -1394,6 +1425,10 @@
     }
 
     function deactivateNear(levelOrDim, x, y, z, radius, keyOrGroup, fadeOutOrOpts, maybeMaxPriority) {
+        if (levelOrDim == null || levelOrDim === '') {
+            reportConfigWarning('调用 deactivateNear 时未指定有效维度')
+            return 0
+        }
         var lv = resolveLevel(levelOrDim, null)
         if (lv == null) return 0
         var r = (radius !== undefined && radius !== null && radius !== '') ? parseNonNegNum(radius, -1, 0) : DEFAULTS.radius
@@ -1425,6 +1460,10 @@
     }
 
     function clearNear(levelOrDim, x, y, z, radius, groupOrOpts, maxPriority) {
+        if (levelOrDim == null || levelOrDim === '') {
+            reportConfigWarning('调用 clearNear 时未指定有效维度')
+            return 0
+        }
         var lv = resolveLevel(levelOrDim, null)
         if (lv == null) return 0
         var r = (radius !== undefined && radius !== null && radius !== '') ? parseNonNegNum(radius, -1, 0) : DEFAULTS.radius
@@ -1444,10 +1483,18 @@
     var scopeListCache        = new Map() // '<dim>|<scopeKey>' -> { rev, builtTick, list: [{ rec, binding, seq, cx, cy, cz, r, rSq }], idxByKey: Map, mergeClustersByKey: Map }
     var blockSeqByKey         = new Map() // '<posKey>' -> seq
 
-    function invalidateScopeCache(removedKey) {
-        boundScopeRevision++
-        if (scopeListCache.size > 0) scopeListCache.clear()
+    function invalidateScopeCache(removedKey, optCacheKey) {
+        if (optCacheKey != null && optCacheKey !== '') {
+            scopeListCache.delete(optCacheKey)
+        } else {
+            boundScopeRevision++
+            if (scopeListCache.size > 0) scopeListCache.clear()
+        }
         if (removedKey != null) blockSeqByKey.delete(removedKey)
+    }
+
+    function getScopeCacheKeyForRecord(rec, binding) {
+        return String(rec.dim || 'minecraft:overworld') + '|' + getBlockConflictScopeKey(rec, binding)
     }
 
     function getBlockConflictScopeKey(rec, binding) {
@@ -1652,15 +1699,23 @@
 
         var px = pPos.x, py = pPos.y, pz = pPos.z
         var myIdx = scopeEntry.idxByKey.get(rec.key)
+        if (myIdx === undefined) {
+            invalidateScopeCache(null, getScopeCacheKeyForRecord(rec, binding))
+            scopeEntry = getScopeCacheEntry(rec, binding)
+            list       = scopeEntry.list
+            myIdx      = scopeEntry.idxByKey.get(rec.key)
+        }
+        var mySeq = ensureRecordSeq(rec)
 
         // list 已按 _danmakuSeq 升序排序：first/latest 只需扫描竞争一侧并可提前命中退出
         if (mode === 'first') {
             var limitFirst = (myIdx !== undefined) ? myIdx : list.length
             for (var fi = 0; fi < limitFirst; fi++) {
-                var fe  = list[fi]
+                var fe = list[fi]
+                if (myIdx === undefined && fe.seq >= mySeq) break
                 var fdx = px - fe.cx, fdy = py - fe.cy, fdz = pz - fe.cz
                 if ((fdx * fdx + fdy * fdy + fdz * fdz) <= fe.rSq) {
-                    return myIdx !== undefined ? false : (fe.rec.key === rec.key)
+                    return false
                 }
             }
             return true
@@ -1668,10 +1723,11 @@
         if (mode === 'latest') {
             var stopLatest = (myIdx !== undefined) ? (myIdx + 1) : 0
             for (var li = list.length - 1; li >= stopLatest; li--) {
-                var le  = list[li]
+                var le = list[li]
+                if (myIdx === undefined && le.seq <= mySeq) break
                 var ldx = px - le.cx, ldy = py - le.cy, ldz = pz - le.cz
                 if ((ldx * ldx + ldy * ldy + ldz * ldz) <= le.rSq) {
-                    return myIdx !== undefined ? false : (le.rec.key === rec.key)
+                    return false
                 }
             }
             return true
@@ -1697,12 +1753,19 @@
     }
 
     function shouldEmitStaggerTick(rec, binding, tickNum) {
-        ensureRecordSeq(rec)
+        var mySeq      = ensureRecordSeq(rec)
         var scopeEntry = getScopeCacheEntry(rec, binding)
         var total      = scopeEntry.list.length
         if (total <= 1) return (tickNum % binding.intervalTicks) === 0
         var idx = scopeEntry.idxByKey.get(rec.key)
-        if (idx === undefined) idx = 0
+        if (idx === undefined) {
+            invalidateScopeCache(null, getScopeCacheKeyForRecord(rec, binding))
+            scopeEntry = getScopeCacheEntry(rec, binding)
+            total      = scopeEntry.list.length
+            if (total <= 1) return (tickNum % binding.intervalTicks) === 0
+            idx = scopeEntry.idxByKey.get(rec.key)
+        }
+        if (idx === undefined) idx = mySeq % total
         var phase = Math.floor((idx * binding.intervalTicks) / total)
         return ((tickNum + phase) % binding.intervalTicks) === 0
     }
@@ -1734,6 +1797,28 @@
                     : forEachPlayerInRadius(lv, cx, cy, cz, r, cb)
             }
 
+            function normalizeBoundSpec(rawSpec) {
+                var normSpec = normalizeOptionsObject(rawSpec)
+                if (normSpec == null || typeof normSpec !== 'object') return rawSpec
+                var hasNs = (normSpec.namespace != null && String(normSpec.namespace).trim() !== '') ||
+                            (normSpec.ns != null && String(normSpec.ns).trim() !== '')
+                var outSpec = normSpec
+                if (!hasNs) {
+                    outSpec = {}
+                    for (var ok in normSpec) {
+                        if (Object.prototype.hasOwnProperty.call(normSpec, ok)) outSpec[ok] = normSpec[ok]
+                    }
+                    outSpec.namespace = binding.defaultNamespace
+                }
+                var effNs = String(pickNonEmpty(outSpec, ['namespace', 'ns'], binding.defaultNamespace))
+                binding.lastEmittedNs = effNs
+                var specPri = parsePriority(pick(outSpec, ['priority', 'importance'], null), -1)
+                if (specPri >= 0 && specPri > (binding.maxSeenPriority || -1)) {
+                    binding.maxSeenPriority = specPri
+                }
+                return outSpec
+            }
+
             // 模式 1（共享模式 perPlayer === false，默认）：仅当至少有一名玩家通过作用域准入后才延迟生成并打包一次，避免 merge/竞争落选方块空耗构包
             if (!binding.perPlayer) {
                 var sharedBuilt = false
@@ -1761,7 +1846,10 @@
                             sharedSpec = null
                         }
                         if (sharedSpec != null) {
-                            sharedPkt = buildValidatedPacket(sharedSpec, null)
+                            sharedPkt = buildValidatedPacket(normalizeBoundSpec(sharedSpec), null)
+                            if (sharedPkt != null && sharedPkt.priority > (binding.maxSeenPriority || -1)) {
+                                binding.maxSeenPriority = sharedPkt.priority
+                            }
                         }
                     }
                     if (sharedPkt == null) return
@@ -1792,7 +1880,7 @@
                         })
                         : binding.specOrFn
                     if (rawSpec != null) {
-                        toPlayer(p, rawSpec)
+                        toPlayer(p, normalizeBoundSpec(rawSpec))
                     }
                 } catch (eEmit) {
                     reportCatch('emitForBoundBlock:per_player', eEmit)
@@ -1805,8 +1893,18 @@
     }
 
     function handleBoundBlockRemoved(rec, binding) {
-        invalidateScopeCache(rec != null ? rec.key : null)
+        var scKey = (rec != null && binding != null) ? getScopeCacheKeyForRecord(rec, binding) : null
+        invalidateScopeCache(rec != null ? rec.key : null, scKey)
         if (rec == null || binding == null || !binding.group) return
+        var clearNs  = binding.lastEmittedNs || binding.defaultNamespace || ('blk:' + rec.blockId)
+        var clearPri = (binding.clearMaxPriority != null)
+            ? binding.clearMaxPriority
+            : ((binding.maxSeenPriority != null && binding.maxSeenPriority >= 0) ? binding.maxSeenPriority : 5)
+        var clearSpec = {
+            group:       binding.group,
+            namespace:   clearNs,
+            maxPriority: clearPri
+        }
         if ((binding.conflictMode || 'overlap') === 'merge') {
             var scopeEntry = getScopeCacheEntry(rec, binding)
             var remaining  = []
@@ -1818,7 +1916,7 @@
             if (remaining.length > 0) {
                 var lv = resolveLevel(rec.dim, null)
                 if (lv != null) {
-                    var pkt = buildValidatedPacket(buildClearOptions(binding.group, null), null)
+                    var pkt = buildValidatedPacket(buildClearOptions(clearSpec, null), null)
                     if (pkt != null) {
                         var clearRad   = binding.radius + 6
                         var clearRadSq = clearRad * clearRad
@@ -1840,15 +1938,15 @@
                     }
                 }
                 if (scopeEntry.idxByKey != null && scopeEntry.idxByKey.has(rec.key)) {
-                    invalidateScopeCache(rec.key)
+                    invalidateScopeCache(rec.key, scKey)
                 }
                 return
             }
             if (scopeEntry.idxByKey != null && scopeEntry.idxByKey.has(rec.key)) {
-                invalidateScopeCache(rec.key)
+                invalidateScopeCache(rec.key, scKey)
             }
         }
-        clearNear(rec.dim, rec.x + 0.5, rec.y + 0.5, rec.z + 0.5, binding.radius + 6, binding.group)
+        clearNear(rec.dim, rec.x + 0.5, rec.y + 0.5, rec.z + 0.5, binding.radius + 6, clearSpec)
     }
 
     var danmakuBlockTracker = null
@@ -1863,7 +1961,7 @@
             },
             onFound: function (rec, binding, source) {
                 ensureRecordSeq(rec)
-                invalidateScopeCache(null)
+                invalidateScopeCache(null, getScopeCacheKeyForRecord(rec, binding))
                 // 仅在玩家新放置时立即触发首帧反馈；若归属于已存在合并集群的从属方块则静默合并，不额外运行
                 if (source === 'placed' || source === 'fallback_placed') {
                     if ((binding.conflictMode || 'overlap') === 'merge' && !isMergeClusterLeader(rec, binding)) {
@@ -1924,6 +2022,9 @@
         }
         var conflictCooldown = Number(pick(meta, ['conflictCooldownTicks', 'sourceCooldownTicks'], interval))
         if (!isFinite(conflictCooldown) || conflictCooldown < 1) conflictCooldown = interval
+        var defNsRaw = pickNonEmpty(meta, ['namespace', 'ns'], null)
+        var defNs    = defNsRaw != null ? String(defNsRaw).trim() : ('blk:' + idStr)
+        var clearPri = pick(meta, ['clearMaxPriority'], null)
         tracker.bind(idStr, {
             blockId:               idStr,
             specOrFn:              specOrFn,
@@ -1931,6 +2032,10 @@
             scanRadius:            Math.min(128, Math.max(16, radius + 6)),
             intervalTicks:         Math.floor(interval),
             group:                 grp,
+            defaultNamespace:      defNs,
+            lastEmittedNs:         defNs,
+            maxSeenPriority:       -1,
+            clearMaxPriority:      clearPri != null ? parsePriority(clearPri, 5) : null,
             perPlayer:             perPlayer,
             conflictMode:          conflictMode,
             conflictScope:         conflictScope,
@@ -2050,11 +2155,12 @@
         '§b§l  [ Epiphy 屏幕弹幕组件 // /epiphy danmaku 帮助手册 ]',
         '§3§l----------------------------------------------------',
         '§e1. 查看弹幕帮助： §f/epiphy danmaku help §7(或 §f/epiphy help danmaku§7)',
-        '§e2. 指定玩家显示： §f/epiphy danmaku player <玩家> <弹幕内容与可选参数...>',
-        '§e3. 自身周围显示： §f/epiphy danmaku here <半径> <弹幕内容与可选参数...>',
-        '§e4. 维度坐标显示： §f/epiphy danmaku pos <维度> <x> <y> <z> <半径> <弹幕内容与可选参数...>',
-        '§e5. 停止持续弹幕： §f/epiphy danmaku stop [玩家] [key或分组名] [fadeOut] [maxPriority]',
-        '§e6. 清空屏幕弹幕： §f/epiphy danmaku clear [玩家] [分组名(默认*)] [maxPriority]',
+        '§e2. 仅给自己显示： §f/epiphy danmaku self <弹幕内容与可选参数...>',
+        '§e3. 指定玩家显示： §f/epiphy danmaku player <玩家> <弹幕内容与可选参数...>',
+        '§e4. 自身周围显示： §f/epiphy danmaku here <半径> <弹幕内容与可选参数...>',
+        '§e5. 维度坐标显示： §f/epiphy danmaku pos <维度> <x> <y> <z> <半径> <弹幕内容与可选参数...>',
+        '§e6. 停止持续弹幕： §f/epiphy danmaku stop [玩家] [key或分组名] [fadeOut] [maxPriority]',
+        '§e7. 清空屏幕弹幕： §f/epiphy danmaku clear [玩家] [分组名(默认*)] [maxPriority]',
         '§7----------------------------------------------------',
         '§6【文本与可选键值参数语法（所有非必填参数均可直接省略不写）】：',
         '  §a必填文本§7：直接书写主文本，可用 §f|§7 分隔主副标题（支持 §f&c &l§7 颜色码与 §f\\n§7 换行）',
@@ -2192,18 +2298,20 @@
     }
 
     var PLAYER_DANMAKU_LIMITS = {
-        maxPriority:       3,
-        minScale:          0.5,
-        maxScale:          2.0,
-        maxInlineScale:    1.5,
-        maxTextLen:        120,
-        maxSubLen:         80,
-        maxLines:          3,
-        maxStayTicks:      200,
-        maxFadeOutTicks:   60,
-        maxWidth:          260,
-        maxRadius:         96,
-        commandCooldownMs: 250
+        maxPriority:         3,
+        minScale:            0.5,
+        maxScale:            2.0,
+        maxInlineScale:      1.5,
+        maxTextLen:          120,
+        maxSubLen:           80,
+        maxLines:            3,
+        maxStayTicks:        200,
+        maxFadeOutTicks:     60,
+        maxWidth:            260,
+        maxRadius:           32,
+        broadcastMaxRadius:  96,
+        maxBroadcastTargets: 4,
+        commandCooldownMs:   250
     }
     var playerCmdCooldownMap = new Map() // uuid -> lastAllowedAtMs
 
@@ -2215,7 +2323,8 @@
         if (source != null) {
             var pl = (typeof source.getPlayer === 'function') ? source.getPlayer() : source.player
             if (pl != null) {
-                var isOp = (typeof pl.hasPermissions === 'function' && pl.hasPermissions(2))
+                // 权限阀缺失时 Fail-Closed：绝不信任 bare hasPermissions(2)
+                var isOp = Boolean(typeof pl.isOp === 'function' && pl.isOp())
                 var u = getPlayerUuidSafe(pl)
                 return {
                     tier:     isOp ? 'system' : 'player',
@@ -2307,14 +2416,15 @@
         return opts
     }
 
-    function checkPlayerDanmakuCmdRate(actor) {
+    function checkPlayerDanmakuCmdRate(actor, bucket) {
         if (actor == null || actor.tier !== 'player' || !actor.uuid) return true
+        var key   = (bucket ? String(bucket) : 'send') + ':' + actor.uuid
         var nowMs = Date.now()
-        var last  = playerCmdCooldownMap.get(actor.uuid) || 0
+        var last  = playerCmdCooldownMap.get(key) || 0
         if ((nowMs - last) < PLAYER_DANMAKU_LIMITS.commandCooldownMs) {
             return false
         }
-        playerCmdCooldownMap.set(actor.uuid, nowMs)
+        playerCmdCooldownMap.set(key, nowMs)
         return true
     }
 
@@ -2339,19 +2449,92 @@
             return cb.replyErr(ctx, msg + ' §7(输入 §f/epiphy danmaku help §7查看语法)')
         }
 
+        function hasDanmakuBroadcastGrant(actor) {
+            if (actor == null || actor.tier !== 'player') return true
+            var valve = (typeof global !== 'undefined' && global != null) ? global.EpiphyPermissionValve : null
+            var srv = SERVER_REF || (actor.player != null ? actor.player.server : null)
+            if (valve != null && typeof valve.hasPlayerScope === 'function' && actor.player != null) {
+                return Boolean(valve.hasPlayerScope(srv, actor.player, 'danmaku.broadcast', { exactScopeOnly: true }))
+            }
+            return false
+        }
+
+        function resolveTargetUuidForCount(t) {
+            if (t == null) return ''
+            if (typeof t === 'string') {
+                if (SERVER_REF != null && typeof SERVER_REF.getPlayer === 'function') {
+                    try {
+                        var p = SERVER_REF.getPlayer(t)
+                        if (p != null) return getPlayerUuidSafe(p)
+                    } catch (e) {}
+                }
+                return t.trim().toLowerCase()
+            }
+            return getPlayerUuidSafe(t)
+        }
+
+        function countNonSelfTargets(targets, actor) {
+            if (targets == null) return 0
+            var selfUuid = (actor != null && actor.uuid) ? String(actor.uuid).trim().toLowerCase() : ''
+            var seen = {}
+            var anonCnt = 0
+            var uniqueOther = 0
+
+            function recordOne(t) {
+                if (t == null) return
+                var u = resolveTargetUuidForCount(t)
+                if (u) {
+                    if (selfUuid && u === selfUuid) return
+                    if (!seen[u]) {
+                        seen[u] = true
+                        uniqueOther++
+                    }
+                } else {
+                    anonCnt++
+                }
+            }
+
+            if (Array.isArray(targets)) {
+                for (var i = 0; i < targets.length; i++) recordOne(targets[i])
+            } else if (typeof targets.iterator === 'function') {
+                var iter = targets.iterator()
+                while (iter.hasNext()) recordOne(iter.next())
+            } else {
+                recordOne(targets)
+            }
+            return uniqueOther + anonCnt
+        }
+
+        function checkBroadcastTargetLimit(ctx, targets, actor, verb) {
+            if (actor == null || actor.tier !== 'player') return null
+            var nonSelf = countNonSelfTargets(targets, actor)
+            if (nonSelf > PLAYER_DANMAKU_LIMITS.maxBroadcastTargets && !hasDanmakuBroadcastGrant(actor)) {
+                return '你未被授予 danmaku.broadcast 权限，单次最多只能对 ' + PLAYER_DANMAKU_LIMITS.maxBroadcastTargets + ' 名其他玩家' + verb + '（当前匹配 ' + nonSelf + ' 人）！'
+            }
+            return null
+        }
+
         function handleStop(ctx, v) {
-            var actor   = resolveDanmakuActorTier(ctx.source)
+            var actor = resolveDanmakuActorTier(ctx.source)
             var isPlayerTier = (actor.tier === 'player')
             var ownerNs = isPlayerTier ? ('u:' + (actor.uuid || 'anon')) : ''
             if (v._count === 0) {
                 var p = ctx.source.player
                 if (p == null) return cmdErr(ctx, '控制台或命令方块执行 stop 请指定目标玩家！')
+                if (!checkPlayerDanmakuCmdRate(actor, 'stop')) {
+                    return cmdErr(ctx, '弹幕指令发送过快，请稍候重试！')
+                }
                 if (isPlayerTier) {
                     deactivatePlayer(p, { key: '*', group: '*', namespace: ownerNs, maxPriority: PLAYER_DANMAKU_LIMITS.maxPriority, tier: 'player' })
                     return cb.replyOk(ctx, '已停止你发送并显示在你屏幕上的持续弹幕。')
                 }
                 deactivatePlayer(p, '*')
                 return cb.replyOk(ctx, '已停止你屏幕上的持续激活弹幕。')
+            }
+            var limitErr = checkBroadcastTargetLimit(ctx, v.targets, actor, '停止弹幕')
+            if (limitErr != null) return cmdErr(ctx, limitErr)
+            if (!checkPlayerDanmakuCmdRate(actor, 'stop')) {
+                return cmdErr(ctx, '弹幕指令发送过快，请稍候重试！')
             }
             var key = v._count >= 2 ? v.key : '*'
             var pkt = { action: 'deactivate', key: key, group: key }
@@ -2372,18 +2555,26 @@
         }
 
         function handleClear(ctx, v) {
-            var actor   = resolveDanmakuActorTier(ctx.source)
+            var actor = resolveDanmakuActorTier(ctx.source)
             var isPlayerTier = (actor.tier === 'player')
             var ownerNs = isPlayerTier ? ('u:' + (actor.uuid || 'anon')) : ''
             if (v._count === 0) {
                 var p = ctx.source.player
                 if (p == null) return cmdErr(ctx, '控制台或命令方块执行 clear 请指定目标玩家！')
+                if (!checkPlayerDanmakuCmdRate(actor, 'clear')) {
+                    return cmdErr(ctx, '弹幕指令发送过快，请稍候重试！')
+                }
                 if (isPlayerTier) {
                     clearPlayer(p, { group: '*', namespace: ownerNs, maxPriority: PLAYER_DANMAKU_LIMITS.maxPriority, tier: 'player' })
                     return cb.replyOk(ctx, '已清空你个人命名空间下的屏幕弹幕。')
                 }
                 clearPlayer(p, '*')
                 return cb.replyOk(ctx, '已清空你屏幕上的所有弹幕。')
+            }
+            var limitErr = checkBroadcastTargetLimit(ctx, v.targets, actor, '清空弹幕')
+            if (limitErr != null) return cmdErr(ctx, limitErr)
+            if (!checkPlayerDanmakuCmdRate(actor, 'clear')) {
+                return cmdErr(ctx, '弹幕指令发送过快，请稍候重试！')
             }
             var grp = v._count >= 2 ? v.group : '*'
             var pkt = { action: 'clear', group: grp }
@@ -2401,8 +2592,24 @@
             return cnt
         }
 
+        function handleSelf(ctx, v) {
+            var actor = resolveDanmakuActorTier(ctx.source)
+            var p = (ctx.source != null && typeof ctx.source.getPlayer === 'function') ? ctx.source.getPlayer() : (ctx.source != null ? ctx.source.player : null)
+            if (p == null) return cmdErr(ctx, '控制台或命令方块无法执行 danmaku self，请改用 danmaku player 指定目标玩家！')
+            if (!checkPlayerDanmakuCmdRate(actor)) {
+                return cmdErr(ctx, '弹幕指令发送过快，请稍候重试！')
+            }
+            var opts = applyPlayerDanmakuLimits(parseSpecString(v.spec), actor)
+            if (!opts.text && !opts.title) return cmdErr(ctx, '缺少必填的弹幕主文本！')
+            var cnt = toPlayer(p, opts)
+            cb.replyOk(ctx, '已向自己屏幕发送弹幕: §f' + (opts.text || opts.title))
+            return cnt
+        }
+
         function handlePlayer(ctx, v) {
             var actor = resolveDanmakuActorTier(ctx.source)
+            var limitErr = checkBroadcastTargetLimit(ctx, v.targets, actor, '发送弹幕')
+            if (limitErr != null) return cmdErr(ctx, limitErr)
             if (!checkPlayerDanmakuCmdRate(actor)) {
                 return cmdErr(ctx, '弹幕指令发送过快，请稍候重试！')
             }
@@ -2411,6 +2618,18 @@
             var cnt = toPlayer(v.targets, opts)
             cb.replyOk(ctx, '已向 ' + cnt + ' 名玩家发送弹幕: §f' + (opts.text || opts.title))
             return cnt
+        }
+
+        function computeEffectiveRadius(rawRadius, actor) {
+            var r = Number(rawRadius) || 0
+            if (r < 0) r = 0
+            if (actor != null && actor.tier === 'player') {
+                var cap = hasDanmakuBroadcastGrant(actor)
+                    ? PLAYER_DANMAKU_LIMITS.broadcastMaxRadius
+                    : PLAYER_DANMAKU_LIMITS.maxRadius
+                return Math.min(r, cap)
+            }
+            return r
         }
 
         function handleHere(ctx, v) {
@@ -2422,7 +2641,7 @@
             if (!opts.text && !opts.title) return cmdErr(ctx, '缺少必填的弹幕主文本！')
             var pos = BASE.readPos(ctx.source.position)
             if (pos == null) return cmdErr(ctx, '无法读取当前指令执行位置！')
-            var effRadius = (actor.tier === 'player') ? Math.min(Number(v.radius) || 0, PLAYER_DANMAKU_LIMITS.maxRadius) : v.radius
+            var effRadius = computeEffectiveRadius(v.radius, actor)
             var cnt = inDimension(ctx.source.level, pos.x, pos.y, pos.z, effRadius, opts)
             return cb.replyOk(ctx, '已在当前维度半径 ' + effRadius + 'm 内触发弹幕（命中 ' + cnt + ' 名玩家）。')
         }
@@ -2432,20 +2651,36 @@
             if (!checkPlayerDanmakuCmdRate(actor)) {
                 return cmdErr(ctx, '弹幕指令发送过快，请稍候重试！')
             }
+            var tgtLevel = resolveLevel(v.dim, SERVER_REF)
+            if (tgtLevel == null) return cmdErr(ctx, '无效的目标维度！')
+            if (actor.tier === 'player' && !hasDanmakuBroadcastGrant(actor)) {
+                var srcDim = (ctx.source != null && ctx.source.level != null) ? BASE.dimOfLevel(ctx.source.level) : ''
+                var tgtDim = BASE.dimOfLevel(tgtLevel)
+                if (srcDim && tgtDim && srcDim !== tgtDim) {
+                    return cmdErr(ctx, '你未被授予 danmaku.broadcast 权限，禁止跨维度触发坐标弹幕！')
+                }
+            }
             var center = BASE.readPos(v.center)
             if (center == null) return cmdErr(ctx, '无法解析目标坐标！')
             var opts = applyPlayerDanmakuLimits(parseSpecString(v.spec), actor)
             if (!opts.text && !opts.title) return cmdErr(ctx, '缺少必填的弹幕主文本！')
-            var effRadius = (actor.tier === 'player') ? Math.min(Number(v.radius) || 0, PLAYER_DANMAKU_LIMITS.maxRadius) : v.radius
-            var cnt = inDimension(v.dim, center.x, center.y, center.z, effRadius, opts)
+            var effRadius = computeEffectiveRadius(v.radius, actor)
+            var cnt = inDimension(tgtLevel, center.x, center.y, center.z, effRadius, opts)
             return cb.replyOk(ctx, '已在目标维度 (' + center.x.toFixed(1) + ', ' + center.y.toFixed(1) + ', ' + center.z.toFixed(1) + ') 半径 ' + effRadius + 'm 内触发弹幕（命中 ' + cnt + ' 名玩家）。')
         }
 
         return cb.literal('danmaku', {
             helpLines: DANMAKU_HELP_LINES,
             children: [
-                cb.literal('help', { helpLines: DANMAKU_HELP_LINES }),
+                cb.literal('help', { scope: 'danmaku.help', helpLines: DANMAKU_HELP_LINES }),
+                cb.literal('self', {
+                    scope: 'danmaku.self',
+                    chain: [[
+                        { name: 'spec', type: 'greedy' }
+                    ], handleSelf]
+                }),
                 cb.literal('stop', {
+                    scope: 'danmaku.stop',
                     chain: [[
                         { name: 'targets', type: 'players' },
                         { name: 'key', type: 'word' },
@@ -2454,6 +2689,7 @@
                     ], handleStop, { minArgs: 0 }]
                 }),
                 cb.literal('clear', {
+                    scope: 'danmaku.clear',
                     chain: [[
                         { name: 'targets', type: 'players' },
                         { name: 'group', type: 'word' },
@@ -2461,18 +2697,21 @@
                     ], handleClear, { minArgs: 0 }]
                 }),
                 cb.literal('player', {
+                    scope: 'danmaku.player',
                     chain: [[
                         { name: 'targets', type: 'players' },
                         { name: 'spec', type: 'greedy' }
                     ], handlePlayer]
                 }),
                 cb.literal('here', {
+                    scope: 'danmaku.here',
                     chain: [[
                         { name: 'radius', type: 'double' },
                         { name: 'spec', type: 'greedy' }
                     ], handleHere]
                 }),
                 cb.literal('pos', {
+                    scope: 'danmaku.pos',
                     chain: [[
                         { name: 'dim', type: 'dim' },
                         { name: 'center', type: 'vec3' },
@@ -2488,8 +2727,8 @@
         name:       'danmaku',
         // 由屏幕弹幕组件自行声明权限策略：
         //   - 命令方块 (BaseCommandBlock) 与控制台 (MinecraftServer) 放行；
-        //   - 玩家聊天框执行需 [可作弊 + 是管理员或已被授权]；
-        //   - 其他脚本函数若以命令形式调用，须先调用 EpiphyPermissionValve.declareCaller(id, ['danmaku']) 注册并在调用头使用 withDeclaration。
+        //   - 玩家聊天框执行需 [可作弊 + 是管理员或已被授予对应 scope（如 danmaku.self / danmaku.*）]；
+        //   - 其他脚本函数若以命令形式调用，须先调用 EpiphyPermissionValve.declareCaller 注册并在调用头使用 withDeclaration。
         permission: {
             mode:                 'authorized',
             label:                '可作弊 + 管理员/已授权对象',
@@ -2502,6 +2741,16 @@
             allowDeclaredCallers: true,
             allowedCallers:       null
         },
+        scopes: [
+            { scope: 'danmaku.self',      desc: '仅向自己屏幕发送单条受限弹幕（可单独授予非 OP）' },
+            { scope: 'danmaku.player',    desc: '向指定目标玩家发送弹幕（超过 4 名其他玩家需 danmaku.broadcast）' },
+            { scope: 'danmaku.here',      desc: '向当前维度坐标周围发送弹幕（无 broadcast 上限 32m）' },
+            { scope: 'danmaku.pos',       desc: '向指定维度坐标周围发送弹幕（跨维度或 >32m 需 danmaku.broadcast）' },
+            { scope: 'danmaku.stop',      desc: '停止自己命名空间下的持续激活弹幕（>4 名其他玩家需 broadcast）' },
+            { scope: 'danmaku.clear',     desc: '清空自己命名空间下的屏幕弹幕（>4 名其他玩家需 broadcast）' },
+            { scope: 'danmaku.broadcast', desc: '允许非 OP 跨维度、超 32m(最高96m) 或 >4 人的广域弹幕调度（需单独授予）' },
+            { scope: 'danmaku.help',      desc: '查看 /epiphy danmaku 帮助' }
+        ],
         summary:    '通用屏幕弹幕与泛用文本显示调度指令 (/epiphy danmaku ...)',
         helpLines:  DANMAKU_HELP_LINES,
         buildNode:  buildDanmakuCommandNode
