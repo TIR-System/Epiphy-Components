@@ -1,6 +1,6 @@
 // priority: 1000
 // ============================================================================
-//  通用指令权限阀与 /epiphy 根命令注册中心 (EpiphyPermissionValve v4)
+//  通用指令权限阀与 /epiphy 根命令注册中心 (EpiphyPermissionValve v5)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
@@ -8,10 +8,12 @@
 //
 //  职责说明：
 //    1. 统一接管 `/epiphy` 根指令树，向各业务组件提供子命令挂载与 `/epiphy help` 帮助聚合（总览仅显示各模块一句话 summary，输入 `/epiphy help <模块>` 查看详情）；
-//    2. 按存档独立持久化授权记录（含审计元数据）：
-//       - 使用 KubeJS 原生 `JsonIO` 将每个存档的授权列表独立保存在该存档目录下（`saves/<存档>/kubejs_epiphy_permissions.json`，
-//         若无法解析世界路径则按存档名落盘至 `kubejs/config/epiphy_permissions/<存档名>.json`）；
-//       - 每条 scope 授权均记录 `{ by: '<授权人>', at: '<ISO时间>', playerName: '<被授权玩家名>' }`，支持在 `/epiphy auth list` 与 JSON 中追溯；
+//    2. 外部统一持久化、防回滚墓碑与 Fail-Closed 按名备用模式：
+//       - 将每个世界的授权与撤销数据落盘至独立外部目录 `epiphy-data/worlds/<世界slug>__<短worldId>/`（`permissions.json`、`revocations.json`、`auth_mode.json`），首次升级支持从旧 `saves/<存档>/kubejs_epiphy_permissions.json` 一次性迁移；
+//       - 若检测到存档被复制导致 `lastWorldPath` 变化，由 `EpiphyServerBase` 自动分叉新世界目录并在 OP 进服时提醒手动清理旧目录；
+//       - 撤销权限时在 `revocations.json` 写入 `revokedAtMs` 墓碑，防止世界备份/回滚或旧快照导入使已撤销权限复活；
+//       - 默认严格按 UUID 授权（并明示纯离线服无 TrueUUID 且无密码插件时 UUID 亦不安全）；备用按名授权模式默认 Fail-Closed（`allowNameGrant: false`），仅允许真 OP / 控制台通过 `/epiphy auth namegrant enable -> confirm <8位口令>`（2 分钟内二次确认）或手动修改带完整风险注释的 `auth_mode.json` 开启，中途关闭后保留未迁移按名记录但暂停生效；
+//       - 提供 `getCommandActorTier(source)` 为下游组件区分 `'system'`（真 OP/控制台/命令方块/声明调用）与 `'player'`（`authorized` 普通玩家）资源层级。
 //    3. 严格的调用源类型甄别（纯 `Class.isInstance` 校验，零类名字符串模糊匹配）：
 //       - 【命令方块 (BaseCommandBlock)】：确认 `source.source` 为 `BaseCommandBlock` 实例后按 `policy.allowCommandBlock` 判定；
 //       - 【控制台 (MinecraftServer / RconConsoleSource)】：确认实例类型后进入 `policy.allowConsole` 与 `opLevel` 权限查询；

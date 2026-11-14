@@ -1,11 +1,11 @@
 // ============================================================================
-//  通用空间音频与流式声场组件 —— 客户端播放引擎 (EpiphyAudioClient v5.2, ES6)
+//  通用空间音频与流式声场组件 —— 客户端播放引擎 (EpiphyAudioClient v5.3, ES6)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-音频播放器.js
 //  配套服务端组件：
-//    - kubejs/server_scripts/通用组件/Epiphy的-音频组件.js（服务端调度器 EpiphyAudio v5.2）
+//    - kubejs/server_scripts/通用组件/Epiphy的-音频组件.js（服务端调度器 EpiphyAudio v5.3）
 //    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀）
 //
 //  依赖与缺失降级：
@@ -32,7 +32,7 @@
     }
     var CHANNEL       = (PROTO && PROTO.AUDIO_CHANNEL) || 'epiphy:audio'
     var PROTO_VERSION = (PROTO && PROTO.AUDIO_PROTO_VERSION) || 5
-    var VERSION       = (PROTO && PROTO.AUDIO_SEMVER) || '5.2.0'
+    var VERSION       = (PROTO && PROTO.AUDIO_SEMVER) || '5.3.0'
 
     var CONFIG = {
         sweepIntervalTicks:     10,   // 慢速巡检周期（负责死链清理、异常断流重连、超时判定）

@@ -1,6 +1,6 @@
 // priority: 1100
 // ============================================================================
-//  通用限频日志与调试中心 (EpiphyLog v1)
+//  通用限频日志与调试中心 (EpiphyLog v1.1)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
@@ -10,7 +10,8 @@
 //    1. 为 Epiphy的-通用组件系列提供统一的限频警告、错误、信息与已捕获异常日志；
 //    2. 区分“预期外但已处理的异常”(catchWarn -> console.warn，不染红、不计入脚本错误数)
 //       与“不可恢复的硬错误”(error -> console.error)；
-//    3. 提供按 key 去重的单次日志 (once) 与按模块开关的调试日志 (debug / setDebug)。
+//    3. 提供按 key 去重的单次日志 (once) 与按模块开关的调试日志 (debug / setDebug)；
+//    4. 提供独立于控制台的外部文件持久化接收器（`configureFileSink` / `getFileSinkConfig`），默认按天向 `epiphy-data/logs/YYYY-MM-DD.log` 写入可读日志（可配置为 `hourly` / `single` / `off`），并支持初始化前缓冲。
 //
 //  依赖与缺失影响：
 //    - 本文件无前置脚本依赖（priority: 1100）。

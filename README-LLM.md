@@ -79,35 +79,37 @@
 | 玩家重进世界时属性修饰符加载晚于 `setHealth()`，导致高生命上限玩家 HP 被截断回 20 | `Epiphy的-基础bug修复.js` | 新增独立纯服务端模块：退出持久化真实 HP，重进后于结算窗口按服务端实际 `maxHealth` 补回，删 Mod 降上限时丢弃超出部分 | [x] |
 | 客户端弹幕亮度异常，以及逐字 `glow` + `blur` 渲染、冗余 JNI/矩阵调用及测试方块性能开销过大 | `Epiphy的-屏幕弹幕渲染器.js` / `Epiphy的小玩意_功能测试.js` | 恢复正确阴影与绘制亮度参数，批处理优化逐字绘制并削减冗余矩阵与 JNI 调用 | [x] |
 | 音频播放器链路与调用异常修复 | `Epiphy的-音频组件.js` / `Epiphy的-音频播放器.js` | 完成参数解析与端侧播放异常定位修复并回归现有沙盒测试 | [x] |
+| `epiphy-data/` 外部统一目录、可读按天日志与复制档自动分叉 | `Epiphy的-服务端基础.js` / `Epiphy的-日志.js` / `.gitignore` | 建立 `config`/`worlds`/`players`/`events`/`logs`/`presets`/`backups` 骨架与 `.tmp`+`.bak` 原子写；默认输出按天 `.log`（支持 `logging.json`）；通过 `epiphy_world_id.json` + `meta.json` 检测 `lastWorldPath` 变化自动分叉并通知 OP | [x] |
+| 外部撤销墓碑、Fail-Closed 按名授权备用模式与离线风险边界 | `Epiphy的-权限阀.js` | 权限迁移至 `epiphy-data/worlds/<slug>__<shortId>/`；`revocations.json` 拦截旧快照复活；`auth_mode.json` 默认 `false` 并附完整风险/离线服警示，仅真 OP/控制台 8 位口令 2 分钟二次确认或手动配置开启，关闭即暂停并保留未迁移记录 | [x] |
+| `authorized` 非 OP 玩家音频与弹幕资源隔离与端侧防挤占 | `权限阀` / `音频组件` / `音频播放器` / `弹幕组件` / `弹幕渲染器` | 引入 `getCommandActorTier` 区分 `'system'` 与 `'player'`；音频钳制 `priority <= 3`、`u:<uuid>:` key 隔离、服务端配额与听众预留、`system` 单向淘汰及端侧优先淘汰 `'player'`；弹幕玩家命令参数限流、`250ms` 冷却、命名空间清屏锁及端侧每命名空间 `16` 条上限 | [x] |
 
 ---
 
-## 5. 既定演进契约（尚未实施，后续改造须严格遵循）
+## 5. 现行数据边界与演进契约（后续改造不得破坏）
 
-以下设计已与仓库维护者确认完毕，后续展开重构或功能开发时须按此执行：
+以下设计已在本仓库落地并通过单元测试验证，后续重构、脚本增删或向 Kotlin + Java 迁移时须严格保持其边界与语义：
 
-1. **`epiphy-data/` 统一外部数据目录**：
-   - 位置：运行根目录 `epiphy-data/`（客户端 `.minecraft/epiphy-data/`，专用服 `./epiphy-data/`）。
-   - 目录骨架先建齐但不硬加空模块：`config/`、`worlds/`、`players/`、`events/`、`logs/`、`presets/`、`backups/`（配合 `.tmp` 原子写 + `.bak` 备份），同时迁移已有需要抗回滚的数据。
-   - **数据边界**：抗回滚管理/安全数据（权限授权、外部撤销墓碑、模块配置、审计日志）入 `epiphy-data/`；须随存档方块状态同步回滚的数据仍留 `saves/<world>/`。
-   - **日志规范**：`logs/` 默认按天输出可读性高的文本日志（如 `YYYY-MM-DD.log`），并在 `config/` 中提供轮转/记录模式配置项。
-2. **世界标识防撞与复制档自动分叉**：
-   - 外部世界目录命名为 `<可读世界名slug>__<短ID>`，绑定世界内部稳定 `worldId` 与外部 `meta.json`（含 `lastWorldPath`）。
-   - 若命中同一 `worldId` 但目录路径与 `lastWorldPath` 发生变化（如复制正式存档作测试档），必须**自动分叉**创建独立 `worldId` 与目录，并在日志输出明确提示（含目录路径与自行删除清理说明）。
-3. **“按名字授权”备用模式与安全提示边界**：
-   - 默认严格 UUID 授权；须在提示与配置注释中写明：**纯离线服（`online-mode=false`）在无 TrueUUID 类模组且无密码登录插件保护时，仅依靠 UUID 模式同样不安全**。
-   - **开启方式 1（游戏内）**：仅限**真 OP / 控制台**（`allowAuthorized: false`、禁止命令方块），首次执行展示完整风险提示与 **8 位数字 + 随机大小写字母口令**，限 **2 分钟内**二次输入同一口令生效。
-   - **开启方式 2（手动改 JSON）**：生成配置文件时默认 `false`，且文件内必须自带固定注释明确说明 **将该字段改为 `true` 会产生何种风险与后果**（并备注若服务器已安装强制密码登录插件可忽略该风险）；缺失或异常值一律按 Fail-Closed 处理。
-   - **中途关闭回退**：开关改回 `false` 后，未迁移的纯名字授权记录**保留在原文件中不删除，但立即暂停生效**。
-4. **`authorized` 资源隔离与 DoS 防护**：
-   - 为音频句柄与弹幕包引入 `'system'`（脚本 API / 真 OP / 控制台 / 命令方块）与 `'player'`（仅通过 `authorized` 授权执行指令的玩家）来源分级及 `ownerUuid`；
-   - 禁止 `authorized` 玩家 `stop`/`clear`/`update` 或撞 `key`/`group` 覆盖 `'system'` 与他人对象；
-   - 限制 `authorized` 命令行 `priority` 上限（不高于系统常用演出优先级），保护全服池及单人听觉槽位不被玩家级循环音频挤占；仅在玩家命令入口限制弹幕 `scale`、长度、换行数、`stay` 与频次，不限制脚本 API 与 OP 演出。
+1. **`epiphy-data/` 统一外部数据目录与世界分叉边界**：
+   - 位置：运行根目录 `epiphy-data/`（客户端 `.minecraft/epiphy-data/`，专用服 `./epiphy-data/`），子目录骨架 `config/`、`worlds/`、`players/`、`events/`、`logs/`、`presets/`、`backups/` 保持预建（禁止为了填满预留目录强加无用功能）。
+   - **数据边界**：抗回滚管理/安全数据（权限授权、外部撤销墓碑、模块配置、可读审计日志）入 `epiphy-data/`；须随存档方块状态同步回滚的数据（如 `kubejs_epiphy_bugfix_hp.json`、`kubejs_epiphy_tracked_blocks.json`）仍留 `saves/<world>/`。
+   - **世界复制防撞**：外部世界目录采用 `<slug>__<shortId>`，依赖存档内 `data/epiphy_world_id.json` 与外部 `meta.json`（含 `lastWorldPath`）双向校验；路径变更时自动分叉新目录并提醒 OP 手动清理旧目录。
+   - **日志规范**：`logs/` 默认按天输出 `YYYY-MM-DD.log`，配置位于 `epiphy-data/config/logging.json`。
+2. **“按名字授权”备用模式与 Fail-Closed 边界**：
+   - 默认严格 UUID 授权；在提示与配置注释中必须明示：**纯离线服（`online-mode=false`）在无 TrueUUID 类模组且无密码登录插件保护时，仅依靠 UUID 模式同样不安全**。
+   - 仅限**真 OP / 控制台**可操作 `/epiphy auth namegrant enable|confirm <code>|disable`（8 位数字 + 随机大小写字母口令，2 分钟有效期）；`auth_mode.json` 须保留 `_warning` / `_consequences` 注释，缺失或异常值一律按 Fail-Closed 处理；关闭后保留未迁移纯名字记录但立即暂停生效。
+3. **`authorized` 非 OP 玩家资源隔离原则**：
+   - 必须通过 `EpiphyPermissionValve.getCommandActorTier(source)` 区分 `'system'`（JS API / 真 OP / 控制台 / 命令方块 / Declared Callers）与 `'player'`（非 OP `authorized` 玩家）。
+   - 任何新增音频/弹幕能力不得允许 `'player'` 源绕过命名空间隔离、越权停止 `'system'` 或他人对象，也不得挤压系统演出配额/槽位；同时不得反向给脚本 API、OP、控制台或命令方块施压额外玩家限流。
+4. **长期原生化迁出计划**：
+   - 本项目在脚本阶段功能与契约充分稳定后，将整体迁往 **Kotlin + Java** 原生模组，KubeJS 仅作此前过渡依赖。
 
 ---
 
-## 6. 工作流、测试与协议合规
+## 6. 工作流、文档同步、版本规范与协议合规
 
-1. **Git 规范**：主仓库位于 `D:\Git-Epiphy`。重大重构或模块改动前须先提交当前可用基准；严禁将运行期生成的 `epiphy-data/`、`_backup_*/`、`probe/`、`*.log`、`*.tmp`、`kubejs/config/epiphy_permissions/` 等提交进版本库。所有读写均须使用 **UTF-8** 编码。
-2. **测试定位**：`npm test`（`node tests/pure_functions.test.js`）运行在 Node.js V8 沙盒中，可回归纯函数与模拟命令/权限链路，但**无法捕获 Rhino 引擎缺陷与客户端渲染问题**；涉及运行期或画面修改后必须进服核验。
-3. **许可证约束（RAL 1.6）**：本项目受 [`LICENSE.md`](LICENSE.md) 约束（作者：`Epiphy-iLLUMs + Gemini 4 系列 + Claude 5.5 系列`；吉祥物：`DeepSeek`）。修改代码须保留既有 `RAL-1.6` 文件头与署名；严禁切换为非官方修改/衍生许可证，严禁引入不可调和冲突协议（如 PolyForm Shield License 1.0.0）或绕开桥接隔离规范直接混编冲突组件。
+1. **Git 规范**：主仓库位于 `D:\Git-Epiphy`。重大重构或模块改动前须先提交当前可用基准；严禁将运行期生成的 `epiphy-data/`、`_backup_*/`、`probe/`、`*.log`、`*.tmp`、`*.bak`、`kubejs/config/epiphy_permissions/` 等提交进版本库。所有读写均须使用 **UTF-8** 编码。
+2. **文档与头部版本号同步规范（每次功能/架构改动必做）**：
+   - **更新脚本头部注释与版本号**：修改任意 `.js` 组件涉及职责、依赖、降级策略或接口行为变化时，提交前必须检查并同步更新该脚本顶部注释的版本号（如 `EpiphyLog v1.1`、`EpiphyServerBase v2`、`EpiphyPermissionValve v5`、`ScreenDanmaku v5.1`、`EpiphyAudio v5.3` 等）、职责列表与依赖说明；若涉及共享语义版本常量（如 `EpiphySpec` 中 `AUDIO_SEMVER` 与端侧兜底 `VERSION`），须双端同步递增（网络包 `PROTO_VERSION` 仅在不兼容包结构变更时递增）。不得删除或篡改与改动无关的已有注释。
+   - **同步仓库文档**：须同步检查并更新 [`README.md`](README.md)、[`README_EN.md`](README_EN.md)（工程架构表、组件版本号、核心能力与指令/目录说明），以及本文档 [`README-LLM.md`](README-LLM.md) 第 4 节（已解决问题基线表打 `[x]`）与第 5 节（现行契约状态）。
+3. **测试定位**：`npm test`（`node tests/pure_functions.test.js`）运行在 Node.js V8 沙盒中，可回归纯函数与模拟命令/权限/音频/弹幕隔离链路，但**无法捕获 Rhino 引擎缺陷与客户端渲染问题**；涉及运行期或画面修改后必须进服核验。
+4. **许可证约束（RAL 1.6）**：本项目受 [`LICENSE.md`](LICENSE.md) 约束（作者：`Epiphy-iLLUMs + Gemini 4 系列 + Claude 5.5 系列`；吉祥物：`DeepSeek`）。修改代码须保留既有 `RAL-1.6` 文件头与署名；严禁切换为非官方修改/衍生许可证，严禁引入不可调和冲突协议（如 PolyForm Shield License 1.0.0）或绕开桥接隔离规范直接混编冲突组件。

@@ -67,16 +67,16 @@ A collection of shared server/client infrastructure modules, audiovisual present
 | **L1 Cross-Side Spec** | `Epiphy的-Spec与通用工具.js` | `startup` / `1200` | `EpiphySpec`, `EpiphyProtocol` |
 | **L1 Content Reg** | `创造模式栏-epiphy.js` | `startup` / `1000` | `EpiphyCreativeTab` (`epiphy:stuff`) |
 | **L1 Content Reg** | Hidden Items / Test Block / Unstable Table | `startup` | Custom items, test block & 5-stage blocks |
-| **L2 Infrastructure** | `Epiphy的-日志.js` | `server` / `1100` | `EpiphyLog` (rate-limit, `once`, `catchWarn`) |
-| **L2 Infrastructure** | `Epiphy的-服务端基础.js` | `server` / `1080` | `EpiphyServerBase` (accessors, paths, DSL) |
+| **L2 Infrastructure** | `Epiphy的-日志.js` | `server` / `1100` | `EpiphyLog v1.1` (rate-limit, `once`, `catchWarn`, external `.log` sink) |
+| **L2 Infrastructure** | `Epiphy的-服务端基础.js` | `server` / `1080` | `EpiphyServerBase v2` (accessors, `epiphy-data/`, world fork, DSL) |
 | **L2 Infrastructure** | `Epiphy的-方块追踪组件.js` | `server` / `1050` | `EpiphyBlockTracker v2` (section scanning) |
-| **L2 Access Control** | `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v4` (`/epiphy`) |
+| **L2 Access Control** | `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v5` (`/epiphy`, tombstones, fail-closed auth) |
 | **L2 Diagnostics** | `Epiphy的-调试组件.js` | `server` / `950` | `EpiphyDebug v1` (`/epiphy debug`) |
 | **L2 Standalone Fix** | `Epiphy的-基础bug修复.js` | `server` / `900` | `EpiphyBugfix v1` (logout HP restoration) |
-| **L3 Presentation** | `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `ScreenDanmaku v5` |
-| **L3 Presentation** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.2` |
+| **L3 Presentation** | `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `ScreenDanmaku v5.1` |
+| **L3 Presentation** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.3` |
 | **L3 Gameplay** | `拆解台-混沌殉爆.v18.js` & `合成表-*` | `server` | Meltdown progression & recipe tweaks |
-| **L4 Client** | `屏幕弹幕渲染器` / `音频播放器` / `拆解台描述` | `client` | `ScreenDanmakuClient`, `EpiphyAudioClient` |
+| **L4 Client** | `屏幕弹幕渲染器` / `音频播放器` / `拆解台描述` | `client` | `ScreenDanmakuClient v5.1`, `EpiphyAudioClient v5.3` |
 
 ### 3. Dependency & Fallback Specification (YAML)
 
@@ -167,10 +167,14 @@ Epiphy的-音频播放器.js:
 
 ## Core Capabilities
 
-1. **Shared Infrastructure**: Centralized protocol constants and argument parsers (`EpiphySpec`), rate-limited/deduplicated logging (`EpiphyLog`), server accessors & Brigadier DSL (`EpiphyServerBase`), progressive chunk-section block tracking (`EpiphyBlockTracker`), `Class.isInstance`-verified `/epiphy` command routing and per-world permissions (`EpiphyPermissionValve`), live diagnostics (`EpiphyDebug`), and standalone server-authoritative logout HP restoration (`EpiphyBugfix`).
-2. **Audiovisual Presentation Engines**:
-   - **Screen Danmaku (`ScreenDanmaku v5`)**: Normalized coordinates with HUD zone avoidance, typewriter reveals, `per_char` glyph shake, outlines/glow, inline rich tags (`<b>`, `<big>`, `<scale=...>`, `<shake>`, `<outline>`), `once`/`active` lifecycles, and block bindings.
-   - **Spatial Audio (`EpiphyAudio v5.2`)**: Fixed coordinate, block, tracked entity, dimension, and server-wide handles; attenuation curves; out-of-range mute/resume; `merge` cluster consolidation; vanilla music ducking (`duckMusic`); and client reconnect backoff.
+1. **Shared Infrastructure & External `epiphy-data/` Storage**:
+   - Centralized protocol constants and argument parsers (`EpiphySpec`), rate-limited logging with external readable `.log` rotation (`EpiphyLog v1.1`: `daily` default, `hourly` / `single` / `off` via `epiphy-data/config/logging.json`), server accessors & atomic `.tmp` + `.bak` storage + Brigadier DSL (`EpiphyServerBase v2`), and progressive chunk-section block tracking (`EpiphyBlockTracker v2`).
+   - External runtime root `<gameDir>/epiphy-data/` (`config/`, `worlds/`, `players/`, `events/`, `logs/`, `presets/`, `backups/`). Worlds bind via save-local `epiphy_world_id.json` and external `<slug>__<shortId>/meta.json`, automatically forking a fresh world folder when `lastWorldPath` changes (e.g., copied test saves) and notifying OPs on join.
+   - **Permissions & Anti-Rollback Hardening (`EpiphyPermissionValve v5`)**: `Class.isInstance`-verified command dispatch, default strict UUID mode (explicitly documenting offline-server risks without TrueUUID or password-login plugins), external `revocations.json` tombstones blocking save-rollback resurrection, and Fail-Closed `auth_mode.json` requiring real OP/console 2-step confirmation (8-char `[0-9A-Za-z]` token valid for 2 minutes) via `/epiphy auth namegrant enable|confirm` (plus `grantname`, `revokename`, `where`, `reload`).
+   - **Diagnostics & Standalone Fix**: Live health/perf inspector (`EpiphyDebug v1`) and standalone server-authoritative logout HP restoration (`EpiphyBugfix v1`).
+2. **Audiovisual Presentation Engines (with Non-OP Player Resource Isolation)**:
+   - **Screen Danmaku (`ScreenDanmaku v5.1`)**: Normalized coordinates with HUD zone avoidance, typewriter reveals, `per_char` glyph shake, outlines/glow, inline rich tags (`<b>`, `<big>`, `<scale=...>`, `<shake>`, `<outline>`), `once`/`active` lifecycles, and block bindings. Non-OP `authorized` player commands are classified as `'player'` tier with parameter clamping (priority/scale/length/lines/stay/radius), 250ms cooldown, `u:<uuid>` namespace lock on `stop`/`clear`, and a client per-namespace cap (`16`); JS API, OP, console, and command blocks stay unrestricted.
+   - **Spatial Audio (`EpiphyAudio v5.3`)**: Fixed coordinate, block, tracked entity, dimension, and server-wide handles; attenuation curves; out-of-range mute/resume; `merge` cluster consolidation; vanilla music ducking (`duckMusic`); and client reconnect backoff. Non-OP `authorized` player commands enter `'player'` tier (`priority <= 3`, `u:<uuid>:` key prefix, global/creator/listener quotas reserving `>= 4/12` listener slots for `'system'`, and one-way server/client eviction protecting `'system'` audio).
 3. **Gameplay Content & Tweaks**: `epiphy:stuff` creative tab and hidden-item collection (including Chaos Crystal CCL 3D OBJ + Chaos Shader rendering), `epiphy:rnfmabj_test` broadcast test block, the 5-stage Twilight Forest Uncrafting Table chaotic meltdown event with supreme-relic exemptions, and recipe adjustments.
 
 ---
@@ -202,7 +206,7 @@ Epiphy的-音频播放器.js:
 ### Installing into a Modpack
 1. Current transitional runtime requirement: **Minecraft 1.20.1 / Forge 47.x / KubeJS 2001.6.x** (theoretically compatible with Fabric; untested).
 2. Merge `kubejs/` into both client `.minecraft/` and dedicated server root.
-3. In-game (OP required for admin actions), use `/epiphy help`, `/epiphy auth list`, and `/epiphy debug`.
+3. In-game (OP required for admin actions), use `/epiphy help`, `/epiphy auth list`, `/epiphy auth where`, and `/epiphy debug`; runtime data is stored in `<gameDir>/epiphy-data/` (git-ignored; never commit runtime artifacts).
 
 ### Running Sandbox Unit Tests
 ```bash

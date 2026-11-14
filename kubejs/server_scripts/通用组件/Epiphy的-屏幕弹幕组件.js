@@ -1,12 +1,12 @@
 // priority: 500
 // ============================================================================
-//  通用屏幕弹幕与泛用文本显示组件 —— 服务端调度器 (ScreenDanmaku v5)
+//  通用屏幕弹幕与泛用文本显示组件 —— 服务端调度器 (ScreenDanmaku v5.1)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js
-//  配套客户端渲染器：kubejs/client_scripts/通用组件/Epiphy的-屏幕弹幕渲染器.js
-//  配套权限阀组件：kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（管理 /epiphy 根命令与执行权限，本组件向其声明 danmaku 子命令与帮助文本）
+//  配套客户端渲染器：kubejs/client_scripts/通用组件/Epiphy的-屏幕弹幕渲染器.js (ScreenDanmakuClient v5.1)
+//  配套权限阀组件：kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（管理 /epiphy 根命令、执行权限与 actorTier 资源分级）
 //
 //  依赖与缺失降级行为：
 //    - 必需配套：kubejs/client_scripts/通用组件/Epiphy的-屏幕弹幕渲染器.js（缺失时服务端可正常调用 API，但客户端无接收与画面渲染）

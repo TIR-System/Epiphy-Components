@@ -67,16 +67,16 @@
 | **L1 跨端契约** | `Epiphy的-Spec与通用工具.js` | `startup` / `1200` | `EpiphySpec`、`EpiphyProtocol` |
 | **L1 内容注册** | `创造模式栏-epiphy.js` | `startup` / `1000` | `EpiphyCreativeTab` (`epiphy:stuff`) |
 | **L1 内容注册** | 隐藏物品 / 测试方块 / 失稳拆解台 | `startup` | 物品、测试方块与 5 阶段失稳方块 |
-| **L2 基础设施** | `Epiphy的-日志.js` | `server` / `1100` | `EpiphyLog`（限频、去重、`catchWarn`） |
-| **L2 基础设施** | `Epiphy的-服务端基础.js` | `server` / `1080` | `EpiphyServerBase`（访问器、路径、DSL） |
+| **L2 基础设施** | `Epiphy的-日志.js` | `server` / `1100` | `EpiphyLog v1.1`（限频、去重、`catchWarn`、外部文本日志） |
+| **L2 基础设施** | `Epiphy的-服务端基础.js` | `server` / `1080` | `EpiphyServerBase v2`（访问器、`epiphy-data/`、自动分叉、DSL） |
 | **L2 基础设施** | `Epiphy的-方块追踪组件.js` | `server` / `1050` | `EpiphyBlockTracker v2`（区块段扫描） |
-| **L2 安全控制** | `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v4`（`/epiphy`） |
+| **L2 安全控制** | `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v5`（`/epiphy`、墓碑、按名备用模式） |
 | **L2 诊断维护** | `Epiphy的-调试组件.js` | `server` / `950` | `EpiphyDebug v1`（`/epiphy debug`） |
 | **L2 独立修复** | `Epiphy的-基础bug修复.js` | `server` / `900` | `EpiphyBugfix v1`（退出 HP 服务端恢复） |
-| **L3 业务调度** | `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `ScreenDanmaku v5` |
-| **L3 业务调度** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.2` |
+| **L3 业务调度** | `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `ScreenDanmaku v5.1` |
+| **L3 业务调度** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.3` |
 | **L3 玩法脚本** | `拆解台-混沌殉爆.v18.js` & `合成表-*` | `server` | 混沌殉爆事件链与配方调整 |
-| **L4 客户端表现** | `屏幕弹幕渲染器` / `音频播放器` / `拆解台描述` | `client` | `ScreenDanmakuClient`、`EpiphyAudioClient` |
+| **L4 客户端表现** | `屏幕弹幕渲染器` / `音频播放器` / `拆解台描述` | `client` | `ScreenDanmakuClient v5.1`、`EpiphyAudioClient v5.3` |
 
 ### 3. 模块依赖与降级语义规范（YAML）
 
@@ -167,10 +167,14 @@ Epiphy的-音频播放器.js:
 
 ## 核心功能说明
 
-1. **通用基础设施**：统一收拢跨端协议常量与解析规范（`EpiphySpec`）、限频与去重日志（`EpiphyLog`）、服务端对象与 Brigadier 命令树 DSL（`EpiphyServerBase`）、渐进式区块段方块扫描追踪（`EpiphyBlockTracker`）、基于 `Class.isInstance` 源类型鉴权与按世界授权管理的 `/epiphy` 指令中心（`EpiphyPermissionValve`）、动态性能监控与健康自检（`EpiphyDebug`），以及不依赖前置的纯服务端退出 HP 保留与延迟恢复修复（`EpiphyBugfix`）。
-2. **双端交互表现引擎**：
-   - **屏幕弹幕（`ScreenDanmaku v5`）**：归一化屏幕坐标与 HUD 禁区避让、多段打字机、`per_char` 单字震动、描边/发光、局部富文本标签（`<b>`/`<big>`/`<scale=...>`/`<shake>`/`<outline>`）、`once` / `active` 双生命周期与方块绑定。
-   - **空间音频（`EpiphyAudio v5.2`）**：固定位置/方块/追踪实体/维度/全局声场、衰减曲线、出界静音与恢复、邻近同源方块 `merge` 簇合并、背景音乐避让（`duckMusic`）与客户端断流退避重连。
+1. **通用基础设施与外部存储（`epiphy-data/`）**：
+   - 统一收拢跨端协议常量与解析规范（`EpiphySpec`）、限频去重日志与外部可读文本日志接收器（`EpiphyLog v1.1`，默认按天输出 `.log` 并支持 `daily`/`hourly`/`single`/`off` 轮转）、服务端对象/原子文件读写/DSL（`EpiphyServerBase v2`）与渐进式区块段方块扫描（`EpiphyBlockTracker v2`）。
+   - 运行期在游戏根目录建立 `epiphy-data/`（`config` / `worlds` / `players` / `events` / `logs` / `presets` / `backups`），配合 `.tmp` + `.bak` 原子写入；世界目录采用 `<slug>__<shortId>` 命名并与存档内 `epiphy_world_id.json` 双向绑定，当 `lastWorldPath` 变化（如复制存档）时自动分叉并提示 OP 清理旧目录。
+   - **权限与防回滚安全（`EpiphyPermissionValve v5`）**：基于 `Class.isInstance` 的源类型鉴权，默认严格按 UUID 授权（并显式提示无 TrueUUID 与密码登录插件的纯离线服风险）；撤销写入外部 `revocations.json` 墓碑防止存档回滚复活；按名授权备用模式默认 Fail-Closed，须真 OP/控制台在 2 分钟内凭 8 位随机口令二次确认（或修改带风险说明的 `auth_mode.json`）开启，支持 `/epiphy auth namegrant|grantname|revokename|where|reload`。
+   - **独立修复与诊断**：动态性能监控与健康自检（`EpiphyDebug v1`），以及零硬依赖的纯服务端退出 HP 保留与延迟恢复修复（`EpiphyBugfix v1`）。
+2. **双端交互表现引擎（含 `authorized` 玩家资源隔离）**：
+   - **屏幕弹幕（`ScreenDanmaku v5.1`）**：归一化屏幕坐标与 HUD 禁区避让、多段打字机、`per_char` 单字震动、描边/发光、局部富文本标签（`<b>`/`<big>`/`<scale=...>`/`<shake>`/`<outline>`）、`once` / `active` 双生命周期与方块绑定；非 OP `authorized` 玩家命令进入 `'player'` 层级并受优先级、字号/长度/驻留/半径限流、250ms 冷却、独立 `u:<uuid>` 命名空间清屏锁与端侧每命名空间 `16` 条上限约束（JS API 与 OP/控制台/命令方块不限）。
+   - **空间音频（`EpiphyAudio v5.3`）**：固定位置/方块/追踪实体/维度/全局声场、衰减曲线、出界静音与恢复、邻近同源方块 `merge` 簇合并、背景音乐避让（`duckMusic`）与客户端断流退避重连；非 OP `authorized` 玩家命令进入 `'player'` 层级并受优先级 `<= 3`、`u:<uuid>:` key 隔离、服务端全服/创建者/听众槽位配额保护及双端单向淘汰（优先保 `'system'` 音频）。
 3. **内容与玩法拓展**：`epiphy:stuff` 创造模式物品栏与隐藏物品收录（含混沌晶体 CCL 3D OBJ + Chaos Shader 物品渲染）、`epiphy:rnfmabj_test` 测试方块、暮色森林终极拆解台 5 阶段失稳殉爆与遗物豁免机制，以及原版/植物魔法/神秘遗物部分配方调整。
 
 ---
@@ -202,7 +206,7 @@ Epiphy的-音频播放器.js:
 ### 安装到游戏整合包
 1. 当前过渡期运行要求：**Minecraft 1.20.1 / Forge 47.x / KubeJS 2001.6.x**（理论上兼容 Fabric，未实测）。
 2. 将 `kubejs/` 合并放入客户端 `.minecraft/` 与服务端根目录。
-3. 管理员可在游戏内通过 `/epiphy help`、`/epiphy auth list`、`/epiphy debug` 查看帮助、授权状态与性能面板。
+3. 管理员可在游戏内通过 `/epiphy help`、`/epiphy auth list`、`/epiphy auth where`、`/epiphy debug` 查看帮助、授权状态、外部数据路径与性能面板；运行期自动在游戏根目录生成并维护 `epiphy-data/`（已在 `.gitignore` 中忽略，请勿提交至源码仓库）。
 
 ### 本地沙盒单元测试
 ```bash

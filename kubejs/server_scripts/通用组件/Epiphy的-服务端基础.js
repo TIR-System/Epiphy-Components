@@ -1,12 +1,13 @@
 // priority: 1080
 // ============================================================================
-// Epiphy 服务端通用基础设施 (EpiphyServerBase)
+// Epiphy 服务端通用基础设施 (EpiphyServerBase v2)
 //   所属阶段：server_scripts
 //   可选依赖：
 //     - global.EpiphySpec (Epiphy的-Spec与通用工具.js)：缺失时维度/数组工具自动使用内置精简降级实现
 //     - global.EpiphyLog (Epiphy的-日志.js)：缺失时自动降级为基础 console 限频日志，不阻断服务端模块加载
-//   定位    ：收拢服务端日志包装与降级、Java 类缓存、MC 对象访问器、存档级磁盘路径定位、
-//            权限阀子命令队列与统一 OP 提醒、Debug 提供者注册、单点兜底方块追踪与命令树 DSL
+//   定位    ：收拢服务端日志包装与降级、Java 类缓存、MC 对象访问器、外部统一数据根 `epiphy-data/`
+//            （config/worlds/players/events/logs/presets/backups）、`.tmp`+`.bak` 原子读写、
+//            `lastWorldPath` 复制档自动分叉、权限阀子命令队列与统一 OP 提醒、Debug 注册与命令树 DSL
 //   约束    ：严格 Rhino ES5（禁止 let/const、箭头函数、模板字符串、展开运算符）
 // ============================================================================
 
