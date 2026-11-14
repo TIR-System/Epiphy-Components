@@ -1,6 +1,6 @@
 // priority: 1100
 // ============================================================================
-//  通用限频日志与调试中心 (EpiphyLog v1.1)
+//  通用限频日志与调试中心 (EpiphyLog v1.2)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
@@ -11,7 +11,7 @@
 //    2. 区分“预期外但已处理的异常”(catchWarn -> console.warn，不染红、不计入脚本错误数)
 //       与“不可恢复的硬错误”(error -> console.error)；
 //    3. 提供按 key 去重的单次日志 (once) 与按模块开关的调试日志 (debug / setDebug)；
-//    4. 提供独立于控制台的外部文件持久化接收器（`configureFileSink` / `getFileSinkConfig`），默认按天向 `epiphy-data/logs/YYYY-MM-DD.log` 写入可读日志（可配置为 `hourly` / `single` / `off`），并支持初始化前缓冲。
+//    4. 提供独立于控制台的外部文件持久化接收器（`configureFileSink` / `getFileSinkConfig`），支持 NIO 文本写盘与 KubeJS `ClassFilter` 环境下的 `KubeJSPaths.dir` + `JsonIO` 持久化降级，并随世界上下文自动切换至对应世界的 `logs/` 子目录，支持初始化前缓冲。
 //
 //  依赖与缺失影响：
 //    - 本文件无前置脚本依赖（priority: 1100）。
@@ -45,16 +45,35 @@
         lastError:        ''
     }
 
-    var FILE_CLASS   = null
-    var FILES_CLASS  = null
-    var PATHS_CLASS  = null
-    var CHARSET_UTF8 = null
-    var OPEN_OPTS    = null
-    var javaIoProbed = false
+    var FILE_CLASS         = null
+    var FILES_CLASS        = null
+    var PATHS_CLASS        = null
+    var CHARSET_UTF8       = null
+    var OPEN_OPTS          = null
+    var KUBEJS_PATHS_CLASS = null
+    var javaIoProbed       = false
+    var kubeJsPathsProbed  = false
+    var jsonLogCache       = {}
+    var MAX_JSON_LOG_LINES = 2000
+
+    function ensureKubeJsPaths() {
+        if (kubeJsPathsProbed) return KUBEJS_PATHS_CLASS != null
+        kubeJsPathsProbed = true
+        if (typeof Java === 'undefined' || Java == null || typeof Java.loadClass !== 'function') {
+            return false
+        }
+        try {
+            KUBEJS_PATHS_CLASS = Java.loadClass('dev.latvian.mods.kubejs.KubeJSPaths')
+        } catch (eKj) {
+            KUBEJS_PATHS_CLASS = null
+        }
+        return KUBEJS_PATHS_CLASS != null
+    }
 
     function ensureJavaFileIo() {
         if (javaIoProbed) return (FILES_CLASS != null && PATHS_CLASS != null)
         javaIoProbed = true
+        ensureKubeJsPaths()
         if (typeof Java === 'undefined' || Java == null || typeof Java.loadClass !== 'function') {
             return false
         }
@@ -124,13 +143,57 @@
         return baseDir + '/' + parts.dateStr + ext
     }
 
-    function writeLineToDisk(filePath, line) {
+    function ensureDirViaKubeJs(filePath) {
+        ensureKubeJsPaths()
+        if (KUBEJS_PATHS_CLASS == null) return false
+        var norm = String(filePath).replace(/\\/g, '/')
+        var slashIdx = norm.lastIndexOf('/')
+        if (slashIdx <= 0) return false
+        var parentDir = norm.slice(0, slashIdx)
+        if (!/^(?:[a-zA-Z]:[\\/]|\/)/.test(parentDir)) return false
+        try {
+            if (typeof KUBEJS_PATHS_CLASS.dir !== 'function') return false
+            KUBEJS_PATHS_CLASS.dir(parentDir)
+            return true
+        } catch (eDir) {
+            return false
+        }
+    }
+
+    function loadExistingJsonLogLines(filePath) {
+        if (Object.prototype.hasOwnProperty.call(jsonLogCache, filePath)) {
+            return jsonLogCache[filePath]
+        }
+        var lines = []
+        if (typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.readString === 'function') {
+            try {
+                var raw = JsonIO.readString(String(filePath))
+                if (raw != null && String(raw).trim() !== '') {
+                    var parsed = JSON.parse(String(raw))
+                    if (parsed != null && Array.isArray(parsed.entries)) {
+                        for (var i = 0; i < parsed.entries.length; i++) {
+                            lines.push(String(parsed.entries[i]))
+                        }
+                    } else if (Array.isArray(parsed)) {
+                        for (var j = 0; j < parsed.length; j++) {
+                            lines.push(String(parsed[j]))
+                        }
+                    }
+                }
+            } catch (eSeed) { }
+        }
+        jsonLogCache[filePath] = lines
+        return lines
+    }
+
+    function writeLineToDisk(filePath, line, parts) {
         if (!filePath) return false
         try {
             if (typeof fileSink.writer === 'function') {
                 fileSink.writer(filePath, line)
                 fileSink.writtenLines++
                 fileSink.lastFilePath = filePath
+                fileSink.lastError = ''
                 return true
             }
             if (ensureJavaFileIo()) {
@@ -144,8 +207,30 @@
                     FILES_CLASS.writeString(p, line, CHARSET_UTF8, OPEN_OPTS[0], OPEN_OPTS[1])
                     fileSink.writtenLines++
                     fileSink.lastFilePath = filePath
+                    fileSink.lastError = ''
                     return true
                 }
+            }
+            // KubeJS 2001.6.x ClassFilter 默认屏蔽 java.io / java.nio.file：回退为 KubeJSPaths.dir + JsonIO 写盘，避免产生文件锁
+            if (typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.write === 'function') {
+                ensureDirViaKubeJs(filePath)
+                var cachedLines = loadExistingJsonLogLines(filePath)
+                var cleanLine = String(line).replace(/[\r\n]+$/, '')
+                if (cleanLine) cachedLines.push(cleanLine)
+                if (cachedLines.length > MAX_JSON_LOG_LINES) {
+                    cachedLines.splice(0, cachedLines.length - MAX_JSON_LOG_LINES)
+                }
+                var tsNow = (parts && parts.ts) ? parts.ts : formatNowParts(new Date()).ts
+                JsonIO.write(String(filePath), {
+                    format:    'epiphy-log-v1',
+                    updatedAt: tsNow,
+                    count:     cachedLines.length,
+                    entries:   cachedLines
+                })
+                fileSink.writtenLines++
+                fileSink.lastFilePath = filePath
+                fileSink.lastError = ''
+                return true
             }
         } catch (eWrite) {
             fileSink.lastError = String(eWrite)
@@ -171,7 +256,7 @@
         }
         var targetPath = resolveTargetLogPath(parts)
         if (!targetPath) return
-        writeLineToDisk(targetPath, formatFileLine(parts.ts, level, text))
+        writeLineToDisk(targetPath, formatFileLine(parts.ts, level, text), parts)
     }
 
     function flushBufferedLogs() {
@@ -184,7 +269,7 @@
             if (item.level === 'debug' && !fileSink.includeDebug) continue
             var targetPath = resolveTargetLogPath(item.parts)
             if (targetPath) {
-                writeLineToDisk(targetPath, formatFileLine(item.parts.ts, item.level, item.text))
+                writeLineToDisk(targetPath, formatFileLine(item.parts.ts, item.level, item.text), item.parts)
             }
         }
     }

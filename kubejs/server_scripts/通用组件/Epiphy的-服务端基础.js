@@ -1,6 +1,6 @@
 // priority: 1080
 // ============================================================================
-// Epiphy 服务端通用基础设施 (EpiphyServerBase v2.2)
+// Epiphy 服务端通用基础设施 (EpiphyServerBase v2.3)
 //   许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //   所属阶段：server_scripts
 //   可选依赖：
@@ -8,7 +8,8 @@
 //     - global.EpiphyLog (Epiphy的-日志.js)：缺失时自动降级为基础 console 限频日志，不阻断服务端模块加载
 //   定位    ：收拢服务端日志包装与降级、Java 类缓存、MC 对象访问器（`resolveLevel` 无效维度 fail-closed 拒绝回落主世界）、
 //            外部统一数据根 `epiphy-data/`（config/worlds/players/events/logs/presets/backups）、`.tmp`+`.bak` 原子读写、
-//            `lastWorldPath` 复制档自动分叉、权限阀子命令队列与统一 OP 提醒、Debug 注册与命令树 DSL（支持分支 `scope` 权限分层传播）
+//            KubeJS ClassFilter 兼容路径（`KubeJSPaths.dir` + `JsonIO.readString` + `worlds_index.json` + Rhino `NativeJavaMap` 防护）、
+//            `lastWorldPath` 复制档自动分叉与世界专属 `logs/` 运行日志目录切换、权限阀子命令队列与统一 OP 提醒、Debug 注册与命令树 DSL
 //   约束    ：严格 Rhino ES5（禁止 let/const、箭头函数、模板字符串、展开运算符）
 // ============================================================================
 
@@ -592,7 +593,7 @@
         if (!filePathStr) return false;
         var norm = String(filePathStr).replace(/\\/g, '/');
         var slashIdx = norm.lastIndexOf('/');
-        if (slashIdx > 0 && KUBEJS_PATHS_CLASS != null && typeof KUBEJS_PATHS_CLASS.dir === 'function') {
+        if (slashIdx > 0 && safeHasMethod(KUBEJS_PATHS_CLASS, 'dir')) {
             try {
                 var parentDir = norm.slice(0, slashIdx);
                 if (parentDir && KUBEJS_PATHS_CLASS.dir(parentDir) != null) {
@@ -743,6 +744,16 @@
                 (logger || baseLogger).catchWarn('ensureDirExists:nio', eNioDir);
             }
         }
+        if (safeHasMethod(KUBEJS_PATHS_CLASS, 'dir')
+            && (epiphyDataRootOverride != null || /^(?:[a-zA-Z]:[\\/]|\/)/.test(norm))) {
+            try {
+                if (KUBEJS_PATHS_CLASS.dir(norm) != null) {
+                    return true;
+                }
+            } catch (eKjDir) {
+                (logger || baseLogger).catchWarn('ensureDirExists:KubeJSPaths', eKjDir);
+            }
+        }
         return false;
     }
 
@@ -769,6 +780,13 @@
         }
     }
 
+    function isExpectedMissingFileErr(err) {
+        var s = String(err || '');
+        return s.indexOf('NoSuchFileException') >= 0
+            || s.indexOf('FileNotFoundException') >= 0
+            || s.indexOf('ENOENT') >= 0;
+    }
+
     function readTextSafe(filePath, logger) {
         if (!filePath) return null;
         if (JAVA_FILES_CLASS != null && JAVA_PATHS_CLASS != null && JAVA_CHARSET_UTF8 != null) {
@@ -784,7 +802,22 @@
                     if (jStrCls != null) return String(new jStrCls(bytes, JAVA_CHARSET_UTF8));
                 }
             } catch (eRead) {
-                (logger || baseLogger).catchWarn('readTextSafe', eRead);
+                if (!isExpectedMissingFileErr(eRead)) {
+                    (logger || baseLogger).catchWarn('readTextSafe', eRead);
+                }
+            }
+        }
+        if (typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.readString === 'function') {
+            try {
+                var jsStr = JsonIO.readString(String(filePath));
+                if (jsStr != null) {
+                    var rawStr = String(jsStr);
+                    if (rawStr !== '') return rawStr;
+                }
+            } catch (eJioStr) {
+                if (!isExpectedMissingFileErr(eJioStr)) {
+                    (logger || baseLogger).catchWarn('readTextSafe:JsonIO.readString', eJioStr);
+                }
             }
         }
         if (typeof FilesIO !== 'undefined' && FilesIO != null && typeof FilesIO.read === 'function') {
@@ -792,7 +825,9 @@
                 var r = FilesIO.read(String(filePath));
                 return r != null ? String(r) : null;
             } catch (eFio) {
-                (logger || baseLogger).catchWarn('readTextSafe:FilesIO', eFio);
+                if (!isExpectedMissingFileErr(eFio)) {
+                    (logger || baseLogger).catchWarn('readTextSafe:FilesIO', eFio);
+                }
             }
         }
         return null;
@@ -877,32 +912,67 @@
         return false;
     }
 
-    function javaToJsPlain(val) {
-        if (val == null || typeof val !== 'object') return val;
+    function javaToJsPlain(val, depth) {
+        var curDepth = depth != null ? depth : 0;
+        if (val == null || curDepth > 24) return val;
+        var t = safeTypeOf(val);
+        if (t !== 'object') return val;
         if (Array.isArray(val)) {
             var arr = [];
-            for (var i = 0; i < val.length; i++) arr.push(javaToJsPlain(val[i]));
+            for (var i = 0; i < val.length; i++) arr.push(javaToJsPlain(val[i], curDepth + 1));
             return arr;
         }
-        if (typeof val.keySet === 'function' && typeof val.get === 'function') {
-            var obj = {};
-            var it = val.keySet().iterator();
-            while (it.hasNext()) {
-                var k = String(it.next());
-                obj[k] = javaToJsPlain(val.get(k));
-            }
-            return obj;
+        // 先检查 Java Map 接口；Rhino 的 NativeJavaMap 可能拦截 keySet/iterator 键查，需结合 Object.keys 兜底
+        if (safeHasMethod(val, 'entrySet')) {
+            try {
+                var objE = {};
+                var itE = val.entrySet().iterator();
+                while (itE.hasNext()) {
+                    var entry = itE.next();
+                    var ek = entry != null ? String(entry.getKey()) : '';
+                    if (ek) objE[ek] = javaToJsPlain(entry.getValue(), curDepth + 1);
+                }
+                return objE;
+            } catch (eEntry) { }
         }
-        if (typeof val.iterator === 'function') {
-            var list = [];
-            var it2 = val.iterator();
-            while (it2.hasNext()) list.push(javaToJsPlain(it2.next()));
-            return list;
+        if (safeHasMethod(val, 'keySet') && safeHasMethod(val, 'get')) {
+            try {
+                var obj = {};
+                var it = val.keySet().iterator();
+                while (it.hasNext()) {
+                    var k = String(it.next());
+                    obj[k] = javaToJsPlain(val.get(k), curDepth + 1);
+                }
+                return obj;
+            } catch (eMap) { }
         }
+        if (!isJavaMapLike(val) && safeHasMethod(val, 'iterator')) {
+            try {
+                var list = [];
+                var it2 = val.iterator();
+                while (it2.hasNext()) list.push(javaToJsPlain(it2.next(), curDepth + 1));
+                return list;
+            } catch (eList) { }
+        }
+        if (!isJavaMapLike(val) && safeHasMethod(val, 'size') && safeHasMethod(val, 'get')) {
+            try {
+                var listSz = Number(val.size());
+                var arrL = [];
+                for (var li = 0; li < listSz; li++) arrL.push(javaToJsPlain(val.get(li), curDepth + 1));
+                return arrL;
+            } catch (eSize) { }
+        }
+        // 使用 Object.keys 遍历普通 JS 对象与 Rhino NativeJavaMap，绝不对未过滤的 Java POJO 使用 `for..in` 误触 `.class`
         var out = {};
-        for (var pk in val) {
-            if (hasOwn(val, pk)) out[pk] = javaToJsPlain(val[pk]);
-        }
+        try {
+            var keys = Object.keys(val);
+            for (var ki = 0; ki < keys.length; ki++) {
+                var pk = keys[ki];
+                if (pk === 'class' || pk === 'constructors' || pk === 'declaredConstructors') continue;
+                var pv = safeReadProp(val, pk);
+                if (pv !== undefined) out[pk] = javaToJsPlain(pv, curDepth + 1);
+            }
+        } catch (eKeys) { }
         return out;
     }
 
@@ -919,15 +989,40 @@
                 return null;
             }
         }
-        if (typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.read === 'function') {
-            try {
-                var raw = JsonIO.read(String(filePath));
-                return raw != null ? javaToJsPlain(raw) : null;
-            } catch (eJio) {
-                (logger || baseLogger).catchWarn('readJsonSafe:JsonIO', eJio);
+        if (typeof JsonIO !== 'undefined' && JsonIO != null) {
+            if (typeof JsonIO.readJson === 'function' && typeof JsonIO.toString === 'function') {
+                try {
+                    var el = JsonIO.readJson(String(filePath));
+                    if (el != null) {
+                        var jsonStr = String(JsonIO.toString(el)).trim();
+                        if (jsonStr && jsonStr !== 'null') return JSON.parse(jsonStr);
+                    }
+                } catch (eJioEl) {
+                    if (!isExpectedMissingFileErr(eJioEl)) {
+                        (logger || baseLogger).catchWarn('readJsonSafe:JsonIO.readJson', eJioEl);
+                    }
+                }
+            }
+            if (typeof JsonIO.read === 'function') {
+                try {
+                    var raw = JsonIO.read(String(filePath));
+                    return raw != null ? javaToJsPlain(raw, 0) : null;
+                } catch (eJio) {
+                    if (!isExpectedMissingFileErr(eJio)) {
+                        (logger || baseLogger).catchWarn('readJsonSafe:JsonIO', eJio);
+                    }
+                }
             }
         }
         return null;
+    }
+
+    function canWritePersistentFiles() {
+        if (JAVA_FILES_CLASS != null || JAVA_FILE_CLASS != null) return true;
+        if (typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.write === 'function') {
+            return Boolean(epiphyDataRootOverride != null || /^(?:[a-zA-Z]:[\\/]|\/)/.test(resolveGameDir()));
+        }
+        return false;
     }
 
     function writeJsonAtomic(filePath, obj, keepBackup, logger) {
@@ -944,6 +1039,14 @@
         if (typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.write === 'function') {
             try {
                 ensureParentDir(normPath, logger);
+                if (keepBackup !== false && normPath.slice(-4) !== '.bak' && normPath.indexOf('worlds_index.json') < 0) {
+                    try {
+                        var prevObj = readJsonSafe(normPath, null);
+                        if (prevObj != null && isObjectLike(prevObj)) {
+                            JsonIO.write(normPath + '.bak', prevObj);
+                        }
+                    } catch (eBakJio) { }
+                }
                 JsonIO.write(normPath, obj);
                 return true;
             } catch (eJioW) {
@@ -999,30 +1102,90 @@
         }
     }
 
-    function scanWorldsMetadata(worldsDir, logger) {
-        var entries = [];
-        if (!worldsDir || JAVA_FILE_CLASS == null) return entries;
+    function readWorldsIndexMap(worldsDir, logger) {
+        if (!worldsDir) return {};
+        var idxData = readJsonSafe(worldsDir + '/worlds_index.json', logger);
+        if (idxData == null || !isObjectLike(idxData)) return {};
+        var mapObj = isObjectLike(idxData.worlds) ? idxData.worlds : idxData;
+        var out = {};
         try {
-            var dirObj = new JAVA_FILE_CLASS(worldsDir);
-            if (!dirObj.exists() || !dirObj.isDirectory()) return entries;
-            var children = dirObj.listFiles();
-            if (children == null) return entries;
-            for (var i = 0; i < children.length; i++) {
-                var child = children[i];
-                if (child == null || !child.isDirectory()) continue;
-                var folderName = String(child.getName());
-                var metaPath = normalizeSlashPath(child.getPath()) + '/meta.json';
-                var meta = readJsonSafe(metaPath, logger);
-                if (meta != null && typeof meta === 'object') {
-                    entries.push({
-                        folderName: folderName,
-                        metaPath:   metaPath,
-                        meta:       meta
-                    });
+            var ks = Object.keys(mapObj);
+            for (var i = 0; i < ks.length; i++) {
+                var k = ks[i];
+                var rec = mapObj[k];
+                if (rec != null && isObjectLike(rec) && rec.folderName) {
+                    out[String(k)] = rec;
                 }
             }
-        } catch (eScan) {
-            (logger || baseLogger).catchWarn('scanWorldsMetadata', eScan);
+        } catch (eIdx) { }
+        return out;
+    }
+
+    function upsertWorldsIndexEntry(worldsDir, metaPayload, logger) {
+        if (!worldsDir || !metaPayload || !metaPayload.worldId || !metaPayload.folderName) return false;
+        var mapObj = readWorldsIndexMap(worldsDir, logger);
+        var wid = String(metaPayload.worldId);
+        mapObj[wid] = {
+            worldId:       wid,
+            folderName:    String(metaPayload.folderName),
+            worldName:     String(metaPayload.worldName || 'world'),
+            lastWorldPath: String(metaPayload.lastWorldPath || ''),
+            updatedAt:     String(metaPayload.updatedAt || formatIsoNow())
+        };
+        return writeJsonAtomic(worldsDir + '/worlds_index.json', {
+            version:   1,
+            updatedAt: formatIsoNow(),
+            worlds:    mapObj
+        }, false, logger);
+    }
+
+    function scanWorldsMetadata(worldsDir, logger, hintFolderNames) {
+        var entries = [];
+        if (!worldsDir) return entries;
+        var seenFolders = {};
+        function tryCollectFolder(folderName) {
+            if (!folderName) return;
+            var fn = String(folderName).trim();
+            if (!fn || hasOwn(seenFolders, fn)) return;
+            seenFolders[fn] = true;
+            var metaPath = worldsDir + '/' + fn + '/meta.json';
+            var meta = readJsonSafe(metaPath, logger);
+            if (meta != null && isObjectLike(meta) && meta.worldId) {
+                entries.push({
+                    folderName: fn,
+                    metaPath:   metaPath,
+                    meta:       meta
+                });
+            }
+        }
+        if (JAVA_FILE_CLASS != null) {
+            try {
+                var dirObj = new JAVA_FILE_CLASS(worldsDir);
+                if (dirObj.exists() && dirObj.isDirectory()) {
+                    var children = dirObj.listFiles();
+                    if (children != null) {
+                        for (var i = 0; i < children.length; i++) {
+                            var child = children[i];
+                            if (child != null && child.isDirectory()) {
+                                tryCollectFolder(String(child.getName()));
+                            }
+                        }
+                    }
+                }
+            } catch (eScan) {
+                (logger || baseLogger).catchWarn('scanWorldsMetadata', eScan);
+            }
+        }
+        var idxMap = readWorldsIndexMap(worldsDir, logger);
+        var idxKeys = Object.keys(idxMap);
+        for (var j = 0; j < idxKeys.length; j++) {
+            var item = idxMap[idxKeys[j]];
+            if (item && item.folderName) tryCollectFolder(item.folderName);
+        }
+        if (Array.isArray(hintFolderNames)) {
+            for (var h = 0; h < hintFolderNames.length; h++) {
+                if (hintFolderNames[h]) tryCollectFolder(hintFolderNames[h]);
+            }
         }
         return entries;
     }
@@ -1030,6 +1193,8 @@
     function buildWorldContextResult(dataDirs, worldId, worldName, slug, folderName, worldPath, anchorPath, forkedFrom, forkNotice, isBoundWorld) {
         var wDir = dataDirs.subdirs.worlds + '/' + folderName;
         ensureDirExists(wDir, baseLogger);
+        var worldLogsDir = wDir + '/logs';
+        ensureDirExists(worldLogsDir, baseLogger);
         var legacyFiles = [];
         if (worldPath) {
             legacyFiles.push(worldPath + '/kubejs_epiphy_permissions.json');
@@ -1047,6 +1212,7 @@
             isWorldBound:    Boolean(isBoundWorld),
             dataRoot:        dataDirs.root,
             worldDataDir:    wDir,
+            logsDir:         worldLogsDir,
             permissionsFile: wDir + '/permissions.json',
             revocationsFile: wDir + '/revocations.json',
             authModeFile:    wDir + '/auth_mode.json',
@@ -1057,6 +1223,25 @@
         };
     }
 
+    function switchRuntimeLogDirToWorld(ctx) {
+        if (!ctx || !ctx.logsDir) return;
+        initEpiphyLoggingSink(false);
+        var logApi = resolveEpiphyLog();
+        if (logApi != null && typeof logApi.configureFileSink === 'function') {
+            var cur = (typeof logApi.getFileSinkConfig === 'function') ? logApi.getFileSinkConfig() : null;
+            var changed = !cur || normalizePathCompare(cur.dir) !== normalizePathCompare(ctx.logsDir);
+            logApi.configureFileSink({ dir: ctx.logsDir });
+            if (changed && typeof logApi.info === 'function') {
+                logApi.info(
+                    'EpiphyServerBase',
+                    'worldLogBound',
+                    'worldId=' + ctx.worldId + ' folder=' + ctx.folderName + ' logDir=' + ctx.logsDir
+                    + (ctx.forkedFrom ? (' forkedFrom=' + ctx.forkedFrom.folderName) : '')
+                );
+            }
+        }
+    }
+
     function resolveEpiphyWorldContext(server, options) {
         var srv = resolveServer(server);
         var dataDirs = ensureEpiphyDataDirs(baseLogger);
@@ -1065,9 +1250,12 @@
         var worldPath = resolveWorldDirectoryPath(srv);
         var pathCmp = normalizePathCompare(worldPath);
         var forceReload = Boolean(options && options.forceReload);
+        var allowLogSwitch = !(options && options.switchLogsDir === false);
 
         if (!forceReload && pathCmp && hasOwn(worldContextCache, pathCmp)) {
-            return worldContextCache[pathCmp];
+            var cachedCtx = worldContextCache[pathCmp];
+            if (allowLogSwitch) switchRuntimeLogDirToWorld(cachedCtx);
+            return cachedCtx;
         }
         if (!forceReload && !pathCmp && hasOwn(worldContextCache, '__unbound__:' + slug)) {
             return worldContextCache['__unbound__:' + slug];
@@ -1084,11 +1272,17 @@
 
         var anchorPath = worldPath + '/data/epiphy_world_id.json';
         var anchor = readJsonSafe(anchorPath, baseLogger);
-        var existingEntries = scanWorldsMetadata(dataDirs.subdirs.worlds, baseLogger);
+        var anchorId = (anchor != null && anchor.worldId) ? String(anchor.worldId).trim() : '';
+        var hintFolders = [];
+        if (anchor != null && anchor.folderName) {
+            hintFolders.push(String(anchor.folderName).trim());
+        } else if (anchorId) {
+            hintFolders.push(slug + '__' + anchorId.slice(0, 8));
+        }
+        var existingEntries = scanWorldsMetadata(dataDirs.subdirs.worlds, baseLogger, hintFolders);
 
         var matchedById = null;
         var matchedByPath = null;
-        var anchorId = (anchor != null && anchor.worldId) ? String(anchor.worldId).trim() : '';
 
         for (var i = 0; i < existingEntries.length; i++) {
             var item = existingEntries[i];
@@ -1144,7 +1338,7 @@
                 if (!matchedById.meta.lastWorldPath || matchedById.meta.worldName !== worldName) {
                     needWriteMeta = true;
                 }
-                if (anchor.folderName !== finalFolder) {
+                if (anchor == null || anchor.worldId !== finalWorldId || anchor.folderName !== finalFolder) {
                     needWriteAnchor = true;
                 }
             }
@@ -1185,26 +1379,31 @@
             }, true, baseLogger);
         }
 
+        var oldMeta = (matchedById != null && forkedFrom == null)
+            ? matchedById.meta
+            : (matchedByPath != null ? matchedByPath.meta : null);
+        var metaPayload = {
+            version:       1,
+            worldId:       finalWorldId,
+            worldName:     worldName,
+            slug:          slug,
+            folderName:    finalFolder,
+            lastWorldPath: worldPath,
+            seed:          seedStr != null ? seedStr : (oldMeta && oldMeta.seed ? oldMeta.seed : null),
+            createdAt:     (oldMeta && oldMeta.createdAt) ? oldMeta.createdAt : nowStr,
+            updatedAt:     nowStr
+        };
+        if (forkedFrom != null) metaPayload.forkedFrom = forkedFrom;
         if (needWriteMeta) {
-            var oldMeta = (matchedById != null && forkedFrom == null)
-                ? matchedById.meta
-                : (matchedByPath != null ? matchedByPath.meta : null);
-            var metaPayload = {
-                version:       1,
-                worldId:       finalWorldId,
-                worldName:     worldName,
-                slug:          slug,
-                folderName:    finalFolder,
-                lastWorldPath: worldPath,
-                seed:          seedStr != null ? seedStr : (oldMeta && oldMeta.seed ? oldMeta.seed : null),
-                createdAt:     (oldMeta && oldMeta.createdAt) ? oldMeta.createdAt : nowStr,
-                updatedAt:     nowStr
-            };
-            if (forkedFrom != null) metaPayload.forkedFrom = forkedFrom;
             writeJsonAtomic(ctx.metaFile, metaPayload, true, baseLogger);
+        }
+        var existingIdxMap = readWorldsIndexMap(dataDirs.subdirs.worlds, null);
+        if (needWriteMeta || !hasOwn(existingIdxMap, finalWorldId) || existingIdxMap[finalWorldId].folderName !== finalFolder) {
+            upsertWorldsIndexEntry(dataDirs.subdirs.worlds, metaPayload, baseLogger);
         }
 
         worldContextCache[pathCmp] = ctx;
+        if (allowLogSwitch) switchRuntimeLogDirToWorld(ctx);
         return ctx;
     }
 
@@ -1227,15 +1426,15 @@
         var dirs = ensureEpiphyDataDirs(baseLogger);
         var cfgPath = dirs.subdirs.config + '/logging.json';
         var defaultCfg = {
-            _description:  'Epiphy 本地文件日志配置（mode 支持: daily=按天YYYY-MM-DD.log | hourly=按小时 | single=单文件epiphy.log | off=关闭写盘）',
+            _description:  'Epiphy 本地文件日志配置（mode 支持: daily=按天YYYY-MM-DD.log | hourly=按小时 | single=单文件epiphy.log | off=关闭写盘；进入世界后自动切换至 worlds/<world>/logs/）',
             enabled:       true,
             mode:          'daily',
             fileExtension: '.log',
             includeDebug:  false
         };
         var loaded = readJsonSafe(cfgPath, baseLogger);
-        if (loaded == null || typeof loaded !== 'object') {
-            if (JAVA_FILES_CLASS != null || JAVA_FILE_CLASS != null) {
+        if (loaded == null || !isObjectLike(loaded)) {
+            if (canWritePersistentFiles()) {
                 writeJsonAtomic(cfgPath, defaultCfg, true, baseLogger);
             }
             loaded = defaultCfg;
@@ -1964,5 +2163,35 @@
             acquireBlockTracker:          acquireBlockTracker,
             createCommandBuilder:         createCommandBuilder
         };
+    }
+
+    if (typeof ServerEvents !== 'undefined' && ServerEvents != null) {
+        if (typeof ServerEvents.loaded === 'function') {
+            ServerEvents.loaded(function (event) {
+                try {
+                    initEpiphyLoggingSink(false);
+                    var srv = (event != null && event.server != null) ? event.server : resolveServer(null);
+                    if (srv != null) {
+                        resolveEpiphyWorldContext(srv, { forceReload: true });
+                    }
+                } catch (eLoad) {
+                    baseLogger.catchWarn('ServerEvents.loaded', eLoad);
+                }
+            });
+        }
+        if (typeof ServerEvents.unloaded === 'function') {
+            ServerEvents.unloaded(function () {
+                try {
+                    clearEpiphyWorldContextCache();
+                    var dirs = ensureEpiphyDataDirs(baseLogger);
+                    var logApi = resolveEpiphyLog();
+                    if (logApi != null && typeof logApi.configureFileSink === 'function') {
+                        logApi.configureFileSink({ dir: dirs.subdirs.logs });
+                    }
+                } catch (eUnload) {
+                    baseLogger.catchWarn('ServerEvents.unloaded', eUnload);
+                }
+            });
+        }
     }
 })();

@@ -5034,6 +5034,149 @@ test('PermissionValve strict_op policy & ScreenDanmaku bindBlock perPlayer/share
     assert.ok(/var recordOne = function\s*\(/.test(danmakuSrc), 'recordOne must be var-assigned inside countNonSelfTargets')
 })
 
+// ----------------------------------------------------------------------------
+// 40. KubeJS ClassFilter sandbox: world rejoin keeps same worldId, copy auto-forks, & per-world logs/
+// ----------------------------------------------------------------------------
+test('KubeJS ClassFilter: same world keeps worldId across restarts, copied save forks, and runtime logs write to world/logs/', function () {
+    var os = require('os')
+    var tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'epiphy_kjs_cf_'))
+    try {
+        var gameDir = path.join(tmpRoot, 'mc')
+        var save1   = path.join(gameDir, 'saves', 'TestWorld')
+        var save2   = path.join(gameDir, 'saves', 'TestWorldCopy')
+        fs.mkdirSync(path.join(gameDir, 'kubejs'), { recursive: true })
+        fs.mkdirSync(save1, { recursive: true })
+
+        function makeFilteredSandbox() {
+            var loadedCbs = []
+            var unloadedCbs = []
+            var sb = createKubeSandbox(function (clsName) {
+                // Simulate real KubeJS 2001.6.5 ClassFilter blocking java.io / java.nio / java.lang.System
+                if (clsName === 'java.io.File' || clsName.indexOf('java.nio.') === 0 || clsName === 'java.lang.System') {
+                    throw new Error('Class ' + clsName + ' is not allowed by class filter!')
+                }
+                if (clsName === 'dev.latvian.mods.kubejs.KubeJSPaths') {
+                    return {
+                        DIRECTORY: path.join(gameDir, 'kubejs').replace(/\\/g, '/'),
+                        dir: function (d) {
+                            var rp = path.resolve(String(d))
+                            fs.mkdirSync(rp, { recursive: true })
+                            return rp.replace(/\\/g, '/')
+                        }
+                    }
+                }
+                if (clsName === 'net.minecraft.world.level.storage.LevelResource') {
+                    return { ROOT: 'ROOT' }
+                }
+                return null
+            })
+            sb.ServerEvents.loaded = function (fn) { loadedCbs.push(fn) }
+            sb.ServerEvents.unloaded = function (fn) { unloadedCbs.push(fn) }
+            sb.JsonIO = {
+                readString: function (p) {
+                    var rp = path.resolve(String(p))
+                    if (!fs.existsSync(rp)) throw new Error('java.nio.file.NoSuchFileException: ' + rp)
+                    return fs.readFileSync(rp, 'utf8')
+                },
+                read: function (p) {
+                    var rp = path.resolve(String(p))
+                    if (!fs.existsSync(rp)) return null
+                    // Poisonous NativeJavaMap simulation: .keySet/.iterator return undefined, reflection props throw
+                    var parsed = JSON.parse(fs.readFileSync(rp, 'utf8'))
+                    return new Proxy(parsed, {
+                        get: function (target, prop) {
+                            if (prop === 'class' || prop === 'constructors') {
+                                throw new Error('InternalError: Java class "[Ljava.lang.reflect.Constructor;" has no public instance field or method named "keySet".')
+                            }
+                            return target[prop]
+                        }
+                    })
+                },
+                write: function (p, obj) {
+                    var rp = path.resolve(String(p))
+                    fs.mkdirSync(path.dirname(rp), { recursive: true })
+                    fs.writeFileSync(rp, JSON.stringify(obj, null, 2), 'utf8')
+                }
+            }
+            var cap = attachConsoleCapture(sb)
+            vm.runInContext(fs.readFileSync(LOG_PATH, 'utf8'), sb, { filename: 'Epiphy的-日志.js' })
+            loadServerBase(sb)
+            return { sb: sb, cap: cap, loadedCbs: loadedCbs, unloadedCbs: unloadedCbs }
+        }
+
+        function mkSrv(saveDir) {
+            return {
+                getWorldData: function () { return { getLevelName: function () { return 'TestWorld' } } },
+                getWorldPath: function () { return saveDir.replace(/\\/g, '/') }
+            }
+        }
+
+        // Session 1: initial enter world
+        var s1 = makeFilteredSandbox()
+        for (var i1 = 0; i1 < s1.loadedCbs.length; i1++) s1.loadedCbs[i1]({ server: mkSrv(save1) })
+        var Base1 = s1.sb.global.EpiphyServerBase
+        var Log1  = s1.sb.global.EpiphyLog
+        var ctx1  = Base1.resolveEpiphyWorldContext(mkSrv(save1))
+
+        assert.ok(fs.existsSync(path.join(gameDir, 'epiphy-data', 'config', 'logging.json')), 'logging.json must be created even under KubeJS ClassFilter')
+        assert.ok(fs.existsSync(path.join(gameDir, 'epiphy-data', 'worlds', 'worlds_index.json')), 'worlds_index.json must be created')
+        assert.ok(fs.existsSync(ctx1.anchorPath), 'save anchor epiphy_world_id.json must exist')
+        assert.ok(fs.existsSync(ctx1.metaFile), 'world meta.json must exist')
+        assert.ok(fs.existsSync(ctx1.logsDir) && fs.statSync(ctx1.logsDir).isDirectory(), 'per-world logs/ dir must exist')
+
+        Log1.warn('TestMod', 'session1', 'hello-world-log-1', null, 0)
+        var d = new Date()
+        var p2 = function (n) { return n < 10 ? ('0' + n) : String(n) }
+        var dayFile = d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + '.log'
+        var worldLogFile = path.join(ctx1.logsDir, dayFile)
+        assert.ok(fs.existsSync(worldLogFile), 'runtime log file must be created inside world/logs/: ' + worldLogFile)
+        var logTxt1 = fs.readFileSync(worldLogFile, 'utf8')
+        assert.ok(logTxt1.indexOf('hello-world-log-1') >= 0, 'world log must record session1 log entry')
+        assert.strictEqual(s1.cap.errors.length, 0, 'session 1 must have zero errors')
+
+        // Session 2: fresh VM sandbox, rejoin SAME save1 -> MUST preserve same worldId & folderName
+        var s2 = makeFilteredSandbox()
+        for (var i2 = 0; i2 < s2.loadedCbs.length; i2++) s2.loadedCbs[i2]({ server: mkSrv(save1) })
+        var ctx2 = s2.sb.global.EpiphyServerBase.resolveEpiphyWorldContext(mkSrv(save1))
+        assert.strictEqual(ctx2.worldId, ctx1.worldId, 'rejoining same save under ClassFilter must keep exact same worldId')
+        assert.strictEqual(ctx2.folderName, ctx1.folderName, 'rejoining same save must reuse same world folder')
+        assert.strictEqual(
+            s2.cap.warns.some(function (w) { return w.indexOf('Constructor') >= 0 || w.indexOf('readJsonSafe') >= 0 }),
+            false,
+            'session 2 must have zero JsonIO/Constructor warnings: ' + JSON.stringify(s2.cap.warns)
+        )
+        var worldFoldersAfterRejoin = fs.readdirSync(path.join(gameDir, 'epiphy-data', 'worlds')).filter(function (x) {
+            return x.indexOf('TestWorld__') === 0
+        })
+        assert.strictEqual(worldFoldersAfterRejoin.length, 1, 'rejoin must not duplicate world folders: ' + JSON.stringify(worldFoldersAfterRejoin))
+
+        // Session 3: even if worlds_index.json is absent (pre-existing world dir on disk), anchor.folderName self-heals
+        fs.rmSync(path.join(gameDir, 'epiphy-data', 'worlds', 'worlds_index.json'))
+        var s3 = makeFilteredSandbox()
+        for (var i3 = 0; i3 < s3.loadedCbs.length; i3++) s3.loadedCbs[i3]({ server: mkSrv(save1) })
+        var ctx3 = s3.sb.global.EpiphyServerBase.resolveEpiphyWorldContext(mkSrv(save1))
+        assert.strictEqual(ctx3.worldId, ctx1.worldId, 'missing worlds_index.json must still resolve same world via anchor.folderName')
+        assert.ok(fs.existsSync(path.join(gameDir, 'epiphy-data', 'worlds', 'worlds_index.json')), 'worlds_index.json must self-heal')
+
+        // Session 4: copy save1 -> save2 (different path carrying same anchor) -> MUST auto-fork!
+        fs.mkdirSync(path.join(save2, 'data'), { recursive: true })
+        fs.copyFileSync(ctx1.anchorPath, path.join(save2, 'data', 'epiphy_world_id.json'))
+        var s4 = makeFilteredSandbox()
+        var ctx4 = s4.sb.global.EpiphyServerBase.resolveEpiphyWorldContext(mkSrv(save2))
+        assert.notStrictEqual(ctx4.worldId, ctx1.worldId, 'copied save at different path must auto-fork new worldId')
+        assert.notStrictEqual(ctx4.folderName, ctx1.folderName, 'copied save must fork isolated world folder')
+        assert.ok(ctx4.forkNotice != null && ctx4.forkNotice.oldFolder.indexOf(ctx1.folderName) >= 0, 'forkNotice must reference original folder')
+        s4.sb.global.EpiphyLog.warn('TestMod', 'forked', 'hello-forked-log', null, 0)
+        assert.ok(fs.existsSync(path.join(ctx4.logsDir, dayFile)), 'forked world must write runtime logs to its own logs/ subfolder')
+
+        // Confirm session1 + session2 appended entries still exist intact in world1 log without loss
+        var logTxtFinal = fs.readFileSync(worldLogFile, 'utf8')
+        assert.ok(logTxtFinal.indexOf('hello-world-log-1') >= 0, 'existing world log entries must be preserved across restarts')
+    } finally {
+        fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
+})
+
 var passed = 0
 for (var i = 0; i < tests.length; i++) {
     var t = tests[i]

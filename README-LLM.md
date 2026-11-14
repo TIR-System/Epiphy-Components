@@ -92,6 +92,7 @@
 | 实机 Forge 1.20.1 SRG 环境下音频无法播放及右下角字幕未注册（`Client.minecraft` / SRG 字段编号与 `attCache` 冷加载毒化） | `Epiphy的-音频播放器.js` / `tests/pure_functions.test.js` | 修复 `getMc()` 误落至 KubeJS `Client` 包装器并补全 `Minecraft`/`Options`/`SoundManager`/`SoundEngine`/`Gui`/`SubtitleOverlay`/`RandomSource`/`AbstractSoundInstance` 等全链路 SRG 兜底；修正音量/坐标字段偏移（`f_119572_`/`f_119574_`..`f_119576_`）及 3 处 `omode` -> `outMode`、`warnedKeys` 初始化顺序；为 `getSoundEvent` 冷加载新增宽限期与重试退避，避免 `attCache` 永久写入 `-1`；新增纯 SRG 端到端测试验证右下角 `m_7761_` 字幕 | [x] |
 | 实机 KubeJS 2001.6.5 / Rhino Java 互操作异常（`KubeJSPaths.GAMEDIR` 缺失、POJO `typeof` 抛 `InternalError`、`JsonIO.read` `LinkedTreeMap` 被当数组）与重进世界测试方块弹幕不触发 | `Spec与通用工具` / `服务端基础 v2.2` / `方块追踪组件 v2.1` / `屏幕弹幕组件 v5.3` / `音频组件` / `权限阀` / 客户端渲染器与播放器 / `docs` | 全链改用 `safeTypeOf`/`isObjectLike`/`isJavaMapLike`/`safeReadProp`/`safeHasMethod` 隔离 Rhino `MemberType.get` 与 `EvaluatorException`；`resolveGameDir()` 安全探测并用 `KubeJSPaths.DIRECTORY` 取上级目录；`toSeqArray` 排除 `java.util.Map` 使持久化列表正常加载；`ensureLoaded()` 派发 `'persist'`、`danmaku` 响应 `'scan'`/`'persist'` 并通过 `PlayerEvents.loggedIn` 延迟 6 tick 补发；客户端静默探测 `java.lang.System` | [x] |
 | 实机 `kube-mods/rhino` 下 `try` 块内 `function normalizeBoundSpec` 块级函数声明退化为 `undefined` 致弹幕完全失效，以及 `normalizePermissionPolicy('strict_op')` 误报未知策略 | `Epiphy的-屏幕弹幕组件.js` / `Epiphy的-权限阀.js` / `docs` / `tests/pure_functions.test.js` | 将 `normalizeBoundSpec`（与 `recordOne`）提升/改为 `var ... = function` 赋值形式并移出 `try` 块；在 `normalizePermissionPolicy` 补齐 `'strict_op'` 归一化映射；在文档与单测补齐 `try` 块语句级具名函数静检与双向回归测试 | [x] |
+| 实机 KubeJS `ClassFilter` 屏蔽 `java.io`/`java.nio` 且 `JsonIO.read` 触发 `[Ljava.lang.reflect.Constructor;` 致同一世界每次重进重生成目录、`epiphy-data` 缺子目录且运行日志未落至世界子文件夹 | `Epiphy的-日志.js v1.2` / `Epiphy的-服务端基础.js v2.3` / `tests/pure_functions.test.js` | `ensureDirExists` 增加 `KubeJSPaths.dir` 兜底；`readTextSafe`/`readJsonSafe` 优先使用 `JsonIO.readString` 并加固 `javaToJsPlain` 防误触 Java `.class`；新增 `worlds/worlds_index.json` 与 `anchor.folderName` 探测替代 `File.listFiles()` 恢复同档识别与复制分叉；`EpiphyLog` 增加 `KubeJSPaths.dir + JsonIO` 写盘兜底并于进档后自动切换至 `worlds/<slug>__<shortId>/logs/` | [x] |
 
 ---
 
@@ -103,7 +104,7 @@
    - 位置：运行根目录 `epiphy-data/`（客户端 `.minecraft/epiphy-data/`，专用服 `./epiphy-data/`），子目录骨架 `config/`、`worlds/`、`players/`、`events/`、`logs/`、`presets/`、`backups/` 保持预建（禁止为了填满预留目录强加无用功能）。
    - **数据边界**：抗回滚管理/安全数据（权限授权、外部撤销墓碑、模块配置、可读审计日志）入 `epiphy-data/`；须随存档方块状态同步回滚的数据（如 `kubejs_epiphy_bugfix_hp.json`、`kubejs_epiphy_tracked_blocks.json`）仍留 `saves/<world>/`。
    - **世界复制防撞**：外部世界目录采用 `<slug>__<shortId>`，依赖存档内 `data/epiphy_world_id.json` 与外部 `meta.json`（含 `lastWorldPath`）双向校验；路径变更时自动分叉新目录并提醒 OP 手动清理旧目录。
-   - **日志规范**：`logs/` 默认按天输出 `YYYY-MM-DD.log`，配置位于 `epiphy-data/config/logging.json`。
+   - **日志规范**：未绑定世界前的启动期日志落盘于 `epiphy-data/logs/`；进入具体存档绑定世界上下文后，运行时日志自动切换至对应世界目录 **`epiphy-data/worlds/<slug>__<shortId>/logs/YYYY-MM-DD.log`**（默认按天输出，配置位于 `epiphy-data/config/logging.json`）。在受 KubeJS `ClassFilter` 屏蔽 `java.io`/`java.nio` 的实机环境中自动降级为 `KubeJSPaths.dir` + `JsonIO` 写盘（无 OS 文件锁）。
 2. **“按名字授权”备用模式与 Fail-Closed 边界**：
    - 默认严格 UUID 授权；在提示与配置注释中必须明示：**纯离线服（`online-mode=false`）在无 TrueUUID 类模组且无密码登录插件保护时，仅依靠 UUID 模式同样不安全**。
    - 仅限**真 OP / 控制台**可操作 `/epiphy auth namegrant enable|confirm <code>|disable`（8 位数字 + 随机大小写字母口令，2 分钟有效期）；`auth_mode.json` 须保留 `_warning` / `_consequences` 注释，缺失或异常值一律按 Fail-Closed 处理；关闭后保留未迁移纯名字记录但立即暂停生效。
