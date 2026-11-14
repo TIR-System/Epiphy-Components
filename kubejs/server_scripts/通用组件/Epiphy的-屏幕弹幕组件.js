@@ -1805,6 +1805,28 @@
         if (lv == null) lv = resolveLevel(rec.dim, null)
         if (lv == null || rec.chunkLoaded === false) return 0
 
+        var normalizeBoundSpec = function (rawSpec) {
+            var normSpec = normalizeOptionsObject(rawSpec)
+            if (normSpec == null || typeof normSpec !== 'object') return rawSpec
+            var hasNs = (normSpec.namespace != null && String(normSpec.namespace).trim() !== '') ||
+                        (normSpec.ns != null && String(normSpec.ns).trim() !== '')
+            var outSpec = normSpec
+            if (!hasNs) {
+                outSpec = {}
+                for (var ok in normSpec) {
+                    if (Object.prototype.hasOwnProperty.call(normSpec, ok)) outSpec[ok] = normSpec[ok]
+                }
+                outSpec.namespace = binding.defaultNamespace
+            }
+            var effNs = String(pickNonEmpty(outSpec, ['namespace', 'ns'], binding.defaultNamespace))
+            binding.lastEmittedNs = effNs
+            var specPri = parsePriority(pick(outSpec, ['priority', 'importance'], null), -1)
+            if (specPri >= 0 && specPri > (binding.maxSeenPriority || -1)) {
+                binding.maxSeenPriority = specPri
+            }
+            return outSpec
+        }
+
         var t0Ns    = nowNano()
         var sentOut = 0
         try {
@@ -1838,28 +1860,6 @@
                 return cluster != null
                     ? forEachPlayerInMergeCluster(lv, cluster, cb)
                     : forEachPlayerInRadius(lv, cx, cy, cz, r, cb)
-            }
-
-            function normalizeBoundSpec(rawSpec) {
-                var normSpec = normalizeOptionsObject(rawSpec)
-                if (normSpec == null || typeof normSpec !== 'object') return rawSpec
-                var hasNs = (normSpec.namespace != null && String(normSpec.namespace).trim() !== '') ||
-                            (normSpec.ns != null && String(normSpec.ns).trim() !== '')
-                var outSpec = normSpec
-                if (!hasNs) {
-                    outSpec = {}
-                    for (var ok in normSpec) {
-                        if (Object.prototype.hasOwnProperty.call(normSpec, ok)) outSpec[ok] = normSpec[ok]
-                    }
-                    outSpec.namespace = binding.defaultNamespace
-                }
-                var effNs = String(pickNonEmpty(outSpec, ['namespace', 'ns'], binding.defaultNamespace))
-                binding.lastEmittedNs = effNs
-                var specPri = parsePriority(pick(outSpec, ['priority', 'importance'], null), -1)
-                if (specPri >= 0 && specPri > (binding.maxSeenPriority || -1)) {
-                    binding.maxSeenPriority = specPri
-                }
-                return outSpec
             }
 
             // 模式 1（共享模式 perPlayer === false，默认）：仅当至少有一名玩家通过作用域准入后才延迟生成并打包一次，避免 merge/竞争落选方块空耗构包
@@ -2544,7 +2544,7 @@
             var anonCnt = 0
             var uniqueOther = 0
 
-            function recordOne(t) {
+            var recordOne = function (t) {
                 if (t == null) return
                 var u = resolveTargetUuidForCount(t)
                 if (u) {

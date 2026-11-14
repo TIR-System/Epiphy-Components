@@ -194,3 +194,7 @@
 
 4. **客户端 `Java.loadClass('java.lang.System')` 受类过滤器拦截**：
    - KubeJS 客户端默认 `JavaWrapper` 类过滤器禁止加载 `java.lang.System`，调用会正常抛异常；高精计时回退至 `Util.getMillis()` / `Date.now()` 属于预期降级，应通过 `loadJavaClass('java.lang.System', true)` 静默探测，避免在 `client.log` 刷出无意义 `[WARN]`。
+
+5. **`try` / `if` 等块作用域内的 `function` 声明在 Rhino 下可能绑定为 `undefined`**：
+   - 在 `kube-mods/rhino` 下，于函数体内部的 `try { ... }` 或条件块中书写 `function helper(...) {}` 时，若与同块内的闭包表达（`var cb = function(){}`）混用，调用处可能出现 `TypeError: helper is not a function, it is undefined.`（V8 正常而 Rhino 失效）。
+   - **规避规范**：函数内部辅助函数一律改写为函数顶部的 `var helper = function (...) { ... }` 表达式，严禁将 `function` 声明语句放进 `try`/`if` 块内。

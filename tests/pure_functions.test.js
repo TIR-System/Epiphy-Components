@@ -4912,6 +4912,128 @@ test('Client loadJavaClass(java.lang.System, true): class filter rejection emits
     )
 })
 
+// ----------------------------------------------------------------------------
+// 39. strict_op policy normalization + Rhino try-block function guard + bindBlock perPlayer/shared emit
+// ----------------------------------------------------------------------------
+test('PermissionValve strict_op policy & ScreenDanmaku bindBlock perPlayer/shared + Rhino try-block function guard', function () {
+    // (1) EpiphyPermissionValve.normalizePermissionPolicy('strict_op')
+    var vSb = createKubeSandbox()
+    var vCon = attachConsoleCapture(vSb)
+    loadStartupBase(vSb)
+    runScriptIn(vSb, LOG_PATH)
+    runScriptIn(vSb, SERVER_BASE_PATH)
+    runScriptIn(vSb, VALVE_PATH)
+
+    var valve = vSb.global.EpiphyPermissionValve
+    assert.ok(valve && typeof valve.normalizePermissionPolicy === 'function', 'EpiphyPermissionValve.normalizePermissionPolicy must exist')
+    var pStrict = valve.normalizePermissionPolicy('strict_op')
+    assert.strictEqual(pStrict.mode, 'strict_op', 'normalizePermissionPolicy(strict_op) must keep mode=strict_op')
+    assert.strictEqual(pStrict.allowCommandBlock, false, 'strict_op policy must set allowCommandBlock=false')
+    assert.strictEqual(
+        vCon.warns.some(function (w) { return w.indexOf('未知权限策略') >= 0 || w.indexOf('strict_op') >= 0 }),
+        false,
+        'normalizePermissionPolicy(strict_op) must emit zero unknown-policy warnings: ' + JSON.stringify(vCon.warns)
+    )
+
+    // (2) ScreenDanmaku.bindBlock with perPlayer=false and perPlayer=true via BlockTracker
+    var dSb = createKubeSandbox()
+    var dHooks = attachSandboxEventHooks(dSb)
+    var dCon = attachConsoleCapture(dSb)
+    loadStartupBase(dSb)
+    runScriptIn(dSb, LOG_PATH)
+    runScriptIn(dSb, SERVER_BASE_PATH)
+    runScriptIn(dSb, TRACKER_PATH)
+    runScriptIn(dSb, DANMAKU_PATH)
+
+    var dm = dSb.global.ScreenDanmaku
+    var world = makeMockWorld()
+    var p1 = world.addPlayer('P1', 'aaaaaaaa-aaaa-4000-8000-aaaaaaaaaaaa', 2, 64, 0)
+    var p2 = world.addPlayer('P2', 'bbbbbbbb-bbbb-4000-8000-bbbbbbbbbbbb', 3, 64, 0)
+
+    dm.bindBlock('test:shared_block', {
+        id: 'shared_danmaku',
+        text: 'SharedHello',
+        perPlayer: false
+    }, { radius: 24, intervalTicks: 4 })
+
+    dm.bindBlock('test:perplayer_block', function (ctx) {
+        var pl = ctx && ctx.player ? ctx.player : null
+        return {
+            id: 'pp_danmaku',
+            text: 'Hi ' + (pl ? pl.username : 'none'),
+            perPlayer: true
+        }
+    }, { radius: 24, intervalTicks: 4, perPlayer: true })
+
+    world.setBlock(0, 64, 0, 'test:shared_block')
+    world.setBlock(4, 64, 0, 'test:perplayer_block')
+    for (var pi = 0; pi < dHooks.placed.length; pi++) {
+        dHooks.placed[pi]({ block: world.makeBlock(0, 64, 0, 'test:shared_block'), level: world.level, player: p1 })
+        dHooks.placed[pi]({ block: world.makeBlock(4, 64, 0, 'test:perplayer_block'), level: world.level, player: p1 })
+    }
+    for (var tk = 0; tk < 12; tk++) {
+        for (var ti = 0; ti < dHooks.tick.length; ti++) {
+            dHooks.tick[ti]({ server: world.server })
+        }
+    }
+
+    var p1Msgs = p1.sentPackets.map(function (x) { return JSON.stringify(x.pkt) }).join('|')
+    var p2Msgs = p2.sentPackets.map(function (x) { return JSON.stringify(x.pkt) }).join('|')
+    assert.ok(p1Msgs.indexOf('SharedHello') >= 0 && p2Msgs.indexOf('SharedHello') >= 0, 'perPlayer=false bound block must send to both nearby players; p1=' + p1Msgs + ' p2=' + p2Msgs)
+    assert.ok(p1Msgs.indexOf('Hi P1') >= 0 && p1Msgs.indexOf('Hi P2') < 0, 'perPlayer=true bound block must tailor message for P1; p1=' + p1Msgs)
+    assert.ok(p2Msgs.indexOf('Hi P2') >= 0 && p2Msgs.indexOf('Hi P1') < 0, 'perPlayer=true bound block must tailor message for P2; p2=' + p2Msgs)
+    assert.strictEqual(dCon.errors.length, 0, 'ScreenDanmaku bindBlock tick must emit zero errors: ' + JSON.stringify(dCon.errors))
+
+    // (3) Static Rhino guard: no statement-position `function name(` inside any `try { ... }` across kubejs/**/*.js
+    var kubejsRoot = path.join(ROOT_DIR, 'kubejs')
+    var allJs = []
+    function walkDir(dir) {
+        var entries = fs.readdirSync(dir, { withFileTypes: true })
+        for (var i = 0; i < entries.length; i++) {
+            var full = path.join(dir, entries[i].name)
+            if (entries[i].isDirectory()) walkDir(full)
+            else if (entries[i].isFile() && /\.js$/i.test(entries[i].name)) allJs.push(full)
+        }
+    }
+    walkDir(kubejsRoot)
+    assert.ok(allJs.length > 0, 'kubejs directory must contain .js files')
+
+    var violations = []
+    for (var fi = 0; fi < allJs.length; fi++) {
+        var srcLines = fs.readFileSync(allJs[fi], 'utf8').split(/\r?\n/)
+        var tryDepths = []
+        var braceDepth = 0
+        for (var li = 0; li < srcLines.length; li++) {
+            var line = srcLines[li]
+            var trimmed = line.replace(/\/\/.*$/, '').trim()
+            if (tryDepths.length > 0 && /^\s*function\s+[A-Za-z_$][A-Za-z0-9_$]*\s*\(/.test(line)) {
+                violations.push(path.relative(ROOT_DIR, allJs[fi]) + ':' + (li + 1) + ' -> ' + trimmed)
+            }
+            if (/\btry\s*\{\s*$/.test(trimmed)) {
+                tryDepths.push(braceDepth)
+            }
+            for (var ci = 0; ci < trimmed.length; ci++) {
+                if (trimmed[ci] === '{') braceDepth++
+                else if (trimmed[ci] === '}') {
+                    braceDepth--
+                    if (tryDepths.length > 0 && braceDepth === tryDepths[tryDepths.length - 1]) {
+                        tryDepths.pop()
+                    }
+                }
+            }
+        }
+    }
+    assert.deepStrictEqual(
+        violations,
+        [],
+        'kube-mods/rhino forbids statement-position named function declarations inside try blocks: ' + JSON.stringify(violations)
+    )
+
+    var danmakuSrc = fs.readFileSync(DANMAKU_PATH, 'utf8')
+    assert.ok(/var normalizeBoundSpec = function\s*\(/.test(danmakuSrc), 'normalizeBoundSpec must be var-assigned before try in emitForBoundBlock')
+    assert.ok(/var recordOne = function\s*\(/.test(danmakuSrc), 'recordOne must be var-assigned inside countNonSelfTargets')
+})
+
 var passed = 0
 for (var i = 0; i < tests.length; i++) {
     var t = tests[i]

@@ -311,6 +311,7 @@
             if (s === 'cheats' || s === 'cheat' || s === '仅作弊') return clonePolicy(POLICY_PRESETS.cheats)
             if (s === 'authorized' || s === 'cheat_or_auth' || s === '授权') return clonePolicy(POLICY_PRESETS.authorized)
             if (s === 'admin' || s === 'op' || s === 'operator' || s === '管理员') return clonePolicy(POLICY_PRESETS.admin)
+            if (s === 'strict_op' || s === 'strict-op' || s === 'strictop' || s === '严格管理员') return clonePolicy(POLICY_PRESETS.strict_op)
             var failClosed = (fallbackPolicy && s !== 'auth') ? fallbackPolicy : POLICY_PRESETS.admin
             logWarn('normalizePermissionPolicy', '未知权限策略 "' + rawPolicy + '"（注意：\'auth\' 是保留子命令名而非策略预设名，请改用 "authorized"），已按最小权限原则回退为 "' + failClosed.mode + '"。')
             return clonePolicy(failClosed)
