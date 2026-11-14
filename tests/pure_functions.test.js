@@ -11,8 +11,9 @@ var LOG_PATH         = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用�
 var SERVER_BASE_PATH = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-服务端基础.js')
 var TRACKER_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-方块追踪组件.js')
 var VALVE_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-权限阀.js')
-var DEBUG_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-调试组件.js')
-var DANMAKU_PATH   = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-屏幕弹幕组件.js')
+var DEBUG_PATH        = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-调试组件.js')
+var BUGFIX_PATH       = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-基础bug修复.js')
+var DANMAKU_PATH      = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-屏幕弹幕组件.js')
 var AUDIO_PATH        = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-音频组件.js')
 var RENDERER_PATH     = path.join(ROOT_DIR, 'kubejs', 'client_scripts', '通用组件', 'Epiphy的-屏幕弹幕渲染器.js')
 var AUDIO_CLIENT_PATH = path.join(ROOT_DIR, 'kubejs', 'client_scripts', '通用组件', 'Epiphy的-音频播放器.js')
@@ -2478,6 +2479,266 @@ test('client modules: degrade gracefully when EpiphySpec/EpiphyProtocol is absen
     assert.strictEqual(dmEnv.errors.length, 1, 'degraded renderer must paint valid proto=5 danmaku without draw errors')
     assert.ok(dmEnv.draws.length >= 1, 'degraded renderer must still render valid proto=5 danmaku')
     assert.ok(dmEnv.draws.some(function (s) { return s.indexOf('DegradedOK') >= 0 }), 'degraded renderer must draw payload text')
+})
+
+test('EpiphyBugfix: zero hard dependencies, optional EpiphyLog, server-authoritative logout HP & deleted-mod cap clamp', function () {
+    function makeBugfixHarness(opts) {
+        opts = opts || {}
+        var sharedDisk = opts.sharedDisk || {}
+        var logs = { info: [], warn: [], error: [], debug: [] }
+        var handlers = {
+            loggedIn:  [],
+            loggedOut: [],
+            respawned: [],
+            death:     [],
+            loaded:    [],
+            tick:      [],
+            unloaded:  []
+        }
+        var onlinePlayers = {}
+
+        function makePd() {
+            var store = {}
+            return {
+                getString: function (k) { return store[k] != null ? String(store[k]) : '' },
+                putString: function (k, v) { store[k] = String(v) },
+                _raw: store
+            }
+        }
+
+        var serverObj = {
+            persistentData: opts.pd || makePd(),
+            players: [],
+            getWorldPath: opts.disableJsonIo ? undefined : function () {
+                return {
+                    toAbsolutePath: function () { return this },
+                    normalize: function () { return this },
+                    resolve: function (name) { return { normalize: function () { return 'world_test/' + name } } }
+                }
+            },
+            getPlayerList: function () {
+                return {
+                    getPlayerByName: function (name) {
+                        var keys = Object.keys(onlinePlayers)
+                        for (var i = 0; i < keys.length; i++) {
+                            var p = onlinePlayers[keys[i]]
+                            if (p && p.username === name) return p
+                        }
+                        return null
+                    }
+                }
+            }
+        }
+
+        var netTried = false
+        var sb = {
+            console: {
+                info:  function (m) { logs.info.push(String(m)) },
+                warn:  function (m) { logs.warn.push(String(m)) },
+                error: function (m) { logs.error.push(String(m)) },
+                debug: function (m) { logs.debug.push(String(m)) },
+                log:   function () {}
+            },
+            ServerEvents: {
+                loaded:   function (fn) { handlers.loaded.push(fn) },
+                tick:     function (fn) { handlers.tick.push(fn) },
+                unloaded: function (fn) { handlers.unloaded.push(fn) },
+                commandRegistry: function () {},
+                command:         function () {}
+            },
+            PlayerEvents: {
+                loggedIn:  function (fn) { handlers.loggedIn.push(fn) },
+                loggedOut: function (fn) { handlers.loggedOut.push(fn) },
+                respawned: function (fn) { handlers.respawned.push(fn) }
+            },
+            EntityEvents: {
+                death: function (fn) { handlers.death.push(fn) }
+            },
+            BlockEvents: { placed: function () {}, broken: function () {} },
+            NetworkEvents: {
+                dataReceived: function () { netTried = true }
+            },
+            JsonIO: opts.disableJsonIo ? undefined : {
+                read: function (p) { return sharedDisk[p] != null ? JSON.parse(JSON.stringify(sharedDisk[p])) : null },
+                write: function (p, obj) { sharedDisk[p] = JSON.parse(JSON.stringify(obj)) }
+            },
+            Java: {
+                loadClass: function (cls) {
+                    if (cls === 'net.minecraft.world.level.storage.LevelResource') return { ROOT: 'ROOT' }
+                    return null
+                }
+            },
+            Text: { of: function (s) { return String(s) } },
+            global: {}
+        }
+        sb.globalThis = sb
+        vm.createContext(sb)
+
+        if (opts.withLog) {
+            runScriptIn(sb, LOG_PATH)
+            sb.global.EpiphyLog.setDebug('EpiphyBugfix', true)
+        }
+        runScriptIn(sb, BUGFIX_PATH)
+
+        function mkPlayer(uuid, name, hp, maxHp, extra) {
+            extra = extra || {}
+            var p = {
+                stringUUID: uuid,
+                username: name,
+                health: hp,
+                maxHealth: maxHp,
+                fake: Boolean(extra.fake),
+                dead: Boolean(extra.dead),
+                server: serverObj,
+                isPlayer: function () { return true },
+                getHealth: function () { return p.health },
+                setHealth: function (v) { p.health = v },
+                getMaxHealth: function () { return p.maxHealth },
+                isDeadOrDying: function () { return p.dead || p.health <= 0 }
+            }
+            return p
+        }
+
+        function fireLogin(p) {
+            onlinePlayers[p.stringUUID] = p
+            serverObj.players.push(p)
+            for (var i = 0; i < handlers.loggedIn.length; i++) {
+                handlers.loggedIn[i]({ server: serverObj, player: p })
+            }
+        }
+        function fireLogout(p) {
+            for (var i = 0; i < handlers.loggedOut.length; i++) {
+                handlers.loggedOut[i]({ server: serverObj, player: p })
+            }
+            delete onlinePlayers[p.stringUUID]
+            serverObj.players = serverObj.players.filter(function (x) { return x !== p })
+        }
+        function stepTicks(n, onBeforeEach) {
+            for (var t = 0; t < n; t++) {
+                if (typeof onBeforeEach === 'function') onBeforeEach(t)
+                for (var i = 0; i < handlers.tick.length; i++) {
+                    handlers.tick[i]({ server: serverObj })
+                }
+            }
+        }
+
+        return {
+            sb: sb,
+            api: sb.global.EpiphyBugfix,
+            logs: logs,
+            handlers: handlers,
+            serverObj: serverObj,
+            sharedDisk: sharedDisk,
+            get netTried() { return netTried },
+            mkPlayer: mkPlayer,
+            fireLogin: fireLogin,
+            fireLogout: fireLogout,
+            stepTicks: stepTicks
+        }
+    }
+
+    // 1. 零前置独立加载：无 Spec / Base / Log，不监听任何客户端上传包，纯服务端落盘后重启恢复
+    var sharedDisk = {}
+    var h1 = makeBugfixHarness({ sharedDisk: sharedDisk, withLog: false })
+    assert.ok(h1.api != null && h1.api.VERSION === 1)
+    assert.strictEqual(h1.netTried, false, 'EpiphyBugfix must never register client->server NetworkEvents handlers')
+    assert.ok(h1.logs.info.some(function (s) { return s.indexOf('内置兜底') >= 0 }))
+
+    var pExit = h1.mkPlayer('uuid-p1', 'Alice', 55, 60)
+    h1.fireLogout(pExit)
+    assert.deepStrictEqual(
+        { hp: h1.api.getRecord('uuid-p1').hp, max: h1.api.getRecord('uuid-p1').max },
+        { hp: 55, max: 60 }
+    )
+    assert.ok(sharedDisk['world_test/kubejs_epiphy_bugfix_hp.json'] != null)
+
+    // 模拟重开世界 + 可选接入 EpiphyLog + 原版读档先钳位到 20，再分两阶段恢复到 60 上限
+    var h2 = makeBugfixHarness({ sharedDisk: sharedDisk, withLog: true })
+    assert.ok(h2.logs.info.some(function (s) { return s.indexOf('已接入') >= 0 }))
+    var pJoin = h2.mkPlayer('uuid-p1', 'Alice', 20, 20)
+    h2.fireLogin(pJoin)
+    assert.strictEqual(h2.api.getPendingCount(), 1)
+    assert.ok(h2.logs.info.some(function (s) { return s.indexOf('DEBUG:loginQueue') >= 0 }), 'EpiphyLog debug hook should receive loginQueue via info console')
+
+    h2.stepTicks(1)
+    assert.strictEqual(pJoin.health, 20)
+    assert.strictEqual(h2.api.getPendingCount(), 1)
+
+    pJoin.maxHealth = 35
+    h2.stepTicks(1)
+    assert.strictEqual(pJoin.health, 35, 'should grant partial headroom up to 35 as first mod loads')
+    assert.strictEqual(h2.api.getPendingCount(), 1)
+
+    pJoin.maxHealth = 60
+    h2.stepTicks(1)
+    assert.strictEqual(pJoin.health, 55, 'should restore exact logout HP 55 without healing to 60')
+    assert.strictEqual(h2.api.getPendingCount(), 0, 'pending session must finish once full recorded HP is restored')
+    assert.strictEqual(h2.api.getRecord('uuid-p1'), null, 'consumed record must be removed cleanly')
+
+    // 2. 等待窗口内受伤不能被免费回满（真实扣血必须扣掉）
+    var hDmg = makeBugfixHarness({ sharedDisk: {} })
+    var pHurtOut = hDmg.mkPlayer('uuid-p2', 'Bob', 55, 60)
+    hDmg.fireLogout(pHurtOut)
+    var pHurtIn = hDmg.mkPlayer('uuid-p2', 'Bob', 20, 20)
+    hDmg.fireLogin(pHurtIn)
+    pHurtIn.health = 14 // creeper hits for 6 while curios haven't loaded yet
+    hDmg.stepTicks(1)
+    assert.strictEqual(pHurtIn.health, 14, 'must not heal damage sustained while maxHealth is still 20')
+    pHurtIn.maxHealth = 60
+    hDmg.stepTicks(1)
+    assert.strictEqual(pHurtIn.health, 49, 'must preserve pre-load 6 damage (55 - 6 = 49)')
+
+    // 3. 删 Mod 导致 HP 上限降低：超出部分不计算、不欠账、到期彻底清零
+    var modDelDisk = {}
+    var hMod1 = makeBugfixHarness({ sharedDisk: modDelDisk })
+    hMod1.fireLogout(hMod1.mkPlayer('uuid-p3', 'Carol', 50, 80))
+
+    var hMod2 = makeBugfixHarness({ sharedDisk: modDelDisk })
+    var pCarIn = hMod2.mkPlayer('uuid-p3', 'Carol', 20, 20)
+    hMod2.fireLogin(pCarIn)
+    pCarIn.maxHealth = 35 // Mod A (+45) was deleted; only Mod B (+15) remains
+    hMod2.stepTicks(1)
+    assert.strictEqual(pCarIn.health, 35, 'should restore up to new real cap 35 only')
+    assert.strictEqual(hMod2.api.getPendingCount(), 1, 'stays within settle window until window expires')
+
+    hMod2.stepTicks(25)
+    assert.strictEqual(hMod2.api.getPendingCount(), 0, 'expired settle window drops unreachable excess 15')
+    assert.strictEqual(hMod2.api.getRecord('uuid-p3'), null, 'deleted-mod surplus must not persist past settlement window')
+
+    // 窗口到期后玩家自己再装回新加血道具，绝不能 retroactively 补血
+    pCarIn.maxHealth = 80
+    hMod2.stepTicks(5)
+    assert.strictEqual(pCarIn.health, 35, 'equipping new gear after settlement must not refund discarded excess')
+
+    // 4. 死亡清档、假玩家忽略、结算期闪退保留未扣血额度、无 JsonIO 回退 server.persistentData
+    var sharedPd = {
+        store: {},
+        getString: function (k) { return this.store[k] || '' },
+        putString: function (k, v) { this.store[k] = String(v) }
+    }
+    var hFb = makeBugfixHarness({ disableJsonIo: true, pd: sharedPd })
+    // 假玩家忽略
+    var pFake = hFb.mkPlayer('uuid-fake', 'Deployer', 100, 100, { fake: true })
+    hFb.fireLogout(pFake)
+    assert.strictEqual(hFb.api.getRecord('uuid-fake'), null)
+
+    // 无 JsonIO 回退写入 server.persistentData
+    hFb.fireLogout(hFb.mkPlayer('uuid-p4', 'Dave', 55, 60))
+    assert.ok(sharedPd.store.epiphy_bugfix_logout_hp_v1 && sharedPd.store.epiphy_bugfix_logout_hp_v1.indexOf('55') >= 0)
+
+    // 重载后从 server.persistentData 读回，在 tick 0 受伤4点且尚未加载完即闪退
+    var hFb2 = makeBugfixHarness({ disableJsonIo: true, pd: sharedPd })
+    var pDaveFast = hFb2.mkPlayer('uuid-p4', 'Dave', 20, 20)
+    hFb2.fireLogin(pDaveFast)
+    pDaveFast.health = 16 // hurt 4 mid-settlement
+    hFb2.fireLogout(pDaveFast)
+    assert.strictEqual(hFb2.api.getRecord('uuid-p4').hp, 51, 'mid-settlement disconnect keeps remaining headroom minus damage (55 - 4 = 51)')
+
+    // 死亡清除记录，防止读到旧血量复活作弊
+    for (var di = 0; di < hFb2.handlers.death.length; di++) {
+        hFb2.handlers.death[di]({ server: hFb2.serverObj, entity: pDaveFast })
+    }
+    assert.strictEqual(hFb2.api.getRecord('uuid-p4'), null, 'EntityEvents.death must purge saved logout HP')
 })
 
 var passed = 0
