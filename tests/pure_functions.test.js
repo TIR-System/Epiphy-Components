@@ -55,6 +55,14 @@ function createKubeSandbox(loadClassFn) {
     return sandbox
 }
 
+function attachConsoleCapture(sb) {
+    var cap = { infos: [], warns: [], errors: [] }
+    sb.console.info = function (m) { cap.infos.push(String(m)) }
+    sb.console.warn = function (m) { cap.warns.push(String(m)) }
+    sb.console.error = function (m) { cap.errors.push(String(m)) }
+    return cap
+}
+
 function runScriptIn(sb, scriptPath) {
     vm.runInContext(fs.readFileSync(scriptPath, 'utf8'), sb, { filename: path.basename(scriptPath) })
     return sb
@@ -635,16 +643,19 @@ test('debug hub: dynamic queue drain, multi-module metrics, checks, actions & ad
         return null
     })
     isoSandbox.ServerEvents.tick = function (fn) { tickHandlers.push(fn) }
+    var isoConsole = attachConsoleCapture(isoSandbox)
 
-    // Load all 6 server components in real KubeJS priority order (1100 -> 1050 -> 1000 -> 950 -> 500 -> 500)
-    vm.runInContext(fs.readFileSync(LOG_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-日志.js' })
+    // Load server components once in real KubeJS priority order (1200 -> 1100 -> 1080 -> 1050 -> 1000 -> 950 -> 500)
     loadServerBase(isoSandbox)
     runScriptIn(isoSandbox, TRACKER_PATH)
-    loadServerBase(isoSandbox)
     runScriptIn(isoSandbox, VALVE_PATH)
     vm.runInContext(fs.readFileSync(DEBUG_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-调试组件.js' })
     vm.runInContext(fs.readFileSync(DANMAKU_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-屏幕弹幕组件.js' })
     vm.runInContext(fs.readFileSync(AUDIO_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-音频组件.js' })
+
+    assert.strictEqual(tickHandlers.length, 5, 'single-load order must not duplicate ServerEvents.tick handlers (TRACKER + DEBUG + 2*DANMAKU + AUDIO; fallback skipped)')
+    assert.strictEqual(isoConsole.warns.length, 0, 'clean load must emit zero console warns')
+    assert.strictEqual(isoConsole.errors.length, 0, 'clean load must emit zero console errors')
 
     var Log     = isoSandbox.global.EpiphyLog
     var Valve   = isoSandbox.global.EpiphyPermissionValve
@@ -3259,9 +3270,12 @@ test('audio: authorized player command isolation, quota caps, one-way eviction &
     })
     sb.ServerEvents.tick = function (fn) { tickHandlers.push(fn) }
     sb.ServerEvents.commandRegistry = function (fn) { cmdCallbacks.push(fn) }
+    var auConsole = attachConsoleCapture(sb)
 
     var authPl = new MockServerPlayer('AuthPlayer', '00000000-0000-4000-8000-0000000000aa', false)
     var listenerPl = new MockServerPlayer('Listener', '00000000-0000-4000-8000-0000000000bb', false)
+    var unauthPl = new MockServerPlayer('PlainPlayer', '00000000-0000-4000-8000-0000000000cc', false)
+    var opPl = new MockServerPlayer('OpPlayer', '00000000-0000-4000-8000-0000000000dd', true)
     var mockLevel = {
         dimension: 'minecraft:overworld',
         players: [authPl, listenerPl],
@@ -3330,8 +3344,26 @@ test('audio: authorized player command isolation, quota caps, one-way eviction &
     assert.ok(sysId > 0)
     stepTicks(10)
 
-    var authCtx = { source: { source: authPl, player: authPl, getPlayer: function () { return authPl }, getServer: function () { return srv }, sendSuccess: function () {}, sendFailure: function () {} } }
+    var authMsgs = []
+    var authCtx = { source: { player: authPl, getPlayer: function () { return authPl }, getServer: function () { return srv }, sendSuccess: function (m) { authMsgs.push(String(m)) }, sendFailure: function () {} } }
+    var unauthSrc = { source: unauthPl, player: unauthPl, getPlayer: function () { return unauthPl }, getServer: function () { return srv }, hasPermission: function () { return true } }
+    var opSrc = { source: opPl, player: opPl, getPlayer: function () { return opPl }, getServer: function () { return srv } }
     var audioNode = regRoot._children.audio
+    var authNode = regRoot._children.auth
+
+    // Check real Brigadier .requires() gates
+    assert.strictEqual(audioNode._req(unauthSrc), false, 'unauthorized player must NOT see /epiphy audio even with stack hasPermission(4)')
+    assert.strictEqual(audioNode._req(authCtx.source), true, 'authorized player must see /epiphy audio')
+    assert.strictEqual(authNode._req(authCtx.source), false, 'non-OP authorized player must NOT see /epiphy auth')
+    assert.strictEqual(authNode._req(opSrc), true, 'real OP must see /epiphy auth')
+
+    // /epiphy audio list & info must work without ReferenceError (describeHandle)
+    assert.strictEqual(audioNode._children.list._exec(authCtx), 1, '/epiphy audio list must execute cleanly')
+    argValues = { ref: 'boss_bgm' }
+    assert.strictEqual(audioNode._children.info._children.ref._exec(authCtx), 1, '/epiphy audio info must execute cleanly')
+    assert.ok(authMsgs.some(function (m) { return m.indexOf('boss_bgm') >= 0 }), 'audio info output must describe handle key')
+    assert.strictEqual(auConsole.errors.length, 0, 'audio baseline commands must emit zero console errors')
+    assert.strictEqual(auConsole.warns.length, 0, 'audio baseline commands must emit zero console warns')
 
     // Player tries to play with key='boss_bgm' priority=10 -> must NOT overwrite system key, priority clamped <= 3
     argValues = { sound: 'minecraft:block.note_block.harp', options: 'loop=true priority=10 key=boss_bgm' }
@@ -3378,7 +3410,7 @@ test('audio: authorized player command isolation, quota caps, one-way eviction &
         assert.ok(Audio.listeners(sysExtraIds[si2]).length === 1, 'system handle must secure listener slot even when player handles filled up to 12')
     }
 
-    // Client audio evictOldestEntry prefers player tier before system tier
+    // Client audio evictOldestEntry round-trips real server _sent play packets & preserves system over player tier
     var acTick = null
     var acNet = null
     var acSb = {
@@ -3388,18 +3420,31 @@ test('audio: authorized player command isolation, quota caps, one-way eviction &
         Java: { loadClass: function () { return null } },
         global: {}
     }
+    var cliAudioCon = attachConsoleCapture(acSb)
     acSb.globalThis = acSb
     vm.createContext(acSb)
     loadStartupBase(acSb)
     runScriptIn(acSb, AUDIO_CLIENT_PATH)
     var acClient = acSb.global.EpiphyAudioClient
-    acNet({ data: { proto: 5, act: 'play', ses: 's1', h: 1, tier: 'system', pri: 5, snd: 'minecraft:music.dragon', cat: 'MASTER', vol: 1, pit: 1, loop: 1, mode: 'flat', anc: 'none', fin: 0, fout: 20 } })
-    for (var cpi = 2; cpi <= 130; cpi++) {
-        acNet({ data: { proto: 5, act: 'play', ses: 's1', h: cpi, tier: 'player', pri: 3, snd: 'minecraft:block.note_block.harp', cat: 'MASTER', vol: 1, pit: 1, loop: 1, mode: 'flat', anc: 'none', fin: 0, fout: 20 } })
+    var realPlayPkts = listenerPl._sent
+        .filter(function (item) { return item && item.pkt && item.pkt.act === 'play' })
+        .map(function (item) { return item.pkt })
+    assert.ok(realPlayPkts.some(function (p) { return p.h === sysId && p.tier === 'system' }), 'server _sent must contain real system play pkt')
+    assert.ok(realPlayPkts.some(function (p) { return p.tier === 'player' }), 'server _sent must contain real player play pkt')
+    for (var rp = 0; rp < realPlayPkts.length; rp++) {
+        acNet({ data: realPlayPkts[rp] })
+    }
+    acTick({})
+    assert.ok(acClient.list().some(function (x) { return x.h === sysId }), 'real server _sent system play packet must mount in EpiphyAudioClient')
+
+    var baseSysPkt = realPlayPkts.filter(function (p) { return p.h === sysId })[0]
+    for (var cpi = 1000; cpi < 1130; cpi++) {
+        acNet({ data: { proto: baseSysPkt.proto, act: 'play', ses: baseSysPkt.ses, h: cpi, tier: 'player', pri: 3, snd: 'minecraft:block.note_block.harp', cat: 'RECORDS', vol: 1, pit: 1, loop: 1, mode: 'flat', anc: 'none', fin: 0, fout: 20 } })
     }
     acTick({})
     assert.strictEqual(acClient.count(), 128, 'client audio entries must respect maxEntries=128')
-    assert.ok(acClient.list().some(function (x) { return x.h === 1 }), 'client audio eviction must keep system handle h=1 over player handles')
+    assert.ok(acClient.list().some(function (x) { return x.h === sysId }), 'client audio eviction must keep real system handle over player handles')
+    assert.strictEqual(cliAudioCon.errors.length, 0, 'audio client round-trip must emit zero errors')
 })
 
 // ----------------------------------------------------------------------------
@@ -3425,9 +3470,11 @@ test('danmaku: non-OP player command clamping, namespace stop/clear isolation & 
         return null
     })
     sb.ServerEvents.commandRegistry = function (fn) { cmdCallbacks.push(fn) }
+    var dmConsole = attachConsoleCapture(sb)
 
     var authPl   = new MockServerPlayer('AuthP', '00000000-0000-4000-8000-0000000000cc', false)
     var targetPl = new MockServerPlayer('TargetP', '00000000-0000-4000-8000-0000000000dd', false)
+    var plainPl  = new MockServerPlayer('PlainDm', '00000000-0000-4000-8000-0000000000ee', false)
     var srv = new MockMinecraftServer()
     srv.getWorldData = function () { return { getLevelName: function () { return 'DmIso' }, getAllowCommands: function () { return true } } }
     srv.getPlayerList = function () { return { getPlayers: function () { return [authPl, targetPl] } } }
@@ -3442,11 +3489,11 @@ test('danmaku: non-OP player command clamping, namespace stop/clear isolation & 
     Valve.grantPlayer(srv, authPl, 'danmaku', 'TestAdmin')
 
     function FakeNode(kind, name) {
-        this._kind = kind; this._name = name; this._children = {}; this._exec = null
+        this._kind = kind; this._name = name; this._children = {}; this._exec = null; this._req = null
     }
     FakeNode.prototype.then = function (child) { if (child) this._children[child._name] = child; return this }
     FakeNode.prototype.executes = function (fn) { this._exec = fn; return this }
-    FakeNode.prototype.requires = function () { return this }
+    FakeNode.prototype.requires = function (fn) { this._req = fn; return this }
     FakeNode.prototype.suggests = function () { return this }
     var regRoot = null
     var argValues = {}
@@ -3474,19 +3521,24 @@ test('danmaku: non-OP player command clamping, namespace stop/clear isolation & 
     for (var ci = 0; ci < cmdCallbacks.length; ci++) cmdCallbacks[ci](regEv)
 
     var authCtx = { source: { source: authPl, player: authPl, getPlayer: function () { return authPl }, getServer: function () { return srv }, sendSuccess: function () {}, sendFailure: function () {} } }
+    var plainSrc = { source: plainPl, player: plainPl, getPlayer: function () { return plainPl }, getServer: function () { return srv }, hasPermission: function () { return true } }
     var dmNode  = regRoot._children.danmaku
+    assert.strictEqual(dmNode._req(plainSrc), false, 'unauthorized player must NOT see /epiphy danmaku even with stack elevation')
+    assert.strictEqual(dmNode._req(authCtx.source), true, 'authorized player must see /epiphy danmaku')
+    assert.strictEqual(regRoot._children.auth._req(authCtx.source), false, 'authorized non-OP must NOT see /epiphy auth')
 
-    // 1. Authorized non-OP tries giant overlay spam
+    // 1. Authorized non-OP tries giant overlay spam + group hijacking
     var longBody = new Array(160).join('X')
     argValues = {
         targets: [targetPl],
-        spec: `text="<scale=99><big>${longBody}\\nL2\\nL3\\nL4" priority=10 size=giant scale=50 maxWidth=9999 wrap=false stay=99999 ns=sys_override`
+        spec: `text="<scale=99><big>${longBody}\\nL2\\nL3\\nL4" priority=10 size=giant scale=50 maxWidth=9999 wrap=false stay=99999 ns=sys_override group=boss maxgroup=1`
     }
     dmNode._children.player._children.targets._children.spec._exec(authCtx)
     assert.strictEqual(targetPl._sent.length, 1)
     var sentPkt = targetPl._sent[0].pkt
     assert.strictEqual(sentPkt.tier, 'player')
     assert.strictEqual(sentPkt.namespace, 'u:00000000-0000-4000-8000-0000000000cc')
+    assert.strictEqual(sentPkt.group, 'u:00000000-0000-4000-8000-0000000000cc:boss', 'player group must be scoped inside u:<uuid>:')
     assert.strictEqual(sentPkt.priority, 3)
     assert.ok(sentPkt.scale <= 2.0 && sentPkt.scale >= 0.5)
     assert.strictEqual(sentPkt.wrap, true)
@@ -3547,6 +3599,126 @@ test('danmaku: non-OP player command clamping, namespace stop/clear isolation & 
     }
     rPaints[0](rMockEv)
     assert.ok(rCli.count() <= 17, 'per-player namespace must cap overlays while keeping system overlay')
+    assert.strictEqual(dmConsole.errors.length, 0, 'danmaku isolation server run must emit zero console errors')
+    assert.strictEqual(dmConsole.warns.length, 0, 'danmaku isolation server run must emit zero console warns')
+})
+
+// ----------------------------------------------------------------------------
+// 30. P0 regressions: CompoundTag numeric priority, per-char space typewriter & maxGroup isolation
+// ----------------------------------------------------------------------------
+test('P0 regressions: CompoundTag numeric priority, per-char space alignment & maxGroup isolation', function () {
+    // 1. Simulate Minecraft CompoundTag where getString(key) returns '' for IntTag/DoubleTag, and raw[key] is undefined
+    function FakeCompoundTag(map) {
+        this._m = map || {}
+    }
+    FakeCompoundTag.prototype.contains = function (k) {
+        return Object.prototype.hasOwnProperty.call(this._m, k)
+    }
+    FakeCompoundTag.prototype.getString = function (k) {
+        var v = this._m[k]
+        return (typeof v === 'string') ? v : ''
+    }
+    FakeCompoundTag.prototype.getDouble = function (k) {
+        var v = this._m[k]
+        return (typeof v === 'number') ? v : 0
+    }
+    FakeCompoundTag.prototype.getBoolean = function (k) {
+        return Boolean(this._m[k])
+    }
+
+    var nowMs = 1000
+    var paints = []
+    var netFn = null
+    var drawnChars = []
+    var p0Warns = []
+    var cliSb = {
+        console: { info: function () {}, warn: function (m) { p0Warns.push(String(m)) }, error: function (m) { p0Warns.push(String(m)) }, debug: function () {}, log: function () {} },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function (fn) { paints.push(fn) } },
+        NetworkEvents: { dataReceived: function (ch, fn) { if (ch === 'epiphy:screen_danmaku') netFn = fn } },
+        Java: {
+            loadClass: function (cls) {
+                if (cls === 'java.lang.System') return { nanoTime: function () { return nowMs * 1000000 } }
+                return null
+            }
+        },
+        Text: { of: function (s) { return { string: String(s), getVisualOrderText: function () { return String(s) } } } },
+        global: {}
+    }
+    cliSb.globalThis = cliSb
+    vm.createContext(cliSb)
+    loadStartupBase(cliSb)
+    runScriptIn(cliSb, RENDERER_PATH)
+    var rCli = cliSb.global.ScreenDanmakuClient
+    var rEv = {
+        width: 854, height: 480, level: 'minecraft:overworld',
+        font: {
+            width: function (s) { return String(s || '').length * 6 },
+            drawInBatch: function () {}
+        },
+        text: function (txt) {
+            var s = (txt && txt.string != null) ? String(txt.string) : String(txt)
+            drawnChars.push(s)
+        },
+        graphics: { bufferSource: function () { return { endBatch: function () {} } }, flush: function () {} },
+        getMatrix: function () { return {} },
+        push: function () {}, pop: function () {}, translate: function () {}, scale: function () {}, rotate: function () {}
+    }
+
+    // Push two system overlays via FakeCompoundTag: high priority=9 in group='boss', low priority=2 in group='default'
+    netFn({ data: new FakeCompoundTag({ proto: 5, action: 'push', key: 'boss_title', group: 'boss', priority: 9, title: 'BossTitle', stay: 200, lifeMode: 'active' }) })
+    netFn({ data: new FakeCompoundTag({ proto: 5, action: 'push', key: 'low_note', group: 'default', priority: 2, title: 'LowNote', stay: 200 }) })
+    paints[0](rEv)
+    assert.strictEqual(rCli.count(), 2)
+
+    // System clear with numeric maxPriority=3 via CompoundTag must ONLY clear priority<=3, preserving priority=9!
+    netFn({ data: new FakeCompoundTag({ proto: 5, action: 'clear', group: '*', maxPriority: 3 }) })
+    paints[0](rEv)
+    assert.strictEqual(rCli.count(), 1, 'CompoundTag numeric maxPriority=3 must NOT degrade to 10 and clear priority=9')
+
+    // System deactivate with numeric maxPriority=3 via CompoundTag must NOT stop priority=9!
+    netFn({ data: new FakeCompoundTag({ proto: 5, action: 'deactivate', key: 'boss_title', maxPriority: 3 }) })
+    nowMs += 400
+    paints[0](rEv)
+    assert.strictEqual(rCli.count(), 1, 'CompoundTag numeric maxStopPriority=3 must NOT stop priority=9')
+
+    // Adversarial player push with group='boss' & maxGroup=1 must NOT evict system 'boss_title' nor another player's 'boss' overlay!
+    rCli.push({ action: 'push', tier: 'player', namespace: 'u:good', group: 'boss', priority: 2, title: 'GoodP', stay: 200 })
+    rCli.push({ action: 'push', tier: 'player', namespace: 'u:evil', group: 'boss', maxGroup: 1, priority: 2, title: 'Evil1', stay: 200 })
+    rCli.push({ action: 'push', tier: 'player', namespace: 'u:evil', group: 'boss', maxGroup: 1, priority: 2, title: 'Evil2', stay: 200 })
+    paints[0](rEv)
+    // GoodP + boss_title + Evil2 (and fading Evil1 up to maxGroup+1=2) must never wipe boss_title or GoodP!
+    netFn({ data: new FakeCompoundTag({ proto: 5, action: 'clear', tier: 'player', namespace: 'u:evil', group: '*', maxPriority: 3 }) })
+    paints[0](rEv)
+    assert.strictEqual(rCli.count(), 2, 'player maxGroup eviction must stay isolated from system and other players')
+
+    // Clear remaining overlays and test per-char typewriter with multiple spaces: "A  B C"
+    rCli.clear('*')
+    paints[0](rEv)
+    assert.strictEqual(rCli.count(), 0)
+
+    nowMs = 5000
+    rCli.push({
+        title: 'A  B C',
+        typewriter: true,
+        charMs: 100,
+        perCharShake: true,
+        shadow: false,
+        stay: 200
+    })
+
+    function collectTextAt(t) {
+        nowMs = t
+        drawnChars.length = 0
+        paints[0](rEv)
+        return drawnChars.filter(function (c) { return c === 'A' || c === 'B' || c === 'C' }).join('')
+    }
+
+    assert.strictEqual(collectTextAt(5000), 'A', 'charMs=100 at 0ms shows 1st char A')
+    assert.strictEqual(collectTextAt(5120), 'A', 'at 120ms (vis=2, space #1) must NOT reveal B early')
+    assert.strictEqual(collectTextAt(5220), 'A', 'at 220ms (vis=3, space #2) must NOT reveal B early')
+    assert.strictEqual(collectTextAt(5320), 'AB', 'at 320ms (vis=4) reveals A and B, not C')
+    assert.strictEqual(collectTextAt(5520), 'ABC', 'at 520ms (vis=6) reveals A, B, and C')
+    assert.strictEqual(p0Warns.length, 0, 'P0 client regression checks must produce zero warnings/errors')
 })
 
 var passed = 0

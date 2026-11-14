@@ -213,6 +213,20 @@
         return isFinite(n) ? clampNum(Math.round(n), 0, 10) : defVal
     }
 
+    function readPriorityField(d, key, fallbackKey, defVal) {
+        var s1 = readStr(d, key, '')
+        if (s1) return parsePriority(s1, defVal)
+        var n1 = readNum(d, key, null)
+        if (n1 !== null && isFinite(n1)) return parsePriority(n1, defVal)
+        if (fallbackKey) {
+            var s2 = readStr(d, fallbackKey, '')
+            if (s2) return parsePriority(s2, defVal)
+            var n2 = readNum(d, fallbackKey, null)
+            if (n2 !== null && isFinite(n2)) return parsePriority(n2, defVal)
+        }
+        return defVal
+    }
+
     function checkProtoCompatible(expectedVer, incomingVer) {
         if (PROTO && typeof PROTO.isProtoCompatible === 'function') {
             return PROTO.isProtoCompatible(expectedVer, incomingVer)
@@ -853,10 +867,12 @@
         var pendingX          = 0
         var pendingW          = 0
         var pendingCount      = 0
+        var pendingVisIndex   = 0
         var pendingScale      = 1.0
         var pendingShakeFlag  = 0
         var pendingOutMode    = ''
         var pendingOutCol     = -1
+        var visOffset         = 0
 
         for (var i = 0; i < lineText.length;) {
             var code = lineText.charCodeAt(i)
@@ -893,6 +909,7 @@
                             text:         pendingText,
                             x:            pendingX,
                             w:            pendingW,
+                            visIndex:     pendingVisIndex,
                             charScale:    pendingScale,
                             shakeFlag:    pendingShakeFlag,
                             outlineMode:  pendingOutMode,
@@ -919,6 +936,7 @@
                         text:         pendingText,
                         x:            pendingX,
                         w:            pendingW,
+                        visIndex:     pendingVisIndex,
                         charScale:    pendingScale,
                         shakeFlag:    pendingShakeFlag,
                         outlineMode:  pendingOutMode,
@@ -929,6 +947,7 @@
                     pendingCount = 0
                 }
                 curX += cw + charSp
+                visOffset++
                 i = g.nextIndex
                 continue
             }
@@ -937,6 +956,7 @@
                 pendingText      = fmtPref + g.cluster
                 pendingX         = curX
                 pendingW         = cw
+                pendingVisIndex  = visOffset
                 pendingScale     = tagState.charScale
                 pendingShakeFlag = tagState.shakeFlag
                 pendingOutMode   = tagState.outlineMode
@@ -948,6 +968,7 @@
                 pendingCount++
             }
             curX += cw + charSp
+            visOffset++
             i = g.nextIndex
 
             if (pendingCount >= maxClusterPerFrag) {
@@ -955,6 +976,7 @@
                     text:         pendingText,
                     x:            pendingX,
                     w:            pendingW,
+                    visIndex:     pendingVisIndex,
                     charScale:    pendingScale,
                     shakeFlag:    pendingShakeFlag,
                     outlineMode:  pendingOutMode,
@@ -970,6 +992,7 @@
                 text:         pendingText,
                 x:            pendingX,
                 w:            pendingW,
+                visIndex:     pendingVisIndex,
                 charScale:    pendingScale,
                 shakeFlag:    pendingShakeFlag,
                 outlineMode:  pendingOutMode,
@@ -1436,7 +1459,7 @@
                         baseX:        rf.x,
                         baseY:        baseY,
                         w:            rf.w,
-                        visIndex:     visSeq,
+                        visIndex:     visSeq + (rf.visIndex != null ? rf.visIndex : fIdx),
                         charScale:    rf.charScale || 1.0,
                         shakeFlag:    rf.shakeFlag || 0,
                         outlineMode:  rf.outlineMode || '',
@@ -1453,8 +1476,8 @@
                         _muiEpoch:    -1,
                         _muiCheckMs:  0
                     })
-                    visSeq++
                 }
+                visSeq += (ln.vis != null ? ln.vis : countVisibleChars(ln.text))
             }
         }
         item.charShakeCacheKey = cacheKey
@@ -2236,7 +2259,7 @@
             var targetNs    = readStr(raw, 'namespace', readStr(raw, 'ns', ''))
             var clearTier   = readStr(raw, 'tier', '')
             var isPlayerClear = (clearTier === 'player' || targetNs.indexOf('u:') === 0)
-            var clearMaxPri = parsePriority(readStr(raw, 'maxPriority', readStr(raw, 'priority', '')), 10)
+            var clearMaxPri = readPriorityField(raw, 'maxPriority', 'priority', 10)
             if (isPlayerClear && clearMaxPri > 3) clearMaxPri = 3
             if ((!targetGroup || targetGroup === '*' || targetGroup === 'all') && !targetNs && !isPlayerClear && clearMaxPri >= 10) {
                 activeOverlays.length = 0
@@ -2244,7 +2267,10 @@
                 for (var i = activeOverlays.length - 1; i >= 0; i--) {
                     var cov    = activeOverlays[i]
                     if (isPlayerClear && cov.tier !== 'player') continue
-                    var grpHit = (!targetGroup || targetGroup === '*' || targetGroup === 'all' || cov.group === targetGroup)
+                    var nsGrpKey = (targetNs && targetGroup && targetGroup.indexOf(targetNs + ':') !== 0)
+                        ? (targetNs + ':' + targetGroup)
+                        : targetGroup
+                    var grpHit = (!targetGroup || targetGroup === '*' || targetGroup === 'all' || cov.group === targetGroup || (targetNs && cov.group === nsGrpKey))
                     var nsHit  = (!targetNs || cov.namespace === targetNs)
                     var covPri = cov.priority != null ? cov.priority : (cov.lifeMode === 'active' ? 5 : 2)
                     if (grpHit && nsHit && covPri <= clearMaxPri) {
@@ -2264,7 +2290,7 @@
             var isPlayerStop    = (stopTier === 'player' || stopNs.indexOf('u:') === 0)
             var customFadeTicks = readNum(raw, 'fadeOut', -1)
             var includeOnce     = readBool(raw, 'includeOnce', false)
-            var maxStopPriority = parsePriority(readStr(raw, 'maxPriority', readStr(raw, 'priority', '')), 10)
+            var maxStopPriority = readPriorityField(raw, 'maxPriority', 'priority', 10)
             if (isPlayerStop && maxStopPriority > 3) maxStopPriority = 3
             var isWildcard      = (targetKey === '*' || targetKey === 'all' || stopGroup === '*' || stopGroup === 'all')
 
@@ -2305,7 +2331,10 @@
                 for (var gStopIdx = activeOverlays.length - 1; gStopIdx >= 0; gStopIdx--) {
                     var gOv = activeOverlays[gStopIdx]
                     if (isPlayerStop && gOv.tier !== 'player') continue
-                    var gMatch = (!stopGroup || gOv.group === stopGroup) && (!stopNs || gOv.namespace === stopNs)
+                    var nsStopGrp = (stopNs && stopGroup && stopGroup.indexOf(stopNs + ':') !== 0)
+                        ? (stopNs + ':' + stopGroup)
+                        : stopGroup
+                    var gMatch = (!stopGroup || gOv.group === stopGroup || (stopNs && gOv.group === nsStopGrp)) && (!stopNs || gOv.namespace === stopNs)
                     if (gMatch) {
                         if (!includeOnce && gOv.lifeMode !== 'active') continue
                         var gPri = gOv.priority != null ? gOv.priority : (gOv.lifeMode === 'active' ? 5 : 2)
@@ -2341,7 +2370,7 @@
         var charMs     = Math.round(readNonNegNum(raw, 'charMs', 30, 8))
         var lifeMode   = readStr(raw, 'lifeMode', 'once')
         var defPri     = (lifeMode === 'active') ? 5 : 2
-        var priority   = parsePriority(readStr(raw, 'priority', readStr(raw, 'importance', '')), defPri)
+        var priority   = readPriorityField(raw, 'priority', 'importance', defPri)
         var stayTicks  = readNonNegNum(raw, 'stay', (lifeMode === 'active') ? 28 : 65, 4)
         var holdTicks  = (lifeMode === 'active')
             ? readNonNegNum(raw, 'activeHold', readNonNegNum(raw, 'holdTicks', stayTicks, 4), 4)
@@ -2602,11 +2631,14 @@
             var allGrpIndices = []
             for (var gCheckIdx = 0; gCheckIdx < activeOverlays.length; gCheckIdx++) {
                 var gov = activeOverlays[gCheckIdx]
-                if (gov.group === group) {
-                    allGrpIndices.push(gCheckIdx)
-                    if (now < gov.fadeStartAt) {
-                        activeGrpList.push(gov)
-                    }
+                if (gov.group !== group) continue
+                if (tier === 'player') {
+                    if (gov.tier !== 'player') continue
+                    if (namespace && gov.namespace !== namespace) continue
+                }
+                allGrpIndices.push(gCheckIdx)
+                if (now < gov.fadeStartAt) {
+                    activeGrpList.push(gov)
                 }
             }
             var activeExcess = activeGrpList.length - maxGroupSize
@@ -2689,7 +2721,7 @@
     NetworkEvents.dataReceived(CHANNEL, function (event) {
         try {
             var pkt = event.data
-            var incomingProto = (pkt != null) ? pkt.proto : null
+            var incomingProto = (pkt != null) ? readNum(pkt, 'proto', null) : null
             if (!checkProtoCompatible(PROTO_VERSION, incomingProto)) {
                 if (!protoMismatchWarned) {
                     protoMismatchWarned = true

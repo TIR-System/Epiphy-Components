@@ -1062,7 +1062,7 @@
     NetworkEvents.dataReceived(CHANNEL, (event) => {
         try {
             var pkt = event.data
-            var incomingProto = (pkt != null) ? pkt.proto : null
+            var incomingProto = (pkt != null) ? readNum(pkt, 'proto', null) : null
             if (!checkProtoCompatible(PROTO_VERSION, incomingProto)) {
                 if (!protoMismatchWarned) {
                     protoMismatchWarned = true

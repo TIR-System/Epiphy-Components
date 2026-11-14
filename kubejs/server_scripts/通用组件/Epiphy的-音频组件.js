@@ -2862,6 +2862,21 @@
             ]
         }
 
+        var describeHandle = (info) => {
+            if (info == null) return '§7(null)'
+            var keyPart = info.key ? ` key=§f${info.key}§7` : ''
+            var ancDesc = info.anchor === 'pos'
+                ? `${Math.round(info.x)},${Math.round(info.y)},${Math.round(info.z)}@${info.dim || '?'}`
+                : (info.anchor === 'entity'
+                    ? `entity:${info.entityUuid || '?'}`
+                    : (info.anchor === 'block' ? `block(${info.blockId || '?'})` : 'none'))
+            var flags = []
+            if (info.loop) flags.push('loop')
+            if (info.waitingStart) flags.push('wait')
+            var flagPart = flags.length > 0 ? ` [${flags.join(',')}]` : ''
+            return `§e#${info.id}§7${keyPart} §f${info.sound}§7 pri=§b${info.priority}§7 listeners=§a${info.listeners}§7 anc=§7${ancDesc}${flagPart}`
+        }
+
         return cb.literal('audio', {
             helpLines: AUDIO_HELP_LINES,
             children: [

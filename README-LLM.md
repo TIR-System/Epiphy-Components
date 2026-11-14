@@ -82,6 +82,9 @@
 | `epiphy-data/` 外部统一目录、可读按天日志与复制档自动分叉 | `Epiphy的-服务端基础.js` / `Epiphy的-日志.js` / `.gitignore` | 建立 `config`/`worlds`/`players`/`events`/`logs`/`presets`/`backups` 骨架与 `.tmp`+`.bak` 原子写；默认输出按天 `.log`（支持 `logging.json`）；通过 `epiphy_world_id.json` + `meta.json` 检测 `lastWorldPath` 变化自动分叉并通知 OP | [x] |
 | 外部撤销墓碑、Fail-Closed 按名授权备用模式与离线风险边界 | `Epiphy的-权限阀.js` | 权限迁移至 `epiphy-data/worlds/<slug>__<shortId>/`；`revocations.json` 拦截旧快照复活；`auth_mode.json` 默认 `false` 并附完整风险/离线服警示，仅真 OP/控制台 8 位口令 2 分钟二次确认或手动配置开启，关闭即暂停并保留未迁移记录 | [x] |
 | `authorized` 非 OP 玩家音频与弹幕资源隔离与端侧防挤占 | `权限阀` / `音频组件` / `音频播放器` / `弹幕组件` / `弹幕渲染器` | 引入 `getCommandActorTier` 区分 `'system'` 与 `'player'`；音频钳制 `priority <= 3`、`u:<uuid>:` key 隔离、服务端配额与听众预留、`system` 单向淘汰及端侧优先淘汰 `'player'`；弹幕玩家命令参数限流、`250ms` 冷却、命名空间清屏锁及端侧每命名空间 `16` 条上限 | [x] |
+| 弹幕端侧 `CompoundTag` 数值 `priority`/`proto` 读取失效、含空格文本逐字错位与 `maxGroup` 跨层驱逐 | `Epiphy的-屏幕弹幕渲染器.js` / `Epiphy的-屏幕弹幕组件.js` | 新增 `readPriorityField` 并改用 `readNum` 解析 `proto`，避免 `IntTag`/`DoubleTag` 退化；`splitLineIntoFragments` 统一空白与可见字素 `visIndex` 对齐 `countVisibleChars`；玩家命令强制 `u:<uuid>:` 组前缀且端侧 `maxGroupSize` 仅统计/驱逐同玩家命名空间 | [x] |
+| 音频 `/epiphy audio list\|info` 缺 `describeHandle` 及端侧 `CompoundTag` `proto` 读取补齐 | `Epiphy的-音频组件.js` / `Epiphy的-音频播放器.js` | 在 `buildAudioCommandNode` 内补全 `describeHandle` 格式化函数，并将端侧 `dataReceived` 协议版本读取统一改为 `readNum(pkt, 'proto', null)` | [x] |
+| 单元测试 `requires`/三重加载/`console`/音频端侧包往返“假绿”盲区 | `tests/pure_functions.test.js` | 真测 Brigadier `_req` 权限门禁与命令执行；移除 Test 14 重复加载并严格断言单次加载 `ServerEvents.tick` 数量；全链路捕获并断言零意外 `console.warn`/`error`；补全服务端 `_sent` 包到 `EpiphyAudioClient` 的真实往返及 P0 回归测试 | [x] |
 
 ---
 

@@ -2267,6 +2267,8 @@
         opts.tier        = 'player'
         opts.namespace   = ownerNs
         opts.ns          = ownerNs
+        var rawPlayerGrp = String(opts.group != null && opts.group !== '' ? opts.group : DEFAULTS.group)
+        opts.group       = (rawPlayerGrp.indexOf(ownerNs + ':') === 0) ? rawPlayerGrp : (ownerNs + ':' + rawPlayerGrp)
 
         if (opts.text != null) opts.text = clampPlayerTextField(opts.text, PLAYER_DANMAKU_LIMITS.maxTextLen, PLAYER_DANMAKU_LIMITS.maxLines)
         if (opts.title != null) opts.title = clampPlayerTextField(opts.title, PLAYER_DANMAKU_LIMITS.maxTextLen, PLAYER_DANMAKU_LIMITS.maxLines)
