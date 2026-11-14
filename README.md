@@ -4,8 +4,9 @@
 
 一套面向 **Minecraft 1.20.1 / Forge 47.x / KubeJS 2001.6.x** 的通用服务端 / 客户端基础组件、双端交互表现引擎（屏幕弹幕 + 3D 空间音频）、机制修复与模组联动脚本集合。
 
-> **技术演进与平台定位**
-> - **长期演进方向**：本项目在当前阶段完善与验证后，后续将整体转向 **Kotlin + Java** 原生模组开发，大部分核心组件与玩法机制均会独立脱离脚本层运行；**KubeJS 仅作为当前阶段的过渡期依赖**。
+> **项目状态、演进方向与平台定位**
+> - **开发阶段声明（⚠️ 早期测试）**：本项目目前仍处于**早期测试阶段**，接口设计、配置格式、命令语法与模块边界尚未冻结——**当前版本行为可能不稳定，后续随时可能出现大量破坏性更新（Breaking Changes）**，暂不建议直接用于对稳定性要求高的长期正式周目。
+> - **长期演进方向**：本项目在持续完善与验证后，后续将整体转向 **Kotlin + Java** 原生模组开发，大部分核心组件与玩法机制均会独立脱离脚本层运行；**KubeJS 仅作为当前阶段的过渡期依赖**。
 > - **加载器兼容性**：当前主要在 **Forge 47.x** 环境实测；除涉及少量 Forge 特有兼容细节外，核心逻辑与 KubeJS 脚本在**理论上同样兼容 Fabric**，但目前尚未在 Fabric 环境完成实测验证。
 
 ---
@@ -14,68 +15,35 @@
 
 ### 分层架构总览
 
-```mermaid
-flowchart TB
-    subgraph S["Startup 阶段（跨端前置）"]
-        SPEC["Epiphy的-Spec与通用工具.js<br/>(EpiphySpec / EpiphyProtocol, P:1200)"]
-        TAB["创造模式栏-epiphy.js<br/>(EpiphyCreativeTab, P:1000)"]
-        HIDE["Epiphy的小玩意-原版_其他Mod的隐藏物品.js"]
-        TESTBLK["Epiphy的小玩意_功能测试.js"]
-        INSTBLK["Epiphy的小玩意-终极拆解台_不稳定.js"]
-    end
+```text
+[第 1 层 · Startup 阶段：跨端契约与注册层]
+├── Epiphy的-Spec与通用工具.js          (P:1200) -> 导出 EpiphySpec / EpiphyProtocol（全局契约真相源）
+├── 创造模式栏-epiphy.js                (P:1000) -> 导出 EpiphyCreativeTab (epiphy:stuff)
+├── Epiphy的小玩意-原版_其他Mod的隐藏物品.js      <- 依赖 [创造模式栏]
+├── Epiphy的小玩意-终极拆解台_不稳定.js           <- 配合 [拆解台-混沌殉爆] 与 assets/epiphy/
+└── Epiphy的小玩意_功能测试.js                    <- 联动 [创造模式栏] + [ScreenDanmaku] + [EpiphyAudio]
 
-    subgraph B["Server 基础层（通用基础设施）"]
-        LOG["Epiphy的-日志.js<br/>(EpiphyLog, P:1100)"]
-        BASE["Epiphy的-服务端基础.js<br/>(EpiphyServerBase, P:1080)"]
-        TRACKER["Epiphy的-方块追踪组件.js<br/>(EpiphyBlockTracker, P:1050)"]
-        VALVE["Epiphy的-权限阀.js<br/>(EpiphyPermissionValve, P:1000)"]
-        DEBUG["Epiphy的-调试组件.js<br/>(EpiphyDebug, P:950)"]
-        BUGFIX["Epiphy的-基础bug修复.js<br/>(EpiphyBugfix, P:900)"]
-    end
+[第 2 层 · Server 基础层：通用基础设施层]
+├── Epiphy的-日志.js                    (P:1100) -> 导出 EpiphyLog（无前置，全局限频日志中心）
+├── Epiphy的-服务端基础.js              (P:1080) -> 导出 EpiphyServerBase（可选: Spec / Log）
+├── Epiphy的-方块追踪组件.js            (P:1050) -> 导出 EpiphyBlockTracker v2（可选: Log）
+├── Epiphy的-权限阀.js                  (P:1000) -> 导出 EpiphyPermissionValve v4（强依赖: ServerBase；可选: Log）
+├── Epiphy的-调试组件.js                (P:950)  -> 导出 EpiphyDebug v1（可选: Log / 权限阀）
+└── Epiphy的-基础bug修复.js             (P:900)  -> 导出 EpiphyBugfix v1（零硬依赖独立运行；可选: Log）
 
-    subgraph D["Server 业务调度与玩法层"]
-        DMK["Epiphy的-屏幕弹幕组件.js<br/>(ScreenDanmaku, P:500)"]
-        AUD["Epiphy的-音频组件.js<br/>(EpiphyAudio, P:500)"]
-        BOOM["拆解台-混沌殉爆.v18.js"]
-    end
+[第 3 层 · Server 调度与玩法层：业务表现与机制]
+├── Epiphy的-屏幕弹幕组件.js            (P:500)  <- 强依赖 [Spec + ServerBase]；可选 [Log / 方块追踪 / 权限阀]
+├── Epiphy的-音频组件.js                (P:500)  <- 强依赖 [Spec + ServerBase]；可选 [Log / 方块追踪 / 权限阀]
+├── 拆解台-混沌殉爆.v18.js                       <- 依赖 [终极拆解台_不稳定] + [ScreenDanmaku]
+└── 合成表-*/*.js                                <- 仅依赖原版或对应目标模组
 
-    subgraph C["Client 渲染与播放层"]
-        DMKC["Epiphy的-屏幕弹幕渲染器.js<br/>(ScreenDanmakuClient)"]
-        AUDC["Epiphy的-音频播放器.js<br/>(EpiphyAudioClient)"]
-        TIP["拆解台描述.js"]
-    end
-
-    HIDE --> TAB
-    BASE -.可选.-> SPEC
-    BASE -.可选.-> LOG
-    TRACKER -.可选.-> LOG
-    VALVE --> BASE
-    VALVE -.可选.-> LOG
-    DEBUG -.可选.-> LOG
-    DEBUG -.可选.-> VALVE
-    BUGFIX -.可选.-> LOG
-    DMK --> SPEC
-    DMK --> BASE
-    DMK -.可选.-> LOG
-    DMK -.可选.-> TRACKER
-    DMK -.可选.-> VALVE
-    DMK <-->|"epiphy:screen_danmaku"| DMKC
-    AUD --> SPEC
-    AUD --> BASE
-    AUD -.可选.-> LOG
-    AUD -.可选.-> TRACKER
-    AUD -.可选.-> VALVE
-    AUD <-->|"epiphy:audio"| AUDC
-    DMKC -.可选.-> SPEC
-    AUDC -.可选.-> SPEC
-    BOOM --> INSTBLK
-    BOOM --> DMK
-    TESTBLK -.联动.-> TAB
-    TESTBLK -.联动.-> DMK
-    TESTBLK -.联动.-> AUD
+[第 4 层 · Client 渲染与播放层：端侧消费]
+├── Epiphy的-屏幕弹幕渲染器.js                   <- 消费网络包 epiphy:screen_danmaku（可选前置: Spec）
+├── Epiphy的-音频播放器.js                       <- 消费网络包 epiphy:audio（可选前置: Spec）
+└── 拆解台描述.js                                <- 客户端物品 Tooltip 描述
 ```
 
-> 实线 `-->` 表示硬依赖/主联动关系，虚线 `-.->` 表示可选依赖（缺失时按单层约定降级）。
+> 加载优先级约定：`Startup` 优先于 `Server` / `Client`；同一阶段内 `Priority` 数值越高越早加载（如 `1200 -> 1100 -> 1080 -> 1050 -> 1000 -> 950 -> 900 -> 500`）。
 
 ### 全模块依赖关系明细表
 

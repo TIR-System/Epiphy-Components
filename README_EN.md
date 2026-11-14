@@ -4,7 +4,8 @@
 
 A collection of shared server/client infrastructure modules, audiovisual presentation engines (screen danmaku + 3D spatial audio), gameplay bugfixes, and modpack customization scripts built for **Minecraft 1.20.1 / Forge 47.x / KubeJS 2001.6.x**.
 
-> **Roadmap & Platform Notes**
+> **Status, Roadmap & Platform Notes**
+> - **Early Testing Notice (⚠️ Unstable)**: This project is currently in an **early testing stage**. APIs, data schemas, command syntax, and module boundaries are not yet frozen — **current behavior may be unstable and major breaking changes can occur frequently**. Not recommended for production worlds requiring strict long-term stability yet.
 > - **Migration Direction**: Once stabilized and feature-complete, this project will transition to **Kotlin + Java** native mod development, with most features becoming standalone modules; **KubeJS is a transitional dependency prior to that migration**.
 > - **Loader Compatibility**: Currently tested on **Forge 47.x**. Apart from a small number of Forge-specific compatibility hooks, the core design is **theoretically compatible with Fabric as well**, though **untested on Fabric**.
 
@@ -14,68 +15,35 @@ A collection of shared server/client infrastructure modules, audiovisual present
 
 ### Layered Architecture Overview
 
-```mermaid
-flowchart TB
-    subgraph S["Startup Stage (Cross-Side Foundation)"]
-        SPEC["Epiphy的-Spec与通用工具.js<br/>(EpiphySpec / EpiphyProtocol, P:1200)"]
-        TAB["创造模式栏-epiphy.js<br/>(EpiphyCreativeTab, P:1000)"]
-        HIDE["Epiphy的小玩意-原版_其他Mod的隐藏物品.js"]
-        TESTBLK["Epiphy的小玩意_功能测试.js"]
-        INSTBLK["Epiphy的小玩意-终极拆解台_不稳定.js"]
-    end
+```text
+[Layer 1 · Startup Stage: Cross-Side Contracts & Registrations]
+├── Epiphy的-Spec与通用工具.js          (P:1200) -> Exports EpiphySpec / EpiphyProtocol (shared source of truth)
+├── 创造模式栏-epiphy.js                (P:1000) -> Exports EpiphyCreativeTab (epiphy:stuff)
+├── Epiphy的小玩意-原版_其他Mod的隐藏物品.js      <- Depends on [Creative Tab]
+├── Epiphy的小玩意-终极拆解台_不稳定.js           <- Paired with [Meltdown v18] & assets/epiphy/
+└── Epiphy的小玩意_功能测试.js                    <- Integrates [Creative Tab] + [ScreenDanmaku] + [EpiphyAudio]
 
-    subgraph B["Server Foundation Layer"]
-        LOG["Epiphy的-日志.js<br/>(EpiphyLog, P:1100)"]
-        BASE["Epiphy的-服务端基础.js<br/>(EpiphyServerBase, P:1080)"]
-        TRACKER["Epiphy的-方块追踪组件.js<br/>(EpiphyBlockTracker, P:1050)"]
-        VALVE["Epiphy的-权限阀.js<br/>(EpiphyPermissionValve, P:1000)"]
-        DEBUG["Epiphy的-调试组件.js<br/>(EpiphyDebug, P:950)"]
-        BUGFIX["Epiphy的-基础bug修复.js<br/>(EpiphyBugfix, P:900)"]
-    end
+[Layer 2 · Server Foundation Layer: Core Infrastructure]
+├── Epiphy的-日志.js                    (P:1100) -> Exports EpiphyLog (standalone rate-limited logging hub)
+├── Epiphy的-服务端基础.js              (P:1080) -> Exports EpiphyServerBase (optional: Spec / Log)
+├── Epiphy的-方块追踪组件.js            (P:1050) -> Exports EpiphyBlockTracker v2 (optional: Log)
+├── Epiphy的-权限阀.js                  (P:1000) -> Exports EpiphyPermissionValve v4 (hard: ServerBase; optional: Log)
+├── Epiphy的-调试组件.js                (P:950)  -> Exports EpiphyDebug v1 (optional: Log / PermissionValve)
+└── Epiphy的-基础bug修复.js             (P:900)  -> Exports EpiphyBugfix v1 (zero hard deps; optional: Log)
 
-    subgraph D["Server Scheduling & Gameplay Layer"]
-        DMK["Epiphy的-屏幕弹幕组件.js<br/>(ScreenDanmaku, P:500)"]
-        AUD["Epiphy的-音频组件.js<br/>(EpiphyAudio, P:500)"]
-        BOOM["拆解台-混沌殉爆.v18.js"]
-    end
+[Layer 3 · Server Scheduling & Gameplay Layer]
+├── Epiphy的-屏幕弹幕组件.js            (P:500)  <- Hard: [Spec + ServerBase]; Optional: [Log / BlockTracker / Valve]
+├── Epiphy的-音频组件.js                (P:500)  <- Hard: [Spec + ServerBase]; Optional: [Log / BlockTracker / Valve]
+├── 拆解台-混沌殉爆.v18.js                       <- Depends on [Unstable Blocks] + [ScreenDanmaku]
+└── 合成表-*/*.js                                <- Standalone recipe tweaks for vanilla / target mods
 
-    subgraph C["Client Rendering & Audio Playback Layer"]
-        DMKC["Epiphy的-屏幕弹幕渲染器.js<br/>(ScreenDanmakuClient)"]
-        AUDC["Epiphy的-音频播放器.js<br/>(EpiphyAudioClient)"]
-        TIP["拆解台描述.js"]
-    end
-
-    HIDE --> TAB
-    BASE -.optional.-> SPEC
-    BASE -.optional.-> LOG
-    TRACKER -.optional.-> LOG
-    VALVE --> BASE
-    VALVE -.optional.-> LOG
-    DEBUG -.optional.-> LOG
-    DEBUG -.optional.-> VALVE
-    BUGFIX -.optional.-> LOG
-    DMK --> SPEC
-    DMK --> BASE
-    DMK -.optional.-> LOG
-    DMK -.optional.-> TRACKER
-    DMK -.optional.-> VALVE
-    DMK <-->|"epiphy:screen_danmaku"| DMKC
-    AUD --> SPEC
-    AUD --> BASE
-    AUD -.optional.-> LOG
-    AUD -.optional.-> TRACKER
-    AUD -.optional.-> VALVE
-    AUD <-->|"epiphy:audio"| AUDC
-    DMKC -.optional.-> SPEC
-    AUDC -.optional.-> SPEC
-    BOOM --> INSTBLK
-    BOOM --> DMK
-    TESTBLK -.integrates.-> TAB
-    TESTBLK -.integrates.-> DMK
-    TESTBLK -.integrates.-> AUD
+[Layer 4 · Client Rendering & Playback Layer]
+├── Epiphy的-屏幕弹幕渲染器.js                   <- Consumes epiphy:screen_danmaku packets (optional startup: Spec)
+├── Epiphy的-音频播放器.js                       <- Consumes epiphy:audio packets (optional startup: Spec)
+└── 拆解台描述.js                                <- Client item tooltip script
 ```
 
-> Solid arrows (`-->`) denote hard dependencies or primary integrations; dashed arrows (`-.->`) denote optional dependencies with explicit single-layer fallbacks.
+> Load order convention: `Startup` loads before `Server` / `Client`; within a stage, higher `Priority` values load earlier (`1200 -> 1100 -> 1080 -> 1050 -> 1000 -> 950 -> 900 -> 500`).
 
 ### Module Dependency Matrix
 
