@@ -972,11 +972,14 @@
             return reportConfigWarning('调用时必须传入弹幕配置对象或文本字符串！', notifyPlayer)
         }
         if (opts.action === 'clear') {
+            var cNs  = String(pick(opts, ['namespace', 'ns'], ''))
+            var cTier = (opts._sourceTier === 'player' || opts.tier === 'player' || cNs.indexOf('u:') === 0) ? 'player' : 'system'
             var cPacket = {
                 proto:     PROTO_VERSION,
                 action:    'clear',
+                tier:      cTier,
                 group:     String(pickNonEmpty(opts, ['group'], '*')),
-                namespace: String(pick(opts, ['namespace', 'ns'], ''))
+                namespace: cNs
             }
             var cPri = pick(opts, ['maxPriority', 'priority'], null)
             if (cPri != null) cPacket.maxPriority = parsePriority(cPri, 10)
@@ -984,12 +987,15 @@
         }
         if (opts.action === 'deactivate' || opts.action === 'stop') {
             var dKeyRaw = pickNonEmpty(opts, ['key', 'id', 'slot'], '')
+            var dNs     = String(pick(opts, ['namespace', 'ns'], ''))
+            var dTier   = (opts._sourceTier === 'player' || opts.tier === 'player' || dNs.indexOf('u:') === 0) ? 'player' : 'system'
             var dPacket = {
                 proto:     PROTO_VERSION,
                 action:    'deactivate',
+                tier:      dTier,
                 key:       String(dKeyRaw),
                 group:     String(pick(opts, ['group'], '')),
-                namespace: String(pick(opts, ['namespace', 'ns'], ''))
+                namespace: dNs
             }
             var dFadeOut = parseTicksOrSec(opts.fadeOut)
             if (dFadeOut !== null) dPacket.fadeOut = dFadeOut
@@ -1046,9 +1052,12 @@
         if (fadeOutVal === null) fadeOutVal = DEFAULTS.fadeOut
         var baseShift    = parseNonNegNum(opts.charShakeShift, DEFAULTS.charShakeShift, 0.0)
 
+        var pTier = (opts._sourceTier === 'player' || opts.tier === 'player' || nsStr.indexOf('u:') === 0) ? 'player' : 'system'
+
         return {
             proto:               PROTO_VERSION,
             action:              'push',
+            tier:                pTier,
             key:                 keyStr,
             slotId:              slotIdStr,
             namespace:           nsStr,
@@ -2182,11 +2191,142 @@
         }
     }
 
+    var PLAYER_DANMAKU_LIMITS = {
+        maxPriority:       3,
+        minScale:          0.5,
+        maxScale:          2.0,
+        maxInlineScale:    1.5,
+        maxTextLen:        120,
+        maxSubLen:         80,
+        maxLines:          3,
+        maxStayTicks:      200,
+        maxFadeOutTicks:   60,
+        maxWidth:          260,
+        maxRadius:         96,
+        commandCooldownMs: 250
+    }
+    var playerCmdCooldownMap = new Map() // uuid -> lastAllowedAtMs
+
+    function resolveDanmakuActorTier(source) {
+        var valve = (typeof global !== 'undefined' && global != null) ? global.EpiphyPermissionValve : null
+        if (valve != null && typeof valve.getCommandActorTier === 'function') {
+            return valve.getCommandActorTier(source)
+        }
+        if (source != null) {
+            var pl = (typeof source.getPlayer === 'function') ? source.getPlayer() : source.player
+            if (pl != null) {
+                var isOp = (typeof pl.hasPermissions === 'function' && pl.hasPermissions(2))
+                var u = getPlayerUuidSafe(pl)
+                return {
+                    tier:     isOp ? 'system' : 'player',
+                    isPlayer: true,
+                    isOp:     isOp,
+                    uuid:     u ? String(u).trim().toLowerCase() : 'anon',
+                    player:   pl
+                }
+            }
+        }
+        return { tier: 'system', isPlayer: false, isOp: true, uuid: '', player: null }
+    }
+
+    function clampInlineRichTags(str) {
+        var s = String(str != null ? str : '')
+        s = s.replace(/<\s*big\s*>/gi, '<scale=1.25>')
+        s = s.replace(/<\s*scale\s*=\s*([^>]+?)\s*>/gi, function (_all, rawNum) {
+            var n = Number(rawNum)
+            if (!isFinite(n)) n = 1.0
+            if (n < PLAYER_DANMAKU_LIMITS.minScale) n = PLAYER_DANMAKU_LIMITS.minScale
+            if (n > PLAYER_DANMAKU_LIMITS.maxInlineScale) n = PLAYER_DANMAKU_LIMITS.maxInlineScale
+            return '<scale=' + n + '>'
+        })
+        return s
+    }
+
+    function clampPlayerTextField(rawVal, maxChars, maxLines) {
+        if (rawVal == null) return ''
+        var normalized = String(rawVal).replace(/\\n/g, '\n')
+        var clampedTags = clampInlineRichTags(normalized)
+        var lines = clampedTags.split('\n')
+        if (lines.length > maxLines) {
+            lines = lines.slice(0, maxLines)
+        }
+        var joined = lines.join('\n')
+        if (joined.length > maxChars) {
+            joined = joined.slice(0, maxChars)
+        }
+        return joined
+    }
+
+    function applyPlayerDanmakuLimits(opts, actor) {
+        if (opts == null || typeof opts !== 'object') return opts
+        if (actor == null || actor.tier !== 'player') return opts
+
+        var ownerNs = 'u:' + (actor.uuid || 'anon')
+        opts._sourceTier = 'player'
+        opts._ownerUuid  = actor.uuid || 'anon'
+        opts.tier        = 'player'
+        opts.namespace   = ownerNs
+        opts.ns          = ownerNs
+
+        if (opts.text != null) opts.text = clampPlayerTextField(opts.text, PLAYER_DANMAKU_LIMITS.maxTextLen, PLAYER_DANMAKU_LIMITS.maxLines)
+        if (opts.title != null) opts.title = clampPlayerTextField(opts.title, PLAYER_DANMAKU_LIMITS.maxTextLen, PLAYER_DANMAKU_LIMITS.maxLines)
+        if (opts.sub != null) opts.sub = clampPlayerTextField(opts.sub, PLAYER_DANMAKU_LIMITS.maxSubLen, PLAYER_DANMAKU_LIMITS.maxLines)
+        if (opts.subtitle != null) opts.subtitle = clampPlayerTextField(opts.subtitle, PLAYER_DANMAKU_LIMITS.maxSubLen, PLAYER_DANMAKU_LIMITS.maxLines)
+
+        var szInfo = parseSize(opts.size, opts.scale)
+        var clampedScale = Math.max(PLAYER_DANMAKU_LIMITS.minScale, Math.min(PLAYER_DANMAKU_LIMITS.maxScale, szInfo.scale))
+        opts.scale = Number(clampedScale.toFixed(2))
+        delete opts.size
+
+        var reqPri = parsePriority(pick(opts, ['priority', 'importance'], null), DEFAULTS.priority)
+        opts.priority = Math.min(reqPri, PLAYER_DANMAKU_LIMITS.maxPriority)
+        delete opts.importance
+
+        opts.wrap  = true
+        opts.clamp = true
+        opts.maxWidth = Math.min(sanitizeMaxWidth(opts.maxWidth != null ? opts.maxWidth : DEFAULTS.maxWidth), PLAYER_DANMAKU_LIMITS.maxWidth)
+
+        var stayTicks = parseTicksOrSec(opts.stay)
+        if (stayTicks !== null && stayTicks > PLAYER_DANMAKU_LIMITS.maxStayTicks) {
+            opts.stay = PLAYER_DANMAKU_LIMITS.maxStayTicks
+        }
+        var durTicks = parseTicksOrSec(opts.duration)
+        if (durTicks !== null && durTicks > PLAYER_DANMAKU_LIMITS.maxStayTicks) {
+            opts.duration = PLAYER_DANMAKU_LIMITS.maxStayTicks
+        }
+        var holdTicks = parseTicksOrSec(opts.activeHold)
+        if (holdTicks !== null && holdTicks > PLAYER_DANMAKU_LIMITS.maxStayTicks) {
+            opts.activeHold = PLAYER_DANMAKU_LIMITS.maxStayTicks
+        }
+        var foTicks = parseTicksOrSec(opts.fadeOut)
+        if (foTicks !== null && foTicks > PLAYER_DANMAKU_LIMITS.maxFadeOutTicks) {
+            opts.fadeOut = PLAYER_DANMAKU_LIMITS.maxFadeOutTicks
+        }
+        return opts
+    }
+
+    function checkPlayerDanmakuCmdRate(actor) {
+        if (actor == null || actor.tier !== 'player' || !actor.uuid) return true
+        var nowMs = Date.now()
+        var last  = playerCmdCooldownMap.get(actor.uuid) || 0
+        if ((nowMs - last) < PLAYER_DANMAKU_LIMITS.commandCooldownMs) {
+            return false
+        }
+        playerCmdCooldownMap.set(actor.uuid, nowMs)
+        return true
+    }
+
     function parseSpecString(specStr) {
         if (!specStr || String(specStr).trim().length === 0) {
             return {}
         }
-        return SPEC.parseCommandSpec(specStr, DANMAKU_SPEC_SCHEMA).opts
+        var opts = SPEC.parseCommandSpec(specStr, DANMAKU_SPEC_SCHEMA).opts
+        if (opts != null) {
+            delete opts._sourceTier
+            delete opts._ownerUuid
+            delete opts.tier
+        }
+        return opts
     }
 
     // 构建 danmaku 子命令节点，所有 executes 分支统一由权限阀 guardExecution 包裹
@@ -2198,9 +2338,16 @@
         }
 
         function handleStop(ctx, v) {
+            var actor   = resolveDanmakuActorTier(ctx.source)
+            var isPlayerTier = (actor.tier === 'player')
+            var ownerNs = isPlayerTier ? ('u:' + (actor.uuid || 'anon')) : ''
             if (v._count === 0) {
                 var p = ctx.source.player
                 if (p == null) return cmdErr(ctx, '控制台或命令方块执行 stop 请指定目标玩家！')
+                if (isPlayerTier) {
+                    deactivatePlayer(p, { key: '*', group: '*', namespace: ownerNs, maxPriority: PLAYER_DANMAKU_LIMITS.maxPriority, tier: 'player' })
+                    return cb.replyOk(ctx, '已停止你发送并显示在你屏幕上的持续弹幕。')
+                }
                 deactivatePlayer(p, '*')
                 return cb.replyOk(ctx, '已停止你屏幕上的持续激活弹幕。')
             }
@@ -2208,33 +2355,56 @@
             var pkt = { action: 'deactivate', key: key, group: key }
             if (v._count >= 3) pkt.fadeOut = v.fadeOut
             if (v._count >= 4) pkt.maxPriority = v.maxPriority
+            if (isPlayerTier) {
+                pkt.tier        = 'player'
+                pkt.namespace   = ownerNs
+                var reqStopPri  = parsePriority(pkt.maxPriority, PLAYER_DANMAKU_LIMITS.maxPriority)
+                pkt.maxPriority = Math.min(reqStopPri, PLAYER_DANMAKU_LIMITS.maxPriority)
+            }
             var cnt = toPlayer(v.targets, pkt)
-            if (v._count === 1) cb.replyOk(ctx, '已停止 ' + cnt + ' 名玩家的持续激活弹幕。')
+            if (v._count === 1) cb.replyOk(ctx, '已停止 ' + cnt + ' 名玩家的' + (isPlayerTier ? '个人命名空间' : '') + '持续激活弹幕。')
             else if (v._count === 2) cb.replyOk(ctx, '已停止 ' + cnt + ' 名玩家的 [' + key + '] 持续弹幕。')
             else if (v._count === 3) cb.replyOk(ctx, '已停止 ' + cnt + ' 名玩家的 [' + key + '] 持续弹幕 (fadeOut=' + v.fadeOut + ')。')
-            else cb.replyOk(ctx, '已停止 ' + cnt + ' 名玩家的 [' + key + '] 持续弹幕 (fadeOut=' + v.fadeOut + ', maxPriority=' + v.maxPriority + ')。')
+            else cb.replyOk(ctx, '已停止 ' + cnt + ' 名玩家的 [' + key + '] 持续弹幕 (fadeOut=' + v.fadeOut + ', maxPriority=' + pkt.maxPriority + ')。')
             return cnt
         }
 
         function handleClear(ctx, v) {
+            var actor   = resolveDanmakuActorTier(ctx.source)
+            var isPlayerTier = (actor.tier === 'player')
+            var ownerNs = isPlayerTier ? ('u:' + (actor.uuid || 'anon')) : ''
             if (v._count === 0) {
                 var p = ctx.source.player
                 if (p == null) return cmdErr(ctx, '控制台或命令方块执行 clear 请指定目标玩家！')
+                if (isPlayerTier) {
+                    clearPlayer(p, { group: '*', namespace: ownerNs, maxPriority: PLAYER_DANMAKU_LIMITS.maxPriority, tier: 'player' })
+                    return cb.replyOk(ctx, '已清空你个人命名空间下的屏幕弹幕。')
+                }
                 clearPlayer(p, '*')
                 return cb.replyOk(ctx, '已清空你屏幕上的所有弹幕。')
             }
             var grp = v._count >= 2 ? v.group : '*'
             var pkt = { action: 'clear', group: grp }
             if (v._count >= 3) pkt.maxPriority = v.maxPriority
+            if (isPlayerTier) {
+                pkt.tier        = 'player'
+                pkt.namespace   = ownerNs
+                var reqClrPri   = parsePriority(pkt.maxPriority, PLAYER_DANMAKU_LIMITS.maxPriority)
+                pkt.maxPriority = Math.min(reqClrPri, PLAYER_DANMAKU_LIMITS.maxPriority)
+            }
             var cnt = toPlayer(v.targets, pkt)
-            if (v._count === 1) cb.replyOk(ctx, '已清空 ' + cnt + ' 名玩家的全部屏幕弹幕。')
+            if (v._count === 1) cb.replyOk(ctx, '已清空 ' + cnt + ' 名玩家的' + (isPlayerTier ? '个人命名空间' : '全部') + '屏幕弹幕。')
             else if (v._count === 2) cb.replyOk(ctx, '已清空 ' + cnt + ' 名玩家的 [' + grp + '] 分组弹幕。')
-            else cb.replyOk(ctx, '已清空 ' + cnt + ' 名玩家的 [' + grp + '] 分组弹幕 (maxPriority=' + v.maxPriority + ')。')
+            else cb.replyOk(ctx, '已清空 ' + cnt + ' 名玩家的 [' + grp + '] 分组弹幕 (maxPriority=' + pkt.maxPriority + ')。')
             return cnt
         }
 
         function handlePlayer(ctx, v) {
-            var opts = parseSpecString(v.spec)
+            var actor = resolveDanmakuActorTier(ctx.source)
+            if (!checkPlayerDanmakuCmdRate(actor)) {
+                return cmdErr(ctx, '弹幕指令发送过快，请稍候重试！')
+            }
+            var opts = applyPlayerDanmakuLimits(parseSpecString(v.spec), actor)
             if (!opts.text && !opts.title) return cmdErr(ctx, '缺少必填的弹幕主文本！')
             var cnt = toPlayer(v.targets, opts)
             cb.replyOk(ctx, '已向 ' + cnt + ' 名玩家发送弹幕: §f' + (opts.text || opts.title))
@@ -2242,21 +2412,31 @@
         }
 
         function handleHere(ctx, v) {
-            var opts = parseSpecString(v.spec)
+            var actor = resolveDanmakuActorTier(ctx.source)
+            if (!checkPlayerDanmakuCmdRate(actor)) {
+                return cmdErr(ctx, '弹幕指令发送过快，请稍候重试！')
+            }
+            var opts = applyPlayerDanmakuLimits(parseSpecString(v.spec), actor)
             if (!opts.text && !opts.title) return cmdErr(ctx, '缺少必填的弹幕主文本！')
             var pos = BASE.readPos(ctx.source.position)
             if (pos == null) return cmdErr(ctx, '无法读取当前指令执行位置！')
-            var cnt = inDimension(ctx.source.level, pos.x, pos.y, pos.z, v.radius, opts)
-            return cb.replyOk(ctx, '已在当前维度半径 ' + v.radius + 'm 内触发弹幕（命中 ' + cnt + ' 名玩家）。')
+            var effRadius = (actor.tier === 'player') ? Math.min(Number(v.radius) || 0, PLAYER_DANMAKU_LIMITS.maxRadius) : v.radius
+            var cnt = inDimension(ctx.source.level, pos.x, pos.y, pos.z, effRadius, opts)
+            return cb.replyOk(ctx, '已在当前维度半径 ' + effRadius + 'm 内触发弹幕（命中 ' + cnt + ' 名玩家）。')
         }
 
         function handlePos(ctx, v) {
+            var actor = resolveDanmakuActorTier(ctx.source)
+            if (!checkPlayerDanmakuCmdRate(actor)) {
+                return cmdErr(ctx, '弹幕指令发送过快，请稍候重试！')
+            }
             var center = BASE.readPos(v.center)
             if (center == null) return cmdErr(ctx, '无法解析目标坐标！')
-            var opts = parseSpecString(v.spec)
+            var opts = applyPlayerDanmakuLimits(parseSpecString(v.spec), actor)
             if (!opts.text && !opts.title) return cmdErr(ctx, '缺少必填的弹幕主文本！')
-            var cnt = inDimension(v.dim, center.x, center.y, center.z, v.radius, opts)
-            return cb.replyOk(ctx, '已在目标维度 (' + center.x.toFixed(1) + ', ' + center.y.toFixed(1) + ', ' + center.z.toFixed(1) + ') 半径 ' + v.radius + 'm 内触发弹幕（命中 ' + cnt + ' 名玩家）。')
+            var effRadius = (actor.tier === 'player') ? Math.min(Number(v.radius) || 0, PLAYER_DANMAKU_LIMITS.maxRadius) : v.radius
+            var cnt = inDimension(v.dim, center.x, center.y, center.z, effRadius, opts)
+            return cb.replyOk(ctx, '已在目标维度 (' + center.x.toFixed(1) + ', ' + center.y.toFixed(1) + ', ' + center.z.toFixed(1) + ') 半径 ' + effRadius + 'm 内触发弹幕（命中 ' + cnt + ' 名玩家）。')
         }
 
         return cb.literal('danmaku', {
@@ -2334,6 +2514,7 @@
                 if (p == null) return
                 var uuid = getPlayerUuidSafe(p)
                 if (uuid && uuid !== 'unknown') {
+                    playerCmdCooldownMap.delete(String(uuid).trim().toLowerCase())
                     var prefix = uuid + '|'
                     playerSourceCooldown.forEach(function (_exp, k) {
                         if (String(k).indexOf(prefix) === 0) {

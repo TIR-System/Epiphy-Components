@@ -51,8 +51,9 @@
 
     // 统一配置常量表（消除散落魔法数）
     var CONFIG = {
-        maxOverlays:           120,
-        lineStepPx:            11,     // 单行步进高度 (px)
+        maxOverlays:                  120,
+        maxPlayerOverlaysPerNamespace: 16,    // 单个玩家指令命名空间 (u:<uuid>) 同屏最多保留条数
+        lineStepPx:                   11,     // 单行步进高度 (px)
         minBlockHeightPx:      10,     // 最小文本块高度 (px)
         defaultWrapScreenPct:  0.86,   // maxWidth=0 时默认折行占屏宽比例
         wrapBucketPx:          8,      // 折行行宽分桶步长 (px)
@@ -2233,12 +2234,16 @@
         if (action === 'clear') {
             var targetGroup = readStr(raw, 'group', '')
             var targetNs    = readStr(raw, 'namespace', readStr(raw, 'ns', ''))
+            var clearTier   = readStr(raw, 'tier', '')
+            var isPlayerClear = (clearTier === 'player' || targetNs.indexOf('u:') === 0)
             var clearMaxPri = parsePriority(readStr(raw, 'maxPriority', readStr(raw, 'priority', '')), 10)
-            if ((!targetGroup || targetGroup === '*' || targetGroup === 'all') && !targetNs && clearMaxPri >= 10) {
+            if (isPlayerClear && clearMaxPri > 3) clearMaxPri = 3
+            if ((!targetGroup || targetGroup === '*' || targetGroup === 'all') && !targetNs && !isPlayerClear && clearMaxPri >= 10) {
                 activeOverlays.length = 0
             } else {
                 for (var i = activeOverlays.length - 1; i >= 0; i--) {
                     var cov    = activeOverlays[i]
+                    if (isPlayerClear && cov.tier !== 'player') continue
                     var grpHit = (!targetGroup || targetGroup === '*' || targetGroup === 'all' || cov.group === targetGroup)
                     var nsHit  = (!targetNs || cov.namespace === targetNs)
                     var covPri = cov.priority != null ? cov.priority : (cov.lifeMode === 'active' ? 5 : 2)
@@ -2255,14 +2260,18 @@
             var targetKey       = readStr(raw, 'key', readStr(raw, 'slotId', readStr(raw, 'slot', readStr(raw, 'id', ''))))
             var stopGroup       = readStr(raw, 'group', '')
             var stopNs          = readStr(raw, 'namespace', readStr(raw, 'ns', ''))
+            var stopTier        = readStr(raw, 'tier', '')
+            var isPlayerStop    = (stopTier === 'player' || stopNs.indexOf('u:') === 0)
             var customFadeTicks = readNum(raw, 'fadeOut', -1)
             var includeOnce     = readBool(raw, 'includeOnce', false)
             var maxStopPriority = parsePriority(readStr(raw, 'maxPriority', readStr(raw, 'priority', '')), 10)
+            if (isPlayerStop && maxStopPriority > 3) maxStopPriority = 3
             var isWildcard      = (targetKey === '*' || targetKey === 'all' || stopGroup === '*' || stopGroup === 'all')
 
             if (isWildcard) {
                 for (var wIdx = activeOverlays.length - 1; wIdx >= 0; wIdx--) {
                     var wOv = activeOverlays[wIdx]
+                    if (isPlayerStop && wOv.tier !== 'player') continue
                     if (!includeOnce && wOv.lifeMode !== 'active') continue
                     if (stopNs && wOv.namespace !== stopNs) continue
                     var wPri = wOv.priority != null ? wOv.priority : (wOv.lifeMode === 'active' ? 5 : 2)
@@ -2276,6 +2285,7 @@
             if (targetKey.length > 0) {
                 for (var kStopIdx = activeOverlays.length - 1; kStopIdx >= 0; kStopIdx--) {
                     var kOv = activeOverlays[kStopIdx]
+                    if (isPlayerStop && kOv.tier !== 'player') continue
                     if (stopNs && kOv.namespace !== stopNs) continue
                     var nsTargetKey = (kOv.namespace && targetKey.indexOf(kOv.namespace + ':') !== 0)
                         ? (kOv.namespace + ':' + targetKey)
@@ -2294,6 +2304,7 @@
             if (stopGroup.length > 0 || stopNs.length > 0) {
                 for (var gStopIdx = activeOverlays.length - 1; gStopIdx >= 0; gStopIdx--) {
                     var gOv = activeOverlays[gStopIdx]
+                    if (isPlayerStop && gOv.tier !== 'player') continue
                     var gMatch = (!stopGroup || gOv.group === stopGroup) && (!stopNs || gOv.namespace === stopNs)
                     if (gMatch) {
                         if (!includeOnce && gOv.lifeMode !== 'active') continue
@@ -2338,6 +2349,8 @@
         var fadeTicks  = readNonNegNum(raw, 'fadeOut', 10, 1)
 
         var namespace    = readStr(raw, 'namespace', readStr(raw, 'ns', ''))
+        var rawTier      = readStr(raw, 'tier', '')
+        var tier         = (rawTier === 'player' || namespace.indexOf('u:') === 0) ? 'player' : 'system'
         var group        = readStr(raw, 'group', 'default')
         var slotId       = readStr(raw, 'slotId', readStr(raw, 'slot', readStr(raw, 'id', '')))
         var posTag       = readStr(raw, 'posTag', 'center')
@@ -2514,6 +2527,7 @@
         activeOverlays.push({
             key:               key,
             slotId:            slotId,
+            tier:              tier,
             namespace:         namespace,
             group:             group,
             lifeMode:          lifeMode,
@@ -2605,13 +2619,43 @@
             }
         }
 
+        if (tier === 'player' && namespace && CONFIG.maxPlayerOverlaysPerNamespace > 0) {
+            var nsCount = 0
+            for (var nIdx = 0; nIdx < activeOverlays.length; nIdx++) {
+                if (activeOverlays[nIdx].tier === 'player' && activeOverlays[nIdx].namespace === namespace) {
+                    nsCount++
+                }
+            }
+            while (nsCount > CONFIG.maxPlayerOverlaysPerNamespace) {
+                var nsDropIdx = -1
+                var nsMinScore = Infinity
+                for (var nChk = 0; nChk < activeOverlays.length; nChk++) {
+                    var nCand = activeOverlays[nChk]
+                    if (nCand.tier === 'player' && nCand.namespace === namespace) {
+                        var nPri = nCand.priority != null ? nCand.priority : (nCand.lifeMode === 'active' ? 5 : 2)
+                        var nSc  = nPri * 10 + (nCand.lifeMode === 'active' ? 5 : 0)
+                        if (nSc < nsMinScore) {
+                            nsMinScore = nSc
+                            nsDropIdx  = nChk
+                        }
+                    }
+                }
+                if (nsDropIdx < 0) break
+                activeOverlays.splice(nsDropIdx, 1)
+                nsCount--
+            }
+        }
+
         while (activeOverlays.length > CONFIG.maxOverlays) {
             var dropIdx  = 0
-            var minScore = (activeOverlays[0].priority != null ? activeOverlays[0].priority : (activeOverlays[0].lifeMode === 'active' ? 5 : 2)) * 10 + (activeOverlays[0].lifeMode === 'active' ? 5 : 0)
+            var ov0      = activeOverlays[0]
+            var tw0      = (ov0.tier === 'player') ? 0 : 100000
+            var minScore = tw0 + (ov0.priority != null ? ov0.priority : (ov0.lifeMode === 'active' ? 5 : 2)) * 10 + (ov0.lifeMode === 'active' ? 5 : 0)
             for (var mIdx = 1; mIdx < activeOverlays.length; mIdx++) {
                 var cand    = activeOverlays[mIdx]
+                var candTw  = (cand.tier === 'player') ? 0 : 100000
                 var candPri = cand.priority != null ? cand.priority : (cand.lifeMode === 'active' ? 5 : 2)
-                var score   = candPri * 10 + (cand.lifeMode === 'active' ? 5 : 0)
+                var score   = candTw + candPri * 10 + (cand.lifeMode === 'active' ? 5 : 0)
                 if (score < minScore) {
                     minScore = score
                     dropIdx  = mIdx

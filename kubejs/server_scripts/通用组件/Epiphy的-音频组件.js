@@ -75,8 +75,12 @@
         defaultOneShotTicks: 20 * 60 * 3,    // 非循环且未给 duration 时的句柄最大兜底保留时长 (3分钟)
         defaultActiveHold:   30,             // lifeMode='active' 心跳续期单次默认维持窗口 (tick)
         anchorGraceTicks:    100,            // 实体锚点因区块卸载暂时丢失后的宽限等待 (tick)
-        maxHandles:          512,            // 全服句柄上限；超出时按优先级淘汰
+        maxHandles:          512,            // 全服句柄上限；超出时按层级与优先级淘汰
+        maxPlayerHandles:    64,             // 非OP授权玩家指令创建句柄的全服总上限
+        maxCreatedHandlesPerPlayer: 8,       // 单名非OP授权玩家通过指令同时存在的句柄上限
         maxHandlesPerPlayer: 12,             // 单名玩家同时收听的句柄上限
+        maxPlayerHandlesPerListener: 8,      // 单名玩家收听槽中允许 player 层级占用的上限（预留 >=4 槽给 system/OP/脚本）
+        playerMaxPriority:   3,              // 非OP授权玩家指令允许的最高优先级
         maxKeyLength:        160,
         listMaxLines:        20,
         errorLogIntervalMs:  5000            // 限频警告日志最小间隔 (ms)
@@ -641,11 +645,30 @@
                 ? (lifetimeTicks != null ? lifetimeTicks : 0)
                 : (durationTicks != null ? durationTicks : CONFIG.defaultOneShotTicks))
 
+        var sourceTier = (spec._sourceTier === 'player') ? 'player' : 'system'
+        var ownerUuid  = (sourceTier === 'player' && spec._ownerUuid != null)
+            ? String(spec._ownerUuid).trim().toLowerCase()
+            : ''
+        if (sourceTier === 'player') {
+            priority = min2(priority, CONFIG.playerMaxPriority)
+            if (autoKey != null && ownerUuid) {
+                var uPrefix = `u:${ownerUuid}:`
+                if (autoKey.indexOf(uPrefix) !== 0) {
+                    autoKey = `${uPrefix}${autoKey}`
+                    if (autoKey.length > CONFIG.maxKeyLength) {
+                        autoKey = autoKey.slice(0, CONFIG.maxKeyLength)
+                    }
+                }
+            }
+        }
+
         return {
             handle: {
                 id:              0,
                 key:             autoKey,
                 explicitKey:     explicitKey != null,
+                sourceTier:      sourceTier,
+                ownerUuid:       ownerUuid,
                 tag:             tagStr,
                 group:           groupStr,
                 priority:        priority,
@@ -917,6 +940,8 @@
             act:    'play',
             ses:    SESSION,
             h:      h.id,
+            tier:   h.sourceTier === 'player' ? 'player' : 'system',
+            pri:    h.priority != null ? h.priority : 2,
             snd:    h.sound,
             cat:    h.category,
             vol:    h.volume,
@@ -1223,9 +1248,42 @@
                 }
                 if (!isPlayerEligible(h, rec, false)) continue
                 var isMergeSibling = (h.conflictMode === 'merge' && findOtherActiveMergeSibling(h, rec.uuid) != null)
-                if (!isMergeSibling && (listenCount.get(rec.uuid) || 0) >= CONFIG.maxHandlesPerPlayer) {
-                    reportWarning('maxHandlesPerPlayer', `玩家 ${rec.name || rec.uuid} 同时收听句柄数已达上限 (${CONFIG.maxHandlesPerPlayer})，已跳过新增音频 #${h.id}`)
-                    continue
+                if (!isMergeSibling) {
+                    var curListen = listenCount.get(rec.uuid) || 0
+                    if (h.sourceTier === 'player') {
+                        var playerTierCount = 0
+                        for (var eh of handles.values()) {
+                            if (eh != null && eh.sourceTier === 'player' && eh.listeners[rec.uuid] && eh.countedListeners && eh.countedListeners[rec.uuid]) {
+                                playerTierCount++
+                            }
+                        }
+                        if (playerTierCount >= CONFIG.maxPlayerHandlesPerListener) {
+                            reportWarning('maxPlayerHandlesPerListener', `玩家 ${rec.name || rec.uuid} 的普通玩家层级收听槽位已达上限 (${CONFIG.maxPlayerHandlesPerListener}/${CONFIG.maxHandlesPerPlayer})，已跳过新增 #${h.id}`)
+                            continue
+                        }
+                        if (curListen >= CONFIG.maxHandlesPerPlayer) {
+                            reportWarning('maxHandlesPerPlayer', `玩家 ${rec.name || rec.uuid} 同时收听句柄数已达上限 (${CONFIG.maxHandlesPerPlayer})，已跳过新增音频 #${h.id}`)
+                            continue
+                        }
+                    } else if (curListen >= CONFIG.maxHandlesPerPlayer) {
+                        var listenerVictim = null
+                        var lvScore = Infinity
+                        for (var vh of handles.values()) {
+                            if (vh != null && vh.sourceTier === 'player' && vh.listeners[rec.uuid] && vh.countedListeners && vh.countedListeners[rec.uuid]) {
+                                var vs = (vh.priority || 2) * 1000000 + (vh.loop ? 500000 : 0) + (vh.bornTick % 500000)
+                                if (vs < lvScore) {
+                                    lvScore = vs
+                                    listenerVictim = vh
+                                }
+                            }
+                        }
+                        if (listenerVictim != null) {
+                            removeListener(listenerVictim, rec.uuid, rec, 'evicted_by_system')
+                        } else {
+                            reportWarning('maxHandlesPerPlayer', `玩家 ${rec.name || rec.uuid} 同时收听句柄数已达上限 (${CONFIG.maxHandlesPerPlayer})，已跳过新增音频 #${h.id}`)
+                            continue
+                        }
+                    }
                 }
                 var joinPkt = null
                 var joinSrc = null
@@ -1523,17 +1581,56 @@
         return true
     }
 
-    var evictLowestPriorityHandle = (incomingPriority) => {
+    var countPlayerHandles = (optOwnerUuid) => {
+        var cnt = 0
+        for (var h of handles.values()) {
+            if (h != null && h.sourceTier === 'player' && (!optOwnerUuid || h.ownerUuid === optOwnerUuid)) {
+                cnt++
+            }
+        }
+        return cnt
+    }
+
+    var evictPlayerHandleVictim = (incomingPriority, optOwnerUuid, allowCrossLoopReplace) => {
         var victim   = null
         var minScore = Infinity
         for (var cand of handles.values()) {
+            if (cand == null || cand.sourceTier !== 'player') continue
+            if (optOwnerUuid && cand.ownerUuid !== optOwnerUuid) continue
             var score = (cand.priority || 2) * 1000000 + (cand.loop ? 500000 : 0) + (cand.bornTick % 500000)
             if (score < minScore) {
                 minScore = score
                 victim   = cand
             }
         }
-        if (victim != null && (!victim.loop || (incomingPriority || 2) >= (victim.priority || 2))) {
+        if (victim == null) return false
+        if (allowCrossLoopReplace || !victim.loop || (incomingPriority || 2) >= (victim.priority || 2)) {
+            return endHandle(victim, 'evicted')
+        }
+        return false
+    }
+
+    var evictLowestPriorityHandle = (incomingPriority, incomingTier) => {
+        if (incomingTier === 'player') {
+            return evictPlayerHandleVictim(incomingPriority, null, false)
+        }
+        var victim   = null
+        var minScore = Infinity
+        for (var cand of handles.values()) {
+            if (cand == null) continue
+            // system 层级优先淘汰 player 层级句柄；同层级内再比较 priority / loop / bornTick
+            var tierWeight = (cand.sourceTier === 'player') ? 0 : 1000000000
+            var score = tierWeight + (cand.priority || 2) * 1000000 + (cand.loop ? 500000 : 0) + (cand.bornTick % 500000)
+            if (score < minScore) {
+                minScore = score
+                victim   = cand
+            }
+        }
+        if (victim == null) return false
+        if (victim.sourceTier === 'player') {
+            return endHandle(victim, 'evicted')
+        }
+        if (!victim.loop || (incomingPriority || 2) >= (victim.priority || 2)) {
             return endHandle(victim, 'evicted')
         }
         return false
@@ -1635,6 +1732,10 @@
             if (h.key != null && keyIndex.has(h.key)) {
                 var old = handles.get(keyIndex.get(h.key))
                 if (old != null) {
+                    if (h.sourceTier === 'player' && old.sourceTier !== 'player') {
+                        reportWarning('play', `玩家指令无权覆盖或续期系统级 key [${h.key}]`)
+                        return 0
+                    }
                     var forceReplace = parseBool(spec.replace != null ? spec.replace : spec.restart, false)
                     if (!forceReplace) {
                         return renewExistingHandle(old, h, spec)
@@ -1643,7 +1744,20 @@
                 }
             }
 
-            if (handles.size >= CONFIG.maxHandles && !evictLowestPriorityHandle(h.priority)) {
+            if (h.sourceTier === 'player') {
+                if (countPlayerHandles(h.ownerUuid) >= CONFIG.maxCreatedHandlesPerPlayer &&
+                    !evictPlayerHandleVictim(h.priority, h.ownerUuid, true)) {
+                    reportWarning('play', `玩家并发音频句柄已达个人上限 (${CONFIG.maxCreatedHandlesPerPlayer}) 且无可淘汰句柄，已忽略: ${h.sound}`)
+                    return 0
+                }
+                if (countPlayerHandles(null) >= CONFIG.maxPlayerHandles &&
+                    !evictPlayerHandleVictim(h.priority, null, false)) {
+                    reportWarning('play', `全服玩家指令音频总池已满 (${CONFIG.maxPlayerHandles})，已忽略: ${h.sound}`)
+                    return 0
+                }
+            }
+
+            if (handles.size >= CONFIG.maxHandles && !evictLowestPriorityHandle(h.priority, h.sourceTier)) {
                 reportWarning('play', `全服句柄已达上限 (${CONFIG.maxHandles}) 且无可淘汰低优先级句柄，已忽略: ${h.sound}`)
                 return 0
             }
@@ -2110,7 +2224,7 @@
         h.listenerAnchorKey = {}
         h.listenerSentPos   = {}
 
-        if (handles.size >= CONFIG.maxHandles && !evictLowestPriorityHandle(h.priority)) {
+        if (handles.size >= CONFIG.maxHandles && !evictLowestPriorityHandle(h.priority, h.sourceTier)) {
             reportWarning('play', `全服句柄已达上限 (${CONFIG.maxHandles}) 且无可淘汰低优先级句柄，已忽略: ${h.sound}`)
             return false
         }
@@ -2630,18 +2744,101 @@
         if (str == null || String(str).trim().length === 0) return { opts: {} }
         var res = SPEC.parseCommandSpec(str, AUDIO_SPEC_SCHEMA)
         if (!res.ok) return { error: res.error }
+        if (res.opts != null) {
+            delete res.opts._sourceTier
+            delete res.opts._ownerUuid
+        }
         return { opts: res.opts }
     }
+
+    var resolveAudioActorTier = (source) => {
+        var valve = (typeof global !== 'undefined') ? global.EpiphyPermissionValve : null
+        if (valve != null && typeof valve.getCommandActorTier === 'function') {
+            return valve.getCommandActorTier(source)
+        }
+        if (source != null) {
+            var pl = (typeof source.getPlayer === 'function') ? source.getPlayer() : source.player
+            if (pl != null) {
+                var isOp = (typeof pl.hasPermissions === 'function' && pl.hasPermissions(2))
+                var u = uuidOf(pl)
+                return {
+                    tier:     isOp ? 'system' : 'player',
+                    isPlayer: true,
+                    isOp:     isOp,
+                    uuid:     u ? String(u).trim().toLowerCase() : '',
+                    name:     nameOf(pl) || '',
+                    player:   pl
+                }
+            }
+        }
+        return { tier: 'system', isPlayer: false, isOp: true, uuid: '', name: '', player: null }
+    }
+
+    var isHandleOwnedByActor = (h, actor) =>
+        Boolean(h != null && h.sourceTier === 'player' && actor != null && actor.uuid && h.ownerUuid === actor.uuid)
 
     var buildAudioCommandNode = (ctxReg) => {
         var cb = BASE.createCommandBuilder(ctxReg, { tag: 'EpiphyAudio' })
 
         var cmdErr = (sourceOrCtx, msg) => cb.replyErr(sourceOrCtx, `${msg} §7(输入 §f/epiphy audio help §7查看语法)`)
 
+        var resolveHandleForActor = (ref, actor) => {
+            if (actor == null || actor.tier !== 'player') return resolveHandle(ref)
+            if (typeof ref === 'string') {
+                var s = ref.trim()
+                if (/^\d+$/.test(s)) {
+                    var byId = resolveHandle(s)
+                    return isHandleOwnedByActor(byId, actor) ? byId : null
+                }
+                var scoped = resolveHandle(`u:${actor.uuid}:${s}`)
+                if (isHandleOwnedByActor(scoped, actor)) return scoped
+                var direct = resolveHandle(s)
+                return isHandleOwnedByActor(direct, actor) ? direct : null
+            }
+            var h = resolveHandle(ref)
+            return isHandleOwnedByActor(h, actor) ? h : null
+        }
+
+        var stopForActorFilter = (actor, players, soundId, fadeOut) => {
+            var sid = null
+            if (soundId != null && String(soundId).trim() !== '' && String(soundId).trim() !== '*') {
+                sid = normalizeSoundId(soundId)
+                if (sid == null) return 0
+            }
+            var col = collectPlayerUuids(players)
+            if (col.count === 0) return 0
+            var fout = parseTicks(fadeOut, true)
+            var snap = snapshotPlayers()
+            var affected = 0
+            for (var h of handles.values()) {
+                if (!isHandleOwnedByActor(h, actor)) continue
+                if (sid != null && h.sound !== sid) continue
+                var touched = false
+                for (var u of Object.keys(col.uuids)) {
+                    h.excluded[u] = true
+                    if (h.listeners[u]) {
+                        removeListener(h, u, snap.byUuid[u] || null, 'excluded', fout)
+                        touched = true
+                    }
+                }
+                if (touched) affected++
+            }
+            return affected
+        }
+
         var runPlayCommand = (source, fields, optionStr) => {
             var parsed = parseOptions(optionStr)
             if (parsed.error) return cmdErr(source, parsed.error)
-            var id = play(withFields(parsed.opts, fields))
+            var merged = withFields(parsed.opts, fields)
+            var actor  = resolveAudioActorTier(source)
+            if (actor.tier === 'player') {
+                merged._sourceTier = 'player'
+                merged._ownerUuid  = actor.uuid
+            } else {
+                merged._sourceTier = 'system'
+                merged._ownerUuid  = ''
+            }
+            var id = play(merged)
             if (id > 0) {
                 var info = get(id)
                 var stateDesc = (info && info.waitingStart)
@@ -2650,7 +2847,7 @@
                 cb.replyOk(source, `§7已调度 §f${fields.sound}§7（句柄 §e#${id}§7，${stateDesc}）`)
                 return 1
             }
-            return cmdErr(source, '播放未生效：参数无效、非循环音频范围内无在线玩家、或句柄池已满')
+            return cmdErr(source, '播放未生效：参数无效、非循环音频范围内无在线玩家、或玩家/全服句柄配额已满')
         }
 
         var soundChain = (prefixArgs, handler) => {
@@ -2715,6 +2912,16 @@
                     ], (ctx, v) => {
                         var parsed = parseOptions(v.options)
                         if (parsed.error) return cmdErr(ctx.source, parsed.error)
+                        var actor = resolveAudioActorTier(ctx.source)
+                        if (actor.tier === 'player') {
+                            var ownH = resolveHandleForActor(v.ref, actor)
+                            if (ownH == null) return cmdErr(ctx.source, `未找到你名下的句柄 [${v.ref}]（普通授权玩家无权修改系统或他人音频）`)
+                            if (parsed.opts.priority != null) {
+                                parsed.opts.priority = min2(parsePriority(parsed.opts.priority, ownH.priority), CONFIG.playerMaxPriority)
+                            }
+                            if (update(ownH.id, parsed.opts)) return cb.replyOk(ctx.source, `§7已实时热更新句柄 [${v.ref}]`)
+                            return cmdErr(ctx.source, `更新句柄 [${v.ref}] 失败`)
+                        }
                         if (update(v.ref, parsed.opts)) return cb.replyOk(ctx.source, `§7已实时热更新句柄 [${v.ref}]`)
                         return cmdErr(ctx.source, `未找到句柄或 key [${v.ref}]`)
                     }]
@@ -2724,7 +2931,26 @@
                         { name: 'ref', type: 'string' },
                         { name: 'fadeOut', type: 'word' }
                     ], (ctx, v) => {
-                        var n = (v._count >= 2) ? stop(v.ref, v.fadeOut) : stop(v.ref)
+                        var actor = resolveAudioActorTier(ctx.source)
+                        var n = 0
+                        if (actor.tier === 'player') {
+                            var rawRef = String(v.ref || '').trim()
+                            var foutP  = (v._count >= 2) ? v.fadeOut : undefined
+                            if (rawRef === '*' || rawRef === 'all') {
+                                n = endMatching((h) => isHandleOwnedByActor(h, actor), foutP)
+                            } else {
+                                var matchedH = resolveHandleForActor(rawRef, actor)
+                                if (matchedH != null) {
+                                    n = endHandle(matchedH, 'stopped', null, parseTicks(foutP, true)) ? 1 : 0
+                                } else {
+                                    var sidP = normalizeSoundId(rawRef)
+                                    n = endMatching((h) => isHandleOwnedByActor(h, actor) && (h.tag === rawRef || h.group === rawRef || (sidP != null && h.sound === sidP)), foutP)
+                                }
+                            }
+                            if (n > 0) return cb.replyOk(ctx.source, `§7已停止你名下匹配 [${v.ref}] 的 ${n} 个音频句柄`)
+                            return cmdErr(ctx.source, `未找到你名下匹配 [${v.ref}] 的活动句柄（无法停止系统或他人音频）`)
+                        }
+                        n = (v._count >= 2) ? stop(v.ref, v.fadeOut) : stop(v.ref)
                         if (n > 0) {
                             var msg = (v._count >= 2)
                                 ? `§7已软停止 [${v.ref}] (fadeOut=${v.fadeOut}, 共 ${n} 个句柄)`
@@ -2736,12 +2962,25 @@
                 }),
                 cb.literal('stopkey', {
                     chain: [[{ name: 'key', type: 'string' }], (ctx, v) => {
+                        var actor = resolveAudioActorTier(ctx.source)
+                        if (actor.tier === 'player') {
+                            var h = resolveHandleForActor(v.key, actor)
+                            if (h != null && endHandle(h, 'stopped')) return cb.replyOk(ctx.source, `§7已停止你名下的 key=${v.key}`)
+                            return cmdErr(ctx.source, `没有找到你名下 key=${v.key} 的句柄`)
+                        }
                         if (stopKey(v.key) > 0) return cb.replyOk(ctx.source, `§7已停止 key=${v.key}`)
                         return cmdErr(ctx.source, `没有找到 key=${v.key} 的句柄`)
                     }]
                 }),
                 cb.literal('stoptag', {
                     chain: [[{ name: 'tag', type: 'string' }], (ctx, v) => {
+                        var actor = resolveAudioActorTier(ctx.source)
+                        if (actor.tier === 'player') {
+                            var t = String(v.tag || '').trim()
+                            var nOwn = endMatching((h) => isHandleOwnedByActor(h, actor) && (t === '*' || t === 'all' || h.tag === t || h.group === t || h.key === t || h.key === `u:${actor.uuid}:${t}`))
+                            cb.replyOk(ctx.source, `§7已停止你名下 tag/group=${v.tag} 的 ${nOwn} 个句柄`)
+                            return nOwn > 0 ? 1 : 0
+                        }
                         var n = stopTag(v.tag)
                         cb.replyOk(ctx.source, `§7已停止 tag/group=${v.tag} 的 ${n} 个句柄`)
                         return n > 0 ? 1 : 0
@@ -2752,6 +2991,18 @@
                         { name: 'sound', type: 'sound' },
                         { name: 'targets', type: 'players' }
                     ], (ctx, v) => {
+                        var actor = resolveAudioActorTier(ctx.source)
+                        if (actor.tier === 'player') {
+                            if (v._count >= 2) {
+                                var nF = stopForActorFilter(actor, v.targets, v.sound)
+                                cb.replyOk(ctx.source, `§7已对你名下句柄在 ${v.targets.length} 名玩家处停止该音频，涉及 ${nF} 个句柄`)
+                                return nF > 0 ? 1 : 0
+                            }
+                            var sidOwn = normalizeSoundId(v.sound)
+                            var nS = sidOwn != null ? endMatching((h) => isHandleOwnedByActor(h, actor) && h.sound === sidOwn) : 0
+                            cb.replyOk(ctx.source, `§7已结束你名下的 ${nS} 个句柄`)
+                            return nS > 0 ? 1 : 0
+                        }
                         var n = (v._count >= 2) ? stopFor(v.targets, v.sound) : stopSound(v.sound)
                         var msg = (v._count >= 2)
                             ? `§7已对 ${v.targets.length} 名玩家停止该音频，涉及 ${n} 个句柄`
@@ -2765,15 +3016,23 @@
                         { name: 'targets', type: 'players' },
                         { name: 'sound', type: 'sound' }
                     ], (ctx, v) => {
-                        var n = stopFor(v.targets, v._count >= 2 ? v.sound : null)
+                        var actor = resolveAudioActorTier(ctx.source)
+                        var n = (actor.tier === 'player')
+                            ? stopForActorFilter(actor, v.targets, v._count >= 2 ? v.sound : null)
+                            : stopFor(v.targets, v._count >= 2 ? v.sound : null)
                         var kind = v._count >= 2 ? '指定音频' : '全部音频'
-                        cb.replyOk(ctx.source, `§7已对 ${v.targets.length} 名玩家停止${kind}，涉及 ${n} 个句柄`)
+                        cb.replyOk(ctx.source, `§7已对 ${v.targets.length} 名玩家停止${actor.tier === 'player' ? '你名下的' : ''}${kind}，涉及 ${n} 个句柄`)
                         return n > 0 ? 1 : 0
                     }, { minArgs: 1 }]
                 }),
                 cb.literal('stopall', {
                     chain: [[{ name: 'fadeOut', type: 'word' }], (ctx, v) => {
+                        var actor = resolveAudioActorTier(ctx.source)
                         var hasFo = v._count >= 1
+                        if (actor.tier === 'player') {
+                            var nOwn = endMatching((h) => isHandleOwnedByActor(h, actor), hasFo ? v.fadeOut : undefined)
+                            return cb.replyOk(ctx.source, `§7已停止你名下全部 ${nOwn} 个活动句柄（未触及系统或他人音频）`)
+                        }
                         var n = hasFo ? stopAll(v.fadeOut) : stopAll()
                         var msg = hasFo
                             ? `§7已软停止全部 ${n} 个活动句柄 (fadeOut=${v.fadeOut})`

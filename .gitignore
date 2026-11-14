@@ -3,4 +3,6 @@ _backup_*/
 probe/
 *.log
 *.tmp
+*.bak
+epiphy-data/
 kubejs/config/epiphy_permissions/

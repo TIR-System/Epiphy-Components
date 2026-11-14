@@ -723,13 +723,18 @@
     }
 
     var evictOldestEntry = () => {
-        var oldest = null
+        var victim   = null
+        var minScore = Infinity
         for (var cand of entries.values()) {
-            if (oldest == null || cand.created < oldest.created) {
-                oldest = cand
+            var tierWeight = (cand.tier === 'player') ? 0 : 1000000000
+            var pri        = (cand.priority != null && isFinite(cand.priority)) ? cand.priority : 2
+            var score      = tierWeight + pri * 1000000 + (cand.created % 1000000)
+            if (victim == null || score < minScore) {
+                minScore = score
+                victim   = cand
             }
         }
-        if (oldest != null) removeEntryNow(oldest.h)
+        if (victim != null) removeEntryNow(victim.h)
     }
 
     var tryStartEntry = (entry, lv, localPlayer) => {
@@ -867,8 +872,12 @@
         var defDuck = loop && (cat === 'RECORDS' || cat === 'MUSIC')
         var outMode = readStr(d, 'omode', loop ? 'mute' : 'stop')
         if (outMode !== 'mute' && outMode !== 'stop') outMode = 'stop'
+        var tierStr = readStr(d, 'tier', 'system')
+        var priRaw  = readNum(d, 'pri', null)
         return {
             snd:     snd,
+            tier:    (tierStr === 'player') ? 'player' : 'system',
+            pri:     (priRaw !== null && isFinite(priRaw)) ? priRaw : 2,
             outMode: outMode,
             cat:     cat,
             vol:     clampNum(readNum(d, 'vol', 1.0), 0.0, 2.0),
@@ -982,6 +991,8 @@
                     }
                     if (stillActive) {
                         cur.spec      = spec
+                        cur.tier      = (spec.tier === 'player') ? 'player' : 'system'
+                        cur.priority  = (spec.pri != null && isFinite(Number(spec.pri))) ? Number(spec.pri) : (cur.priority != null ? cur.priority : 2)
                         cur.fadingOut = false
                         cur.curX      = spec.x
                         cur.curY      = spec.y
@@ -992,7 +1003,7 @@
                 removeEntryNow(h)
             }
             if (entries.size >= CONFIG.maxEntries) {
-                warnOnce('maxEntries', `客户端同时维护的音频句柄已达上限 (${CONFIG.maxEntries})，将淘汰最旧句柄`)
+                warnOnce('maxEntries', `客户端同时维护的音频句柄已达上限 (${CONFIG.maxEntries})，将淘汰最旧低优先级句柄`)
             }
             while (entries.size >= CONFIG.maxEntries) {
                 evictOldestEntry()
@@ -1000,6 +1011,8 @@
             var entry = {
                 h:               h,
                 spec:            spec,
+                tier:            (spec.tier === 'player') ? 'player' : 'system',
+                priority:        (spec.pri != null && isFinite(Number(spec.pri))) ? Number(spec.pri) : 2,
                 catObj:          null,
                 inst:            null,
                 is2D:            false,

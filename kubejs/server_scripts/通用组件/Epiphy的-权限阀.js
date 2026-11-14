@@ -44,10 +44,10 @@
         throw new Error('[EpiphyPermissionValve] 缺少硬依赖 global.EpiphyServerBase，请确认 server_scripts/通用组件/Epiphy的-服务端基础.js 已加载')
     }
 
-    var LOGGER          = BASE.createLogger('EpiphyPermissionValve', 5000)
-    var ROOT_LITERAL    = 'epiphy'
-    var FALLBACK_DIR    = 'kubejs/config/epiphy_permissions'
-    var WORLD_FILE_NAME = 'kubejs_epiphy_permissions.json'
+    var LOGGER                  = BASE.createLogger('EpiphyPermissionValve', 5000)
+    var ROOT_LITERAL            = 'epiphy'
+    var NAMEGRANT_TOKEN_TTL_MS  = 120000 // 2 分钟二次确认有效期
+    var NAMEGRANT_TOKEN_LEN     = 8
 
     var SERVER_REF = null
 
@@ -61,6 +61,13 @@
     var MinecraftServerClass   = loadJavaClass('net.minecraft.server.MinecraftServer')
     var RconConsoleSourceClass = loadJavaClass('net.minecraft.server.rcon.RconConsoleSource')
     var ServerPlayerClass      = loadJavaClass('net.minecraft.server.level.ServerPlayer')
+    var SecureRandomClass      = loadJavaClass('java.security.SecureRandom')
+    var secureRandomInst       = null
+    try {
+        if (SecureRandomClass != null) secureRandomInst = new SecureRandomClass()
+    } catch (eSr) {
+        secureRandomInst = null
+    }
 
     // 注意：Java.loadClass(...) 返回 Rhino NativeJavaClass，需兼容 instanceof 与 __javaObject__.isInstance 校验。
     function isJavaInstance(javaClassWrapper, obj) {
@@ -86,10 +93,11 @@
         auth: true,
         help: true
     }
-    // 按存档隔离的内存缓存：
-    // { '<worldKey>': { loaded: true, filePath: '...', grants: { '<playerKey>': { displayName: '...', scopes: { '<scope>': { by: '...', at: '...' } } } } } }
-    var worldAuthStore       = {}
-    var declarationStack     = []
+    // 按存档隔离的内存缓存（统一存储在 epiphy-data/worlds/<slug>__<shortId>/ 下）
+    var worldAuthStore               = {}
+    var pendingNameGrantTokens       = {} // '<worldKey>|<actorKey>' -> { code, expiresAtMs, createdAtMs }
+    var forkNotifiedWorlds           = {} // '<worldKey>' -> true
+    var declarationStack             = []
     // 已注册的内部调用方白名单：{ '<callerId>': { '<subcmd>': true } }（严禁无参数默认全权 '*'）
     var registeredCallers    = {}
     // 与 registeredCallers 一一对应的不可伪造能力令牌（按引用比对，禁止仅凭字符串触发声明调用）
@@ -141,6 +149,18 @@
             allowAuthorized:      false,
             opLevel:              2,
             allowCommandBlock:    true,
+            allowConsole:         true,
+            allowDeclaredCallers: false,
+            allowedCallers:       null
+        }),
+        strict_op: Object.freeze({
+            mode:                 'strict_op',
+            label:                '仅真实 OP 或控制台（禁止命令方块与脚本代调）',
+            requireCheats:        true,
+            requireOp:            true,
+            allowAuthorized:      false,
+            opLevel:              2,
+            allowCommandBlock:    false,
             allowConsole:         true,
             allowDeclaredCallers: false,
             allowedCallers:       null
@@ -306,7 +326,28 @@
     }
 
     function resolveWorldStorageInfo(server) {
-        return BASE.resolveWorldStorageInfo(server || SERVER_REF, WORLD_FILE_NAME, FALLBACK_DIR)
+        var srv = server || SERVER_REF
+        if (typeof BASE.resolveEpiphyWorldContext === 'function') {
+            var ctx = BASE.resolveEpiphyWorldContext(srv)
+            return {
+                worldKey:        ctx.worldKey,
+                worldId:         ctx.worldId,
+                worldName:       ctx.worldName,
+                slug:            ctx.slug,
+                folderName:      ctx.folderName,
+                worldPath:       ctx.worldPath,
+                worldDataDir:    ctx.worldDataDir,
+                filePath:        ctx.permissionsFile,
+                permissionsFile: ctx.permissionsFile,
+                revocationsFile: ctx.revocationsFile,
+                authModeFile:    ctx.authModeFile,
+                metaFile:        ctx.metaFile,
+                legacyFiles:     ctx.legacyFiles || [],
+                forkNotice:      ctx.forkNotice || null,
+                isWorldRoot:     Boolean(ctx.isWorldBound)
+            }
+        }
+        return BASE.resolveWorldStorageInfo(srv, 'kubejs_epiphy_permissions.json', 'kubejs/config/epiphy_permissions')
     }
 
     function ensureParentDir(filePathStr) {
@@ -317,9 +358,76 @@
         return BASE.readMapField(obj, key)
     }
 
-    // 解析单条用户授权数据（兼容旧版数组格式 ['*'] 与新版带审计信息格式 { displayName, scopes: { '*': { by, at } } }）
+    function readJsonFile(filePath) {
+        if (!filePath) return null
+        if (typeof BASE.readJsonSafe === 'function') {
+            return BASE.readJsonSafe(filePath, LOGGER)
+        }
+        try {
+            if (typeof JsonIO !== 'undefined' && JsonIO != null) {
+                return JsonIO.read(filePath)
+            }
+        } catch (eRead) {
+            logCatch('readJsonFile', eRead)
+        }
+        return null
+    }
+
+    function writeJsonFile(filePath, payload) {
+        if (!filePath) return false
+        if (typeof BASE.writeJsonAtomic === 'function') {
+            return BASE.writeJsonAtomic(filePath, payload, true, LOGGER)
+        }
+        try {
+            if (typeof JsonIO !== 'undefined' && JsonIO != null) {
+                ensureParentDir(filePath)
+                JsonIO.write(filePath, payload)
+                return true
+            }
+        } catch (eWrite) {
+            logCatch('writeJsonFile', eWrite)
+        }
+        return false
+    }
+
+    function isUuidKeyFormat(keyStr) {
+        if (!keyStr) return false
+        var s = String(keyStr).trim()
+        return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s) || /^[0-9a-f]{32}$/i.test(s)
+    }
+
+    function isGrantRecordUuid(rec, uKey) {
+        if (rec != null && rec.keyKind === 'uuid') return true
+        if (rec != null && rec.keyKind === 'name') return false
+        return isUuidKeyFormat(uKey)
+    }
+
+    function parseScopeAuditMeta(val) {
+        if (!val) return null
+        if (val === true) return { by: 'unknown', at: 'unknown', atMs: 0 }
+        if (typeof val === 'object') {
+            var byVal  = readMapField(val, 'by') || readMapField(val, 'grantedBy') || 'unknown'
+            var atVal  = readMapField(val, 'at') || readMapField(val, 'grantedAt') || 'unknown'
+            var rawMs  = readMapField(val, 'atMs')
+            var atMs   = (rawMs != null && isFinite(Number(rawMs)) && Number(rawMs) >= 0) ? Number(rawMs) : 0
+            if (atMs === 0 && typeof atVal === 'string' && atVal !== 'unknown') {
+                var parsedMs = Date.parse(String(atVal).replace(' ', 'T'))
+                if (isFinite(parsedMs) && parsedMs > 0) atMs = parsedMs
+            }
+            return {
+                by:   String(byVal),
+                at:   String(atVal),
+                atMs: atMs
+            }
+        }
+        return null
+    }
+
+    // 解析单条用户授权数据（兼容旧版数组格式 ['*'] 与新版带审计信息格式 { keyKind, displayName, scopes: { '*': { by, at, atMs } } }）
     function parseUserGrantRecord(uKey, rawUserVal) {
+        var inferredKind = isUuidKeyFormat(uKey) ? 'uuid' : 'name'
         var record = {
+            keyKind:     inferredKind,
             displayName: uKey,
             scopes:      {}
         }
@@ -330,18 +438,22 @@
                 var it = rawUserVal.iterator()
                 while (it.hasNext()) {
                     var sc = normalizeScope(it.next())
-                    record.scopes[sc] = { by: 'legacy', at: 'unknown' }
+                    record.scopes[sc] = { by: 'legacy', at: 'unknown', atMs: 0 }
                 }
             } else {
                 for (var i = 0; i < rawUserVal.length; i++) {
                     var sc2 = normalizeScope(rawUserVal[i])
-                    record.scopes[sc2] = { by: 'legacy', at: 'unknown' }
+                    record.scopes[sc2] = { by: 'legacy', at: 'unknown', atMs: 0 }
                 }
             }
             return record
         }
 
         if (typeof rawUserVal === 'object') {
+            var kk = readMapField(rawUserVal, 'keyKind')
+            if (kk === 'uuid' || kk === 'name') {
+                record.keyKind = kk
+            }
             var disp = readMapField(rawUserVal, 'displayName')
             if (disp != null && String(disp).trim().length > 0) {
                 record.displayName = String(disp).trim()
@@ -351,14 +463,14 @@
                 var kit = rawScopesObj.keySet().iterator()
                 while (kit.hasNext()) {
                     var k = String(kit.next())
-                    if (k === 'displayName' || k === 'scopes') continue
+                    if (k === 'displayName' || k === 'scopes' || k === 'keyKind') continue
                     var v = rawScopesObj.get(k)
                     var meta = parseScopeAuditMeta(v)
                     if (meta) record.scopes[normalizeScope(k)] = meta
                 }
             } else {
                 for (var sk in rawScopesObj) {
-                    if (sk === 'displayName' || sk === 'scopes') continue
+                    if (sk === 'displayName' || sk === 'scopes' || sk === 'keyKind') continue
                     var meta2 = parseScopeAuditMeta(rawScopesObj[sk])
                     if (meta2) record.scopes[normalizeScope(sk)] = meta2
                 }
@@ -367,18 +479,183 @@
         return record
     }
 
-    function parseScopeAuditMeta(val) {
-        if (!val) return null
-        if (val === true) return { by: 'unknown', at: 'unknown' }
-        if (typeof val === 'object') {
-            var byVal = readMapField(val, 'by') || readMapField(val, 'grantedBy') || 'unknown'
-            var atVal = readMapField(val, 'at') || readMapField(val, 'grantedAt') || 'unknown'
-            return {
-                by: String(byVal),
-                at: String(atVal)
+    function parseUsersMapInto(rawUsersObj, targetGrants) {
+        if (rawUsersObj == null) return
+        if (typeof rawUsersObj.keySet === 'function') {
+            var ks = rawUsersObj.keySet().iterator()
+            while (ks.hasNext()) {
+                var rawK = String(ks.next())
+                var uKey = normalizeKey(rawK)
+                if (uKey) targetGrants[uKey] = parseUserGrantRecord(uKey, rawUsersObj.get(rawK))
+            }
+        } else if (typeof rawUsersObj === 'object') {
+            for (var uk in rawUsersObj) {
+                var normUk = normalizeKey(uk)
+                if (normUk) targetGrants[normUk] = parseUserGrantRecord(normUk, rawUsersObj[uk])
             }
         }
-        return null
+    }
+
+    function parseRevocationsMap(rawObj) {
+        var out = {}
+        if (rawObj == null || typeof rawObj !== 'object') return out
+        var src = readMapField(rawObj, 'revoked') || rawObj
+        if (src == null || typeof src !== 'object') return out
+        for (var uKey in src) {
+            if (!Object.prototype.hasOwnProperty.call(src, uKey)) continue
+            var normUk = normalizeKey(uKey)
+            var rec = src[uKey]
+            if (!normUk || rec == null || typeof rec !== 'object') continue
+            var cleanScopes = {}
+            var hasAny = false
+            for (var sc in rec) {
+                if (!Object.prototype.hasOwnProperty.call(rec, sc)) continue
+                var scopeKey = normalizeScope(sc)
+                var rawItem = rec[sc]
+                var ts = (typeof rawItem === 'number')
+                    ? rawItem
+                    : (rawItem && typeof rawItem === 'object' ? Number(rawItem.revokedAtMs || rawItem.atMs || 0) : 0)
+                if (isFinite(ts) && ts > 0) {
+                    cleanScopes[scopeKey] = {
+                        revokedAtMs: ts,
+                        revokedAt:   (rawItem && rawItem.revokedAt) ? String(rawItem.revokedAt) : '',
+                        by:          (rawItem && rawItem.by) ? String(rawItem.by) : 'unknown'
+                    }
+                    hasAny = true
+                }
+            }
+            if (hasAny) out[normUk] = cleanScopes
+        }
+        return out
+    }
+
+    function getRevocationMs(revocationsMap, userKey, scope) {
+        if (!revocationsMap || !userKey) return 0
+        var rec = revocationsMap[userKey]
+        if (!rec) return 0
+        var starRec  = rec['*']
+        var scopeRec = (scope && scope !== '*') ? rec[scope] : null
+        var starTs   = starRec ? Number(starRec.revokedAtMs || 0) : 0
+        var scopeTs  = scopeRec ? Number(scopeRec.revokedAtMs || 0) : 0
+        return starTs > scopeTs ? starTs : scopeTs
+    }
+
+    function isGrantSupersededByRevocation(revocationsMap, userKey, scope, grantAtMs) {
+        var revTs = getRevocationMs(revocationsMap, userKey, scope)
+        if (!(revTs > 0)) return false
+        var gTs = (grantAtMs != null && isFinite(Number(grantAtMs))) ? Number(grantAtMs) : 0
+        return gTs <= revTs
+    }
+
+    function pruneGrantsByRevocations(grantsMap, revocationsMap) {
+        var removedCount = 0
+        for (var uKey in grantsMap) {
+            if (!Object.prototype.hasOwnProperty.call(grantsMap, uKey)) continue
+            var rec = grantsMap[uKey]
+            if (!rec || !rec.scopes) continue
+            var remain = 0
+            for (var sc in rec.scopes) {
+                var meta = rec.scopes[sc]
+                if (!meta || isGrantSupersededByRevocation(revocationsMap, uKey, sc, meta.atMs)) {
+                    delete rec.scopes[sc]
+                    removedCount++
+                } else {
+                    remain++
+                }
+            }
+            if (remain === 0) {
+                delete grantsMap[uKey]
+            }
+        }
+        return removedCount
+    }
+
+    function recordRevocationTombstone(revocationsMap, userKey, scope, byLabel, nowMs) {
+        if (!revocationsMap || !userKey) return
+        var sc = normalizeScope(scope)
+        if (!revocationsMap[userKey]) revocationsMap[userKey] = {}
+        revocationsMap[userKey][sc] = {
+            revokedAtMs: nowMs,
+            revokedAt:   formatTimestampNow(),
+            by:          byLabel || 'SYSTEM'
+        }
+    }
+
+    function buildDefaultAuthModePayload(allowBool, updatedBy, updatedAt) {
+        var enabled = (allowBool === true) // Fail-Closed：仅严格布尔 true 开启
+        return {
+            _warning: '【安全警告】开启 allowNameGrant 后，服务器将允许按玩家文本名授权，并在首个同名玩家上线时将其迁入 UUID。在未安装强制登录验证插件（如 AuthMe / EasyAuth）的服务器中，任何人只要最先以该名字上线即可永久冒领并继承全部权限！',
+            _consequences: [
+                '1. allowNameGrant 必须严格等于布尔值 true 才生效（Fail-Closed 原则）；任何字符串/数字/null/缺省均按 false（严格 UUID 模式）处理。',
+                '2. 默认关闭（false）：仅校验玩家 UUID；未迁移的文本名授权记录会保留在 permissions.json 中并处于暂停状态，不自动迁移也不放行。',
+                '3. 若服务器安装并强制“登录前禁止执行指令/禁止行动”的登录密码插件，按名冒领风险可忽略。',
+                '4. 【纯离线服重要警告】若服务器为 online-mode=false 的纯离线服，且既未安装 TrueUUID 类 UUID 修复 Mod、也未安装登录密码插件，则即使保持默认 UUID 模式（allowNameGrant=false）依然不安全（原版离线 UUID 可由用户名直接计算）。'
+            ],
+            allowNameGrant: enabled,
+            mode:           enabled ? 'uuid_with_name_fallback' : 'uuid_only',
+            updatedBy:      updatedBy || 'SYSTEM',
+            updatedAt:      updatedAt || formatTimestampNow()
+        }
+    }
+
+    function parseAuthModeFile(rawObj) {
+        if (rawObj == null || typeof rawObj !== 'object') {
+            return {
+                exists:         false,
+                allowNameGrant: false,
+                updatedBy:      'SYSTEM',
+                updatedAt:      formatTimestampNow()
+            }
+        }
+        // Fail-Closed：只有严格布尔 true 才启用按名字授权备用模式
+        var rawFlag = readMapField(rawObj, 'allowNameGrant')
+        var enabled = (rawFlag === true)
+        var byVal   = readMapField(rawObj, 'updatedBy')
+        var atVal   = readMapField(rawObj, 'updatedAt')
+        return {
+            exists:         true,
+            allowNameGrant: enabled,
+            updatedBy:      byVal ? String(byVal) : 'SYSTEM',
+            updatedAt:      atVal ? String(atVal) : formatTimestampNow()
+        }
+    }
+
+    function isNameGrantEnabled(entry) {
+        return Boolean(entry != null && entry.authMode != null && entry.authMode.allowNameGrant === true)
+    }
+
+    function serializeGrantsPayload(grantsMap) {
+        var outUsers = {}
+        for (var uKey in grantsMap) {
+            if (!Object.prototype.hasOwnProperty.call(grantsMap, uKey)) continue
+            var rec = grantsMap[uKey]
+            if (!rec || !rec.scopes) continue
+            var outScopes = {}
+            var count = 0
+            for (var sc in rec.scopes) {
+                var meta = rec.scopes[sc]
+                if (meta) {
+                    outScopes[sc] = {
+                        by:   String(meta.by || 'unknown'),
+                        at:   String(meta.at || ''),
+                        atMs: Number(meta.atMs || 0)
+                    }
+                    count++
+                }
+            }
+            if (count > 0) {
+                outUsers[uKey] = {
+                    keyKind:     isGrantRecordUuid(rec, uKey) ? 'uuid' : 'name',
+                    displayName: String(rec.displayName || uKey),
+                    scopes:      outScopes
+                }
+            }
+        }
+        return {
+            version:   5,
+            updatedAt: formatTimestampNow(),
+            users:     outUsers
+        }
     }
 
     function getOrLoadWorldGrants(server) {
@@ -387,82 +664,107 @@
         if (entry != null && entry.loaded) {
             return entry
         }
+
+        // 1. 先加载外置撤销墓碑 (revocations.json) —— 绝不随 saves/ 回滚而消失
+        var revocations = {}
+        if (info.revocationsFile) {
+            var rawRev = readJsonFile(info.revocationsFile)
+            if (rawRev != null) {
+                revocations = parseRevocationsMap(rawRev)
+            }
+        }
+
+        // 2. 加载世界按名授权模式开关 (auth_mode.json, Fail-Closed 默认 false，首次缺失则落盘生成带风险说明的默认文件)
+        var rawMode = info.authModeFile ? readJsonFile(info.authModeFile) : null
+        var authMode = parseAuthModeFile(rawMode)
+        if (!authMode.exists && info.authModeFile) {
+            writeJsonFile(info.authModeFile, buildDefaultAuthModePayload(false, 'SYSTEM', authMode.updatedAt))
+        }
+
+        // 3. 加载主授权表 (permissions.json)；若尚未迁移过且存在旧版存档/fallback 文件，执行一次性迁移
         var grants = {}
-        try {
-            if (typeof JsonIO !== 'undefined' && JsonIO != null) {
-                var rawMap = JsonIO.read(info.filePath)
-                if (rawMap != null) {
-                    var usersObj = readMapField(rawMap, 'users')
-                    if (usersObj != null) {
-                        if (typeof usersObj.keySet === 'function') {
-                            var ks = usersObj.keySet().iterator()
-                            while (ks.hasNext()) {
-                                var rawK = String(ks.next())
-                                var uKey = normalizeKey(rawK)
-                                grants[uKey] = parseUserGrantRecord(uKey, usersObj.get(rawK))
-                            }
-                        } else if (typeof usersObj === 'object') {
-                            for (var uk in usersObj) {
-                                var normUk = normalizeKey(uk)
-                                grants[normUk] = parseUserGrantRecord(normUk, usersObj[uk])
-                            }
-                        }
+        var mainRaw = info.filePath ? readJsonFile(info.filePath) : null
+        var needSaveMain = false
+        if (mainRaw != null) {
+            parseUsersMapInto(readMapField(mainRaw, 'users'), grants)
+        } else if (Array.isArray(info.legacyFiles)) {
+            for (var lf = 0; lf < info.legacyFiles.length; lf++) {
+                var legPath = info.legacyFiles[lf]
+                var legRaw = readJsonFile(legPath)
+                if (legRaw != null) {
+                    var legUsers = readMapField(legRaw, 'users')
+                    if (legUsers != null) {
+                        parseUsersMapInto(legUsers, grants)
+                        needSaveMain = true
+                        logWarn('legacyImport', '已从旧位置 "' + legPath + '" 一次性导入授权数据至 "' + info.filePath + '"（受外部撤销墓碑校验保护）。')
+                        break
                     }
                 }
             }
-        } catch (eRead) {
-            logCatch('getOrLoadWorldGrants', eRead)
+        }
+
+        // 4. 用外部撤销墓碑裁剪任何因世界回滚或旧文件导入而复活的撤销授权
+        var pruned = pruneGrantsByRevocations(grants, revocations)
+        if (pruned > 0) {
+            needSaveMain = true
+            logWarn('revocationTombstone', '检测到 ' + pruned + ' 条已撤销授权在存档回滚或旧档导入中尝试复活，已被外部墓碑拦截移除。')
         }
 
         entry = {
-            worldKey: info.worldKey,
-            filePath: info.filePath,
-            loaded:   true,
-            grants:   grants
+            worldKey:        info.worldKey,
+            worldId:         info.worldId || info.worldKey,
+            filePath:        info.filePath,
+            revocationsFile: info.revocationsFile || '',
+            authModeFile:    info.authModeFile || '',
+            ctxInfo:         info,
+            loaded:          true,
+            grants:          grants,
+            revocations:     revocations,
+            authMode:        authMode
         }
         worldAuthStore[info.worldKey] = entry
+
+        if (needSaveMain && info.filePath) {
+            writeJsonFile(info.filePath, serializeGrantsPayload(entry.grants))
+        }
         return entry
     }
 
     function saveWorldGrantsToDisk(server) {
         var entry = getOrLoadWorldGrants(server)
         try {
-            if (typeof JsonIO !== 'undefined' && JsonIO != null) {
-                ensureParentDir(entry.filePath)
-                var outUsers = {}
-                for (var uKey in entry.grants) {
-                    var rec = entry.grants[uKey]
-                    if (!rec || !rec.scopes) continue
-                    var outScopes = {}
-                    var count = 0
-                    for (var sc in rec.scopes) {
-                        var meta = rec.scopes[sc]
-                        if (meta) {
-                            outScopes[sc] = {
-                                by: String(meta.by || 'unknown'),
-                                at: String(meta.at || '')
-                            }
-                            count++
-                        }
-                    }
-                    if (count > 0) {
-                        outUsers[uKey] = {
-                            displayName: String(rec.displayName || uKey),
-                            scopes:      outScopes
-                        }
-                    }
-                }
-                JsonIO.write(entry.filePath, {
-                    version:   4,
-                    updatedAt: formatTimestampNow(),
-                    users:     outUsers
-                })
-                return true
-            }
+            return writeJsonFile(entry.filePath, serializeGrantsPayload(entry.grants))
         } catch (eWrite) {
-            logError('saveWorldGrantsToDisk', '写入存档授权文件失败 (' + entry.filePath + '): ' + eWrite)
+            logError('saveWorldGrantsToDisk', '写入授权文件失败 (' + entry.filePath + '): ' + eWrite)
         }
         return false
+    }
+
+    function saveWorldRevocationsToDisk(server) {
+        var entry = getOrLoadWorldGrants(server)
+        if (!entry.revocationsFile) return false
+        try {
+            return writeJsonFile(entry.revocationsFile, {
+                _description: 'Epiphy 外置授权撤销墓碑（独立于 saves/ 存档目录，防止世界回滚复活已撤销授权）',
+                version:      1,
+                updatedAt:    formatTimestampNow(),
+                revoked:      entry.revocations
+            })
+        } catch (eWrite) {
+            logError('saveWorldRevocationsToDisk', '写入撤销墓碑失败 (' + entry.revocationsFile + '): ' + eWrite)
+        }
+        return false
+    }
+
+    function saveWorldAuthModeToDisk(server) {
+        var entry = getOrLoadWorldGrants(server)
+        if (!entry.authModeFile) return false
+        var payload = buildDefaultAuthModePayload(
+            entry.authMode.allowNameGrant === true,
+            entry.authMode.updatedBy,
+            entry.authMode.updatedAt
+        )
+        return writeJsonFile(entry.authModeFile, payload)
     }
 
     function formatTimestampNow() {
@@ -542,24 +844,42 @@
         return false
     }
 
-    function checkScopeInRecord(rec, targetScope) {
+    function checkScopeInRecord(rec, targetScope, revocationsMap, userKey) {
         if (rec == null || rec.scopes == null) return false
-        if (rec.scopes['*']) return true
-        return Boolean(targetScope && rec.scopes[targetScope])
+        var starMeta = rec.scopes['*']
+        if (starMeta && !isGrantSupersededByRevocation(revocationsMap, userKey, '*', starMeta.atMs)) {
+            return true
+        }
+        if (targetScope) {
+            var scMeta = rec.scopes[targetScope]
+            if (scMeta && !isGrantSupersededByRevocation(revocationsMap, userKey, targetScope, scMeta.atMs)) {
+                return true
+            }
+        }
+        return false
     }
 
-    function migrateNameGrantToUuid(grantsMap, nameKey, uuidKey, currentDisplayName) {
+    function migrateNameGrantToUuid(grantsMap, nameKey, uuidKey, currentDisplayName, revocationsMap) {
         if (!nameKey || !uuidKey || !grantsMap || !grantsMap[nameKey]) return false
         var oldRec = grantsMap[nameKey]
         if (oldRec.scopes) {
             if (!grantsMap[uuidKey]) {
-                grantsMap[uuidKey] = { displayName: currentDisplayName || oldRec.displayName || uuidKey, scopes: {} }
-            } else if (currentDisplayName) {
-                grantsMap[uuidKey].displayName = currentDisplayName
+                grantsMap[uuidKey] = { keyKind: 'uuid', displayName: currentDisplayName || oldRec.displayName || uuidKey, scopes: {} }
+            } else {
+                grantsMap[uuidKey].keyKind = 'uuid'
+                if (currentDisplayName) grantsMap[uuidKey].displayName = currentDisplayName
             }
             for (var sc in oldRec.scopes) {
-                if (oldRec.scopes[sc] && !grantsMap[uuidKey].scopes[sc]) {
-                    grantsMap[uuidKey].scopes[sc] = oldRec.scopes[sc]
+                var meta = oldRec.scopes[sc]
+                if (!meta) continue
+                if (revocationsMap && isGrantSupersededByRevocation(revocationsMap, uuidKey, sc, meta.atMs)) {
+                    continue
+                }
+                if (revocationsMap && isGrantSupersededByRevocation(revocationsMap, nameKey, sc, meta.atMs)) {
+                    continue
+                }
+                if (!grantsMap[uuidKey].scopes[sc]) {
+                    grantsMap[uuidKey].scopes[sc] = meta
                 }
             }
         }
@@ -571,19 +891,26 @@
         if (player == null) return false
         var scope = normalizeScope(subCommandName)
         if (RESERVED_SUBCOMMANDS[scope]) return false
-        var srv     = server || resolveServer(null, player)
-        var entry   = getOrLoadWorldGrants(srv)
-        var rawName = extractPlayerName(player)
-        var nameKey = normalizeKey(rawName)
-        var uuidKey = normalizeKey(extractPlayerUuid(player))
+        var srv        = server || resolveServer(null, player)
+        var entry      = getOrLoadWorldGrants(srv)
+        var rawName    = extractPlayerName(player)
+        var nameKey    = normalizeKey(rawName)
+        var uuidKey    = normalizeKey(extractPlayerUuid(player))
+        var allowName  = isNameGrantEnabled(entry)
 
-        if (uuidKey && nameKey && entry.grants[nameKey]) {
-            if (migrateNameGrantToUuid(entry.grants, nameKey, uuidKey, rawName)) {
+        // 只有明确开启按名字授权备用模式时，才允许从未迁移文本名迁移到首个登录的同名玩家 UUID
+        if (allowName && uuidKey && nameKey && entry.grants[nameKey] && !isGrantRecordUuid(entry.grants[nameKey], nameKey)) {
+            if (migrateNameGrantToUuid(entry.grants, nameKey, uuidKey, rawName, entry.revocations)) {
                 saveWorldGrantsToDisk(srv)
             }
         }
-        if (uuidKey && checkScopeInRecord(entry.grants[uuidKey], scope)) return true
-        if (!uuidKey && nameKey && checkScopeInRecord(entry.grants[nameKey], scope)) return true
+
+        if (uuidKey && checkScopeInRecord(entry.grants[uuidKey], scope, entry.revocations, uuidKey)) {
+            return true
+        }
+        if (allowName && nameKey && checkScopeInRecord(entry.grants[nameKey], scope, entry.revocations, nameKey)) {
+            return true
+        }
         return false
     }
 
@@ -604,33 +931,77 @@
         } catch (e) { }
     }
 
-    function applyGrantToRecord(grantsMap, key, displayName, scope, auditMeta) {
+    function refreshAllOnlineCommandTrees(server) {
+        var srv = server || SERVER_REF
+        if (srv == null) return
+        try {
+            var pList = (typeof srv.getPlayerList === 'function') ? srv.getPlayerList() : srv.playerList
+            if (pList == null || typeof pList.getPlayers !== 'function') return
+            var players = BASE.toJsArray(pList.getPlayers())
+            for (var i = 0; i < players.length; i++) {
+                refreshPlayerCommandTree(srv, players[i])
+            }
+        } catch (e) { }
+    }
+
+    function applyGrantToRecord(grantsMap, key, keyKind, displayName, scope, auditMeta, revocationsMap) {
         if (!key) return
         if (!grantsMap[key]) {
-            grantsMap[key] = { displayName: displayName || key, scopes: {} }
-        } else if (displayName && grantsMap[key].displayName === key) {
-            grantsMap[key].displayName = displayName
+            grantsMap[key] = { keyKind: keyKind, displayName: displayName || key, scopes: {} }
+        } else {
+            if (keyKind === 'uuid') grantsMap[key].keyKind = 'uuid'
+            if (displayName && grantsMap[key].displayName === key) {
+                grantsMap[key].displayName = displayName
+            }
+        }
+        var revTs = getRevocationMs(revocationsMap, key, scope)
+        var finalAtMs = (auditMeta.atMs != null && isFinite(auditMeta.atMs)) ? auditMeta.atMs : Date.now()
+        if (revTs > 0 && finalAtMs <= revTs) {
+            finalAtMs = revTs + 1
         }
         grantsMap[key].scopes[scope] = {
-            by: auditMeta.by,
-            at: auditMeta.at
+            by:   auditMeta.by,
+            at:   auditMeta.at,
+            atMs: finalAtMs
         }
     }
 
     function removeGrantFromRecord(grantsMap, key, scope) {
-        if (!key || !grantsMap[key]) return
+        if (!key || !grantsMap[key]) return false
         if (scope === '*') {
             delete grantsMap[key]
-            return
+            return true
         }
         if (grantsMap[key].scopes) {
+            var existed = Boolean(grantsMap[key].scopes[scope])
             delete grantsMap[key].scopes[scope]
             var remain = 0
             for (var s in grantsMap[key].scopes) {
                 if (grantsMap[key].scopes[s]) remain++
             }
             if (remain === 0) delete grantsMap[key]
+            return existed
         }
+        return false
+    }
+
+    function findOnlinePlayerByName(server, nameStr) {
+        if (!server || !nameStr) return null
+        try {
+            var pList = (typeof server.getPlayerList === 'function') ? server.getPlayerList() : server.playerList
+            if (pList == null) return null
+            if (typeof pList.getPlayerByName === 'function') {
+                return pList.getPlayerByName(String(nameStr).trim())
+            }
+            if (typeof pList.getPlayers === 'function') {
+                var arr = BASE.toJsArray(pList.getPlayers())
+                var targetNorm = normalizeKey(nameStr)
+                for (var i = 0; i < arr.length; i++) {
+                    if (normalizeKey(extractPlayerName(arr[i])) === targetNorm) return arr[i]
+                }
+            }
+        } catch (e) { }
+        return null
     }
 
     function mutatePlayerGrant(server, playerOrName, isGrant, subCommandScope, grantedBySourceOrName) {
@@ -640,27 +1011,63 @@
             logWarn('mutatePlayerGrant', '拒绝修改系统保留作用域 "' + scope + '" 的玩家授权记录。')
             return false
         }
-        var srv   = server || (typeof playerOrName === 'object' ? resolveServer(null, playerOrName) : SERVER_REF)
-        var entry = getOrLoadWorldGrants(srv)
+        var srv    = server || (typeof playerOrName === 'object' ? resolveServer(null, playerOrName) : SERVER_REF)
+        var entry  = getOrLoadWorldGrants(srv)
+        var nowMs  = Date.now()
+        var byLbl  = extractActorLabel(grantedBySourceOrName)
         var auditMeta = isGrant ? {
-            by: extractActorLabel(grantedBySourceOrName),
-            at: formatTimestampNow()
+            by:   byLbl,
+            at:   formatTimestampNow(),
+            atMs: nowMs
         } : null
 
         if (typeof playerOrName === 'string') {
-            var k = normalizeKey(playerOrName)
+            var rawStr = String(playerOrName).trim()
+            var k = normalizeKey(rawStr)
             if (!k) return false
+            var strIsUuid = isUuidKeyFormat(k)
             if (isGrant) {
-                applyGrantToRecord(entry.grants, k, String(playerOrName).trim(), scope, auditMeta)
-            } else {
-                removeGrantFromRecord(entry.grants, k, scope)
-                for (var gk in entry.grants) {
-                    var greq = entry.grants[gk]
-                    if (greq != null && greq.displayName && normalizeKey(greq.displayName) === k) {
-                        removeGrantFromRecord(entry.grants, gk, scope)
+                if (!strIsUuid) {
+                    if (!isNameGrantEnabled(entry)) {
+                        logWarn('mutatePlayerGrant', '默认严格 UUID 模式下禁止新建按玩家名 "' + rawStr + '" 的授权；请传入在线玩家实体、UUID，或在确认风险后启用 /epiphy auth namegrant enable。')
+                        return false
+                    }
+                    // 若目标当前在线且已有 UUID，直接落在其 UUID 上（仍受 allowNameGrant 控制）
+                    var onlineTarget = findOnlinePlayerByName(srv, rawStr)
+                    var onlineUuid   = onlineTarget != null ? normalizeKey(extractPlayerUuid(onlineTarget)) : ''
+                    if (onlineUuid) {
+                        var dispOn = extractPlayerName(onlineTarget) || rawStr
+                        applyGrantToRecord(entry.grants, onlineUuid, 'uuid', dispOn, scope, auditMeta, entry.revocations)
+                        saveWorldGrantsToDisk(srv)
+                        refreshPlayerCommandTree(srv, onlineTarget)
+                        return true
                     }
                 }
+                applyGrantToRecord(entry.grants, k, strIsUuid ? 'uuid' : 'name', rawStr, scope, auditMeta, entry.revocations)
+                saveWorldGrantsToDisk(srv)
+                return true
             }
+
+            // 撤销不受 allowNameGrant 开关限制（可随时清除已暂停的旧文本名或 UUID 授权）
+            recordRevocationTombstone(entry.revocations, k, scope, byLbl, nowMs)
+            removeGrantFromRecord(entry.grants, k, scope)
+            for (var gk in entry.grants) {
+                var greq = entry.grants[gk]
+                if (greq != null && greq.displayName && normalizeKey(greq.displayName) === k) {
+                    recordRevocationTombstone(entry.revocations, gk, scope, byLbl, nowMs)
+                    removeGrantFromRecord(entry.grants, gk, scope)
+                }
+            }
+            var affectedOnline = findOnlinePlayerByName(srv, rawStr)
+            if (affectedOnline != null) {
+                var affUuid = normalizeKey(extractPlayerUuid(affectedOnline))
+                if (affUuid) {
+                    recordRevocationTombstone(entry.revocations, affUuid, scope, byLbl, nowMs)
+                    removeGrantFromRecord(entry.grants, affUuid, scope)
+                }
+                refreshPlayerCommandTree(srv, affectedOnline)
+            }
+            saveWorldRevocationsToDisk(srv)
             saveWorldGrantsToDisk(srv)
             return true
         }
@@ -670,18 +1077,32 @@
         var pUuid   = normalizeKey(extractPlayerUuid(playerOrName))
         if (isGrant) {
             if (pUuid) {
-                if (pName && entry.grants[pName]) {
-                    migrateNameGrantToUuid(entry.grants, pName, pUuid, rawName)
+                if (isNameGrantEnabled(entry) && pName && entry.grants[pName] && !isGrantRecordUuid(entry.grants[pName], pName)) {
+                    migrateNameGrantToUuid(entry.grants, pName, pUuid, rawName, entry.revocations)
                 }
-                applyGrantToRecord(entry.grants, pUuid, rawName || pUuid, scope, auditMeta)
+                applyGrantToRecord(entry.grants, pUuid, 'uuid', rawName || pUuid, scope, auditMeta, entry.revocations)
             } else if (pName) {
-                applyGrantToRecord(entry.grants, pName, rawName, scope, auditMeta)
+                if (!isNameGrantEnabled(entry)) {
+                    logWarn('mutatePlayerGrant', '目标玩家缺少 UUID 且当前未开启按名字授权备用模式，已拒绝授权。')
+                    return false
+                }
+                applyGrantToRecord(entry.grants, pName, 'name', rawName, scope, auditMeta, entry.revocations)
+            } else {
+                return false
             }
+            saveWorldGrantsToDisk(srv)
         } else {
-            removeGrantFromRecord(entry.grants, pName, scope)
-            removeGrantFromRecord(entry.grants, pUuid, scope)
+            if (pUuid) {
+                recordRevocationTombstone(entry.revocations, pUuid, scope, byLbl, nowMs)
+                removeGrantFromRecord(entry.grants, pUuid, scope)
+            }
+            if (pName) {
+                recordRevocationTombstone(entry.revocations, pName, scope, byLbl, nowMs)
+                removeGrantFromRecord(entry.grants, pName, scope)
+            }
+            saveWorldRevocationsToDisk(srv)
+            saveWorldGrantsToDisk(srv)
         }
-        saveWorldGrantsToDisk(srv)
         refreshPlayerCommandTree(srv, playerOrName)
         return true
     }
@@ -691,20 +1112,188 @@
         return mutatePlayerGrant(server, playerOrName, true, subCommandScope, grantedBySourceOrName)
     }
 
-    function revokePlayer(server, playerOrName, subCommandScope) {
-        return mutatePlayerGrant(server, playerOrName, false, subCommandScope, null)
+    function revokePlayer(server, playerOrName, subCommandScope, revokedBySourceOrName) {
+        return mutatePlayerGrant(server, playerOrName, false, subCommandScope, revokedBySourceOrName)
+    }
+
+    function generateConfirmationCode(len) {
+        var digits = '0123456789'
+        var upper  = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+        var lower  = 'abcdefghijklmnopqrstuvwxyz'
+        var all    = digits + upper + lower
+        var targetLen = len || NAMEGRANT_TOKEN_LEN
+        function rndInt(max) {
+            if (secureRandomInst != null && typeof secureRandomInst.nextInt === 'function') {
+                try { return secureRandomInst.nextInt(max) } catch (e) { }
+            }
+            return Math.floor(Math.random() * max)
+        }
+        var chars = [
+            digits.charAt(rndInt(digits.length)),
+            upper.charAt(rndInt(upper.length)),
+            lower.charAt(rndInt(lower.length))
+        ]
+        while (chars.length < targetLen) {
+            chars.push(all.charAt(rndInt(all.length)))
+        }
+        for (var i = chars.length - 1; i > 0; i--) {
+            var j = rndInt(i + 1)
+            var tmp = chars[i]
+            chars[i] = chars[j]
+            chars[j] = tmp
+        }
+        return chars.join('')
+    }
+
+    function resolveConfirmationActorKey(source) {
+        var cls = classifyCommandSource(source)
+        if (cls.kind === 'console') return 'console'
+        if (cls.kind === 'player' && cls.player != null) {
+            var u = normalizeKey(extractPlayerUuid(cls.player))
+            if (u) return 'player:' + u
+            var n = normalizeKey(extractPlayerName(cls.player))
+            if (n) return 'playername:' + n
+        }
+        return ''
+    }
+
+    function isRealAdminOrConsoleSource(source) {
+        if (source == null) return { ok: false, reason: '缺少调用源' }
+        var cls = classifyCommandSource(source)
+        if (cls.kind === 'console') return { ok: true, kind: 'console', player: null }
+        if (cls.kind === 'player' && cls.player != null) {
+            var srv = resolveServer(source, cls.player)
+            if (!isWorldCheatsEnabled(srv, cls.player)) {
+                return { ok: false, reason: '当前存档未开启作弊' }
+            }
+            if (!isPlayerAdmin(srv, cls.player, source, 2)) {
+                return { ok: false, reason: '仅真实管理员 (OP) 或控制台可执行该高危开关操作' }
+            }
+            return { ok: true, kind: 'player', player: cls.player }
+        }
+        return { ok: false, reason: '命令方块、脚本代调及普通已授权玩家禁止修改按名字授权模式' }
+    }
+
+    function requestNameGrantEnable(source) {
+        var gate = isRealAdminOrConsoleSource(source)
+        if (!gate.ok) return { ok: false, error: gate.reason }
+        var srv   = resolveServer(source, gate.player)
+        var entry = getOrLoadWorldGrants(srv)
+        if (isNameGrantEnabled(entry)) {
+            return { ok: false, alreadyEnabled: true, error: '当前世界已处于“按名字授权备用模式”开启状态。' }
+        }
+        var actorKey = resolveConfirmationActorKey(source) || 'console'
+        var nowMs    = Date.now()
+        var code     = generateConfirmationCode(NAMEGRANT_TOKEN_LEN)
+        var tokenKey = entry.worldKey + '|' + actorKey
+        pendingNameGrantTokens[tokenKey] = {
+            worldKey:    entry.worldKey,
+            actorKey:    actorKey,
+            code:        code,
+            createdAtMs: nowMs,
+            expiresAtMs: nowMs + NAMEGRANT_TOKEN_TTL_MS
+        }
+        return {
+            ok:          true,
+            code:        code,
+            ttlSeconds:  Math.round(NAMEGRANT_TOKEN_TTL_MS / 1000),
+            authModeFile: entry.authModeFile
+        }
+    }
+
+    function confirmNameGrantEnable(source, inputCode) {
+        var gate = isRealAdminOrConsoleSource(source)
+        if (!gate.ok) return { ok: false, error: gate.reason }
+        var srv      = resolveServer(source, gate.player)
+        var entry    = getOrLoadWorldGrants(srv)
+        var actorKey = resolveConfirmationActorKey(source) || 'console'
+        var tokenKey = entry.worldKey + '|' + actorKey
+        var pending  = pendingNameGrantTokens[tokenKey]
+        if (!pending) {
+            return { ok: false, error: '没有待确认的开启请求，请先执行 /epiphy auth namegrant enable。' }
+        }
+        var nowMs = Date.now()
+        if (nowMs > pending.expiresAtMs) {
+            delete pendingNameGrantTokens[tokenKey]
+            return { ok: false, expired: true, error: '确认口令已超过 2 分钟有效期，请重新执行 /epiphy auth namegrant enable 获取新口令。' }
+        }
+        var cleanCode = inputCode != null ? String(inputCode).trim() : ''
+        if (cleanCode !== pending.code) {
+            return { ok: false, mismatch: true, error: '确认口令不匹配，请检查大小写后重试（原口令仍在有效期内）。' }
+        }
+        delete pendingNameGrantTokens[tokenKey]
+        entry.authMode.allowNameGrant = true
+        entry.authMode.updatedBy = extractActorLabel(source)
+        entry.authMode.updatedAt = formatTimestampNow()
+        saveWorldAuthModeToDisk(srv)
+
+        // 开启后为当前在线且有待迁移文本名授权的玩家立即迁移并刷新指令树
+        var migrated = 0
+        try {
+            var pList = srv != null ? ((typeof srv.getPlayerList === 'function') ? srv.getPlayerList() : srv.playerList) : null
+            if (pList != null && typeof pList.getPlayers === 'function') {
+                var online = BASE.toJsArray(pList.getPlayers())
+                for (var i = 0; i < online.length; i++) {
+                    var op = online[i]
+                    var rn = extractPlayerName(op)
+                    var nk = normalizeKey(rn)
+                    var uk = normalizeKey(extractPlayerUuid(op))
+                    if (uk && nk && entry.grants[nk] && !isGrantRecordUuid(entry.grants[nk], nk)) {
+                        if (migrateNameGrantToUuid(entry.grants, nk, uk, rn, entry.revocations)) migrated++
+                    }
+                }
+            }
+        } catch (eMig) { }
+        if (migrated > 0) saveWorldGrantsToDisk(srv)
+        refreshAllOnlineCommandTrees(srv)
+        logWarn('nameGrantEnable', entry.authMode.updatedBy + ' 已通过 8 位二次确认启用按名字授权备用模式（世界 ' + entry.worldKey + '，立即迁移在线待生效记录 ' + migrated + ' 条）。')
+        return { ok: true, migratedCount: migrated, authModeFile: entry.authModeFile }
+    }
+
+    function disableNameGrantMode(source) {
+        var gate = isRealAdminOrConsoleSource(source)
+        if (!gate.ok) return { ok: false, error: gate.reason }
+        var srv   = resolveServer(source, gate.player)
+        var entry = getOrLoadWorldGrants(srv)
+        var actorKey = resolveConfirmationActorKey(source) || 'console'
+        delete pendingNameGrantTokens[entry.worldKey + '|' + actorKey]
+        var pausedCount = 0
+        for (var k in entry.grants) {
+            if (!isGrantRecordUuid(entry.grants[k], k)) pausedCount++
+        }
+        entry.authMode.allowNameGrant = false
+        entry.authMode.updatedBy = extractActorLabel(source)
+        entry.authMode.updatedAt = formatTimestampNow()
+        saveWorldAuthModeToDisk(srv)
+        refreshAllOnlineCommandTrees(srv)
+        logWarn('nameGrantDisable', entry.authMode.updatedBy + ' 已关闭按名字授权备用模式（回退默认严格 UUID 模式，保留 ' + pausedCount + ' 条未迁移文本名记录为暂停状态）。')
+        return { ok: true, pausedCount: pausedCount, authModeFile: entry.authModeFile }
+    }
+
+    function reloadWorldAuthFromDisk(server) {
+        var srv = server || SERVER_REF
+        if (typeof BASE.clearEpiphyWorldContextCache === 'function') {
+            BASE.clearEpiphyWorldContextCache()
+        }
+        var info = resolveWorldStorageInfo(srv)
+        delete worldAuthStore[info.worldKey]
+        var reloaded = getOrLoadWorldGrants(srv)
+        refreshAllOnlineCommandTrees(srv)
+        return reloaded
     }
 
     function listGrantedEntries(server) {
-        var entry = getOrLoadWorldGrants(server)
-        var out   = []
+        var entry     = getOrLoadWorldGrants(server)
+        var allowName = isNameGrantEnabled(entry)
+        var out       = []
         for (var k in entry.grants) {
             var rec = entry.grants[k]
             if (!rec || !rec.scopes) continue
-            var items = []
+            var isUuid = isGrantRecordUuid(rec, k)
+            var items  = []
             for (var sc in rec.scopes) {
                 var meta = rec.scopes[sc]
-                if (meta) {
+                if (meta && !isGrantSupersededByRevocation(entry.revocations, k, sc, meta.atMs)) {
                     items.push(sc + ' (by ' + (meta.by || 'unknown') + ' @ ' + (meta.at || 'unknown') + ')')
                 }
             }
@@ -712,7 +1301,8 @@
                 var label = (rec.displayName && normalizeKey(rec.displayName) !== k)
                     ? (rec.displayName + '/' + k)
                     : (rec.displayName || k)
-                out.push(label + ' -> [' + items.join(', ') + ']')
+                var statusBadge = (!isUuid && !allowName) ? ' §8[按名记录-已暂停]' : ''
+                out.push(label + statusBadge + ' -> [' + items.join(', ') + ']')
             }
         }
         return out
@@ -1281,11 +1871,13 @@
                 sendSourceMessage(source, '§3§l----------------------------------------------------')
                 sendSourceMessage(source, '§b§l  [ Epiphy 权限阀核心 // /epiphy auth 帮助手册 ]')
                 sendSourceMessage(source, '§3§l----------------------------------------------------')
-                sendSourceMessage(source, '§e1. 查看授权与作弊状态： §f/epiphy auth list')
-                sendSourceMessage(source, '§e2. 授予玩家全部权限：   §f/epiphy auth grant <玩家>')
+                sendSourceMessage(source, '§e1. 查看授权与模式状态： §f/epiphy auth list | /epiphy auth where | /epiphy auth reload')
+                sendSourceMessage(source, '§e2. 授予玩家全部权限：   §f/epiphy auth grant <玩家> §7(默认按在线 UUID)')
                 sendSourceMessage(source, '§e3. 授予玩家单模块权限： §f/epiphy auth grant <玩家> <模块名(如 danmaku)>')
-                sendSourceMessage(source, '§e4. 撤销玩家全部权限：   §f/epiphy auth revoke <玩家>')
+                sendSourceMessage(source, '§e4. 撤销玩家全部权限：   §f/epiphy auth revoke <玩家> §7(同步写外置撤销墓碑)')
                 sendSourceMessage(source, '§e5. 撤销玩家单模块权限： §f/epiphy auth revoke <玩家> <模块名(如 danmaku)>')
+                sendSourceMessage(source, '§e6. 按名字授权备用模式： §f/epiphy auth namegrant <status|enable|confirm <code>|disable> §7(仅真OP/控制台)')
+                sendSourceMessage(source, '§e7. 文本名/离线授权操作： §f/epiphy auth grantname <名> [作用域] | /epiphy auth revokename <名> [作用域]')
                 sendSourceMessage(source, '§3§l----------------------------------------------------')
                 return 1
             }
@@ -1354,8 +1946,10 @@
         if (!headWord || headWord === 'help') return false
 
         if (headWord === 'auth') {
-            if (!canSeeSubcommand(source, 'auth', POLICY_PRESETS.admin)) {
-                checkSourceOrReject(source, 'auth', POLICY_PRESETS.admin)
+            var subSub = tokens.length >= 3 ? normalizeKey(tokens[2]) : ''
+            var polUse = (subSub === 'namegrant') ? POLICY_PRESETS.strict_op : POLICY_PRESETS.admin
+            if (!canSeeSubcommand(source, 'auth', polUse)) {
+                checkSourceOrReject(source, 'auth', polUse)
                 return true
             }
             return false
@@ -1398,6 +1992,26 @@
         }
     }
 
+    function getCommandActorTier(source) {
+        if (source == null) {
+            return { tier: 'system', isPlayer: false, isOp: true, uuid: '', name: '', player: null }
+        }
+        var cls = classifyCommandSource(source)
+        if (cls.kind === 'player' && cls.player != null) {
+            var srv = resolveServer(source, cls.player)
+            var op  = isPlayerAdmin(srv, cls.player, source, 2)
+            return {
+                tier:     op ? 'system' : 'player',
+                isPlayer: true,
+                isOp:     op,
+                uuid:     normalizeKey(extractPlayerUuid(cls.player)),
+                name:     extractPlayerName(cls.player),
+                player:   cls.player
+            }
+        }
+        return { tier: 'system', isPlayer: false, isOp: true, uuid: '', name: '', player: null }
+    }
+
     var valveApi = {
         ROOT_LITERAL:              ROOT_LITERAL,
         POLICIES:                  POLICY_PRESETS,
@@ -1409,6 +2023,7 @@
         bindDeclaration:           bindDeclaration,
         runDeclaredCommand:        runDeclaredCommand,
         classifyCommandSource:     classifyCommandSource,
+        getCommandActorTier:       getCommandActorTier,
         evaluateSourceAccess:      evaluateSourceAccess,
         checkSourceOrReject:       checkSourceOrReject,
         canSeeSubcommand:          canSeeSubcommand,
@@ -1418,6 +2033,12 @@
         isPlayerAuthorized:        isPlayerAuthorized,
         isPlayerAdmin:             isPlayerAdmin,
         isWorldCheatsEnabled:      isWorldCheatsEnabled,
+        requestNameGrantEnable:    requestNameGrantEnable,
+        confirmNameGrantEnable:    confirmNameGrantEnable,
+        disableNameGrantMode:      disableNameGrantMode,
+        reloadWorldAuthFromDisk:   reloadWorldAuthFromDisk,
+        isNameGrantEnabled:        function (srv) { return isNameGrantEnabled(getOrLoadWorldGrants(srv)) },
+        resolveWorldStorageInfo:   resolveWorldStorageInfo,
         sendHelp:                  sendAggregatedHelp,
         getStats:                  getStats
     }
@@ -1427,15 +2048,35 @@
             try {
                 var p = event != null ? event.player : null
                 if (p == null) return
-                var srv = resolveServer(null, p)
-                var entry = getOrLoadWorldGrants(srv)
+                var srv     = resolveServer(null, p)
+                var entry   = getOrLoadWorldGrants(srv)
                 var rawName = extractPlayerName(p)
                 var nameKey = normalizeKey(rawName)
                 var uuidKey = normalizeKey(extractPlayerUuid(p))
+
+                if (isPlayerAdmin(srv, p, null, 2)) {
+                    var notices = (typeof BASE.consumePendingWorldForkNotices === 'function')
+                        ? BASE.consumePendingWorldForkNotices()
+                        : []
+                    if (notices.length === 0 && entry.ctxInfo != null && entry.ctxInfo.forkNotice != null && !forkNotifiedWorlds[entry.worldKey]) {
+                        notices = [entry.ctxInfo.forkNotice]
+                    }
+                    if (notices.length > 0) {
+                        forkNotifiedWorlds[entry.worldKey] = true
+                        for (var ni = 0; ni < notices.length; ni++) {
+                            var fn = notices[ni]
+                            try {
+                                p.tell(Text.of('§e[Epiphy 数据分叉提示] 检测到当前存档路径已变更，已为新目录自动分叉独立数据：§f' + fn.newFolder))
+                                p.tell(Text.of('§7  原数据保留于 §8' + fn.oldFolder + ' §7（原路径: ' + fn.oldPath + '）；如需清理可自行进入对应文件夹删除。'))
+                            } catch (eTell) { }
+                        }
+                    }
+                }
+
                 if (!uuidKey) return
                 var changed = false
-                if (nameKey && entry.grants[nameKey]) {
-                    changed = migrateNameGrantToUuid(entry.grants, nameKey, uuidKey, rawName)
+                if (isNameGrantEnabled(entry) && nameKey && entry.grants[nameKey] && !isGrantRecordUuid(entry.grants[nameKey], nameKey)) {
+                    changed = migrateNameGrantToUuid(entry.grants, nameKey, uuidKey, rawName, entry.revocations)
                 }
                 if (entry.grants[uuidKey] && rawName && entry.grants[uuidKey].displayName !== rawName) {
                     entry.grants[uuidKey].displayName = rawName
@@ -1464,15 +2105,25 @@
         for (var i = 0; i < playersArr.length; i++) {
             var ok = isGrant
                 ? grantPlayer(srv, playersArr[i], scope, source)
-                : revokePlayer(srv, playersArr[i], scope)
+                : revokePlayer(srv, playersArr[i], scope, source)
             if (ok) cnt++
         }
         var targetLabel = (scope === '*') ? '全部 /epiphy 子命令权限 (*)' : ('[/epiphy ' + scope + '] 权限')
         var msg = isGrant
-            ? ('§a[Epiphy 权限阀] 已授予 ' + cnt + ' 名玩家' + targetLabel + '并记录审计信息。')
-            : ('§e[Epiphy 权限阀] 已撤销 ' + cnt + ' 名玩家的' + targetLabel + '并同步至当前存档。')
+            ? ('§a[Epiphy 权限阀] 已按 UUID 授予 ' + cnt + ' 名在线玩家' + targetLabel + '并记录审计信息。')
+            : ('§e[Epiphy 权限阀] 已撤销 ' + cnt + ' 名玩家的' + targetLabel + '并写入外部撤销墓碑。')
         sendSourceMessage(source, msg)
         return cnt
+    }
+
+    function sendNameGrantRiskSummary(source, entry) {
+        var enabled = isNameGrantEnabled(entry)
+        sendSourceMessage(source, '§b[Epiphy 按名授权备用模式] §7当前状态: ' + (enabled ? '§e已开启 (uuid_with_name_fallback)' : '§a已关闭 (默认严格 uuid_only)') +
+            ' §8(最后修改: ' + (entry.authMode.updatedBy || 'SYSTEM') + ' @ ' + (entry.authMode.updatedAt || 'unknown') + ')')
+        sendSourceMessage(source, '§7  • §e风险提示§7: 开启后允许按玩家文本名预授权并在首次登录时迁入 UUID；在无登录密码插件的服务器中，首个以该名字上线者将永久继承该权限。')
+        sendSourceMessage(source, '§7  • §a密码插件说明§7: 若已安装并强制 AuthMe / EasyAuth 等“未登录禁指令”的密码验证插件，则按名冒领风险可忽略。')
+        sendSourceMessage(source, '§7  • §c纯离线服补充警告§7: 若服务器为 online-mode=false 且既无 TrueUUID 类 UUID 修复、也无登录密码插件，则即使维持默认 UUID 模式也不安全。')
+        sendSourceMessage(source, '§7  • 配置文件: §8' + (entry.authModeFile || '（未挂载）'))
     }
 
     ServerEvents.commandRegistry(function (event) {
@@ -1513,19 +2164,146 @@
                     policy: POLICY_PRESETS.admin,
                     exec: function (ctx) {
                         var srv     = resolveServer(ctx.source, ctx.source.player)
-                        var info    = resolveWorldStorageInfo(srv)
+                        var entry   = getOrLoadWorldGrants(srv)
                         var entries = listGrantedEntries(srv)
                         var cheats  = isWorldCheatsEnabled(srv, ctx.source.player)
-                        sendSourceMessage(ctx.source, '§b[Epiphy 权限阀] §7世界作弊状态: ' + (cheats ? '§a已开启' : '§c未开启') + ' §7| 授权用户数: §e' + entries.length)
-                        sendSourceMessage(ctx.source, '§7当前存档授权文件: §8' + info.filePath)
+                        var modeTag = isNameGrantEnabled(entry) ? '§e按名备用已开启' : '§a严格UUID模式'
+                        sendSourceMessage(ctx.source, '§b[Epiphy 权限阀] §7作弊: ' + (cheats ? '§a开' : '§c关') + ' §7| 模式: ' + modeTag + ' §7| 授权条目: §e' + entries.length)
+                        sendSourceMessage(ctx.source, '§7权限文件: §8' + entry.filePath + ' §7| 墓碑: §8' + (entry.revocationsFile || '无'))
                         for (var eIdx = 0; eIdx < entries.length; eIdx++) {
                             sendSourceMessage(ctx.source, '§7  • §f' + entries[eIdx])
                         }
                         return 1
                     }
                 }),
+                b.literal('where', {
+                    policy: POLICY_PRESETS.admin,
+                    exec: function (ctx) {
+                        var srv  = resolveServer(ctx.source, ctx.source.player)
+                        var info = resolveWorldStorageInfo(srv)
+                        sendSourceMessage(ctx.source, '§b[Epiphy 数据定位] §7worldId=§f' + (info.worldId || info.worldKey) + ' §7| worldName=§f' + info.worldName)
+                        sendSourceMessage(ctx.source, '§7  • 数据目录: §8' + (info.worldDataDir || info.filePath))
+                        sendSourceMessage(ctx.source, '§7  • 授权表: §8' + info.permissionsFile)
+                        sendSourceMessage(ctx.source, '§7  • 撤销墓碑: §8' + info.revocationsFile)
+                        sendSourceMessage(ctx.source, '§7  • 认证开关: §8' + info.authModeFile)
+                        return 1
+                    }
+                }),
+                b.literal('reload', {
+                    policy: POLICY_PRESETS.admin,
+                    exec: function (ctx) {
+                        var srv   = resolveServer(ctx.source, ctx.source.player)
+                        var entry = reloadWorldAuthFromDisk(srv)
+                        var count = Object.keys(entry.grants).length
+                        var modeStr = isNameGrantEnabled(entry) ? '§e按名备用已开启' : '§a严格UUID(默认)'
+                        sendSourceMessage(ctx.source, '§a[Epiphy 权限阀] 已从 epiphy-data 重新加载当前世界权限与开关：授权记录 §f' + count + ' §a条 | 模式 ' + modeStr)
+                        return 1
+                    }
+                }),
                 makeAuthScopeMutator('grant', true),
-                makeAuthScopeMutator('revoke', false)
+                makeAuthScopeMutator('revoke', false),
+                b.literal('grantname', {
+                    chain: [
+                        [{ name: 'targetName', type: 'word' }, { name: 'scope', type: 'word' }],
+                        function (ctx, args) {
+                            var srv   = resolveServer(ctx.source, ctx.source.player)
+                            var scope = normalizeScope(args.scope || '*')
+                            if (RESERVED_SUBCOMMANDS[scope]) {
+                                sendSourceMessage(ctx.source, '§c[Epiphy 权限阀] "' + scope + '" 为系统保留子命令，禁止授权。')
+                                return 0
+                            }
+                            var entry = getOrLoadWorldGrants(srv)
+                            if (!isNameGrantEnabled(entry) && !isUuidKeyFormat(args.targetName)) {
+                                sendSourceMessage(ctx.source, '§c[Epiphy 权限阀] 默认严格 UUID 模式下禁止新建按名字授权；请直接对在线玩家使用 /epiphy auth grant <玩家> [作用域]，或由真实 OP/控制台先开启 /epiphy auth namegrant enable。')
+                                return 0
+                            }
+                            if (grantPlayer(srv, args.targetName, scope, ctx.source)) {
+                                sendSourceMessage(ctx.source, '§a[Epiphy 权限阀] 已写入授权 [' + args.targetName + '] -> [' + scope + ']。')
+                                return 1
+                            }
+                            sendSourceMessage(ctx.source, '§c[Epiphy 权限阀] 写入授权失败，请检查参数或权限模式。')
+                            return 0
+                        },
+                        { minArgs: 1, policy: POLICY_PRESETS.admin }
+                    ]
+                }),
+                b.literal('revokename', {
+                    chain: [
+                        [{ name: 'targetName', type: 'word' }, { name: 'scope', type: 'word' }],
+                        function (ctx, args) {
+                            var srv   = resolveServer(ctx.source, ctx.source.player)
+                            var scope = normalizeScope(args.scope || '*')
+                            if (RESERVED_SUBCOMMANDS[scope]) {
+                                sendSourceMessage(ctx.source, '§c[Epiphy 权限阀] "' + scope + '" 为系统保留子命令。')
+                                return 0
+                            }
+                            if (revokePlayer(srv, args.targetName, scope, ctx.source)) {
+                                sendSourceMessage(ctx.source, '§e[Epiphy 权限阀] 已撤销 [' + args.targetName + '] 的 [' + scope + '] 授权并写入外部撤销墓碑。')
+                                return 1
+                            }
+                            return 0
+                        },
+                        { minArgs: 1, policy: POLICY_PRESETS.admin }
+                    ]
+                }),
+                b.literal('namegrant', {
+                    policy: POLICY_PRESETS.strict_op,
+                    children: [
+                        b.literal('status', {
+                            policy: POLICY_PRESETS.strict_op,
+                            exec: function (ctx) {
+                                var srv   = resolveServer(ctx.source, ctx.source.player)
+                                var entry = getOrLoadWorldGrants(srv)
+                                sendNameGrantRiskSummary(ctx.source, entry)
+                                return 1
+                            }
+                        }),
+                        b.literal('enable', {
+                            policy: POLICY_PRESETS.strict_op,
+                            exec: function (ctx) {
+                                var req = requestNameGrantEnable(ctx.source)
+                                if (!req.ok) {
+                                    sendSourceMessage(ctx.source, '§c[Epiphy 按名授权] ' + req.error)
+                                    return 0
+                                }
+                                sendSourceMessage(ctx.source, '§e§l[安全确认] 即将为当前世界开启“按名字授权备用模式”：')
+                                sendSourceMessage(ctx.source, '§7  1. 在无 TrueUUID 的离线服中，首个以目标文本名上线且完成迁入的玩家将永久继承该权限。')
+                                sendSourceMessage(ctx.source, '§7  2. 若服务器已安装强制登录密码插件（如 AuthMe / EasyAuth 等登录前禁指令），该冒领风险可忽略。')
+                                sendSourceMessage(ctx.source, '§7  3. 若为纯 online-mode=false 离线服且既无 TrueUUID 修复也无密码插件，即使保持默认 UUID 模式亦不安全！')
+                                sendSourceMessage(ctx.source, '§f  请在 §c' + req.ttlSeconds + ' 秒 §f内执行以下命令完成二次确认（区分大小写）：')
+                                sendSourceMessage(ctx.source, '§a  /epiphy auth namegrant confirm §l§e' + req.code)
+                                return 1
+                            }
+                        }),
+                        b.literal('confirm', {
+                            chain: [
+                                [{ name: 'code', type: 'word' }],
+                                function (ctx, args) {
+                                    var res = confirmNameGrantEnable(ctx.source, args.code)
+                                    if (!res.ok) {
+                                        sendSourceMessage(ctx.source, '§c[Epiphy 按名授权] ' + res.error)
+                                        return 0
+                                    }
+                                    sendSourceMessage(ctx.source, '§a[Epiphy 按名授权] 二次确认通过，已开启按名字授权备用模式（已写入 §8' + res.authModeFile + '§a，立即迁移在线记录 ' + res.migratedCount + ' 条）。')
+                                    return 1
+                                },
+                                { minArgs: 1, policy: POLICY_PRESETS.strict_op }
+                            ]
+                        }),
+                        b.literal('disable', {
+                            policy: POLICY_PRESETS.strict_op,
+                            exec: function (ctx) {
+                                var res = disableNameGrantMode(ctx.source)
+                                if (!res.ok) {
+                                    sendSourceMessage(ctx.source, '§c[Epiphy 按名授权] ' + res.error)
+                                    return 0
+                                }
+                                sendSourceMessage(ctx.source, '§a[Epiphy 按名授权] 已关闭备用模式并回退默认严格 UUID 模式（保留 ' + res.pausedCount + ' 条未迁移文本名记录为暂停生效状态，可在 §8' + res.authModeFile + ' §a查看）。')
+                                return 1
+                            }
+                        })
+                    ]
+                })
             ]
         })
 

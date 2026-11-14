@@ -2917,6 +2917,638 @@ test('regressions: Rhino ServerPlayer null-check, WindowsPath string-join + Kube
     assert.strictEqual(rDraws.length, 3, 'late blur fade (>=42%) skips glow and draws 2 diag mist + 1 core = 3 passes')
 })
 
+// ----------------------------------------------------------------------------
+// Helper: Real temp-fs Java NIO / File / KubeJSPaths mock for Pillar 1 & 2 tests
+// ----------------------------------------------------------------------------
+function makeNodeBackedJavaSandbox(gameDir, extraClassResolver) {
+    function NodeJavaFile(p) {
+        this._p = path.resolve(String(p))
+    }
+    NodeJavaFile.prototype.exists = function () { return fs.existsSync(this._p) }
+    NodeJavaFile.prototype.isFile = function () { return fs.existsSync(this._p) && fs.statSync(this._p).isFile() }
+    NodeJavaFile.prototype.isDirectory = function () { return fs.existsSync(this._p) && fs.statSync(this._p).isDirectory() }
+    NodeJavaFile.prototype.mkdirs = function () { fs.mkdirSync(this._p, { recursive: true }); return true }
+    NodeJavaFile.prototype.getParentFile = function () { return new NodeJavaFile(path.dirname(this._p)) }
+    NodeJavaFile.prototype.getName = function () { return path.basename(this._p) }
+    NodeJavaFile.prototype.getPath = function () { return this._p }
+    NodeJavaFile.prototype.getCanonicalPath = function () { return this._p }
+    NodeJavaFile.prototype.getAbsolutePath = function () { return this._p }
+    NodeJavaFile.prototype.delete = function () { if (fs.existsSync(this._p)) fs.unlinkSync(this._p); return true }
+    NodeJavaFile.prototype.renameTo = function (dst) { fs.renameSync(this._p, dst._p); return true }
+    NodeJavaFile.prototype.listFiles = function () {
+        if (!fs.existsSync(this._p)) return []
+        var names = fs.readdirSync(this._p)
+        var out = []
+        for (var i = 0; i < names.length; i++) {
+            out.push(new NodeJavaFile(path.join(this._p, names[i])))
+        }
+        return out
+    }
+
+    var NodeFiles = {
+        exists: function (p) { return fs.existsSync(String(p)) },
+        readString: function (p) { return fs.readFileSync(String(p), 'utf8') },
+        writeString: function (p, content) {
+            fs.mkdirSync(path.dirname(String(p)), { recursive: true })
+            var args = Array.prototype.slice.call(arguments, 3)
+            var isAppend = args.indexOf('APPEND') >= 0
+            if (isAppend) fs.appendFileSync(String(p), String(content), 'utf8')
+            else fs.writeFileSync(String(p), String(content), 'utf8')
+        },
+        copy: function (src, dst) {
+            fs.mkdirSync(path.dirname(String(dst)), { recursive: true })
+            fs.copyFileSync(String(src), String(dst))
+        },
+        move: function (src, dst) {
+            fs.mkdirSync(path.dirname(String(dst)), { recursive: true })
+            fs.renameSync(String(src), String(dst))
+        },
+        createDirectories: function (p) {
+            fs.mkdirSync(String(p), { recursive: true })
+        }
+    }
+
+    var sb = createKubeSandbox(function (clsName) {
+        if (clsName === 'java.io.File') return NodeJavaFile
+        if (clsName === 'java.nio.file.Files') return NodeFiles
+        if (clsName === 'java.nio.file.Paths') return { get: function (s) { return path.resolve(String(s)) } }
+        if (clsName === 'java.nio.charset.StandardCharsets') return { UTF_8: 'utf8' }
+        if (clsName === 'java.nio.file.StandardCopyOption') return { REPLACE_EXISTING: 'REPLACE', ATOMIC_MOVE: 'ATOMIC' }
+        if (clsName === 'java.nio.file.StandardOpenOption') return { CREATE: 'CREATE', APPEND: 'APPEND' }
+        if (clsName === 'net.minecraft.world.level.storage.LevelResource') return { ROOT: 'ROOT' }
+        if (clsName === 'dev.latvian.mods.kubejs.KubeJSPaths') {
+            return {
+                GAMEDIR: gameDir,
+                dir: function (d) { fs.mkdirSync(path.resolve(String(d)), { recursive: true }); return String(d) }
+            }
+        }
+        return extraClassResolver ? extraClassResolver(clsName) : null
+    })
+    sb.JsonIO = {
+        read: function (p) {
+            var rp = path.resolve(String(p))
+            if (!fs.existsSync(rp)) return null
+            return JSON.parse(fs.readFileSync(rp, 'utf8'))
+        },
+        write: function (p, obj) {
+            var rp = path.resolve(String(p))
+            fs.mkdirSync(path.dirname(rp), { recursive: true })
+            fs.writeFileSync(rp, JSON.stringify(obj, null, 2), 'utf8')
+        }
+    }
+    return sb
+}
+
+// ----------------------------------------------------------------------------
+// 26. Pillar 1: epiphy-data skeleton, atomic .tmp+.bak, daily logs & worldId auto-fork
+// ----------------------------------------------------------------------------
+test('epiphy-data: skeleton dirs, atomic write + .bak, daily readable logs & lastWorldPath auto-fork', function () {
+    var os = require('os')
+    var tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'epiphy_p1_'))
+    try {
+        var gameDir = path.join(tmpRoot, 'game')
+        var sb = makeNodeBackedJavaSandbox(gameDir)
+        vm.runInContext(fs.readFileSync(LOG_PATH, 'utf8'), sb, { filename: 'Epiphy的-日志.js' })
+        loadServerBase(sb)
+
+        var Base = sb.global.EpiphyServerBase
+        var Log  = sb.global.EpiphyLog
+        var dataRoot = Base.resolveEpiphyDataRoot()
+        assert.strictEqual(path.resolve(dataRoot), path.resolve(path.join(gameDir, 'epiphy-data')))
+
+        var expectedSubdirs = ['config', 'worlds', 'players', 'events', 'logs', 'presets', 'backups']
+        for (var i = 0; i < expectedSubdirs.length; i++) {
+            var subPath = path.join(dataRoot, expectedSubdirs[i])
+            assert.ok(fs.existsSync(subPath) && fs.statSync(subPath).isDirectory(), 'missing skeleton dir: ' + expectedSubdirs[i])
+        }
+        assert.ok(fs.existsSync(path.join(dataRoot, 'config', 'logging.json')), 'logging.json must be auto-created')
+
+        // Log sink writes daily readable .log files & supports mode change
+        Log.warn('TestMod', 'dailyCheck', 'first-line-log', null, 0)
+        var d = new Date()
+        var p2 = function (n) { return n < 10 ? ('0' + n) : String(n) }
+        var dailyName = d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + '.log'
+        var dailyPath = path.join(dataRoot, 'logs', dailyName)
+        assert.ok(fs.existsSync(dailyPath), 'daily log file must exist: ' + dailyPath)
+        var logContent = fs.readFileSync(dailyPath, 'utf8')
+        assert.ok(logContent.indexOf('[WARN ]') >= 0 && logContent.indexOf('first-line-log') >= 0)
+
+        Log.configureFileSink({ mode: 'single' })
+        Log.info('TestMod', 'singleCheck', 'single-line-log')
+        assert.ok(fs.existsSync(path.join(dataRoot, 'logs', 'epiphy.log')))
+
+        // Atomic write produces .bak on overwrite and leaves zero .tmp
+        var testJson = path.join(dataRoot, 'config', 'atomic_test.json')
+        assert.strictEqual(Base.writeJsonAtomic(testJson, { step: 1 }), true)
+        assert.strictEqual(Base.writeJsonAtomic(testJson, { step: 2 }), true)
+        assert.ok(fs.existsSync(testJson + '.bak'), 'overwrite must preserve .bak backup')
+        assert.strictEqual(fs.existsSync(testJson + '.tmp'), false, 'must leave zero .tmp residue')
+        assert.strictEqual(Base.readJsonSafe(testJson).step, 2)
+        assert.strictEqual(Base.readJsonSafe(testJson + '.bak').step, 1)
+
+        // World identification & lastWorldPath copy auto-fork
+        function makeWorldSrv(worldName, savePath) {
+            return {
+                getWorldData: function () { return { getLevelName: function () { return worldName } } },
+                getWorldPath: function () { return savePath }
+            }
+        }
+        var prodPath = path.join(gameDir, 'saves', 'ProdWorld')
+        var copyPath = path.join(gameDir, 'saves', 'TestCopy')
+        fs.mkdirSync(prodPath, { recursive: true })
+        fs.mkdirSync(copyPath, { recursive: true })
+
+        var ctxProd = Base.resolveEpiphyWorldContext(makeWorldSrv('ProdWorld', prodPath))
+        assert.ok(ctxProd.worldId && ctxProd.folderName.indexOf('ProdWorld__') === 0)
+        assert.ok(fs.existsSync(ctxProd.anchorPath), 'world anchor data/epiphy_world_id.json must exist')
+        assert.ok(fs.existsSync(ctxProd.metaFile), 'external meta.json must exist')
+
+        // Copy world save (carrying same worldId) to another folder path -> must auto-fork!
+        fs.mkdirSync(path.join(copyPath, 'data'), { recursive: true })
+        fs.copyFileSync(ctxProd.anchorPath, path.join(copyPath, 'data', 'epiphy_world_id.json'))
+
+        var ctxCopy = Base.resolveEpiphyWorldContext(makeWorldSrv('ProdWorld', copyPath))
+        assert.notStrictEqual(ctxCopy.worldId, ctxProd.worldId, 'copied save with different path must auto-fork fresh worldId')
+        assert.notStrictEqual(ctxCopy.worldDataDir, ctxProd.worldDataDir, 'forked world must isolate external data folder')
+        assert.ok(ctxCopy.forkNotice != null && ctxCopy.forkNotice.oldFolder.indexOf(ctxProd.folderName) >= 0)
+        assert.strictEqual(Base.consumePendingWorldForkNotices().length, 1)
+    } finally {
+        fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
+})
+
+// ----------------------------------------------------------------------------
+// 27. Pillar 2: external revocations, Fail-Closed auth_mode, 8-char 2-min confirm, pause on disable
+// ----------------------------------------------------------------------------
+test('permissions: external revocation tombstones, Fail-Closed auth_mode & 8-char 2-min confirmation', function () {
+    var os = require('os')
+    var tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'epiphy_p2_'))
+    try {
+        var gameDir = path.join(tmpRoot, 'game')
+        var savePath = path.join(gameDir, 'saves', 'VaultWorld')
+        fs.mkdirSync(savePath, { recursive: true })
+
+        function MockServerPlayer(name, uuid, op) {
+            this.username = name
+            this._uuid = uuid
+            this._op = Boolean(op)
+            this._msgs = []
+        }
+        MockServerPlayer.prototype.getProfile = function () { return { name: this.username, id: this._uuid } }
+        MockServerPlayer.prototype.getStringUUID = function () { return this._uuid }
+        MockServerPlayer.prototype.hasPermissions = function (lv) { return this._op && lv <= 4 }
+        MockServerPlayer.prototype.tell = function (t) { this._msgs.push(typeof t === 'string' ? t : (t && t.string ? t.string : String(t))) }
+        function MockMinecraftServer() {
+            this._players = []
+        }
+        MockMinecraftServer.prototype.getWorldData = function () {
+            return { getLevelName: function () { return 'VaultWorld' }, getAllowCommands: function () { return true } }
+        }
+        MockMinecraftServer.prototype.getWorldPath = function () { return savePath }
+        MockMinecraftServer.prototype.getPlayerList = function () {
+            var self = this
+            return { getPlayers: function () { return self._players }, isOp: function () { return false }, getPlayerByName: function (n) {
+                for (var i = 0; i < self._players.length; i++) if (self._players[i].username === n) return self._players[i]
+                return null
+            } }
+        }
+
+        var loginHandlers = []
+        var fakeNow = 1000000
+        var sb = makeNodeBackedJavaSandbox(gameDir, function (cls) {
+            if (cls === 'net.minecraft.server.MinecraftServer') return MockMinecraftServer
+            if (cls === 'net.minecraft.server.level.ServerPlayer') return MockServerPlayer
+            return null
+        })
+        sb.Date = function () { return new Date(fakeNow) }
+        sb.Date.now = function () { return fakeNow }
+        sb.Date.parse = Date.parse
+        sb.PlayerEvents.loggedIn = function (fn) { loginHandlers.push(fn) }
+
+        var srv = new MockMinecraftServer()
+        var opPlayer    = new MockServerPlayer('RealOP', '00000000-0000-4000-8000-000000000001', true)
+        var alicePlayer = new MockServerPlayer('Alice', '00000000-0000-4000-8000-000000000002', false)
+        var steveFake   = new MockServerPlayer('Steve', '00000000-0000-4000-8000-000000000003', false)
+        srv._players = [opPlayer, alicePlayer]
+
+        // Seed legacy save permission file before loading Valve
+        var legacySavePerm = path.join(savePath, 'kubejs_epiphy_permissions.json')
+        fs.writeFileSync(legacySavePerm, JSON.stringify({
+            version: 4,
+            users: {
+                '00000000-0000-4000-8000-000000000002': {
+                    displayName: 'Alice',
+                    scopes: { danmaku: { by: 'Admin', at: '2026-01-01 00:00:00', atMs: 500000 } }
+                },
+                steve: {
+                    displayName: 'Steve',
+                    scopes: { audio: { by: 'Admin', at: '2026-01-01 00:00:00', atMs: 500000 } }
+                }
+            }
+        }), 'utf8')
+
+        vm.runInContext(fs.readFileSync(LOG_PATH, 'utf8'), sb, { filename: 'Epiphy的-日志.js' })
+        loadServerBase(sb)
+        runScriptIn(sb, VALVE_PATH)
+
+        var Valve = sb.global.EpiphyPermissionValve
+        var info  = Valve.resolveWorldStorageInfo(srv)
+        assert.strictEqual(Valve.isPlayerAuthorized(srv, alicePlayer, 'danmaku'), true, 'UUID legacy import must work')
+        assert.strictEqual(Valve.isNameGrantEnabled(srv), false, 'allowNameGrant must default to false')
+        assert.ok(fs.existsSync(info.authModeFile), 'auth_mode.json with warnings must be auto-created')
+        var rawModeJson = JSON.parse(fs.readFileSync(info.authModeFile, 'utf8'))
+        assert.strictEqual(rawModeJson.allowNameGrant, false)
+        assert.ok(String(rawModeJson._warning).length > 20 && Array.isArray(rawModeJson._consequences))
+
+        // In default UUID-only mode: legacy name grant "steve" must stay paused & never migrate
+        for (var li = 0; li < loginHandlers.length; li++) loginHandlers[li]({ player: steveFake })
+        assert.strictEqual(Valve.isPlayerAuthorized(srv, steveFake, 'audio'), false, 'paused name grant must NOT authorize by default')
+        assert.strictEqual(Valve.grantPlayer(srv, 'OfflineNick', 'danmaku', opPlayer), false, 'cannot create new name grant when disabled')
+
+        // Revoke Alice -> external revocation tombstone blocks world rollback resurrection
+        fakeNow = 1005000
+        assert.strictEqual(Valve.revokePlayer(srv, alicePlayer, 'danmaku', opPlayer), true)
+        assert.strictEqual(Valve.isPlayerAuthorized(srv, alicePlayer, 'danmaku'), false)
+        assert.ok(fs.existsSync(info.revocationsFile), 'revocations.json tombstone must be persisted externally')
+
+        // Simulate save rollback: wipe external permissions.json and restore old permissions with atMs <= revokedAtMs
+        fs.writeFileSync(info.permissionsFile, JSON.stringify({
+            version: 5,
+            users: {
+                '00000000-0000-4000-8000-000000000002': {
+                    keyKind: 'uuid',
+                    displayName: 'Alice',
+                    scopes: { danmaku: { by: 'Rollback', at: '2026-01-01 00:00:00', atMs: 500000 } }
+                },
+                steve: {
+                    keyKind: 'name',
+                    displayName: 'Steve',
+                    scopes: { audio: { by: 'Rollback', at: '2026-01-01 00:00:00', atMs: 500000 } }
+                }
+            }
+        }), 'utf8')
+        Valve.reloadWorldAuthFromDisk(srv)
+        assert.strictEqual(Valve.isPlayerAuthorized(srv, alicePlayer, 'danmaku'), false, 'revocation tombstone must stop rollback resurrection')
+
+        // Name-grant activation: denied for non-OP, denied on wrong/expired token, succeeds for real OP within 2 min
+        var nonOpSrc = { source: alicePlayer, player: alicePlayer, getServer: function () { return srv } }
+        var opSrc    = { source: opPlayer, player: opPlayer, getServer: function () { return srv } }
+        assert.strictEqual(Valve.requestNameGrantEnable(nonOpSrc).ok, false, 'non-OP must never enable name-grant mode')
+
+        var req1 = Valve.requestNameGrantEnable(opSrc)
+        assert.strictEqual(req1.ok, true)
+        assert.ok(/^[0-9A-Za-z]{8}$/.test(req1.code), 'confirmation code must be 8 alphanumeric chars: ' + req1.code)
+        assert.strictEqual(Valve.confirmNameGrantEnable(opSrc, 'WRONG000').ok, false, 'wrong code must fail')
+
+        // Expire (> 120s)
+        fakeNow += 121000
+        assert.strictEqual(Valve.confirmNameGrantEnable(opSrc, req1.code).expired, true, 'expired code must fail')
+
+        // Valid confirm within 2 min
+        var req2 = Valve.requestNameGrantEnable(opSrc)
+        fakeNow += 30000
+        var conf = Valve.confirmNameGrantEnable(opSrc, req2.code)
+        assert.strictEqual(conf.ok, true)
+        assert.strictEqual(Valve.isNameGrantEnabled(srv), true)
+
+        // Now Steve logs in -> paused name grant migrates onto Steve's UUID
+        for (var li2 = 0; li2 < loginHandlers.length; li2++) loginHandlers[li2]({ player: steveFake })
+        assert.strictEqual(Valve.isPlayerAuthorized(srv, steveFake, 'audio'), true)
+
+        // Grant another offline name Bob, then disable mid-session -> Bob stays in JSON paused
+        assert.strictEqual(Valve.grantPlayer(srv, 'BobName', 'danmaku', opSrc), true)
+        var dis = Valve.disableNameGrantMode(opSrc)
+        assert.strictEqual(dis.ok, true)
+        assert.strictEqual(dis.pausedCount >= 1, true)
+        assert.strictEqual(Valve.isNameGrantEnabled(srv), false)
+        var afterDisableJson = JSON.parse(fs.readFileSync(info.permissionsFile, 'utf8'))
+        assert.ok(afterDisableJson.users.bobname, 'unmigrated name record must remain preserved on disk when disabled')
+
+        // Fail-Closed check: string "true" in auth_mode.json must NOT activate
+        fs.writeFileSync(info.authModeFile, JSON.stringify({ allowNameGrant: 'true' }), 'utf8')
+        Valve.reloadWorldAuthFromDisk(srv)
+        assert.strictEqual(Valve.isNameGrantEnabled(srv), false, 'string "true" must fail-closed to false')
+    } finally {
+        fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
+})
+
+// ----------------------------------------------------------------------------
+// 28. Pillar 3A: Audio command isolation (tier, quotas, eviction & listener headroom)
+// ----------------------------------------------------------------------------
+test('audio: authorized player command isolation, quota caps, one-way eviction & listener headroom', function () {
+    function MockMinecraftServer() {}
+    function MockServerPlayer(name, uuid, op) {
+        this.username = name
+        this._uuid = uuid
+        this._op = Boolean(op)
+        this._sent = []
+        this.x = 0; this.y = 64; this.z = 0
+    }
+    MockServerPlayer.prototype.getProfile = function () { return { name: this.username, id: this._uuid } }
+    MockServerPlayer.prototype.getStringUUID = function () { return this._uuid }
+    MockServerPlayer.prototype.hasPermissions = function (lv) { return this._op && lv <= 4 }
+    MockServerPlayer.prototype.sendData = function (ch, pkt) { this._sent.push({ ch: ch, pkt: pkt }) }
+
+    var tickHandlers = []
+    var cmdCallbacks = []
+    var sb = createKubeSandbox(function (cls) {
+        if (cls === 'net.minecraft.server.MinecraftServer') return MockMinecraftServer
+        if (cls === 'net.minecraft.server.level.ServerPlayer') return MockServerPlayer
+        return null
+    })
+    sb.ServerEvents.tick = function (fn) { tickHandlers.push(fn) }
+    sb.ServerEvents.commandRegistry = function (fn) { cmdCallbacks.push(fn) }
+
+    var authPl = new MockServerPlayer('AuthPlayer', '00000000-0000-4000-8000-0000000000aa', false)
+    var listenerPl = new MockServerPlayer('Listener', '00000000-0000-4000-8000-0000000000bb', false)
+    var mockLevel = {
+        dimension: 'minecraft:overworld',
+        players: [authPl, listenerPl],
+        getBlock: function () { return { id: 'minecraft:air' } }
+    }
+    authPl.level = mockLevel
+    listenerPl.level = mockLevel
+    var srv = new MockMinecraftServer()
+    srv.getWorldData = function () { return { getLevelName: function () { return 'AudioIso' }, getAllowCommands: function () { return true } } }
+    srv.getLevel = function () { return mockLevel }
+    srv.getAllLevels = function () { return [mockLevel] }
+    srv.getPlayerList = function () { return { getPlayers: function () { return [authPl, listenerPl] }, getPlayerByName: function (n) { return n === 'AuthPlayer' ? authPl : listenerPl } } }
+    sb.server = srv
+
+    loadServerBase(sb)
+    runScriptIn(sb, VALVE_PATH)
+    runScriptIn(sb, AUDIO_PATH)
+
+    var Valve = sb.global.EpiphyPermissionValve
+    var Audio = sb.global.EpiphyAudio
+    Valve.grantPlayer(srv, authPl, 'audio', 'TestAdmin')
+
+    // Build mock Brigadier root
+    function FakeNode(kind, name) {
+        this._kind = kind; this._name = name; this._children = {}; this._exec = null; this._req = null
+    }
+    FakeNode.prototype.then = function (child) { if (child) this._children[child._name] = child; return this }
+    FakeNode.prototype.executes = function (fn) { this._exec = fn; return this }
+    FakeNode.prototype.requires = function (fn) { this._req = fn; return this }
+    FakeNode.prototype.suggests = function () { return this }
+    var regRoot = null
+    var argValues = {}
+    function makeArgType(defFn) {
+        return {
+            create: function () { return {} },
+            getResult: defFn || function (c, k) { return argValues[k] }
+        }
+    }
+    var regEv = {
+        commands: {
+            literal: function (n) { return new FakeNode('lit', n) },
+            argument: function (n) { return new FakeNode('arg', n) }
+        },
+        arguments: {
+            GREEDY_STRING:     makeArgType(),
+            STRING:            makeArgType(),
+            WORD:              makeArgType(),
+            RESOURCE_LOCATION: makeArgType(),
+            PLAYERS:           makeArgType(),
+            DIMENSION:         makeArgType(function () { return 'minecraft:overworld' }),
+            VEC3:              makeArgType(),
+            ENTITY:            makeArgType()
+        },
+        register: function (r) { regRoot = r }
+    }
+    for (var ci = 0; ci < cmdCallbacks.length; ci++) cmdCallbacks[ci](regEv)
+
+    function stepTicks(n) {
+        for (var k = 0; k < n; k++) {
+            for (var ti = 0; ti < tickHandlers.length; ti++) tickHandlers[ti]({ server: srv })
+        }
+    }
+
+    // System creates high-priority handle keyed 'boss_bgm'
+    var sysId = Audio.play({ sound: 'minecraft:music.dragon', key: 'boss_bgm', audience: 'all', loop: true, priority: 9 })
+    assert.ok(sysId > 0)
+    stepTicks(10)
+
+    var authCtx = { source: { source: authPl, player: authPl, getPlayer: function () { return authPl }, getServer: function () { return srv }, sendSuccess: function () {}, sendFailure: function () {} } }
+    var audioNode = regRoot._children.audio
+
+    // Player tries to play with key='boss_bgm' priority=10 -> must NOT overwrite system key, priority clamped <= 3
+    argValues = { sound: 'minecraft:block.note_block.harp', options: 'loop=true priority=10 key=boss_bgm' }
+    audioNode._children.all._children.sound._children.options._exec(authCtx)
+    stepTicks(5)
+
+    assert.ok(Audio.get(sysId) != null && Audio.get(sysId).sound === 'minecraft:music.dragon', 'system handle must remain intact')
+    var allHandles = Audio.list()
+    assert.strictEqual(allHandles.length, 2)
+    var playerH = allHandles.filter(function (h) { return h.id !== sysId })[0]
+    assert.strictEqual(playerH.priority, 3, 'player handle priority must clamp to <= 3')
+
+    // Player tries stopall, stopkey boss_bgm, stop sysId -> MUST NOT touch system handle!
+    argValues = { key: 'boss_bgm' }
+    audioNode._children.stopkey._children.key._exec(authCtx)
+    assert.ok(Audio.get(sysId) != null, 'player stopkey must not stop system handle')
+    argValues = { ref: String(sysId) }
+    audioNode._children.stop._children.ref._exec(authCtx)
+    assert.ok(Audio.get(sysId) != null, 'player stop <id> must not stop system handle')
+    argValues = {}
+    audioNode._children.stopall._exec(authCtx)
+    assert.ok(Audio.get(sysId) != null, 'player stopall must not stop system handle')
+    assert.strictEqual(Audio.get(playerH.id), null, 'player stopall only stops own player handles')
+
+    // Listener headroom: fill 8 player handles on listenerPl, 9th skipped while system headroom remains!
+    for (var pi = 0; pi < 9; pi++) {
+        argValues = { targets: [listenerPl], sound: 'minecraft:block.note_block.harp', options: 'loop=true priority=3 key=p' + pi }
+        audioNode._children.play._children.targets._children.sound._children.options._exec(authCtx)
+    }
+    stepTicks(5)
+    // Player created handles capped at maxCreatedHandlesPerPlayer (8)
+    var pCreated = Audio.list().filter(function (h) { return h.id !== sysId })
+    assert.strictEqual(pCreated.length, 8, 'single player must be capped at maxCreatedHandlesPerPlayer=8')
+
+    // System adds 5th/etc handles up to listener cap (12) -> system evicts lowest player handle instead of failing!
+    var sysExtraIds = []
+    for (var si = 0; si < 5; si++) {
+        var sid = Audio.play({ sound: 'minecraft:ambient.cave', players: [listenerPl], loop: true, priority: 7, key: 'sys_extra_' + si })
+        assert.ok(sid > 0)
+        sysExtraIds.push(sid)
+    }
+    stepTicks(5)
+    for (var si2 = 0; si2 < sysExtraIds.length; si2++) {
+        assert.ok(Audio.listeners(sysExtraIds[si2]).length === 1, 'system handle must secure listener slot even when player handles filled up to 12')
+    }
+
+    // Client audio evictOldestEntry prefers player tier before system tier
+    var acTick = null
+    var acNet = null
+    var acSb = {
+        console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, tick: function (fn) { acTick = fn } },
+        NetworkEvents: { dataReceived: function (ch, fn) { if (ch === 'epiphy:audio') acNet = fn } },
+        Java: { loadClass: function () { return null } },
+        global: {}
+    }
+    acSb.globalThis = acSb
+    vm.createContext(acSb)
+    loadStartupBase(acSb)
+    runScriptIn(acSb, AUDIO_CLIENT_PATH)
+    var acClient = acSb.global.EpiphyAudioClient
+    acNet({ data: { proto: 5, act: 'play', ses: 's1', h: 1, tier: 'system', pri: 5, snd: 'minecraft:music.dragon', cat: 'MASTER', vol: 1, pit: 1, loop: 1, mode: 'flat', anc: 'none', fin: 0, fout: 20 } })
+    for (var cpi = 2; cpi <= 130; cpi++) {
+        acNet({ data: { proto: 5, act: 'play', ses: 's1', h: cpi, tier: 'player', pri: 3, snd: 'minecraft:block.note_block.harp', cat: 'MASTER', vol: 1, pit: 1, loop: 1, mode: 'flat', anc: 'none', fin: 0, fout: 20 } })
+    }
+    acTick({})
+    assert.strictEqual(acClient.count(), 128, 'client audio entries must respect maxEntries=128')
+    assert.ok(acClient.list().some(function (x) { return x.h === 1 }), 'client audio eviction must keep system handle h=1 over player handles')
+})
+
+// ----------------------------------------------------------------------------
+// 29. Pillar 3B: Danmaku player command clamping, namespace stop/clear lock & client eviction
+// ----------------------------------------------------------------------------
+test('danmaku: non-OP player command clamping, namespace stop/clear isolation & client eviction', function () {
+    function MockMinecraftServer() {}
+    function MockServerPlayer(name, uuid, op) {
+        this.username = name
+        this._uuid = uuid
+        this._op = Boolean(op)
+        this._sent = []
+    }
+    MockServerPlayer.prototype.getProfile = function () { return { name: this.username, id: this._uuid } }
+    MockServerPlayer.prototype.getStringUUID = function () { return this._uuid }
+    MockServerPlayer.prototype.hasPermissions = function (lv) { return this._op && lv <= 4 }
+    MockServerPlayer.prototype.sendData = function (ch, pkt) { this._sent.push({ ch: ch, pkt: pkt }) }
+
+    var cmdCallbacks = []
+    var sb = createKubeSandbox(function (cls) {
+        if (cls === 'net.minecraft.server.MinecraftServer') return MockMinecraftServer
+        if (cls === 'net.minecraft.server.level.ServerPlayer') return MockServerPlayer
+        return null
+    })
+    sb.ServerEvents.commandRegistry = function (fn) { cmdCallbacks.push(fn) }
+
+    var authPl   = new MockServerPlayer('AuthP', '00000000-0000-4000-8000-0000000000cc', false)
+    var targetPl = new MockServerPlayer('TargetP', '00000000-0000-4000-8000-0000000000dd', false)
+    var srv = new MockMinecraftServer()
+    srv.getWorldData = function () { return { getLevelName: function () { return 'DmIso' }, getAllowCommands: function () { return true } } }
+    srv.getPlayerList = function () { return { getPlayers: function () { return [authPl, targetPl] } } }
+    sb.server = srv
+
+    loadServerBase(sb)
+    runScriptIn(sb, VALVE_PATH)
+    runScriptIn(sb, DANMAKU_PATH)
+
+    var Valve = sb.global.EpiphyPermissionValve
+    var Dm    = sb.global.ScreenDanmaku
+    Valve.grantPlayer(srv, authPl, 'danmaku', 'TestAdmin')
+
+    function FakeNode(kind, name) {
+        this._kind = kind; this._name = name; this._children = {}; this._exec = null
+    }
+    FakeNode.prototype.then = function (child) { if (child) this._children[child._name] = child; return this }
+    FakeNode.prototype.executes = function (fn) { this._exec = fn; return this }
+    FakeNode.prototype.requires = function () { return this }
+    FakeNode.prototype.suggests = function () { return this }
+    var regRoot = null
+    var argValues = {}
+    function makeDmArg(defFn) {
+        return {
+            create: function () { return {} },
+            getResult: defFn || function (c, k) { return argValues[k] }
+        }
+    }
+    var regEv = {
+        commands: { literal: function (n) { return new FakeNode('lit', n) }, argument: function (n) { return new FakeNode('arg', n) } },
+        arguments: {
+            GREEDY_STRING:     makeDmArg(),
+            STRING:            makeDmArg(),
+            WORD:              makeDmArg(),
+            PLAYERS:           makeDmArg(),
+            DOUBLE:            makeDmArg(),
+            INTEGER:           makeDmArg(),
+            DIMENSION:         makeDmArg(function () { return 'minecraft:overworld' }),
+            VEC3:              makeDmArg(),
+            RESOURCE_LOCATION: makeDmArg()
+        },
+        register: function (r) { regRoot = r }
+    }
+    for (var ci = 0; ci < cmdCallbacks.length; ci++) cmdCallbacks[ci](regEv)
+
+    var authCtx = { source: { source: authPl, player: authPl, getPlayer: function () { return authPl }, getServer: function () { return srv }, sendSuccess: function () {}, sendFailure: function () {} } }
+    var dmNode  = regRoot._children.danmaku
+
+    // 1. Authorized non-OP tries giant overlay spam
+    var longBody = new Array(160).join('X')
+    argValues = {
+        targets: [targetPl],
+        spec: `text="<scale=99><big>${longBody}\\nL2\\nL3\\nL4" priority=10 size=giant scale=50 maxWidth=9999 wrap=false stay=99999 ns=sys_override`
+    }
+    dmNode._children.player._children.targets._children.spec._exec(authCtx)
+    assert.strictEqual(targetPl._sent.length, 1)
+    var sentPkt = targetPl._sent[0].pkt
+    assert.strictEqual(sentPkt.tier, 'player')
+    assert.strictEqual(sentPkt.namespace, 'u:00000000-0000-4000-8000-0000000000cc')
+    assert.strictEqual(sentPkt.priority, 3)
+    assert.ok(sentPkt.scale <= 2.0 && sentPkt.scale >= 0.5)
+    assert.strictEqual(sentPkt.wrap, true)
+    assert.ok(sentPkt.stay <= 200)
+    assert.ok(sentPkt.title.length <= 120)
+    assert.strictEqual(sentPkt.title.split('\n').length <= 3, true)
+    assert.ok(sentPkt.title.indexOf('<scale=1.5>') >= 0 && sentPkt.title.indexOf('<scale=1.25>') >= 0)
+
+    // 2. Player clear/stop commands force player tier + namespace + maxPriority <= 3
+    targetPl._sent.length = 0
+    argValues = { targets: [targetPl] }
+    dmNode._children.clear._children.targets._exec(authCtx)
+    assert.strictEqual(targetPl._sent[0].pkt.action, 'clear')
+    assert.strictEqual(targetPl._sent[0].pkt.tier, 'player')
+    assert.strictEqual(targetPl._sent[0].pkt.namespace, 'u:00000000-0000-4000-8000-0000000000cc')
+    assert.strictEqual(targetPl._sent[0].pkt.maxPriority, 3)
+
+    // 3. Direct JS API call stays completely unrestricted
+    targetPl._sent.length = 0
+    Dm.toPlayer(targetPl, { text: 'SystemBoss', priority: 10, scale: 4.5, stay: 600, wrap: false })
+    var sysPkt = targetPl._sent[0].pkt
+    assert.strictEqual(sysPkt.tier, 'system')
+    assert.strictEqual(sysPkt.priority, 10)
+    assert.strictEqual(sysPkt.scale, 4)
+
+    // 4. Client renderer: player clear cannot clear system overlay, and overflow evicts player overlays first
+    var rPaints = []
+    var cliSb = {
+        console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function (fn) { rPaints.push(fn) } },
+        NetworkEvents: { dataReceived: function () {} },
+        Java: { loadClass: function () { return null } },
+        Text: { of: function (s) { return { string: String(s), getVisualOrderText: function () { return String(s) } } } },
+        global: {}
+    }
+    cliSb.globalThis = cliSb
+    vm.createContext(cliSb)
+    loadStartupBase(cliSb)
+    runScriptIn(cliSb, RENDERER_PATH)
+    var rCli = cliSb.global.ScreenDanmakuClient
+    var rMockEv = {
+        width: 854, height: 480, level: 'minecraft:overworld',
+        font: { width: function () { return 6 } },
+        text: function () {},
+        graphics: { bufferSource: function () { return { endBatch: function () {} } }, flush: function () {} },
+        getMatrix: function () { return {} },
+        push: function () {}, pop: function () {}, translate: function () {}, scale: function () {}, rotate: function () {}
+    }
+    rCli.push(sysPkt)
+    rCli.push(sentPkt)
+    rCli.push({ action: 'clear', tier: 'player', namespace: sentPkt.namespace, maxPriority: 3, group: '*' })
+    rPaints[0](rMockEv)
+    assert.strictEqual(rCli.count(), 1, 'player clear must leave system overlay alive')
+
+    // Fill 25 player overlays under same u:<uuid> namespace -> capped at 16 (+ 1 system = 17)
+    for (var k = 0; k < 25; k++) {
+        rCli.push({ action: 'push', tier: 'player', namespace: sentPkt.namespace, priority: 2, title: 'Spam_' + k, stay: 200 })
+    }
+    rPaints[0](rMockEv)
+    assert.ok(rCli.count() <= 17, 'per-player namespace must cap overlays while keeping system overlay')
+})
+
 var passed = 0
 for (var i = 0; i < tests.length; i++) {
     var t = tests[i]

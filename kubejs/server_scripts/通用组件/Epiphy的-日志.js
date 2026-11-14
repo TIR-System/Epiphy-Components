@@ -29,6 +29,196 @@
     var onceKeys            = {} // '<key>' -> true
     var debugModules        = {} // '<module>' or '*' -> boolean
 
+    var fileSink = {
+        configured:       false,
+        enabled:          true,
+        mode:             'daily', // 'daily' | 'hourly' | 'single' | 'off'
+        dir:              '',
+        fileExtension:    '.log',
+        includeDebug:     false,
+        writer:           null,
+        maxBufferedLines: 200,
+        buffered:         [],
+        writtenLines:     0,
+        lastFilePath:     '',
+        lastError:        ''
+    }
+
+    var FILE_CLASS   = null
+    var FILES_CLASS  = null
+    var PATHS_CLASS  = null
+    var CHARSET_UTF8 = null
+    var OPEN_OPTS    = null
+    var javaIoProbed = false
+
+    function ensureJavaFileIo() {
+        if (javaIoProbed) return (FILES_CLASS != null && PATHS_CLASS != null)
+        javaIoProbed = true
+        if (typeof Java === 'undefined' || Java == null || typeof Java.loadClass !== 'function') {
+            return false
+        }
+        try {
+            FILE_CLASS   = Java.loadClass('java.io.File')
+            FILES_CLASS  = Java.loadClass('java.nio.file.Files')
+            PATHS_CLASS  = Java.loadClass('java.nio.file.Paths')
+            var stdCs    = Java.loadClass('java.nio.charset.StandardCharsets')
+            CHARSET_UTF8 = stdCs != null ? stdCs.UTF_8 : null
+            var openOpt  = Java.loadClass('java.nio.file.StandardOpenOption')
+            if (openOpt != null) {
+                OPEN_OPTS = [openOpt.CREATE, openOpt.APPEND]
+            }
+        } catch (eJava) {
+            FILES_CLASS = null
+            PATHS_CLASS = null
+        }
+        return (FILES_CLASS != null && PATHS_CLASS != null)
+    }
+
+    function pad2(n) {
+        return n < 10 ? ('0' + n) : String(n)
+    }
+
+    function pad3(n) {
+        if (n < 10) return '00' + n
+        if (n < 100) return '0' + n
+        return String(n)
+    }
+
+    function formatNowParts(dateObj) {
+        var d    = dateObj || new Date()
+        var yyyy = d.getFullYear()
+        var mm   = pad2(d.getMonth() + 1)
+        var dd   = pad2(d.getDate())
+        var hh   = pad2(d.getHours())
+        var mi   = pad2(d.getMinutes())
+        var ss   = pad2(d.getSeconds())
+        var ms   = pad3(d.getMilliseconds())
+        return {
+            dateStr: yyyy + '-' + mm + '-' + dd,
+            hourStr: yyyy + '-' + mm + '-' + dd + '_' + hh,
+            ts:      yyyy + '-' + mm + '-' + dd + ' ' + hh + ':' + mi + ':' + ss + '.' + ms
+        }
+    }
+
+    function sanitizeExtension(ext) {
+        var s = ext != null ? String(ext).trim() : '.log'
+        if (!s) return '.log'
+        if (s.charAt(0) !== '.') s = '.' + s
+        s = s.replace(/[^a-zA-Z0-9._-]+/g, '')
+        return s.length > 1 ? s : '.log'
+    }
+
+    function normalizeMode(raw) {
+        var m = raw != null ? String(raw).trim().toLowerCase() : 'daily'
+        if (m === 'daily' || m === 'hourly' || m === 'single' || m === 'off') return m
+        return 'daily'
+    }
+
+    function resolveTargetLogPath(parts) {
+        if (!fileSink.dir || !fileSink.enabled || fileSink.mode === 'off') return ''
+        var baseDir = String(fileSink.dir).replace(/\\/g, '/').replace(/\/+$/, '')
+        var ext     = fileSink.fileExtension
+        if (fileSink.mode === 'hourly') return baseDir + '/' + parts.hourStr + ext
+        if (fileSink.mode === 'single') return baseDir + '/epiphy' + ext
+        return baseDir + '/' + parts.dateStr + ext
+    }
+
+    function writeLineToDisk(filePath, line) {
+        if (!filePath) return false
+        try {
+            if (typeof fileSink.writer === 'function') {
+                fileSink.writer(filePath, line)
+                fileSink.writtenLines++
+                fileSink.lastFilePath = filePath
+                return true
+            }
+            if (ensureJavaFileIo()) {
+                var p = PATHS_CLASS.get(String(filePath))
+                if (FILE_CLASS != null) {
+                    var jf = new FILE_CLASS(String(filePath))
+                    var parent = jf.getParentFile()
+                    if (parent != null && !parent.exists()) parent.mkdirs()
+                }
+                if (typeof FILES_CLASS.writeString === 'function' && CHARSET_UTF8 != null && OPEN_OPTS != null) {
+                    FILES_CLASS.writeString(p, line, CHARSET_UTF8, OPEN_OPTS[0], OPEN_OPTS[1])
+                    fileSink.writtenLines++
+                    fileSink.lastFilePath = filePath
+                    return true
+                }
+            }
+        } catch (eWrite) {
+            fileSink.lastError = String(eWrite)
+        }
+        return false
+    }
+
+    function formatFileLine(ts, level, text) {
+        var lvl = String(level || 'warn').toUpperCase()
+        while (lvl.length < 5) lvl += ' '
+        return '[' + ts + '] [' + lvl + '] ' + String(text).replace(/[\r\n]+/g, ' | ') + '\n'
+    }
+
+    function recordFileLog(level, text) {
+        if (!fileSink.enabled || fileSink.mode === 'off') return
+        if (level === 'debug' && !fileSink.includeDebug) return
+        var parts = formatNowParts(new Date())
+        if (!fileSink.configured || !fileSink.dir) {
+            if (fileSink.buffered.length < fileSink.maxBufferedLines) {
+                fileSink.buffered.push({ parts: parts, level: level, text: String(text) })
+            }
+            return
+        }
+        var targetPath = resolveTargetLogPath(parts)
+        if (!targetPath) return
+        writeLineToDisk(targetPath, formatFileLine(parts.ts, level, text))
+    }
+
+    function flushBufferedLogs() {
+        if (!fileSink.configured || !fileSink.dir || fileSink.buffered.length === 0) return
+        var pending = fileSink.buffered.slice()
+        fileSink.buffered.length = 0
+        if (!fileSink.enabled || fileSink.mode === 'off') return
+        for (var i = 0; i < pending.length; i++) {
+            var item = pending[i]
+            if (item.level === 'debug' && !fileSink.includeDebug) continue
+            var targetPath = resolveTargetLogPath(item.parts)
+            if (targetPath) {
+                writeLineToDisk(targetPath, formatFileLine(item.parts.ts, item.level, item.text))
+            }
+        }
+    }
+
+    function configureFileSink(cfg) {
+        if (cfg == null || typeof cfg !== 'object') return getFileSinkConfig()
+        if (cfg.enabled !== undefined) fileSink.enabled = Boolean(cfg.enabled)
+        if (cfg.mode !== undefined) fileSink.mode = normalizeMode(cfg.mode)
+        if (cfg.dir !== undefined && cfg.dir != null) {
+            fileSink.dir = String(cfg.dir).replace(/\\/g, '/').replace(/\/+$/, '')
+        }
+        if (cfg.fileExtension !== undefined) fileSink.fileExtension = sanitizeExtension(cfg.fileExtension)
+        if (cfg.includeDebug !== undefined) fileSink.includeDebug = Boolean(cfg.includeDebug)
+        if (typeof cfg.writer === 'function') fileSink.writer = cfg.writer
+        else if (cfg.writer === null) fileSink.writer = null
+        fileSink.configured = true
+        flushBufferedLogs()
+        return getFileSinkConfig()
+    }
+
+    function getFileSinkConfig() {
+        return {
+            configured:    fileSink.configured,
+            enabled:       fileSink.enabled,
+            mode:          fileSink.mode,
+            dir:           fileSink.dir,
+            fileExtension: fileSink.fileExtension,
+            includeDebug:  fileSink.includeDebug,
+            writtenLines:  fileSink.writtenLines,
+            bufferedCount: fileSink.buffered.length,
+            lastFilePath:  fileSink.lastFilePath,
+            lastError:     fileSink.lastError
+        }
+    }
+
     function normKey(s, fallback) {
         if (s == null) return fallback || ''
         var t = String(s).trim()
@@ -47,6 +237,7 @@
                 console.warn(text)
             }
         } catch (e) { }
+        recordFileLog(level, text)
     }
 
     function getPlayerKey(player) {
@@ -216,6 +407,8 @@
         isDebug:             isDebug,
         debug:               debug,
         reset:               reset,
+        configureFileSink:   configureFileSink,
+        getFileSinkConfig:   getFileSinkConfig,
         getStats:            getStats
     }
 
