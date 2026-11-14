@@ -11,68 +11,157 @@
 
 ---
 
-## 工程架构与模块依赖表
+## 工程架构与模块依赖
 
-### 分层架构总览
-
-> 加载优先级约定：`Startup` 优先于 `Server` / `Client`；同一阶段内 `Priority` 数值越高越早加载（如 `1200 -> 1100 -> 1080 -> 1050 -> 1000 -> 950 -> 900 -> 500`）。
-
-| 架构层级 | 运行阶段 | 核心成员模块 | 核心职责与边界 | 向上/向下交互方式 |
-| :--- | :--- | :--- | :--- | :--- |
-| **第 1 层 · 跨端契约与注册层** | `Startup` | `Epiphy的-Spec与通用工具.js`、`创造模式栏-epiphy.js`、物品/方块注册脚本 | 提供双端共享协议常量、纯参数解析器、几何算法，以及物品/方块/创造栏注册 | 暴露 `global.EpiphySpec`、`EpiphyProtocol`、`EpiphyCreativeTab` 供双端消费 |
-| **第 2 层 · 服务端基础设施层** | `Server` | `日志`、`服务端基础`、`方块追踪组件`、`权限阀`、`调试组件`、`基础bug修复` | 承接日志限频、Java/MC 访问器与命令 DSL、区块段扫描追踪、权限鉴权、诊断与独立修复 | 向下委托 `Spec`；通过 `global.*` 与统一队列向业务层提供基础服务 |
-| **第 3 层 · 业务调度与玩法层** | `Server` | `屏幕弹幕组件`、`音频组件`、`拆解台-混沌殉爆.v18.js`、配方脚本 | 维护弹幕/音频生命周期与目标筛选、执行游戏事件与配方规则 | 调用第 1/2 层接口；通过 KubeJS 网络频道向客户端发包驱动表现 |
-| **第 4 层 · 客户端渲染与播放层** | `Client` | `屏幕弹幕渲染器`、`音频播放器`、`拆解台描述.js` | 负责屏幕排版渲染（含原生与 ModernUI 兼容分支）、3D 声场播放、退避重连与 Tooltip 展示 | 被动消费服务端网络包，并可选读取第 1 层共享协议常量 |
+### 1. 纵向分层拓扑（纯文字框图）
 
 ```text
-[第 1 层 · Startup 阶段：跨端契约与注册层]
-├── Epiphy的-Spec与通用工具.js          (P:1200) -> 导出 EpiphySpec / EpiphyProtocol（全局契约真相源）
-├── 创造模式栏-epiphy.js                (P:1000) -> 导出 EpiphyCreativeTab (epiphy:stuff)
-├── Epiphy的小玩意-原版_其他Mod的隐藏物品.js      <- 依赖 [创造模式栏]
-├── Epiphy的小玩意-终极拆解台_不稳定.js           <- 配合 [拆解台-混沌殉爆] 与 assets/epiphy/
-└── Epiphy的小玩意_功能测试.js                    <- 联动 [创造模式栏] + [ScreenDanmaku] + [EpiphyAudio]
-
-[第 2 层 · Server 基础层：通用基础设施层]
-├── Epiphy的-日志.js                    (P:1100) -> 导出 EpiphyLog（无前置，全局限频日志中心）
-├── Epiphy的-服务端基础.js              (P:1080) -> 导出 EpiphyServerBase（可选: Spec / Log）
-├── Epiphy的-方块追踪组件.js            (P:1050) -> 导出 EpiphyBlockTracker v2（可选: Log）
-├── Epiphy的-权限阀.js                  (P:1000) -> 导出 EpiphyPermissionValve v4（强依赖: ServerBase；可选: Log）
-├── Epiphy的-调试组件.js                (P:950)  -> 导出 EpiphyDebug v1（可选: Log / 权限阀）
-└── Epiphy的-基础bug修复.js             (P:900)  -> 导出 EpiphyBugfix v1（零硬依赖独立运行；可选: Log）
-
-[第 3 层 · Server 调度与玩法层：业务表现与机制]
-├── Epiphy的-屏幕弹幕组件.js            (P:500)  <- 强依赖 [Spec + ServerBase]；可选 [Log / 方块追踪 / 权限阀]
-├── Epiphy的-音频组件.js                (P:500)  <- 强依赖 [Spec + ServerBase]；可选 [Log / 方块追踪 / 权限阀]
-├── 拆解台-混沌殉爆.v18.js                       <- 依赖 [终极拆解台_不稳定] + [ScreenDanmaku]
-└── 合成表-*/*.js                                <- 仅依赖原版或对应目标模组
-
-[第 4 层 · Client 渲染与播放层：端侧消费]
-├── Epiphy的-屏幕弹幕渲染器.js                   <- 消费网络包 epiphy:screen_danmaku（可选前置: Spec）
-├── Epiphy的-音频播放器.js                       <- 消费网络包 epiphy:audio（可选前置: Spec）
-└── 拆解台描述.js                                <- 客户端物品 Tooltip 描述
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ Layer 1 · Startup 阶段（跨端契约与资产/内容注册，最先加载）                        │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│  Epiphy的-Spec与通用工具.js (P:1200) ──► global.EpiphySpec / EpiphyProtocol       │
+│  创造模式栏-epiphy.js       (P:1000) ──► global.EpiphyCreativeTab (epiphy:stuff)  │
+│     ├──► Epiphy的小玩意-原版_其他Mod的隐藏物品.js                                 │
+│     ├──► Epiphy的小玩意-终极拆解台_不稳定.js  (配合 assets/epiphy/ 贴图与模型)    │
+│     └──► Epiphy的小玩意_功能测试.js           (联动 Layer 3 弹幕与音频)            │
+└────────────────────────────┬─────────────────────────────┬───────────────────────┘
+                             │ (可选兜底)                   │ (硬依赖)
+                             ▼                             ▼
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ Layer 2 · Server 基础层（基础设施底座，按 Priority 1100 ──► 900 顺序装配）        │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│  P:1100  Epiphy的-日志.js         ──► EpiphyLog           (无前置，限频/去重中心) │
+│  P:1080  Epiphy的-服务端基础.js   ──► EpiphyServerBase    (可选: Spec / Log)      │
+│  P:1050  Epiphy的-方块追踪组件.js ──► EpiphyBlockTracker  (可选: Log)             │
+│  P:1000  Epiphy的-权限阀.js       ──► EpiphyPermissionValve (强: ServerBase)      │
+│  P:950   Epiphy的-调试组件.js     ──► EpiphyDebug         (可选: Log / 权限阀)    │
+│  P:900   Epiphy的-基础bug修复.js  ──► EpiphyBugfix        (零硬依赖; 可选: Log)   │
+└────────────────────────────┬─────────────────────────────────────────────────────┘
+                             │ global.* API & 延迟注册队列
+                             ▼
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ Layer 3 · Server 业务调度与玩法层                                                │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│  Epiphy的-屏幕弹幕组件.js (P:500) ◄══ 强依赖: Spec + ServerBase                   │
+│                                   ◄── 可选  : Log / BlockTracker / 权限阀         │
+│  Epiphy的-音频组件.js     (P:500) ◄══ 强依赖: Spec + ServerBase                   │
+│                                   ◄── 可选  : Log / BlockTracker / 权限阀         │
+│  拆解台-混沌殉爆.v18.js           ◄══ 依赖  : 终极拆解台_不稳定 + ScreenDanmaku   │
+│  合成表-*/*.js                    ◄── 独立配方脚本（原版 / 植物魔法 / 神秘遗物）  │
+└──────────────┬──────────────────────────────────────────────┬────────────────────┘
+               │ 频道 epiphy:screen_danmaku                   │ 频道 epiphy:audio
+               ▼ (S2C 网络包)                                 ▼ (S2C 网络包)
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ Layer 4 · Client 渲染与播放层（纯端侧消费，不参与服务端权威判定）                 │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│  Epiphy的-屏幕弹幕渲染器.js ──► 排版/动画/原生+ModernUI渲染   (可选前置: Spec)   │
+│  Epiphy的-音频播放器.js     ──► 3D 声场/衰减/MusicDuck/重连   (可选前置: Spec)   │
+│  拆解台描述.js              ──► 客户端物品 Tooltip 描述                          │
+└──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 全模块依赖关系明细表
+### 2. 工程架构速查表
 
-| 模块文件 | 阶段 / Priority | 导出接口 | 硬依赖 | 可选依赖 | 缺失可降级行为 |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `Epiphy的-Spec与通用工具.js` | `startup` / `1200` | `EpiphySpec`, `EpiphyProtocol` | 无 | 无 | 缺失时 `EpiphyServerBase` 与客户端引擎分别启用精简兜底，服务端弹幕/音频核心拒绝启动 |
-| `创造模式栏-epiphy.js` | `startup` / `1000` | `EpiphyCreativeTab` (`epiphy:stuff`) | 无 | 无 | 缺失时附属物品无法自动归入统一创造栏 |
-| `Epiphy的小玩意-原版_其他Mod的隐藏物品.js` | `startup` | 隐藏/特殊物品注册 | `创造模式栏-epiphy.js` | — | 按模块整体启用或禁用，物品需对应模组或原版资源存在 |
-| `Epiphy的小玩意_功能测试.js` | `startup` | 测试方块 `epiphy:rnfmabj_test` | `创造模式栏-epiphy.js` | `ScreenDanmaku`, `EpiphyAudio` | 缺弹幕/音频时方块仍可注册，触发交互无对应声画效果 |
-| `Epiphy的小玩意-终极拆解台_不稳定.js` | `startup` | 5 阶段失稳方块注册 | `kubejs/assets/epiphy/` 纹理与模型 | — | 配套 `拆解台-混沌殉爆.v18.js` 使用 |
-| `Epiphy的-日志.js` | `server` / `1100` | `EpiphyLog` | 无 | 无 | 缺失时各组件自动回退到原生 `console` 输出，失去统一限频与模块 debug 开关 |
-| `Epiphy的-服务端基础.js` | `server` / `1080` | `EpiphyServerBase` | 无 | `EpiphySpec`, `EpiphyLog` | 缺 `EpiphySpec` 时启用内置维度/数组精简实现；缺 `EpiphyLog` 时回退限频 `console` |
-| `Epiphy的-方块追踪组件.js` | `server` / `1050` | `EpiphyBlockTracker v2` | 无（使用 KubeJS 原生事件与 `JsonIO`） | `EpiphyLog` | 缺失本组件时，弹幕/音频的 `bindBlock` 退化为仅响应放置/破坏的基础监听（无区块扫描与持久化） |
-| `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v4` | `EpiphyServerBase` | `EpiphyLog` | 缺失本组件时 `/epiphy` 子命令树不挂载，业务组件 JS API 仍可正常调用 |
-| `Epiphy的-调试组件.js` | `server` / `950` | `EpiphyDebug v1` | KubeJS 服务端 `global` 生命周期 | `EpiphyLog`, `EpiphyPermissionValve` | 缺权限阀时不挂载 `/epiphy debug` 指令，指标仍可通过 `global.EpiphyDebug` 读取 |
-| `Epiphy的-基础bug修复.js` | `server` / `900` | `EpiphyBugfix v1` | 无（独立运行） | `EpiphyLog` | 缺日志组件时自动回退至内置限频 `console` 输出 |
-| `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `ScreenDanmaku v5` | `EpiphySpec`, `EpiphyProtocol`, `EpiphyServerBase`；客户端需 `ScreenDanmakuClient` | `EpiphyLog`, `EpiphyBlockTracker`, `EpiphyPermissionValve` | 缺客户端渲染器时服务端 API 可调用但端侧无画面；可选组件缺失按单层降级 |
-| `Epiphy的-屏幕弹幕渲染器.js` | `client` | `ScreenDanmakuClient v5` | 服务端 `ScreenDanmaku` 发包驱动 | `EpiphySpec` / `EpiphyProtocol` | 缺前置时客户端启用内置 v5 协议常量与基础数值工具兜底 |
-| `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.2` | `EpiphySpec`, `EpiphyProtocol`, `EpiphyServerBase`；客户端需 `EpiphyAudioClient` | `EpiphyLog`, `EpiphyBlockTracker`, `EpiphyPermissionValve` | 缺客户端播放器时服务端句柄可调度但端侧无声；可选组件缺失按单层降级 |
-| `Epiphy的-音频播放器.js` | `client` | `EpiphyAudioClient v5.2` | 服务端 `EpiphyAudio` 发包驱动 | `EpiphySpec` / `EpiphyProtocol` | 缺前置时客户端启用内置 v5 协议常量与基础数值工具兜底 |
-| `拆解台-混沌殉爆.v18.js` | `server` | 混沌殉爆核心事件逻辑 | `Epiphy的小玩意-终极拆解台_不稳定.js`, `ScreenDanmaku` | `kubejs/assets/epiphy/` 语言/资源 | 与暮色森林、无尽贪婪、神秘遗物、诡厄巫法启示录等模组联动 |
-| `合成表-*/*.js` & `拆解台描述.js` | `server` / `client` | 配方调整与 Tooltip | 对应原版及目标模组 | — | 独立配方/提示脚本，互不耦合 |
+| 架构层 | 核心模块 | 阶段 / Priority | 核心导出 / 职责 |
+| :--- | :--- | :--- | :--- |
+| **L1 跨端契约** | `Epiphy的-Spec与通用工具.js` | `startup` / `1200` | `EpiphySpec`、`EpiphyProtocol` |
+| **L1 内容注册** | `创造模式栏-epiphy.js` | `startup` / `1000` | `EpiphyCreativeTab` (`epiphy:stuff`) |
+| **L1 内容注册** | 隐藏物品 / 测试方块 / 失稳拆解台 | `startup` | 物品、测试方块与 5 阶段失稳方块 |
+| **L2 基础设施** | `Epiphy的-日志.js` | `server` / `1100` | `EpiphyLog`（限频、去重、`catchWarn`） |
+| **L2 基础设施** | `Epiphy的-服务端基础.js` | `server` / `1080` | `EpiphyServerBase`（访问器、路径、DSL） |
+| **L2 基础设施** | `Epiphy的-方块追踪组件.js` | `server` / `1050` | `EpiphyBlockTracker v2`（区块段扫描） |
+| **L2 安全控制** | `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v4`（`/epiphy`） |
+| **L2 诊断维护** | `Epiphy的-调试组件.js` | `server` / `950` | `EpiphyDebug v1`（`/epiphy debug`） |
+| **L2 独立修复** | `Epiphy的-基础bug修复.js` | `server` / `900` | `EpiphyBugfix v1`（退出 HP 服务端恢复） |
+| **L3 业务调度** | `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `ScreenDanmaku v5` |
+| **L3 业务调度** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.2` |
+| **L3 玩法脚本** | `拆解台-混沌殉爆.v18.js` & `合成表-*` | `server` | 混沌殉爆事件链与配方调整 |
+| **L4 客户端表现** | `屏幕弹幕渲染器` / `音频播放器` / `拆解台描述` | `client` | `ScreenDanmakuClient`、`EpiphyAudioClient` |
+
+### 3. 模块依赖与降级语义规范（YAML）
+
+```yaml
+# ==================== Layer 1 · Startup ====================
+Epiphy的-Spec与通用工具.js:
+  requires: { hard: [], optional: [] }
+  on_missing:
+    - EpiphyServerBase 与客户端引擎各自启用精简内置兜底
+    - 服务端弹幕组件与音频组件因缺少硬前置拒绝启动
+
+创造模式栏-epiphy.js:
+  requires: { hard: [], optional: [] }
+  on_missing: 附属物品无法自动归入统一的 epiphy:stuff 创造模式栏
+
+Epiphy的小玩意-原版_其他Mod的隐藏物品.js:
+  requires: { hard: [创造模式栏-epiphy.js] }
+
+Epiphy的小玩意-终极拆解台_不稳定.js:
+  requires: { hard: [kubejs/assets/epiphy/ 资源] }
+
+Epiphy的小玩意_功能测试.js:
+  requires: { hard: [创造模式栏-epiphy.js], optional: [ScreenDanmaku, EpiphyAudio] }
+  on_missing: 缺弹幕或音频时测试方块仍正常注册，交互仅无对应声画触发
+
+# ==================== Layer 2 · Server Foundation ====================
+Epiphy的-日志.js:
+  requires: { hard: [], optional: [] }
+  on_missing: 下游模块回退至原生 console，失去统一限频、once 去重与 debug 开关
+
+Epiphy的-服务端基础.js:
+  requires: { hard: [], optional: [EpiphySpec, EpiphyLog] }
+  on_missing:
+    no_EpiphySpec: 维度归一化与数组判断启用内置精简降级实现
+    no_EpiphyLog:  日志包装自动降级为内置限频 console 输出
+
+Epiphy的-方块追踪组件.js:
+  requires: { hard: [], optional: [EpiphyLog] }
+  on_missing: 下游弹幕/音频的 bindBlock 退化为仅响应放置与破坏的基础监听（无区块扫描与持久化）
+
+Epiphy的-权限阀.js:
+  requires: { hard: [EpiphyServerBase], optional: [EpiphyLog] }
+  on_missing: 下游 /epiphy 子命令不挂载（OP 登录提示），但业务组件 JS API 仍可调用
+
+Epiphy的-调试组件.js:
+  requires: { hard: [KubeJS server global 生命周期], optional: [EpiphyLog, EpiphyPermissionValve] }
+  on_missing: 缺权限阀时不注册 /epiphy debug 指令，指标快照仍可通过 global.EpiphyDebug 读取
+
+Epiphy的-基础bug修复.js:
+  requires: { hard: [], optional: [EpiphyLog] } # 设计定位为零硬依赖可独立放入运行
+  on_missing: 缺日志组件时平滑回退内置限频 console
+
+# ==================== Layer 3 · Server Scheduling & Gameplay ====================
+Epiphy的-屏幕弹幕组件.js:
+  requires:
+    hard:     [EpiphySpec, EpiphyProtocol, EpiphyServerBase]
+    paired:   [Epiphy的-屏幕弹幕渲染器.js]
+    optional: [EpiphyLog, EpiphyBlockTracker, EpiphyPermissionValve]
+  on_missing:
+    no_client: 服务端 API 可正常调用，客户端无接收与画面渲染
+    optional:  各可选组件均按单层明确降级，不阻断核心调度
+
+Epiphy的-音频组件.js:
+  requires:
+    hard:     [EpiphySpec, EpiphyProtocol, EpiphyServerBase]
+    paired:   [Epiphy的-音频播放器.js]
+    optional: [EpiphyLog, EpiphyBlockTracker, EpiphyPermissionValve]
+  on_missing:
+    no_client: 服务端句柄可正常调度，客户端无声音输出
+    optional:  各可选组件均按单层明确降级，不阻断常规播放 API
+
+拆解台-混沌殉爆.v18.js:
+  requires:
+    hard:     [Epiphy的小玩意-终极拆解台_不稳定.js, ScreenDanmaku]
+    optional: [kubejs/assets/epiphy/ 语言与资源]
+
+# ==================== Layer 4 · Client ====================
+Epiphy的-屏幕弹幕渲染器.js:
+  requires: { paired: [ScreenDanmaku], optional: [EpiphySpec, EpiphyProtocol] }
+  on_missing: 缺 Startup Spec 时启用内置 v5 协议常量与基础工具兜底
+
+Epiphy的-音频播放器.js:
+  requires: { paired: [EpiphyAudio], optional: [EpiphySpec, EpiphyProtocol] }
+  on_missing: 缺 Startup Spec 时启用内置 v5 协议常量与基础工具兜底
+```
 
 ---
 

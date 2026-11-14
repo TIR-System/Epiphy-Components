@@ -13,66 +13,155 @@ A collection of shared server/client infrastructure modules, audiovisual present
 
 ## Engineering Architecture & Module Dependencies
 
-### Layered Architecture Overview
-
-> Load order convention: `Startup` loads before `Server` / `Client`; within a stage, higher `Priority` values load earlier (`1200 -> 1100 -> 1080 -> 1050 -> 1000 -> 950 -> 900 -> 500`).
-
-| Layer | Stage | Member Modules | Core Responsibilities & Boundaries | Inter-Layer Interaction |
-| :--- | :--- | :--- | :--- | :--- |
-| **Layer 1 · Cross-Side Contracts & Registration** | `Startup` | `Epiphy的-Spec与通用工具.js`, `创造模式栏-epiphy.js`, item/block registration scripts | Shared protocol constants, pure parsers, geometry utilities, creative tab & content registrations | Exposes `global.EpiphySpec`, `EpiphyProtocol`, `EpiphyCreativeTab` to server and client |
-| **Layer 2 · Server Foundation** | `Server` | `日志`, `服务端基础`, `方块追踪组件`, `权限阀`, `调试组件`, `基础bug修复` | Rate-limited logging, Java/MC accessors & command DSL, chunk-section scanning, caller authorization, diagnostics & standalone fixes | Consumes Layer 1 `Spec`; exposes infrastructure services via `global.*` and registration queues |
-| **Layer 3 · Scheduling & Gameplay** | `Server` | `屏幕弹幕组件`, `音频组件`, `拆解台-混沌殉爆.v18.js`, recipe scripts | Manages danmaku/audio lifecycles and audience resolution, gameplay events, and recipe rules | Calls Layers 1–2 APIs; pushes packets to clients over KubeJS network channels |
-| **Layer 4 · Client Rendering & Audio** | `Client` | `屏幕弹幕渲染器`, `音频播放器`, `拆解台描述.js` | Screen layout & rendering (vanilla pipeline + ModernUI compatibility branch), 3D audio playback, reconnect backoff & tooltips | Passively consumes server packets; optionally reads Layer 1 protocol constants |
+### 1. Vertical Layer Topology (Text Box Diagram)
 
 ```text
-[Layer 1 · Startup Stage: Cross-Side Contracts & Registrations]
-├── Epiphy的-Spec与通用工具.js          (P:1200) -> Exports EpiphySpec / EpiphyProtocol (shared source of truth)
-├── 创造模式栏-epiphy.js                (P:1000) -> Exports EpiphyCreativeTab (epiphy:stuff)
-├── Epiphy的小玩意-原版_其他Mod的隐藏物品.js      <- Depends on [Creative Tab]
-├── Epiphy的小玩意-终极拆解台_不稳定.js           <- Paired with [Meltdown v18] & assets/epiphy/
-└── Epiphy的小玩意_功能测试.js                    <- Integrates [Creative Tab] + [ScreenDanmaku] + [EpiphyAudio]
-
-[Layer 2 · Server Foundation Layer: Core Infrastructure]
-├── Epiphy的-日志.js                    (P:1100) -> Exports EpiphyLog (standalone rate-limited logging hub)
-├── Epiphy的-服务端基础.js              (P:1080) -> Exports EpiphyServerBase (optional: Spec / Log)
-├── Epiphy的-方块追踪组件.js            (P:1050) -> Exports EpiphyBlockTracker v2 (optional: Log)
-├── Epiphy的-权限阀.js                  (P:1000) -> Exports EpiphyPermissionValve v4 (hard: ServerBase; optional: Log)
-├── Epiphy的-调试组件.js                (P:950)  -> Exports EpiphyDebug v1 (optional: Log / PermissionValve)
-└── Epiphy的-基础bug修复.js             (P:900)  -> Exports EpiphyBugfix v1 (zero hard deps; optional: Log)
-
-[Layer 3 · Server Scheduling & Gameplay Layer]
-├── Epiphy的-屏幕弹幕组件.js            (P:500)  <- Hard: [Spec + ServerBase]; Optional: [Log / BlockTracker / Valve]
-├── Epiphy的-音频组件.js                (P:500)  <- Hard: [Spec + ServerBase]; Optional: [Log / BlockTracker / Valve]
-├── 拆解台-混沌殉爆.v18.js                       <- Depends on [Unstable Blocks] + [ScreenDanmaku]
-└── 合成表-*/*.js                                <- Standalone recipe tweaks for vanilla / target mods
-
-[Layer 4 · Client Rendering & Playback Layer]
-├── Epiphy的-屏幕弹幕渲染器.js                   <- Consumes epiphy:screen_danmaku packets (optional startup: Spec)
-├── Epiphy的-音频播放器.js                       <- Consumes epiphy:audio packets (optional startup: Spec)
-└── 拆解台描述.js                                <- Client item tooltip script
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ Layer 1 · Startup Stage (Cross-Side Contracts & Asset/Content Registrations)     │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│  Epiphy的-Spec与通用工具.js (P:1200) ──► global.EpiphySpec / EpiphyProtocol       │
+│  创造模式栏-epiphy.js       (P:1000) ──► global.EpiphyCreativeTab (epiphy:stuff)  │
+│     ├──► Epiphy的小玩意-原版_其他Mod的隐藏物品.js                                 │
+│     ├──► Epiphy的小玩意-终极拆解台_不稳定.js  (paired with assets/epiphy/)        │
+│     └──► Epiphy的小玩意_功能测试.js           (integrates Layer 3 Danmaku/Audio)  │
+└────────────────────────────┬─────────────────────────────┬───────────────────────┘
+                             │ (optional fallback)          │ (hard dep)
+                             ▼                             ▼
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ Layer 2 · Server Foundation Layer (Load Order: Priority 1100 ──► 900)            │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│  P:1100  Epiphy的-日志.js         ──► EpiphyLog           (standalone log hub)    │
+│  P:1080  Epiphy的-服务端基础.js   ──► EpiphyServerBase    (opt: Spec / Log)       │
+│  P:1050  Epiphy的-方块追踪组件.js ──► EpiphyBlockTracker  (opt: Log)              │
+│  P:1000  Epiphy的-权限阀.js       ──► EpiphyPermissionValve (hard: ServerBase)    │
+│  P:950   Epiphy的-调试组件.js     ──► EpiphyDebug         (opt: Log / Valve)      │
+│  P:900   Epiphy的-基础bug修复.js  ──► EpiphyBugfix        (zero hard deps; opt:Log)│
+└────────────────────────────┬─────────────────────────────────────────────────────┘
+                             │ global.* APIs & deferred registration queues
+                             ▼
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ Layer 3 · Server Scheduling & Gameplay Layer                                     │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│  Epiphy的-屏幕弹幕组件.js (P:500) ◄══ Hard    : Spec + ServerBase                 │
+│                                   ◄── Optional: Log / BlockTracker / Valve       │
+│  Epiphy的-音频组件.js     (P:500) ◄══ Hard    : Spec + ServerBase                 │
+│                                   ◄── Optional: Log / BlockTracker / Valve       │
+│  拆解台-混沌殉爆.v18.js           ◄══ Requires: Unstable Blocks + ScreenDanmaku  │
+│  合成表-*/*.js                    ◄── Standalone recipes (vanilla / target mods) │
+└──────────────┬──────────────────────────────────────────────┬────────────────────┘
+               │ epiphy:screen_danmaku                        │ epiphy:audio
+               ▼ (S2C packets)                                ▼ (S2C packets)
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ Layer 4 · Client Rendering & Audio Playback Layer (Presentation Consumers Only)  │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│  Epiphy的-屏幕弹幕渲染器.js ──► Layout/Anim/Vanilla+ModernUI (opt startup: Spec) │
+│  Epiphy的-音频播放器.js     ──► 3D Soundscape/Ducking/Retry  (opt startup: Spec) │
+│  拆解台描述.js              ──► Client item tooltip descriptions                 │
+└──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Module Dependency Matrix
+### 2. Architecture Layer Quick Reference Table
 
-| Script | Stage / Priority | Exports | Hard Dependencies | Optional Dependencies | Missing-Dependency Fallback Behavior |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `Epiphy的-Spec与通用工具.js` | `startup` / `1200` | `EpiphySpec`, `EpiphyProtocol` | None | None | If absent, `EpiphyServerBase` and client engines use slim local fallbacks; server danmaku/audio refuse to boot |
-| `创造模式栏-epiphy.js` | `startup` / `1000` | `EpiphyCreativeTab` (`epiphy:stuff`) | None | None | If absent, custom items are not grouped into the unified creative tab |
-| `Epiphy的小玩意-原版_其他Mod的隐藏物品.js` | `startup` | Hidden/special item registrations | `创造模式栏-epiphy.js` | — | Self-contained item module; relies on vanilla / target mod assets |
-| `Epiphy的小玩意_功能测试.js` | `startup` | Test block `epiphy:rnfmabj_test` | `创造模式栏-epiphy.js` | `ScreenDanmaku`, `EpiphyAudio` | Block still registers without danmaku/audio, without audiovisual triggers |
-| `Epiphy的小玩意-终极拆解台_不稳定.js` | `startup` | 5-stage unstable block registrations | `kubejs/assets/epiphy/` textures & models | — | Paired with `拆解台-混沌殉爆.v18.js` |
-| `Epiphy的-日志.js` | `server` / `1100` | `EpiphyLog` | None | None | Downstream modules fall back to native `console`, losing unified rate-limiting & per-module debug switches |
-| `Epiphy的-服务端基础.js` | `server` / `1080` | `EpiphyServerBase` | None | `EpiphySpec`, `EpiphyLog` | Falls back to slim dim/array helpers without `EpiphySpec`, and rate-limited `console` without `EpiphyLog` |
-| `Epiphy的-方块追踪组件.js` | `server` / `1050` | `EpiphyBlockTracker v2` | None (KubeJS events & `JsonIO`) | `EpiphyLog` | If this module is absent, `bindBlock` in danmaku/audio degrades to basic place/break listeners (no chunk scan or persistence) |
-| `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v4` | `EpiphyServerBase` | `EpiphyLog` | If absent, `/epiphy` subcommands do not mount while JS APIs remain callable |
-| `Epiphy的-调试组件.js` | `server` / `950` | `EpiphyDebug v1` | KubeJS server `global` lifecycle | `EpiphyLog`, `EpiphyPermissionValve` | Without the valve, `/epiphy debug` is unmounted while metrics remain readable via `global.EpiphyDebug` |
-| `Epiphy的-基础bug修复.js` | `server` / `900` | `EpiphyBugfix v1` | None (standalone) | `EpiphyLog` | Falls back to built-in rate-limited `console` output when `EpiphyLog` is absent |
-| `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `ScreenDanmaku v5` | `EpiphySpec`, `EpiphyProtocol`, `EpiphyServerBase`; client `ScreenDanmakuClient` | `EpiphyLog`, `EpiphyBlockTracker`, `EpiphyPermissionValve` | Without client renderer, server API runs without client display; optional dependencies degrade cleanly |
-| `Epiphy的-屏幕弹幕渲染器.js` | `client` | `ScreenDanmakuClient v5` | Server `ScreenDanmaku` packet stream | `EpiphySpec` / `EpiphyProtocol` | Falls back to built-in v5 protocol constants & basic helpers when startup Spec is absent |
-| `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.2` | `EpiphySpec`, `EpiphyProtocol`, `EpiphyServerBase`; client `EpiphyAudioClient` | `EpiphyLog`, `EpiphyBlockTracker`, `EpiphyPermissionValve` | Without client player, server handles schedule silently; optional dependencies degrade cleanly |
-| `Epiphy的-音频播放器.js` | `client` | `EpiphyAudioClient v5.2` | Server `EpiphyAudio` packet stream | `EpiphySpec` / `EpiphyProtocol` | Falls back to built-in v5 protocol constants & basic helpers when startup Spec is absent |
-| `拆解台-混沌殉爆.v18.js` | `server` | Chaotic meltdown mechanic | `Epiphy的小玩意-终极拆解台_不稳定.js`, `ScreenDanmaku` | `kubejs/assets/epiphy/` lang/assets | Integrates with Twilight Forest, Avaritia, Enigmatic Legacy, Goety Revelation |
-| `合成表-*/*.js` & `拆解台描述.js` | `server` / `client` | Recipe tweaks & tooltips | Corresponding vanilla/target mods | — | Independent content scripts |
+| Layer | Modules | Stage / Priority | Primary Exports / Role |
+| :--- | :--- | :--- | :--- |
+| **L1 Cross-Side Spec** | `Epiphy的-Spec与通用工具.js` | `startup` / `1200` | `EpiphySpec`, `EpiphyProtocol` |
+| **L1 Content Reg** | `创造模式栏-epiphy.js` | `startup` / `1000` | `EpiphyCreativeTab` (`epiphy:stuff`) |
+| **L1 Content Reg** | Hidden Items / Test Block / Unstable Table | `startup` | Custom items, test block & 5-stage blocks |
+| **L2 Infrastructure** | `Epiphy的-日志.js` | `server` / `1100` | `EpiphyLog` (rate-limit, `once`, `catchWarn`) |
+| **L2 Infrastructure** | `Epiphy的-服务端基础.js` | `server` / `1080` | `EpiphyServerBase` (accessors, paths, DSL) |
+| **L2 Infrastructure** | `Epiphy的-方块追踪组件.js` | `server` / `1050` | `EpiphyBlockTracker v2` (section scanning) |
+| **L2 Access Control** | `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v4` (`/epiphy`) |
+| **L2 Diagnostics** | `Epiphy的-调试组件.js` | `server` / `950` | `EpiphyDebug v1` (`/epiphy debug`) |
+| **L2 Standalone Fix** | `Epiphy的-基础bug修复.js` | `server` / `900` | `EpiphyBugfix v1` (logout HP restoration) |
+| **L3 Presentation** | `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `ScreenDanmaku v5` |
+| **L3 Presentation** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.2` |
+| **L3 Gameplay** | `拆解台-混沌殉爆.v18.js` & `合成表-*` | `server` | Meltdown progression & recipe tweaks |
+| **L4 Client** | `屏幕弹幕渲染器` / `音频播放器` / `拆解台描述` | `client` | `ScreenDanmakuClient`, `EpiphyAudioClient` |
+
+### 3. Dependency & Fallback Specification (YAML)
+
+```yaml
+# ==================== Layer 1 · Startup ====================
+Epiphy的-Spec与通用工具.js:
+  requires: { hard: [], optional: [] }
+  on_missing:
+    - EpiphyServerBase and client engines fall back to slim built-in helpers
+    - Server danmaku and audio engines refuse to boot without hard dependency
+
+创造模式栏-epiphy.js:
+  requires: { hard: [], optional: [] }
+  on_missing: Dependent items are not grouped into the epiphy:stuff creative tab
+
+Epiphy的小玩意-原版_其他Mod的隐藏物品.js:
+  requires: { hard: [创造模式栏-epiphy.js] }
+
+Epiphy的小玩意-终极拆解台_不稳定.js:
+  requires: { hard: [kubejs/assets/epiphy/ textures & models] }
+
+Epiphy的小玩意_功能测试.js:
+  requires: { hard: [创造模式栏-epiphy.js], optional: [ScreenDanmaku, EpiphyAudio] }
+  on_missing: Block still registers normally; interactions emit no danmaku/audio
+
+# ==================== Layer 2 · Server Foundation ====================
+Epiphy的-日志.js:
+  requires: { hard: [], optional: [] }
+  on_missing: Downstream components fall back to native console (no unified rate-limiting or debug toggle)
+
+Epiphy的-服务端基础.js:
+  requires: { hard: [], optional: [EpiphySpec, EpiphyLog] }
+  on_missing:
+    no_EpiphySpec: Enables built-in slim dimension/array helpers
+    no_EpiphyLog:  Logger wrapper falls back to built-in rate-limited console
+
+Epiphy的-方块追踪组件.js:
+  requires: { hard: [], optional: [EpiphyLog] }
+  on_missing: Downstream bindBlock degrades to basic place/break listeners (no chunk scan or persistence)
+
+Epiphy的-权限阀.js:
+  requires: { hard: [EpiphyServerBase], optional: [EpiphyLog] }
+  on_missing: /epiphy subcommands do not mount (OP notified on login); JS APIs remain usable
+
+Epiphy的-调试组件.js:
+  requires: { hard: [KubeJS server global lifecycle], optional: [EpiphyLog, EpiphyPermissionValve] }
+  on_missing: /epiphy debug command is unmounted while snapshots stay accessible via global.EpiphyDebug
+
+Epiphy的-基础bug修复.js:
+  requires: { hard: [], optional: [EpiphyLog] } # Designed for standalone zero-hard-dep operation
+  on_missing: Smoothly falls back to built-in rate-limited console logging
+
+# ==================== Layer 3 · Server Scheduling & Gameplay ====================
+Epiphy的-屏幕弹幕组件.js:
+  requires:
+    hard:     [EpiphySpec, EpiphyProtocol, EpiphyServerBase]
+    paired:   [Epiphy的-屏幕弹幕渲染器.js]
+    optional: [EpiphyLog, EpiphyBlockTracker, EpiphyPermissionValve]
+  on_missing:
+    no_client: Server API works normally with no client rendering
+    optional:  Each optional module triggers a clean single-layer fallback
+
+Epiphy的-音频组件.js:
+  requires:
+    hard:     [EpiphySpec, EpiphyProtocol, EpiphyServerBase]
+    paired:   [Epiphy的-音频播放器.js]
+    optional: [EpiphyLog, EpiphyBlockTracker, EpiphyPermissionValve]
+  on_missing:
+    no_client: Server handles run normally with no client audio output
+    optional:  Each optional module triggers a clean single-layer fallback
+
+拆解台-混沌殉爆.v18.js:
+  requires:
+    hard:     [Epiphy的小玩意-终极拆解台_不稳定.js, ScreenDanmaku]
+    optional: [kubejs/assets/epiphy/ lang & assets]
+
+# ==================== Layer 4 · Client ====================
+Epiphy的-屏幕弹幕渲染器.js:
+  requires: { paired: [ScreenDanmaku], optional: [EpiphySpec, EpiphyProtocol] }
+  on_missing: Uses built-in v5 protocol constants & basic helpers when Startup Spec is absent
+
+Epiphy的-音频播放器.js:
+  requires: { paired: [EpiphyAudio], optional: [EpiphySpec, EpiphyProtocol] }
+  on_missing: Uses built-in v5 protocol constants & basic helpers when Startup Spec is absent
+```
 
 ---
 
