@@ -1,6 +1,6 @@
 // priority: 1080
 // ============================================================================
-// Epiphy 服务端通用基础设施 (EpiphyServerBase v2.1)
+// Epiphy 服务端通用基础设施 (EpiphyServerBase v2.2)
 //   许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //   所属阶段：server_scripts
 //   可选依赖：
@@ -22,11 +22,61 @@
         } catch (eSpecWarn) { }
     }
 
+    function safeTypeOf(x) {
+        if (spec && typeof spec.safeTypeOf === 'function') return spec.safeTypeOf(x);
+        if (x === null) return 'object';
+        if (x === undefined) return 'undefined';
+        try {
+            return typeof x;
+        } catch (e) {
+            return 'object';
+        }
+    }
+
+    function isObjectLike(x) {
+        if (spec && typeof spec.isObjectLike === 'function') return spec.isObjectLike(x);
+        return x != null && safeTypeOf(x) === 'object';
+    }
+
+    function isJavaMapLike(x) {
+        if (spec && typeof spec.isJavaMapLike === 'function') return spec.isJavaMapLike(x);
+        if (!isObjectLike(x)) return false;
+        try {
+            return typeof x.entrySet === 'function' || typeof x.containsKey === 'function' || typeof x.put === 'function';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function safeReadProp(obj, prop) {
+        if (obj == null) return undefined;
+        try {
+            return obj[prop];
+        } catch (e) {
+            return undefined;
+        }
+    }
+
+    function safeHasMethod(obj, prop) {
+        if (obj == null) return false;
+        try {
+            return typeof obj[prop] === 'function';
+        } catch (e) {
+            return false;
+        }
+    }
+
     function isArrayLike(x) {
         if (spec && typeof spec.isArrayLike === 'function') return spec.isArrayLike(x);
-        if (x == null || typeof x !== 'object') return false;
+        if (x == null) return false;
         if (Array.isArray(x)) return true;
-        return typeof x.length === 'number' && x.length >= 0 && isFinite(x.length) && Math.floor(x.length) === x.length;
+        if (!isObjectLike(x)) return false;
+        try {
+            var len = x.length;
+            return typeof len === 'number' && len >= 0 && isFinite(len) && Math.floor(len) === len;
+        } catch (e) {
+            return false;
+        }
     }
 
     function normalizeDim(dimOrKey) {
@@ -92,14 +142,16 @@
         JAVA_FILES_CLASS = loadJavaClass('java.nio.file.Files');
         JAVA_PATHS_CLASS = loadJavaClass('java.nio.file.Paths');
         var stdCs = loadJavaClass('java.nio.charset.StandardCharsets');
-        if (stdCs && stdCs.UTF_8 != null) JAVA_CHARSET_UTF8 = stdCs.UTF_8;
+        var utf8 = safeReadProp(stdCs, 'UTF_8');
+        if (utf8 != null) JAVA_CHARSET_UTF8 = utf8;
         JAVA_COPY_OPT_CLASS = loadJavaClass('java.nio.file.StandardCopyOption');
         JAVA_UUID_CLASS = loadJavaClass('java.util.UUID');
         SERVER_HOOKS_CLASS = loadJavaClass('net.minecraftforge.server.ServerLifecycleHooks');
         SUGGEST_PROVIDERS_CLASS = loadJavaClass('net.minecraft.commands.synchronization.SuggestionProviders');
         var lr = loadJavaClass('net.minecraft.world.level.storage.LevelResource');
-        if (lr && lr.ROOT != null) {
-            LEVEL_RESOURCE_ROOT = lr.ROOT;
+        var lrRoot = safeReadProp(lr, 'ROOT');
+        if (lrRoot != null) {
+            LEVEL_RESOURCE_ROOT = lrRoot;
         }
     })();
 
@@ -217,15 +269,19 @@
             for (var i = 0; i < raw.length; i++) out.push(raw[i]);
             return out;
         }
-        if (typeof raw.iterator === 'function') {
-            var it = raw.iterator();
-            while (it.hasNext()) out.push(it.next());
-            return out;
+        if (safeHasMethod(raw, 'iterator')) {
+            try {
+                var it = raw.iterator();
+                while (it.hasNext()) out.push(it.next());
+                return out;
+            } catch (eIt) { }
         }
-        if (typeof raw.size === 'function' && typeof raw.get === 'function') {
-            var n = Number(raw.size());
-            for (var j = 0; j < n; j++) out.push(raw.get(j));
-            return out;
+        if (!isJavaMapLike(raw) && safeHasMethod(raw, 'size') && safeHasMethod(raw, 'get')) {
+            try {
+                var n = Number(raw.size());
+                for (var j = 0; j < n; j++) out.push(raw.get(j));
+                return out;
+            } catch (eSz) { }
         }
         return out;
     }
@@ -238,116 +294,163 @@
             for (var i = 0; i < raw.length; i++) outA.push(raw[i]);
             return outA;
         }
-        if (typeof raw.iterator === 'function') {
-            var outI = [];
-            var it = raw.iterator();
-            while (it.hasNext()) outI.push(it.next());
-            return outI;
+        if (safeHasMethod(raw, 'iterator')) {
+            try {
+                var outI = [];
+                var it = raw.iterator();
+                while (it.hasNext()) outI.push(it.next());
+                return outI;
+            } catch (eIt) { }
         }
-        if (typeof raw.size === 'function' && typeof raw.get === 'function') {
-            var outL = [];
-            var sz = Number(raw.size());
-            for (var j = 0; j < sz; j++) outL.push(raw.get(j));
-            return outL;
+        if (!isJavaMapLike(raw) && safeHasMethod(raw, 'size') && safeHasMethod(raw, 'get')) {
+            try {
+                var outL = [];
+                var sz = Number(raw.size());
+                for (var j = 0; j < sz; j++) outL.push(raw.get(j));
+                return outL;
+            } catch (eSz) { }
         }
         return null;
     }
 
     function readMapField(obj, key) {
         if (obj == null) return null;
-        if (typeof obj === 'object' && obj[key] !== undefined) {
-            return obj[key];
+        if (safeHasMethod(obj, 'get')) {
+            try {
+                if (safeHasMethod(obj, 'containsKey')) {
+                    return obj.containsKey(key) ? obj.get(key) : null;
+                }
+                if (safeHasMethod(obj, 'has')) {
+                    return obj.has(key) ? obj.get(key) : null;
+                }
+                var got = obj.get(key);
+                if (got !== undefined && got !== null) return got;
+            } catch (eGet) { }
         }
-        if (typeof obj.get === 'function') {
-            return obj.get(key);
+        if (isObjectLike(obj)) {
+            var propVal = safeReadProp(obj, key);
+            if (propVal !== undefined) return propVal;
         }
         return null;
     }
 
     function uuidOf(obj) {
         if (obj == null) return null;
-        if (typeof obj.getStringUUID === 'function') return String(obj.getStringUUID());
-        if (obj.stringUuid != null) return String(obj.stringUuid);
-        if (obj.uuid != null) return String(obj.uuid);
-        if (typeof obj.getUUID === 'function') {
-            var u = obj.getUUID();
-            if (u != null) return String(u);
+        if (safeHasMethod(obj, 'getStringUUID')) {
+            try { return String(obj.getStringUUID()); } catch (e0) { }
         }
-        if (typeof obj.getUuid === 'function') {
-            var u2 = obj.getUuid();
-            if (u2 != null) return String(u2);
+        var su = safeReadProp(obj, 'stringUuid');
+        if (su != null) return String(su);
+        var uu = safeReadProp(obj, 'uuid');
+        if (uu != null) return String(uu);
+        if (safeHasMethod(obj, 'getUUID')) {
+            try {
+                var u = obj.getUUID();
+                if (u != null) return String(u);
+            } catch (e1) { }
         }
-        if (typeof obj.getProfile === 'function') {
-            var prof = obj.getProfile();
-            if (prof != null && typeof prof.getId === 'function' && prof.getId() != null) {
-                return String(prof.getId());
-            }
+        if (safeHasMethod(obj, 'getUuid')) {
+            try {
+                var u2 = obj.getUuid();
+                if (u2 != null) return String(u2);
+            } catch (e2) { }
         }
-        if (obj.id != null && typeof obj.id === 'string') return obj.id;
+        if (safeHasMethod(obj, 'getProfile')) {
+            try {
+                var prof = obj.getProfile();
+                if (prof != null && safeHasMethod(prof, 'getId') && prof.getId() != null) {
+                    return String(prof.getId());
+                }
+            } catch (e3) { }
+        }
+        var idVal = safeReadProp(obj, 'id');
+        if (idVal != null && safeTypeOf(idVal) === 'string') return idVal;
         return null;
     }
 
     function nameOf(obj) {
         if (obj == null) return null;
-        if (typeof obj.getProfile === 'function') {
-            var p = obj.getProfile();
-            if (p != null && typeof p.getName === 'function' && p.getName() != null) return String(p.getName());
+        if (safeHasMethod(obj, 'getProfile')) {
+            try {
+                var p = obj.getProfile();
+                if (p != null && safeHasMethod(p, 'getName') && p.getName() != null) return String(p.getName());
+            } catch (e0) { }
         }
-        if (typeof obj.getGameProfile === 'function') {
-            var gp = obj.getGameProfile();
-            if (gp != null && typeof gp.getName === 'function' && gp.getName() != null) return String(gp.getName());
+        if (safeHasMethod(obj, 'getGameProfile')) {
+            try {
+                var gp = obj.getGameProfile();
+                if (gp != null && safeHasMethod(gp, 'getName') && gp.getName() != null) return String(gp.getName());
+            } catch (e1) { }
         }
-        if (obj.username != null) return String(obj.username);
-        if (typeof obj.getName === 'function') {
-            var n = obj.getName();
-            if (n != null && typeof n.getString === 'function') return String(n.getString());
-            if (n != null) return String(n);
+        var uname = safeReadProp(obj, 'username');
+        if (uname != null) return String(uname);
+        if (safeHasMethod(obj, 'getName')) {
+            try {
+                var n = obj.getName();
+                if (n != null && safeHasMethod(n, 'getString')) return String(n.getString());
+                if (n != null) return String(n);
+            } catch (e2) { }
         }
-        if (obj.name != null) return String(obj.name);
+        var nameProp = safeReadProp(obj, 'name');
+        if (nameProp != null) return String(nameProp);
         return null;
     }
 
     function entityIdOf(obj) {
         if (obj == null) return null;
-        if (typeof obj.getId === 'function') return Number(obj.getId());
-        if (obj.id != null && isFinite(Number(obj.id))) return Number(obj.id);
+        if (safeHasMethod(obj, 'getId')) {
+            try { return Number(obj.getId()); } catch (e0) { }
+        }
+        var idProp = safeReadProp(obj, 'id');
+        if (idProp != null && isFinite(Number(idProp))) return Number(idProp);
         return uuidOf(obj);
     }
 
     function dimOfLevel(lv) {
         if (lv == null) return null;
-        if (typeof lv.getDimension === 'function') {
-            var gd = lv.getDimension();
-            if (gd != null) return normalizeDim(String(gd));
+        if (safeHasMethod(lv, 'getDimension')) {
+            try {
+                var gd = lv.getDimension();
+                if (gd != null) return normalizeDim(String(gd));
+            } catch (e0) { }
         }
-        if (typeof lv.dimension === 'function') return normalizeDim(lv.dimension());
-        if (lv.dimension != null) return normalizeDim(lv.dimension);
-        if (typeof lv.getLevel === 'function') {
-            var inner = lv.getLevel();
-            if (inner != null && inner !== lv) return dimOfLevel(inner);
+        if (safeHasMethod(lv, 'dimension')) {
+            try { return normalizeDim(lv.dimension()); } catch (e1) { }
+        }
+        var dimProp = safeReadProp(lv, 'dimension');
+        if (dimProp != null) return normalizeDim(dimProp);
+        if (safeHasMethod(lv, 'getLevel')) {
+            try {
+                var inner = lv.getLevel();
+                if (inner != null && inner !== lv) return dimOfLevel(inner);
+            } catch (e2) { }
         }
         return null;
     }
 
     function resolveLevel(levelOrDim, preferServer) {
         if (levelOrDim == null || levelOrDim === '') return null;
-        if (typeof levelOrDim === 'object'
-            && (typeof levelOrDim.getBlock === 'function' || levelOrDim.players != null)) {
+        if (isObjectLike(levelOrDim)
+            && (safeHasMethod(levelOrDim, 'getBlock') || safeReadProp(levelOrDim, 'players') != null)) {
             return levelOrDim;
         }
         var srv = resolveServer(preferServer);
         if (srv == null) return null;
         var targetDim = normalizeDim(levelOrDim);
         if (!targetDim) return null;
-        if (typeof srv.getLevel === 'function') {
-            var direct = srv.getLevel(targetDim);
-            if (direct != null) return direct;
+        if (safeHasMethod(srv, 'getLevel')) {
+            try {
+                var direct = srv.getLevel(targetDim);
+                if (direct != null) return direct;
+            } catch (e0) { }
         }
-        if (typeof srv.getAllLevels === 'function') {
-            var all = toJsArray(srv.getAllLevels());
-            for (var i = 0; i < all.length; i++) {
-                if (dimOfLevel(all[i]) === targetDim) return all[i];
-            }
+        if (safeHasMethod(srv, 'getAllLevels')) {
+            try {
+                var all = toJsArray(srv.getAllLevels());
+                for (var i = 0; i < all.length; i++) {
+                    if (dimOfLevel(all[i]) === targetDim) return all[i];
+                }
+            } catch (e1) { }
         }
         return null;
     }
@@ -359,22 +462,31 @@
             var ax = Number(obj[0]), ay = Number(obj[1]), az = Number(obj[2]);
             return (isFinite(ax) && isFinite(ay) && isFinite(az)) ? { x: ax, y: ay, z: az } : null;
         }
-        if (typeof obj.getX === 'function') {
-            var gx = Number(obj.getX()), gy = Number(obj.getY()), gz = Number(obj.getZ());
-            return (isFinite(gx) && isFinite(gy) && isFinite(gz)) ? { x: gx, y: gy, z: gz } : null;
+        if (safeHasMethod(obj, 'getX')) {
+            try {
+                var gx = Number(obj.getX()), gy = Number(obj.getY()), gz = Number(obj.getZ());
+                return (isFinite(gx) && isFinite(gy) && isFinite(gz)) ? { x: gx, y: gy, z: gz } : null;
+            } catch (e0) { }
         }
-        if (obj.pos != null && typeof obj.pos === 'object') {
-            return readPos(obj.pos);
+        var posProp = safeReadProp(obj, 'pos');
+        if (isObjectLike(posProp)) {
+            return readPos(posProp);
         }
-        if (obj.block != null && obj.block !== obj) {
-            return readPos(obj.block);
+        var blkProp = safeReadProp(obj, 'block');
+        if (blkProp != null && blkProp !== obj) {
+            return readPos(blkProp);
         }
-        if (typeof obj.x === 'function') {
-            var fx = Number(obj.x()), fy = Number(obj.y()), fz = Number(obj.z());
-            return (isFinite(fx) && isFinite(fy) && isFinite(fz)) ? { x: fx, y: fy, z: fz } : null;
+        if (safeHasMethod(obj, 'x')) {
+            try {
+                var fx = Number(obj.x()), fy = Number(obj.y()), fz = Number(obj.z());
+                return (isFinite(fx) && isFinite(fy) && isFinite(fz)) ? { x: fx, y: fy, z: fz } : null;
+            } catch (e1) { }
         }
-        if (obj.x != null && obj.y != null && obj.z != null && obj.x !== '' && obj.y !== '' && obj.z !== '') {
-            var nx = Number(obj.x), ny = Number(obj.y), nz = Number(obj.z);
+        var px = safeReadProp(obj, 'x');
+        var py = safeReadProp(obj, 'y');
+        var pz = safeReadProp(obj, 'z');
+        if (px != null && py != null && pz != null && px !== '' && py !== '' && pz !== '') {
+            var nx = Number(px), ny = Number(py), nz = Number(pz);
             return (isFinite(nx) && isFinite(ny) && isFinite(nz)) ? { x: nx, y: ny, z: nz } : null;
         }
         return null;
@@ -393,14 +505,20 @@
 
     function extractBlockId(blockOrState) {
         if (blockOrState == null) return null;
-        if (blockOrState.id != null) return String(blockOrState.id);
-        if (typeof blockOrState.getId === 'function') return String(blockOrState.getId());
-        if (typeof blockOrState.getBlock === 'function') {
-            var blk = blockOrState.getBlock();
-            if (blk != null) {
-                if (blk.id != null) return String(blk.id);
-                if (typeof blk.getId === 'function') return String(blk.getId());
-            }
+        var bidProp = safeReadProp(blockOrState, 'id');
+        if (bidProp != null) return String(bidProp);
+        if (safeHasMethod(blockOrState, 'getId')) {
+            try { return String(blockOrState.getId()); } catch (e0) { }
+        }
+        if (safeHasMethod(blockOrState, 'getBlock')) {
+            try {
+                var blk = blockOrState.getBlock();
+                if (blk != null) {
+                    var innerId = safeReadProp(blk, 'id');
+                    if (innerId != null) return String(innerId);
+                    if (safeHasMethod(blk, 'getId')) return String(blk.getId());
+                }
+            } catch (e1) { }
         }
         return null;
     }
@@ -550,21 +668,34 @@
     }
 
     function resolveGameDir() {
-        var candidates = [];
         if (KUBEJS_PATHS_CLASS != null) {
-            candidates.push(KUBEJS_PATHS_CLASS.GAMEDIR);
-            candidates.push(KUBEJS_PATHS_CLASS.DIRECTORY);
-            candidates.push(KUBEJS_PATHS_CLASS.INSTANCE);
-        }
-        for (var i = 0; i < candidates.length; i++) {
-            var c = candidates[i];
-            if (c != null) {
+            var directCandidates = [
+                safeReadProp(KUBEJS_PATHS_CLASS, 'GAMEDIR'),
+                safeReadProp(KUBEJS_PATHS_CLASS, 'INSTANCE')
+            ];
+            for (var i = 0; i < directCandidates.length; i++) {
+                var c = directCandidates[i];
+                if (c != null) {
+                    try {
+                        var str = normalizeSlashPath(typeof c.toAbsolutePath === 'function' ? c.toAbsolutePath().normalize() : c);
+                        if (str && str !== '[object Object]' && str.indexOf('undefined') !== 0) {
+                            return str;
+                        }
+                    } catch (eC) { }
+                }
+            }
+            var kjsDir = safeReadProp(KUBEJS_PATHS_CLASS, 'DIRECTORY');
+            if (kjsDir != null) {
                 try {
-                    var str = normalizeSlashPath(typeof c.toAbsolutePath === 'function' ? c.toAbsolutePath().normalize() : c);
-                    if (str && str !== '[object Object]' && str.indexOf('undefined') !== 0) {
-                        return str;
+                    var dirStr = normalizeSlashPath(typeof kjsDir.toAbsolutePath === 'function' ? kjsDir.toAbsolutePath().normalize() : kjsDir);
+                    if (dirStr && dirStr !== '[object Object]' && dirStr.indexOf('undefined') !== 0) {
+                        if (/\/kubejs$/i.test(dirStr)) {
+                            var parent = dirStr.slice(0, -7);
+                            if (parent) return parent;
+                        }
+                        return dirStr;
                     }
-                } catch (eC) { }
+                } catch (eDir) { }
             }
         }
         if (JAVA_FILE_CLASS != null) {
@@ -1793,6 +1924,9 @@
             loadJavaClass:                loadJavaClass,
             nowNano:                      nowNano,
             resolveServer:                resolveServer,
+            safeTypeOf:                   safeTypeOf,
+            isObjectLike:                 isObjectLike,
+            isJavaMapLike:                isJavaMapLike,
             isArrayLike:                  isArrayLike,
             normalizeDim:                 normalizeDim,
             toJsArray:                    toJsArray,

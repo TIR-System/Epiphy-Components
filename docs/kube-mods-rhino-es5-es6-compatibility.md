@@ -172,3 +172,25 @@
    - 不要使用 `??` 做数值默认值兜底（请显式写 `(v !== null && v !== undefined) ? v : fallback` 或在确定范围时处理 `== null`）；
    - 不要依赖 `'use strict'` 的 `this === undefined`、严格模式 `eval` 隔离、间接 `eval`、以及标准 `JSON.stringify` 对函数/`undefined` 的静默丢弃规则；
    - 不要使用 `class`、`...`、默认参数、`Promise`、`Proxy`、`Reflect`、正则 `/u`/`/y`。
+
+---
+
+## 七、实机 Java Interop 运行期陷阱（KubeJS 2001.6.5 + `kube-mods/rhino`）
+
+> 以下条目经 KubeJS 2001.6.5 字节码（`javap`）与 Minecraft 1.20.1 实机 `server.log` / `client.log` 联合复现确认：
+
+1. **对未包装 Java 对象执行 `typeof x` 直接抛 `InternalError`**：
+   - `dev.latvian.mods.rhino.MemberType.get(Object, Context)` 对普通 Java POJO / 实体 / 集合 / 服务端对象（如 `ServerPlayer`、`ServerLevel`、`java.util.LinkedTreeMap` 等）求值 `typeof x` 时，若不在允许白名单内会直接抛出 `InternalError: Invalid JavaScript value of type <JavaClass>`，并被 Rhino 上层包装为阻塞当前回调的异常。
+   - **规避规范**：跨 Java/KubeJS 边界的变量**严禁裸用 `typeof x === 'object'` 或 `typeof x` 判别类型**；必须统一使用 `Spec` / `EpiphyServerBase` 提供的 `safeTypeOf(x)`、`isObjectLike(x)`（先判 `x == null` 再 `try { return typeof x } catch (e) { return 'object' }`）。
+
+2. **访问不存在的 Java 类静态成员或 Java 对象字段直接抛 `EvaluatorException`**：
+   - 与标准 JS 返回 `undefined` 不同，Rhino 对 Java 类或 Java 实例读取未定义的静态字段或 getter（如 `KubeJSPaths.GAMEDIR`、`obj.missingProp`）不会返回 `undefined`，而是直接抛出 `EvaluatorException`。
+   - 実证案例：`dev.latvian.mods.kubejs.KubeJSPaths`（2001.6.5）实际只含 `DIRECTORY`（指向 `<gameDir>/kubejs`）、`DATA`、`ASSETS`、`STARTUP_SCRIPTS`、`SERVER_SCRIPTS`、`CLIENT_SCRIPTS`、`CONFIG`、`LOCAL` 等静态字段，**不存在 `GAMEDIR` 或 `INSTANCE`**；解析运行根目录需用 `try/catch` 安全探针并在命中 `KubeJSPaths.DIRECTORY` 时回退取其上级目录。
+   - **规避规范**：探测 Java 类/对象可能缺失的属性或方法时，必须包裹在 `safeReadProp(obj, prop)` / `safeHasMethod(obj, prop)` 的 `try/catch` 内。
+
+3. **`JsonIO.read(path)` 返回 `java.util.Map`，不可用 `size() + get()` 误判为 List**：
+   - `JsonIO.read` 对 JSON 对象 `{...}` 返回 GSON `LinkedTreeMap`（实现了 `Map.size()`，且带 Rhino 映射行为），若类列表判定 `toSeqArray` 只检查 `size()` + `get()` 而不排除 `isJavaMapLike(x)`（`entrySet` / `containsKey` / `put` 方法），会把 4 键对象 `{ version, updatedAt, migratedLegacy, blocks }` 误判为长度为 4 的数组 `[null, null, null, null]`，导致持久化方块恢复失败。
+   - **规避规范**：`isArrayLike` / `isJavaListLike` / `toSeqArray` 必须先排除 `isJavaMapLike(raw)`；读取 Java `Map` 字段时先通过 `containsKey` / `get` 提取键值，不得直接裸用 `obj[key]`。
+
+4. **客户端 `Java.loadClass('java.lang.System')` 受类过滤器拦截**：
+   - KubeJS 客户端默认 `JavaWrapper` 类过滤器禁止加载 `java.lang.System`，调用会正常抛异常；高精计时回退至 `Util.getMillis()` / `Date.now()` 属于预期降级，应通过 `loadJavaClass('java.lang.System', true)` 静默探测，避免在 `client.log` 刷出无意义 `[WARN]`。

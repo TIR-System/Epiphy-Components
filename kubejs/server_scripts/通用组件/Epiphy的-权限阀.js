@@ -1093,7 +1093,7 @@
             logWarn('mutatePlayerGrant', '拒绝修改系统保留作用域 "' + scope + '" 的玩家授权记录。')
             return false
         }
-        var srv    = server || (typeof playerOrName === 'object' ? resolveServer(null, playerOrName) : SERVER_REF)
+        var srv    = server || (BASE.isObjectLike(playerOrName) ? resolveServer(null, playerOrName) : SERVER_REF)
         var entry  = getOrLoadWorldGrants(srv)
         var nowMs  = Date.now()
         var byLbl  = extractActorLabel(grantedBySourceOrName)
@@ -1103,7 +1103,7 @@
             atMs: nowMs
         } : null
 
-        if (typeof playerOrName === 'string') {
+        if (BASE.safeTypeOf(playerOrName) === 'string') {
             var rawStr = String(playerOrName).trim()
             var k = normalizeKey(rawStr)
             if (!k) return false

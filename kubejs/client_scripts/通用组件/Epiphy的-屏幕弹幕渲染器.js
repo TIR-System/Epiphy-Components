@@ -148,18 +148,20 @@
         console.warn('[ScreenDanmakuClient] ' + msg)
     }
 
-    function loadJavaClass(className) {
+    function loadJavaClass(className, silent) {
         if (typeof Java === 'undefined' || Java == null || typeof Java.loadClass !== 'function') return null
         try {
             return Java.loadClass(className)
         } catch (e) {
-            warnOnce('javaClass:' + className, '加载 Java 类 ' + className + ' 失败: ' + e)
+            if (!silent) {
+                warnOnce('javaClass:' + className, '加载 Java 类 ' + className + ' 失败: ' + e)
+            }
             return null
         }
     }
 
     GL11           = loadJavaClass('org.lwjgl.opengl.GL11')
-    SystemClass    = loadJavaClass('java.lang.System')
+    SystemClass    = loadJavaClass('java.lang.System', true)
     MinecraftClass = loadJavaClass('net.minecraft.client.Minecraft')
     Matrix4fClass  = loadJavaClass('org.joml.Matrix4f')
 

@@ -1,6 +1,6 @@
 // priority: 500
 // ============================================================================
-//  通用屏幕弹幕与泛用文本显示组件 —— 服务端调度器 (ScreenDanmaku v5.2)
+//  通用屏幕弹幕与泛用文本显示组件 —— 服务端调度器 (ScreenDanmaku v5.3)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
@@ -228,21 +228,30 @@
     }
 
     function pick(obj, keys, defVal) {
-        if (obj == null || typeof obj !== 'object') return defVal
+        if (!BASE.isObjectLike(obj)) return defVal
         for (var i = 0; i < keys.length; i++) {
-            var v = obj[keys[i]]
+            var v = safeReadPropLocal(obj, keys[i])
             if (v !== undefined && v !== null) return v
         }
         return defVal
     }
 
     function pickNonEmpty(obj, keys, defVal) {
-        if (obj == null || typeof obj !== 'object') return defVal
+        if (!BASE.isObjectLike(obj)) return defVal
         for (var i = 0; i < keys.length; i++) {
-            var v = obj[keys[i]]
+            var v = safeReadPropLocal(obj, keys[i])
             if (v !== undefined && v !== null && String(v).trim() !== '') return v
         }
         return defVal
+    }
+
+    function safeReadPropLocal(obj, key) {
+        if (obj == null) return undefined
+        try {
+            return obj[key]
+        } catch (e) {
+            return undefined
+        }
     }
 
     var readVec3 = BASE.readPos
@@ -258,6 +267,8 @@
 
     var danmakuTickCounter   = 0
     var blockSourceSeq       = 0
+    var boundMetaByBlockId   = new Map()
+    var pendingLoginFlushes  = new Map() // uuid -> { uuid, player, dueTick }
     var playerSourceCooldown = new Map() // '<playerUuid>|<scopeKey>' -> expireTick
 
     var lastEmitMs            = 0
@@ -295,6 +306,19 @@
     ServerEvents.tick(function (event) {
         if (SERVER_REF == null) SERVER_REF = event.server
         danmakuTickCounter++
+        if (pendingLoginFlushes.size > 0) {
+            var duePlayers = []
+            pendingLoginFlushes.forEach(function (entry, uuid) {
+                if (entry != null && danmakuTickCounter >= entry.dueTick) {
+                    duePlayers.push({ uuid: uuid, player: entry.player })
+                }
+            })
+            for (var fi = 0; fi < duePlayers.length; fi++) {
+                var dp = duePlayers[fi]
+                pendingLoginFlushes.delete(dp.uuid)
+                flushTrackedBlocksForJoinedPlayer(dp.player)
+            }
+        }
         if ((danmakuTickCounter % 600) === 0 && playerSourceCooldown.size > 0) {
             playerSourceCooldown.forEach(function (exp, k) {
                 if (exp <= danmakuTickCounter) playerSourceCooldown.delete(k)
@@ -1770,7 +1794,7 @@
         return ((tickNum + phase) % binding.intervalTicks) === 0
     }
 
-    function emitForBoundBlock(rec, binding, lv, curBlock) {
+    function emitForBoundBlock(rec, binding, lv, curBlock, targetPlayer) {
         if (binding == null) return 0
         var isMergeMode = ((binding.conflictMode || 'overlap') === 'merge')
         var cluster = null
@@ -1779,7 +1803,7 @@
             if (cluster != null && cluster.leaderKey !== rec.key) return 0
         }
         if (lv == null) lv = resolveLevel(rec.dim, null)
-        if (lv == null) return 0
+        if (lv == null || rec.chunkLoaded === false) return 0
 
         var t0Ns    = nowNano()
         var sentOut = 0
@@ -1792,6 +1816,25 @@
             var cx = rec.x + 0.5, cy = rec.y + 0.5, cz = rec.z + 0.5
             var r  = binding.radius
             var visitTargets = function (cb) {
+                if (targetPlayer != null) {
+                    var tpPos = readPlayerPos(targetPlayer)
+                    if (tpPos == null) return 0
+                    var tpDim = null
+                    try {
+                        var tpLv = safeReadPropLocal(targetPlayer, 'level')
+                        if (tpLv == null && typeof targetPlayer.getLevel === 'function') tpLv = targetPlayer.getLevel()
+                        if (tpLv != null) tpDim = BASE.dimOfLevel(resolveLevel(tpLv, SERVER_REF) || tpLv)
+                    } catch (eDim) { }
+                    if (tpDim != null && rec.dim != null && tpDim !== rec.dim) return 0
+                    if (cluster != null) {
+                        if (!isPointInMergeCluster(cluster, tpPos.x, tpPos.y, tpPos.z)) return 0
+                    } else {
+                        var tdx = tpPos.x - cx, tdy = tpPos.y - cy, tdz = tpPos.z - cz
+                        if ((tdx * tdx + tdy * tdy + tdz * tdz) > (r * r)) return 0
+                    }
+                    cb(targetPlayer)
+                    return 1
+                }
                 return cluster != null
                     ? forEachPlayerInMergeCluster(lv, cluster, cb)
                     : forEachPlayerInRadius(lv, cx, cy, cz, r, cb)
@@ -1949,6 +1992,24 @@
         clearNear(rec.dim, rec.x + 0.5, rec.y + 0.5, rec.z + 0.5, binding.radius + 6, clearSpec)
     }
 
+    function flushTrackedBlocksForJoinedPlayer(targetPlayer) {
+        if (targetPlayer == null || danmakuBlockTracker == null || boundMetaByBlockId.size === 0) return 0
+        try {
+            if (typeof targetPlayer.isRemoved === 'function' && targetPlayer.isRemoved()) return 0
+        } catch (eRem) { }
+        var recs = danmakuBlockTracker.getTrackedRecords(null)
+        if (!recs || recs.length === 0) return 0
+        var totalSent = 0
+        for (var i = 0; i < recs.length; i++) {
+            var rec = recs[i]
+            if (rec == null) continue
+            var binding = boundMetaByBlockId.get(rec.blockId)
+            if (binding == null) continue
+            totalSent += emitForBoundBlock(rec, binding, null, null, targetPlayer)
+        }
+        return totalSent
+    }
+
     var danmakuBlockTracker = null
 
     function ensureDanmakuBlockTracker() {
@@ -1962,8 +2023,8 @@
             onFound: function (rec, binding, source) {
                 ensureRecordSeq(rec)
                 invalidateScopeCache(null, getScopeCacheKeyForRecord(rec, binding))
-                // 仅在玩家新放置时立即触发首帧反馈；若归属于已存在合并集群的从属方块则静默合并，不额外运行
-                if (source === 'placed' || source === 'fallback_placed') {
+                // 玩家新放置、区块扫盘或持久化加载时立即触发首帧反馈；若归属于已存在合并集群的从属方块则静默合并，不额外运行
+                if (source === 'placed' || source === 'fallback_placed' || source === 'scan' || source === 'persist') {
                     if ((binding.conflictMode || 'overlap') === 'merge' && !isMergeClusterLeader(rec, binding)) {
                         return
                     }
@@ -2025,7 +2086,7 @@
         var defNsRaw = pickNonEmpty(meta, ['namespace', 'ns'], null)
         var defNs    = defNsRaw != null ? String(defNsRaw).trim() : ('blk:' + idStr)
         var clearPri = pick(meta, ['clearMaxPriority'], null)
-        tracker.bind(idStr, {
+        var metaEntry = {
             blockId:               idStr,
             specOrFn:              specOrFn,
             radius:                radius,
@@ -2040,7 +2101,9 @@
             conflictMode:          conflictMode,
             conflictScope:         conflictScope,
             conflictCooldownTicks: Math.floor(conflictCooldown)
-        })
+        }
+        boundMetaByBlockId.set(idStr, metaEntry)
+        tracker.bind(idStr, metaEntry)
         if (!global.ScreenDanmakuBlockBindings || typeof global.ScreenDanmakuBlockBindings !== 'object') {
             global.ScreenDanmakuBlockBindings = {}
         }
@@ -2054,6 +2117,7 @@
         var tracker = ensureDanmakuBlockTracker()
         if (tracker == null) return 0
         var idStr = String(blockId).trim()
+        boundMetaByBlockId.delete(idStr)
         if (global.ScreenDanmakuBlockBindings && typeof global.ScreenDanmakuBlockBindings === 'object') {
             delete global.ScreenDanmakuBlockBindings[idStr]
         }
@@ -2758,6 +2822,34 @@
 
     var valveRegError = null
 
+    if (typeof PlayerEvents !== 'undefined' && PlayerEvents != null && typeof PlayerEvents.loggedIn === 'function') {
+        PlayerEvents.loggedIn(function (event) {
+            try {
+                var p = event != null ? event.player : null
+                if (p == null) return
+                if (SERVER_REF == null) {
+                    SERVER_REF = BASE.resolveServer(null, p)
+                }
+                var uuid = getPlayerUuidSafe(p)
+                if (uuid && uuid !== 'unknown') {
+                    var prefix = uuid + '|'
+                    playerSourceCooldown.forEach(function (_exp, k) {
+                        if (String(k).indexOf(prefix) === 0) {
+                            playerSourceCooldown.delete(k)
+                        }
+                    })
+                    pendingLoginFlushes.set(uuid, {
+                        uuid:    uuid,
+                        player:  p,
+                        dueTick: danmakuTickCounter + 6
+                    })
+                }
+            } catch (eIn) {
+                reportCatch('PlayerEvents.loggedIn:scheduleFlush', eIn)
+            }
+        })
+    }
+
     if (typeof PlayerEvents !== 'undefined' && PlayerEvents != null && typeof PlayerEvents.loggedOut === 'function') {
         PlayerEvents.loggedOut(function (event) {
             try {
@@ -2765,6 +2857,7 @@
                 if (p == null) return
                 var uuid = getPlayerUuidSafe(p)
                 if (uuid && uuid !== 'unknown') {
+                    pendingLoginFlushes.delete(uuid)
                     playerCmdCooldownMap.delete(String(uuid).trim().toLowerCase())
                     var prefix = uuid + '|'
                     playerSourceCooldown.forEach(function (_exp, k) {

@@ -4531,6 +4531,387 @@ test('Epiphy的小玩意_功能测试 & EpiphyAudioClient: SRG-only Forge runtim
     assert.strictEqual(svCon.errors.length, 0, 'server audio block test must emit zero errors')
 })
 
+// ----------------------------------------------------------------------------
+// 36. Rhino Java Interop Safety (KubeJSPaths.DIRECTORY parent + Java POJO traps)
+// ----------------------------------------------------------------------------
+test('Rhino Java interop: KubeJSPaths.DIRECTORY parent resolution & strict Java POJO guards', function () {
+    function makeStrictJavaProxy(obj, label) {
+        var allowed = {
+            Symbol: true,
+            then:   true,
+            inspect: true
+        }
+        return new Proxy(obj, {
+            get: function (target, prop) {
+                if (typeof prop === 'symbol') return target[prop]
+                var p = String(prop)
+                if (Object.prototype.hasOwnProperty.call(target, p)) return target[p]
+                if (allowed[p]) return undefined
+                throw new Error('EvaluatorException: Java class/object "' + label + '" has no property "' + p + '"')
+            }
+        })
+    }
+
+    var fakeKubePaths = makeStrictJavaProxy({
+        DIRECTORY: 'D:/FakeMinecraftInstance/kubejs',
+        CONFIG:    'D:/FakeMinecraftInstance/kubejs/config'
+    }, 'KubeJSPaths')
+
+    var strictLevel = makeStrictJavaProxy({
+        getDimension: function () { return 'minecraft:overworld' },
+        hasChunk:     function () { return true },
+        isLoaded:     function () { return true },
+        getBlock:     function () { return { id: 'minecraft:air' } },
+        getPlayers:   function () { return [strictPlayer] }
+    }, 'ServerLevel')
+
+    var sentPackets = []
+    var strictPlayer = makeStrictJavaProxy({
+        getId:          function () { return 101 },
+        getName:        function () { return { getString: function () { return 'RhinoPlayer' } } },
+        getGameProfile: function () { return { getName: function () { return 'RhinoPlayer' } } },
+        getStringUUID:  function () { return '11111111-1111-4000-8000-111111111111' },
+        isOp:          function () { return false },
+        getX:          function () { return 5 },
+        getY:          function () { return 64 },
+        getZ:          function () { return 5 },
+        getLevel:      function () { return strictLevel },
+        sendData:      function (ch, pkt) { sentPackets.push({ ch: ch, pkt: pkt }) }
+    }, 'ServerPlayer')
+
+    var strictSrv = makeStrictJavaProxy({
+        getWorldData:   function () { return { getLevelName: function () { return 'StrictRhinoWorld' }, getAllowCommands: function () { return true } } },
+        getLevel:       function () { return strictLevel },
+        getAllLevels:   function () { return [strictLevel] },
+        getPlayerList:  function () { return { getPlayers: function () { return [strictPlayer] } } },
+        overworld:      function () { return strictLevel },
+        persistentData: makeStrictJavaProxy({
+            contains:  function () { return false },
+            getString: function () { return '' }
+        }, 'CompoundTag')
+    }, 'MinecraftServer')
+
+    var noop = function () {}
+    var sb = {
+        console: { info: noop, warn: noop, error: noop, debug: noop, log: noop },
+        ServerEvents: {
+            loaded: function (fn) { fn({ server: strictSrv }) },
+            tick: noop,
+            commandRegistry: noop,
+            command: noop,
+            unloaded: noop
+        },
+        PlayerEvents: { loggedIn: noop, loggedOut: noop },
+        BlockEvents:  { placed: noop, broken: noop },
+        Java: {
+            loadClass: function (name) {
+                if (name === 'dev.latvian.mods.kubejs.KubeJSPaths') return fakeKubePaths
+                return null
+            }
+        },
+        global: {}
+    }
+    var con = attachConsoleCapture(sb)
+    sb.globalThis = sb
+    vm.createContext(sb)
+    loadStartupBase(sb)
+    runScriptIn(sb, SERVER_BASE_PATH)
+    runScriptIn(sb, VALVE_PATH)
+    runScriptIn(sb, AUDIO_PATH)
+
+    var BASE = sb.global.EpiphyServerBase
+    assert.ok(BASE != null, 'EpiphyServerBase must load when KubeJSPaths only exposes DIRECTORY')
+    assert.strictEqual(BASE.resolveEpiphyDataRoot(), 'D:/FakeMinecraftInstance/epiphy-data', 'DIRECTORY ending in /kubejs must resolve parent gameDir')
+    assert.strictEqual(BASE.isObjectLike(strictPlayer), true)
+    assert.strictEqual(BASE.isArrayLike(strictPlayer), false)
+    var readP = BASE.readPos(strictPlayer)
+    assert.ok(readP != null && readP.x === 5 && readP.y === 64 && readP.z === 5, 'readPos must read strict ServerPlayer coordinates safely')
+    assert.strictEqual(BASE.uuidOf(strictPlayer), '11111111-1111-4000-8000-111111111111')
+    assert.strictEqual(BASE.nameOf(strictPlayer), 'RhinoPlayer')
+
+    // Audio & PermissionValve APIs must accept strict Java POJOs cleanly without EvaluatorException
+    var handleId = sb.global.EpiphyAudio.play({
+        sound:   'minecraft:music.menu',
+        entity:  strictPlayer,
+        players: [strictPlayer],
+        loop:    true
+    })
+    assert.ok(handleId > 0, 'EpiphyAudio.play on strict Java player/entity must succeed')
+    assert.strictEqual(sb.global.EpiphyAudio.stop(strictPlayer), 1, 'EpiphyAudio.stop(strictPlayer) must stop handle without throwing')
+    assert.strictEqual(con.errors.length, 0, 'Rhino Java interop test must emit zero console errors: ' + JSON.stringify(con.errors))
+    assert.strictEqual(con.warns.length, 0, 'Rhino Java interop test must emit zero console warnings: ' + JSON.stringify(con.warns))
+})
+
+// ----------------------------------------------------------------------------
+// 37. World Exit/Rejoin Regression: JsonIO LinkedTreeMap + persisted test block danmaku/audio
+// ----------------------------------------------------------------------------
+test('World rejoin regression: JsonIO LinkedTreeMap load & PlayerEvents.loggedIn delayed danmaku + audio trigger', function () {
+    var TEST_BLOCK_PATH = path.resolve(__dirname, '../kubejs/startup_scripts/通用组件/Epiphy的小玩意_功能测试.js')
+
+    function makeMockJavaMap(plainObj) {
+        var backing = new Map()
+        var keys = Object.keys(plainObj)
+        for (var i = 0; i < keys.length; i++) {
+            backing.set(keys[i], plainObj[keys[i]])
+        }
+        // Strict Java Map mock: .size() + .get(key) + .containsKey(key) + .entrySet(), throws on JS property reads like .blocks!
+        return new Proxy({
+            size:        function () { return backing.size },
+            containsKey: function (k) { return backing.has(k) },
+            get:         function (k) { return backing.has(k) ? backing.get(k) : null },
+            entrySet:    function () { return backing.entries() }
+        }, {
+            get: function (target, prop) {
+                if (typeof prop === 'symbol') return target[prop]
+                var p = String(prop)
+                if (Object.prototype.hasOwnProperty.call(target, p)) return target[p]
+                if (p === 'then' || p === 'inspect') return undefined
+                throw new Error('EvaluatorException: LinkedTreeMap has no JS field "' + p + '"')
+            }
+        })
+    }
+
+    var fakeJavaList = (function () {
+        var row = ['epiphy:rnfmabj_test', 'minecraft:overworld', 12, 64, 10]
+        return {
+            size: function () { return 1 },
+            get:  function (idx) {
+                if (idx !== 0) return null
+                return {
+                    size: function () { return row.length },
+                    get:  function (j) { return row[j] }
+                }
+            }
+        }
+    })()
+
+    var persistedJavaMap = makeMockJavaMap({
+        version:        2,
+        updatedAt:      '2026-11-15T05:00:00.000Z',
+        migratedLegacy: true,
+        blocks:         fakeJavaList
+    })
+
+    var serverTicks = []
+    var loadedCbs = []
+    var loggedInCbs = []
+    var loggedOutCbs = []
+    var overworldBlock = {
+        id: 'epiphy:rnfmabj_test',
+        x: 12, y: 64, z: 10,
+        getId: function () { return 'epiphy:rnfmabj_test' },
+        getX: function () { return 12 }, getY: function () { return 64 }, getZ: function () { return 10 },
+        getLevel: function () { return overworldLv }
+    }
+    var overworldLv = {
+        getDimension: function () { return 'minecraft:overworld' },
+        dimension: 'minecraft:overworld',
+        hasChunk: function () { return true },
+        isLoaded: function () { return true },
+        getBlock: function (x, y, z) {
+            if (Math.floor(x) === 12 && Math.floor(y) === 64 && Math.floor(z) === 10) return overworldBlock
+            return { id: 'minecraft:air' }
+        },
+        players: [],
+        getPlayers: function () { return overworldLv.players }
+    }
+    var netherLv = {
+        getDimension: function () { return 'minecraft:the_nether' },
+        dimension: 'minecraft:the_nether',
+        hasChunk: function () { return true },
+        isLoaded: function () { return true },
+        getBlock: function () { return { id: 'minecraft:air' } },
+        players: [],
+        getPlayers: function () { return netherLv.players }
+    }
+    var rejoiningPlayer = {
+        username: 'Rejoiner',
+        getId: function () { return 88 },
+        getName: function () { return { getString: function () { return 'Rejoiner' } } },
+        getStringUUID: function () { return '22222222-2222-4000-8000-222222222222' },
+        isOp: function () { return true },
+        isRemoved: function () { return false },
+        getX: function () { return 10 }, getY: function () { return 64 }, getZ: function () { return 10 },
+        getLevel: function () { return overworldLv },
+        level: overworldLv,
+        sendData: function (ch, pkt) { this._sent.push({ ch: ch, pkt: pkt }) },
+        _sent: []
+    }
+    var netherPlayer = {
+        username: 'NetherWatcher',
+        getId: function () { return 89 },
+        getName: function () { return { getString: function () { return 'NetherWatcher' } } },
+        getStringUUID: function () { return '33333333-3333-4000-8000-333333333333' },
+        isOp: function () { return true },
+        isRemoved: function () { return false },
+        getX: function () { return 10 }, getY: function () { return 64 }, getZ: function () { return 10 },
+        getLevel: function () { return netherLv },
+        level: netherLv,
+        sendData: function (ch, pkt) { this._sent.push({ ch: ch, pkt: pkt }) },
+        _sent: []
+    }
+
+    var rejoinSrv = {
+        getWorldData: function () { return { getLevelName: function () { return 'RejoinWorld' }, getAllowCommands: function () { return true } } },
+        getWorldPath: function () { return tmpDisk.replace(/\\/g, '/') + '/saves/RejoinWorld' },
+        getLevel: function (d) { return String(d).indexOf('the_nether') >= 0 ? netherLv : overworldLv },
+        getAllLevels: function () { return [overworldLv, netherLv] },
+        getPlayerList: function () { return { getPlayers: function () { return overworldLv.players.concat(netherLv.players) } } },
+        overworld: function () { return overworldLv },
+        persistentData: { contains: function () { return false }, getString: function () { return '' } }
+    }
+
+    var tmpDisk = fs.mkdtempSync(path.join(require('os').tmpdir(), 'epiphy_rejoin_'))
+    try {
+        var svSb = {
+            console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+            StartupEvents: {
+                registry: function (_kind, fn) {
+                    fn({
+                        create: function () {
+                            var b = {
+                                displayName: function () { return b }, soundType: function () { return b },
+                                hardness: function () { return b }, resistance: function () { return b },
+                                textureAll: function () { return b }, texture: function () { return b }
+                            }
+                            return b
+                        }
+                    })
+                }
+            },
+            ServerEvents: {
+                loaded:          function (fn) { loadedCbs.push(fn) },
+                unloaded:        function () {},
+                tick:            function (fn) { serverTicks.push(fn) },
+                commandRegistry: function () {}
+            },
+            BlockEvents: { placed: function () {}, broken: function () {} },
+            PlayerEvents: {
+                loggedIn:  function (fn) { loggedInCbs.push(fn) },
+                loggedOut: function (fn) { loggedOutCbs.push(fn) }
+            },
+            JsonIO: {
+                read:  function (p) { return String(p).indexOf('kubejs_epiphy_tracked_blocks') >= 0 ? persistedJavaMap : null },
+                write: function () {}
+            },
+            Java: {
+                loadClass: function (name) {
+                    if (name === 'dev.latvian.mods.kubejs.KubeJSPaths') {
+                        return { DIRECTORY: tmpDisk.replace(/\\/g, '/') + '/kubejs' }
+                    }
+                    if (name === 'net.minecraft.world.level.storage.LevelResource') {
+                        return { ROOT: 'ROOT' }
+                    }
+                    return null
+                }
+            },
+            Text: { of: function (s) { return String(s) } },
+            global: {}
+        }
+        var svCon = attachConsoleCapture(svSb)
+        svSb.globalThis = svSb
+        vm.createContext(svSb)
+        loadStartupBase(svSb)
+        runScriptIn(svSb, TEST_BLOCK_PATH)
+        runScriptIn(svSb, LOG_PATH)
+        runScriptIn(svSb, SERVER_BASE_PATH)
+        runScriptIn(svSb, TRACKER_PATH)
+        runScriptIn(svSb, DANMAKU_PATH)
+        runScriptIn(svSb, AUDIO_PATH)
+
+        // Fire ServerEvents.loaded BEFORE players log in (real world startup sequence!)
+        for (var li = 0; li < loadedCbs.length; li++) {
+            loadedCbs[li]({ server: rejoinSrv })
+        }
+
+        // Verify persisted block loaded cleanly from Java LinkedTreeMap with zero importSkipped warnings!
+        var trackerStats = svSb.global.EpiphyBlockTracker.getStats()
+        assert.strictEqual(
+            trackerStats.trackedBlocksSize,
+            1,
+            'JsonIO LinkedTreeMap must restore the persisted epiphy:rnfmabj_test block; warns=' + JSON.stringify(svCon.warns) + ' errors=' + JSON.stringify(svCon.errors)
+        )
+        assert.strictEqual(
+            svCon.warns.some(function (w) { return w.indexOf('importSkipped') >= 0 }),
+            false,
+            'JsonIO LinkedTreeMap must never log importSkipped warnings: ' + JSON.stringify(svCon.warns)
+        )
+
+        // Now player rejoins the world!
+        overworldLv.players.push(rejoiningPlayer)
+        netherLv.players.push(netherPlayer)
+        for (var pi = 0; pi < loggedInCbs.length; pi++) {
+            loggedInCbs[pi]({ player: rejoiningPlayer })
+            loggedInCbs[pi]({ player: netherPlayer })
+        }
+
+        // Step 10 ticks -> tick 6 triggers delayed login flush right after client ClientEvents.loggedIn reset!
+        for (var tk = 0; tk < 10; tk++) {
+            for (var ti = 0; ti < serverTicks.length; ti++) {
+                serverTicks[ti]({ server: rejoinSrv })
+            }
+        }
+
+        var danmakuPkts = rejoiningPlayer._sent.filter(function (x) { return x.ch === 'epiphy:screen_danmaku' })
+        var audioPkts   = rejoiningPlayer._sent.filter(function (x) { return x.ch === 'epiphy:audio' && x.pkt && x.pkt.act === 'play' })
+        assert.ok(danmakuPkts.length >= 1, 'rejoining overworld player near persisted epiphy:rnfmabj_test must receive danmaku automatically')
+        assert.ok(audioPkts.length >= 1, 'rejoining overworld player near persisted epiphy:rnfmabj_test must receive audio automatically')
+        assert.strictEqual(
+            netherPlayer._sent.filter(function (x) { return x.ch === 'epiphy:screen_danmaku' }).length,
+            0,
+            'other-dimension player must not receive overworld persisted block danmaku'
+        )
+        assert.strictEqual(svCon.errors.length, 0, 'world rejoin simulation must emit zero console errors: ' + JSON.stringify(svCon.errors))
+    } finally {
+        try { fs.rmSync(tmpDisk, { recursive: true, force: true }) } catch (eRm) {}
+    }
+})
+
+// ----------------------------------------------------------------------------
+// 38. Client java.lang.System Class Filter: silent probe produces zero WARN
+// ----------------------------------------------------------------------------
+test('Client loadJavaClass(java.lang.System, true): class filter rejection emits zero WARN', function () {
+    function makeClientSb() {
+        var sb = {
+            console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+            ClientEvents:  { tick: function () {}, loggedIn: function () {}, loggedOut: function () {}, paintScreen: function () {} },
+            NetworkEvents: { dataReceived: function () {} },
+            Client:        { minecraft: null },
+            Java: {
+                loadClass: function (name) {
+                    if (name === 'java.lang.System') {
+                        throw new Error('Class java.lang.System is not allowed by class filter!')
+                    }
+                    return null
+                }
+            },
+            global: {}
+        }
+        sb.globalThis = sb
+        vm.createContext(sb)
+        loadStartupBase(sb)
+        return sb
+    }
+
+    var dmSb = makeClientSb()
+    var dmCon = attachConsoleCapture(dmSb)
+    runScriptIn(dmSb, RENDERER_PATH)
+    assert.strictEqual(
+        dmCon.warns.some(function (w) { return w.indexOf('java.lang.System') >= 0 }),
+        false,
+        'ScreenDanmakuClient must not warn when java.lang.System is blocked by class filter'
+    )
+
+    var auSb = makeClientSb()
+    var auCon = attachConsoleCapture(auSb)
+    runScriptIn(auSb, AUDIO_CLIENT_PATH)
+    assert.strictEqual(
+        auCon.warns.some(function (w) { return w.indexOf('java.lang.System') >= 0 }),
+        false,
+        'EpiphyAudioClient must not warn when java.lang.System is blocked by class filter'
+    )
+})
+
 var passed = 0
 for (var i = 0; i < tests.length; i++) {
     var t = tests[i]

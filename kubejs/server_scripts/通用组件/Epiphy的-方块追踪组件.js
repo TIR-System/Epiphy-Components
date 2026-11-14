@@ -1,6 +1,6 @@
 // priority: 1050
 // ============================================================================
-//  通用方块追踪与渐进式区块段扫描组件 (EpiphyBlockTracker v2)
+//  通用方块追踪与渐进式区块段扫描组件 (EpiphyBlockTracker v2.1)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
@@ -358,6 +358,11 @@
                 saveTrackedBlocks(true)
             }
         }
+        trackedBlocks.forEach(function (rec) {
+            if (rec != null && bindingsByBlockId.has(rec.blockId)) {
+                dispatchFoundToSubscribers(rec, null, 'persist')
+            }
+        })
     }
 
     // 统一的一次性旧版数据迁移接口（由业务侧声明迁移源与目标 blockId，底座不硬编码任何业务 ID）
@@ -488,8 +493,10 @@
 
     function getLoadedChunkSections(lv, chunkX, chunkZ) {
         if (lv == null) return { loaded: false, sections: null, minBuildY: -64 }
-        var cs    = lv.getChunkSource()
-        var chunk = cs != null ? cs.getChunkNow(chunkX, chunkZ) : (lv.hasChunk(chunkX, chunkZ) ? lv.getChunk(chunkX, chunkZ) : null)
+        var cs    = (typeof lv.getChunkSource === 'function') ? lv.getChunkSource() : null
+        var chunk = (cs != null && typeof cs.getChunkNow === 'function')
+            ? cs.getChunkNow(chunkX, chunkZ)
+            : ((typeof lv.hasChunk === 'function' && lv.hasChunk(chunkX, chunkZ) && typeof lv.getChunk === 'function') ? lv.getChunk(chunkX, chunkZ) : null)
         if (chunk == null) return { loaded: false, sections: null, minBuildY: -64 }
         var sections  = chunk.getSections()
         var minBuildY = typeof chunk.getMinBuildHeight === 'function' ? Number(chunk.getMinBuildHeight()) : -64
@@ -888,6 +895,13 @@
                 if (sub.onBindingChanged != null) {
                     try { sub.onBindingChanged(idStr, meta, prevMeta) } catch (eChg) { logCatch(sub.id + ':onBindingChanged', eChg) }
                 }
+                if (prevMeta == null && loadedPersistSrv != null && trackedBlocks.size > 0) {
+                    trackedBlocks.forEach(function (rec) {
+                        if (rec != null && rec.blockId === idStr) {
+                            dispatchFoundToSubscribers(rec, subId, 'persist')
+                        }
+                    })
+                }
                 return true
             },
             unbind: unbindBlockForSub,
@@ -987,6 +1001,20 @@
             logCatch('BlockEvents.broken', eBroken)
         }
     })
+
+    if (typeof ServerEvents !== 'undefined' && ServerEvents != null && typeof ServerEvents.loaded === 'function') {
+        ServerEvents.loaded(function (event) {
+            try {
+                if (event != null && event.server != null) SERVER_REF = event.server
+                if (SERVER_REF != null) {
+                    ensureLoaded()
+                    absorbGlobalMigrations()
+                }
+            } catch (eLd) {
+                logCatch('ServerEvents.loaded', eLd)
+            }
+        })
+    }
 
     ServerEvents.tick(function (event) {
         try {

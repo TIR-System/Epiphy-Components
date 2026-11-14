@@ -56,12 +56,14 @@
         console.warn(`[EpiphyAudioClient] ${msg}`)
     }
 
-    var loadJavaClass = (name) => {
+    var loadJavaClass = (name, silent) => {
         if (typeof Java === 'undefined' || Java == null || typeof Java.loadClass !== 'function') return null
         try {
             return Java.loadClass(name)
         } catch (e) {
-            warnOnce(`javaClass:${name}`, `加载 Java 类 ${name} 失败: ${e}`)
+            if (!silent) {
+                warnOnce(`javaClass:${name}`, `加载 Java 类 ${name} 失败: ${e}`)
+            }
             return null
         }
     }
@@ -73,7 +75,7 @@
     var SimpleSoundInstance = loadJavaClass('net.minecraft.client.resources.sounds.SimpleSoundInstance')
     var Attenuation         = loadJavaClass('net.minecraft.client.resources.sounds.SoundInstance$Attenuation')
     var Vec3Class           = loadJavaClass('net.minecraft.world.phys.Vec3')
-    var SystemClass         = loadJavaClass('java.lang.System')
+    var SystemClass         = loadJavaClass('java.lang.System', true)
 
     var createRandomSource = () => {
         if (RandomSource == null) return null

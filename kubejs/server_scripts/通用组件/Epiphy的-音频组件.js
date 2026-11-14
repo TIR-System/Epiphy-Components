@@ -152,14 +152,29 @@
 
     var parsePriority = (val, defVal) => SPEC.parsePriority(val, defVal, { map: PRIORITY_MAP, min: 0, max: 10 })
 
-    var parseTicks = SPEC.parseTicks
+    var parseTicks    = SPEC.parseTicks
+    var safeTypeOf    = BASE.safeTypeOf
+    var isObjectLike  = BASE.isObjectLike
+
+    var safeReadProp = (o, p) => {
+        if (o == null) return undefined
+        try { return o[p] } catch (e) { return undefined }
+    }
+
+    var safeHasMethod = (o, p) => {
+        if (o == null) return false
+        try { return safeTypeOf(o[p]) === 'function' } catch (e) { return false }
+    }
 
     var normalizeSoundId = (v) => {
         if (v == null) return null
         var raw = v
-        if (typeof raw === 'object') {
-            if (typeof raw.getLocation === 'function') raw = raw.getLocation()
-            else if (raw.location != null) raw = raw.location
+        if (isObjectLike(raw)) {
+            if (safeHasMethod(raw, 'getLocation')) raw = raw.getLocation()
+            else {
+                var locProp = safeReadProp(raw, 'location')
+                if (locProp != null) raw = locProp
+            }
         }
         var s = String(raw).trim().toLowerCase()
         if (s.length === 0 || s.length > 256) return null
@@ -182,7 +197,7 @@
 
     var copyObject = (src) => {
         var out = {}
-        if (src != null && typeof src === 'object') {
+        if (isObjectLike(src)) {
             for (var k of Object.keys(src)) out[k] = src[k]
         }
         return out
@@ -192,10 +207,10 @@
 
     // ======================================================================== Minecraft / KubeJS 6 对象访问
 
-    var isEntity = (o) => o != null && typeof o === 'object' && (typeof o.getStringUUID === 'function' || typeof o.getUUID === 'function')
-    var isPlayer = (o) => isEntity(o) && (typeof o.getGameProfile === 'function' || typeof o.getProfile === 'function' || o.username != null)
-    var isBlockContainer = (o) => o != null && typeof o === 'object' && !isEntity(o) &&
-        (typeof o.getBlockState === 'function' || o.blockState != null || (o.id != null && o.level != null && o.pos != null))
+    var isEntity = (o) => isObjectLike(o) && (safeHasMethod(o, 'getStringUUID') || safeHasMethod(o, 'getUUID'))
+    var isPlayer = (o) => isEntity(o) && (safeHasMethod(o, 'getGameProfile') || safeHasMethod(o, 'm_36316_') || safeHasMethod(o, 'getProfile') || safeReadProp(o, 'username') != null)
+    var isBlockContainer = (o) => isObjectLike(o) && !isEntity(o) &&
+        (safeHasMethod(o, 'getBlockState') || safeReadProp(o, 'blockState') != null || (safeReadProp(o, 'id') != null && safeReadProp(o, 'level') != null && safeReadProp(o, 'pos') != null))
 
     var uuidOf     = BASE.uuidOf
     var entityIdOf = BASE.entityIdOf
@@ -203,8 +218,10 @@
 
     var levelOf = (o) => {
         if (o == null) return null
-        var lv = o.level
-        if (lv == null && typeof o.getLevel === 'function') lv = o.getLevel()
+        var lv = safeReadProp(o, 'level')
+        if (lv == null && safeHasMethod(o, 'getLevel')) {
+            try { lv = o.getLevel() } catch (eLv) { lv = null }
+        }
         return lv != null ? lv : null
     }
 
@@ -462,11 +479,13 @@
         var pos = readPos(src)
         if (pos == null) return null
         var dim = null
-        if (!Array.isArray(src) && typeof src === 'object') {
+        if (!Array.isArray(src) && isObjectLike(src)) {
             var ownLevel = levelOf(src)
             if (ownLevel != null) dim = dimOfLevel(ownLevel)
-            if (dim == null && src.dim != null) dim = resolveDimId(src.dim)
-            if (dim == null && src.dimension != null) dim = resolveDimId(src.dimension)
+            var dimProp = safeReadProp(src, 'dim')
+            if (dim == null && dimProp != null) dim = resolveDimId(dimProp)
+            var dimensionProp = safeReadProp(src, 'dimension')
+            if (dim == null && dimensionProp != null) dim = resolveDimId(dimensionProp)
         }
         if (dim == null) dim = resolveDimId(levelOrDim)
         if (dim == null) return null
@@ -486,7 +505,7 @@
     var fail = (msg) => ({ error: msg })
 
     var buildHandle = (spec) => {
-        if (spec == null || typeof spec !== 'object') {
+        if (!isObjectLike(spec)) {
             return fail('调用时必须传入音频配置对象 spec')
         }
         var rawSound = spec.sound != null ? spec.sound : (spec.soundId != null ? spec.soundId : spec.id)
@@ -1683,14 +1702,14 @@
 
     // ======================================================================== 对外接口：播放与心跳续期
 
-    var isSpecObject = (a) => a != null && typeof a === 'object' && !Array.isArray(a) &&
-        typeof a.getClass !== 'function' && (a.sound != null || a.soundId != null || a.id != null)
+    var isSpecObject = (a) => isObjectLike(a) && !Array.isArray(a) &&
+        !safeHasMethod(a, 'getClass') && (safeReadProp(a, 'sound') != null || safeReadProp(a, 'soundId') != null || safeReadProp(a, 'id') != null)
 
     var normalizeLegacySpec = (target, soundId, opts) => {
-        var o = (typeof opts === 'object' && opts != null) ? copyObject(opts) : {}
+        var o = isObjectLike(opts) ? copyObject(opts) : {}
         if (soundId != null) o.sound = soundId
         if (target == null) return o
-        if (typeof target === 'string') {
+        if (safeTypeOf(target) === 'string') {
             var s = target.trim().toLowerCase()
             if (s === 'all' || s === '*') {
                 o.audience = 'all'
@@ -1706,7 +1725,7 @@
             o.entity = target
         } else if (isBlockContainer(target)) {
             o.block = target
-        } else if (Array.isArray(target) || (typeof target.iterator === 'function' && readPos(target) == null)) {
+        } else if (Array.isArray(target) || (safeHasMethod(target, 'iterator') && readPos(target) == null)) {
             o.players = target
         } else {
             o.at = target
@@ -2042,12 +2061,17 @@
             var isSnd2 = (typeof soundIdOrFadeOut === 'string' && parseTicks(soundIdOrFadeOut, true) === null)
             return stopOnEntity(ref, isSnd2 ? soundIdOrFadeOut : null, isSnd2 ? maybeFadeOut : soundIdOrFadeOut)
         }
-        if (typeof ref === 'object') {
-            if (ref.block != null) return stopAtBlock(ref.block, ref.sound, ref.fadeOut)
-            if (ref.entity != null) return stopOnEntity(ref.entity, ref.sound, ref.fadeOut)
-            if (ref.key != null) return stopKey(ref.key, ref.fadeOut)
-            if (ref.tag != null || ref.group != null) return stopTag(ref.tag || ref.group, ref.fadeOut, ref.maxPriority)
-            if (ref.dim != null || ref.level != null) return stopInDimension(ref.dim || ref.level, ref.sound, ref.fadeOut)
+        if (isObjectLike(ref)) {
+            var refBlock = safeReadProp(ref, 'block')
+            if (refBlock != null) return stopAtBlock(refBlock, safeReadProp(ref, 'sound'), safeReadProp(ref, 'fadeOut'))
+            var refEntity = safeReadProp(ref, 'entity')
+            if (refEntity != null) return stopOnEntity(refEntity, safeReadProp(ref, 'sound'), safeReadProp(ref, 'fadeOut'))
+            var refKey = safeReadProp(ref, 'key')
+            if (refKey != null) return stopKey(refKey, safeReadProp(ref, 'fadeOut'))
+            var refTag = safeReadProp(ref, 'tag') != null ? safeReadProp(ref, 'tag') : safeReadProp(ref, 'group')
+            if (refTag != null) return stopTag(refTag, safeReadProp(ref, 'fadeOut'), safeReadProp(ref, 'maxPriority'))
+            var refDim = safeReadProp(ref, 'dim') != null ? safeReadProp(ref, 'dim') : safeReadProp(ref, 'level')
+            if (refDim != null) return stopInDimension(refDim, safeReadProp(ref, 'sound'), safeReadProp(ref, 'fadeOut'))
             if (readPos(ref) != null) return stopAtBlock(ref, soundIdOrFadeOut, maybeFadeOut)
         }
         reportWarning('stop', `无法识别的 stop 目标参数: ${ref}`)

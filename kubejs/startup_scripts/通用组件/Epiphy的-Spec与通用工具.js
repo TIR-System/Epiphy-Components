@@ -130,14 +130,50 @@
         return a > b ? a : b;
     }
 
+    function safeTypeOf(x) {
+        if (x === null) return 'object';
+        if (x === undefined) return 'undefined';
+        try {
+            return typeof x;
+        } catch (e) {
+            // Rhino MemberType.get 对未包装 Java POJO 执行 typeof 时会抛 Invalid JavaScript value InternalError
+            return 'object';
+        }
+    }
+
+    function isObjectLike(x) {
+        return x != null && safeTypeOf(x) === 'object';
+    }
+
+    function isJavaMapLike(x) {
+        if (!isObjectLike(x)) return false;
+        try {
+            return typeof x.entrySet === 'function' || typeof x.containsKey === 'function' || typeof x.put === 'function';
+        } catch (e) {
+            return false;
+        }
+    }
+
     function isArrayLike(x) {
-        if (x == null || typeof x !== 'object') return false;
+        if (x == null) return false;
         if (Array.isArray(x)) return true;
-        return typeof x.length === 'number' && x.length >= 0 && isFinite(x.length) && Math.floor(x.length) === x.length;
+        if (!isObjectLike(x)) return false;
+        try {
+            var len = x.length;
+            return typeof len === 'number' && len >= 0 && isFinite(len) && Math.floor(len) === len;
+        } catch (e) {
+            return false;
+        }
     }
 
     function isJavaListLike(x) {
-        return x != null && typeof x === 'object' && typeof x.size === 'function' && typeof x.get === 'function';
+        if (!isObjectLike(x)) return false;
+        try {
+            if (isJavaMapLike(x)) return false;
+            return typeof x.size === 'function' && typeof x.get === 'function';
+        } catch (e) {
+            return false;
+        }
     }
 
     function readPairBounds(val) {
@@ -746,7 +782,11 @@
             min2:                       min2,
             max2:                       max2,
             clampNum:                   clampNum,
+            safeTypeOf:                 safeTypeOf,
+            isObjectLike:               isObjectLike,
+            isJavaMapLike:              isJavaMapLike,
             isArrayLike:                isArrayLike,
+            isJavaListLike:             isJavaListLike,
             normalizeDim:               normalizeDim,
             parseFiniteNum:             parseFiniteNum,
             parseNonNegNum:             parseNonNegNum,
