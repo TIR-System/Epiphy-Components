@@ -5357,6 +5357,176 @@ test('ScreenDanmakuClient v5.3: trig LUT, bit-mix hash, illegal shared pulse/wav
     assert.strictEqual(warns.length, 0, 'v5.3 renderer optimization checks must produce zero warnings/errors: ' + JSON.stringify(warns))
 })
 
+// ----------------------------------------------------------------------------
+// 42. ScreenDanmakuClient v5.4: frame-cached sAllowShadow, itemFgMat reuse, zero hot-path getMatrix, strict invariant rCtx & priority sweep
+// ----------------------------------------------------------------------------
+test('ScreenDanmakuClient v5.4: frame sAllowShadow cache, itemFgMat reuse, no hot-path getMatrix & strict invariant ctx', function () {
+    var setCalls = 0
+    var translateCalls = 0
+    function CountingMat() {
+        this.z = 0
+    }
+    CountingMat.prototype.set = function (other) {
+        setCalls++
+        this.z = (other && typeof other.z === 'number') ? other.z : 0
+        return this
+    }
+    CountingMat.prototype.translate = function (_dx, _dy, dz) {
+        translateCalls++
+        this.z += (dz || 0)
+        return this
+    }
+    CountingMat.prototype.rotateZ = function () { return this }
+    CountingMat.prototype.scale   = function () { return this }
+
+    var sAllowShadowReads = 0
+    var shadowEnabled = true
+    var ModernRendererMock = { sAllowSDFTextIn2D: true }
+    Object.defineProperty(ModernRendererMock, 'sAllowShadow', {
+        enumerable: true,
+        get: function () {
+            sAllowShadowReads++
+            return shadowEnabled
+        }
+    })
+
+    var drawLogs = []
+    var lookupCalls = 0
+    var muiEngineMock = {
+        lookupFormattedLayout: function (seq) {
+            lookupCalls++
+            var s = String(seq)
+            return {
+                hasColorEmoji: function () { return false },
+                equals: function (o) { return Boolean(o && o._s === s) },
+                _s: s,
+                drawText: function (mat, _buf, x, y, r, g, b, a, isShd) {
+                    drawLogs.push({ s: s, rgb: (r << 16) | (g << 8) | b, isShd: Boolean(isShd), z: mat ? mat.z : 0 })
+                    return 0
+                }
+            }
+        },
+        getTextRenderer: function () { return { chooseMode: function () { return 1 } } }
+    }
+
+    var nowMs = 1000
+    var paints = []
+    var cliSb = {
+        console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+        Date: { now: function () { return nowMs } },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function (fn) { paints.push(fn) } },
+        NetworkEvents: { dataReceived: function () {} },
+        Java: {
+            loadClass: function (cls) {
+                if (cls === 'java.lang.System') return { nanoTime: function () { return nowMs * 1000000 } }
+                if (cls === 'net.minecraft.client.gui.Font$DisplayMode') return { NORMAL: 'NORMAL' }
+                if (cls === 'org.joml.Matrix4f') return CountingMat
+                if (cls === 'icyllis.modernui.mc.text.TextLayoutEngine') return { getInstance: function () { return muiEngineMock } }
+                if (cls === 'icyllis.modernui.mc.text.ModernTextRenderer') return ModernRendererMock
+                return null
+            }
+        },
+        Text: { of: function (s) { return { string: String(s), getVisualOrderText: function () { return String(s) } } } },
+        global: {}
+    }
+    cliSb.globalThis = cliSb
+    vm.createContext(cliSb)
+    loadStartupBase(cliSb)
+    runScriptIn(cliSb, RENDERER_PATH)
+
+    var Cli = cliSb.global.ScreenDanmakuClient
+    assert.ok(Cli.CONFIG.frameBudgetMs >= 40.0, 'emergency frameBudgetMs must stay high to avoid flickering heavy effects')
+
+    var getMatrixCalls = 0
+    var returnNullMatrix = false
+    var baseFrameMat = new CountingMat()
+    var fbDraws = []
+    var ev = {
+        width: 854, height: 480, level: 'minecraft:overworld',
+        font: { width: function (s) { return String(s || '').length * 6 }, m_272191_: function () {} },
+        text: function (comp) { fbDraws.push(String(comp.string)) },
+        graphics: { bufferSource: function () { return { endBatch: function () {} } }, flush: function () {} },
+        getMatrix: function () {
+            getMatrixCalls++
+            return returnNullMatrix ? null : baseFrameMat
+        },
+        push: function () {}, pop: function () {}, translate: function () {}, scale: function () {}, rotateDeg: function () {}
+    }
+
+    // 1. 10-char unrotated omni per_char with shadow=true: sAllowShadow read 1x/frame; itemFgMat built 1x for all 10 chars!
+    Cli.push({
+        key: 'fg_reuse',
+        title: 'ABCDEFGHIJ',
+        perCharShake: true,
+        charShakeStyle: 'omni',
+        outlineMode: 'none',
+        shadow: true,
+        typewriter: false,
+        stay: 200
+    })
+
+    sAllowShadowReads = 0
+    setCalls = 0
+    translateCalls = 0
+    drawLogs.length = 0
+    paints[0](ev)
+    assert.strictEqual(sAllowShadowReads, 1, 'sAllowShadow must only be read ONCE per frame, not once per char')
+    // 1 itemMat (set + translate(px,py)) + 1 itemFgMat (set + translate(0,0,0.03)) = 2 set & 2 translate total across all 10 chars!
+    assert.strictEqual(setCalls, 2, '10 unrotated shaded chars must share 1 itemMat + 1 itemFgMat (2 set calls total, not 11); got ' + setCalls)
+    assert.strictEqual(translateCalls, 2, '10 unrotated shaded chars must invoke translate only twice total; got ' + translateCalls)
+    assert.strictEqual(drawLogs.filter(function (d) { return d.isShd === false && Math.abs(d.z - 0.03) < 1e-6 }).length, 10, 'all 10 fg passes must use z=0.03')
+
+    // Dynamic sAllowShadow toggle to false takes effect on the very next frame (still only 1 read!)
+    shadowEnabled = false
+    drawLogs.length = 0
+    paints[0](ev)
+    assert.strictEqual(sAllowShadowReads, 2, 'frame 2 reads sAllowShadow once again')
+    assert.strictEqual(drawLogs.filter(function (d) { return d.isShd === true }).length, 0, 'dynamic sAllowShadow=false must suppress shadow passes next frame')
+
+    // 2. Null itemMat must NOT trigger hot-path getMatrix() or wasted lookupFormattedLayout() per char
+    shadowEnabled = true
+    returnNullMatrix = true
+    getMatrixCalls = 0
+    lookupCalls = 0
+    fbDraws.length = 0
+    paints[0](ev)
+    assert.ok(getMatrixCalls <= 2, 'null itemMat must never poll event.getMatrix() inside 10-char loop; calls=' + getMatrixCalls)
+    assert.strictEqual(lookupCalls, 1, 'only canary lookup runs when itemMat is null; char loop must skip batched MUI cleanly')
+    assert.strictEqual(fbDraws.length, 10, 'fallback draw still renders all 10 chars')
+
+    // 3. Strictly invariant itemCtx MUST preserve subColor, <outline>, <big> overrides & priority order
+    returnNullMatrix = false
+    Cli.clear('*')
+    paints[0](ev)
+    nowMs = 2000
+    Cli.push({
+        key: 'low_pri', priority: 1, title: 'LOW', typewriter: false, shadow: false, stay: 200
+    })
+    Cli.push({
+        key: 'high_pri_mixed', priority: 9,
+        title: '<outline=#00FF00>A</outline>',
+        sub: 'S',
+        color: 0xFF0000,
+        subColor: 0x0000FF,
+        outlineMode: 'glow',
+        shadow: false,
+        typewriter: false,
+        stay: 200
+    })
+    drawLogs.length = 0
+    paints[0](ev)
+    // High priority renders BEFORE low priority; A gets green stroke (8 outer passes of #00FF00 -> c>>2? no outline passes exact color 0x00FF00)
+    var firstDrawn = drawLogs[0]
+    assert.strictEqual(firstDrawn.s, 'A', 'priority=9 overlay must render before priority=1 overlay even when pushed second')
+    assert.ok(drawLogs.some(function (d) { return d.s === 'A' && d.rgb === 0x00FF00 }), 'inline <outline=#00FF00> must override item outline')
+    assert.ok(drawLogs.some(function (d) { return d.s === 'S' && d.rgb === 0x0000FF }), 'subColor must stay independent from title color in rCtx')
+
+    // 4. Expired items must be cleanly evicted every frame
+    nowMs = 999999
+    paints[0](ev)
+    assert.strictEqual(Cli.count(), 0, 'expired overlays must always be evicted cleanly')
+})
+
 var passed = 0
 for (var i = 0; i < tests.length; i++) {
     var t = tests[i]
