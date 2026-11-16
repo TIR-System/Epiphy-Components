@@ -93,6 +93,7 @@
 | 实机 KubeJS 2001.6.5 / Rhino Java 互操作异常（`KubeJSPaths.GAMEDIR` 缺失、POJO `typeof` 抛 `InternalError`、`JsonIO.read` `LinkedTreeMap` 被当数组）与重进世界测试方块弹幕不触发 | `Spec与通用工具` / `服务端基础 v2.2` / `方块追踪组件 v2.1` / `屏幕弹幕组件 v5.3` / `音频组件` / `权限阀` / 客户端渲染器与播放器 / `docs` | 全链改用 `safeTypeOf`/`isObjectLike`/`isJavaMapLike`/`safeReadProp`/`safeHasMethod` 隔离 Rhino `MemberType.get` 与 `EvaluatorException`；`resolveGameDir()` 安全探测并用 `KubeJSPaths.DIRECTORY` 取上级目录；`toSeqArray` 排除 `java.util.Map` 使持久化列表正常加载；`ensureLoaded()` 派发 `'persist'`、`danmaku` 响应 `'scan'`/`'persist'` 并通过 `PlayerEvents.loggedIn` 延迟 6 tick 补发；客户端静默探测 `java.lang.System` | [x] |
 | 实机 `kube-mods/rhino` 下 `try` 块内 `function normalizeBoundSpec` 块级函数声明退化为 `undefined` 致弹幕完全失效，以及 `normalizePermissionPolicy('strict_op')` 误报未知策略 | `Epiphy的-屏幕弹幕组件.js` / `Epiphy的-权限阀.js` / `docs` / `tests/pure_functions.test.js` | 将 `normalizeBoundSpec`（与 `recordOne`）提升/改为 `var ... = function` 赋值形式并移出 `try` 块；在 `normalizePermissionPolicy` 补齐 `'strict_op'` 归一化映射；在文档与单测补齐 `try` 块语句级具名函数静检与双向回归测试 | [x] |
 | 实机 KubeJS `ClassFilter` 屏蔽 `java.io`/`java.nio` 且 `JsonIO.read` 触发 `[Ljava.lang.reflect.Constructor;` 致同一世界每次重进重生成目录、`epiphy-data` 缺子目录且运行日志未落至世界子文件夹 | `Epiphy的-日志.js v1.2` / `Epiphy的-服务端基础.js v2.3` / `tests/pure_functions.test.js` | `ensureDirExists` 增加 `KubeJSPaths.dir` 兜底；`readTextSafe`/`readJsonSafe` 优先使用 `JsonIO.readString` 并加固 `javaToJsPlain` 防误触 Java `.class`；新增 `worlds/worlds_index.json` 与 `anchor.folderName` 探测替代 `File.listFiles()` 恢复同档识别与复制分叉；`EpiphyLog` 增加 `KubeJSPaths.dir + JsonIO` 写盘兜底并于进档后自动切换至 `worlds/<slug>__<shortId>/logs/` | [x] |
+| 逐字震动/内联混排热路径开销过大（静态字未合批、全表 $O(N)$ 扫描、每帧重算 `cos`/`sin`/`Math.sin` 哈希、无屏幕外裁剪与不可共享时序缺少非法哨兵） | `Epiphy的-屏幕弹幕渲染器.js v5.3` / `tests/pure_functions.test.js` | 合并同样式连续静态片段并保留打字机边界单字回退；可见 `visIndex` 二分定界 ($O(\text{vis})$) 与 2D 视口外 bounds 裁剪；`hashUnit` 改 32 位位混洗与 256 档三角 LUT；`omni` 缓存 `_oCos`/`_oSin` 与稳态快照；统一周期支持弹幕级一次预计算，不可共享场合（随机频率区间 / `smooth` 等）显式置 `NaN` 非法哨兵并拒绝消费 | [x] |
 
 ---
 
@@ -114,6 +115,7 @@
    - 任何新增音频/弹幕能力不得允许 `'player'` 源绕过命名空间隔离、越权停止 `'system'` 或他人对象，也不得挤压系统演出配额/槽位；同时不得反向给脚本 API、OP、控制台或命令方块施压额外玩家限流。
 4. **长期原生化迁出计划**：
    - 本项目在脚本阶段功能与契约充分稳定后，将整体迁往 **Kotlin + Java** 原生模组，KubeJS 仅作此前过渡依赖。
+   - **渲染缓存架构备忘（未来原生模组）**：进入独立 Kotlin + Java 实现阶段时，屏幕弹幕的静态片段与离散/稳态逐字缓冲改为采用独立 **`TextureTarget`** 离屏缓存池（自行管理 FBO 生命周期、离屏渲染与 Quad 贴回），直接绕开 MC 原版高频重复走文字渲染管线的开销。
 
 ---
 

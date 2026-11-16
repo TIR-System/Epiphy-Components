@@ -5177,6 +5177,186 @@ test('KubeJS ClassFilter: same world keeps worldId across restarts, copied save 
     }
 })
 
+// ----------------------------------------------------------------------------
+// 41. ScreenDanmakuClient v5.3: per-char optimization, static-run merge, illegal shared sentinel, binary range & viewport bounds
+// ----------------------------------------------------------------------------
+test('ScreenDanmakuClient v5.3: trig LUT, bit-mix hash, illegal shared pulse/wave sentinel, static merge + typewriter & bounds culling', function () {
+    var nowMs = 1000
+    var paints = []
+    var draws = []
+    var warns = []
+    var cliSb = {
+        console: { info: function () {}, warn: function (m) { warns.push(String(m)) }, error: function (m) { warns.push(String(m)) }, debug: function () {}, log: function () {} },
+        Date: { now: function () { return nowMs } },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function (fn) { paints.push(fn) } },
+        NetworkEvents: { dataReceived: function () {} },
+        Java: {
+            loadClass: function (cls) {
+                if (cls === 'java.lang.System') return { nanoTime: function () { return nowMs * 1000000 } }
+                return null
+            }
+        },
+        Text: { of: function (s) { return { string: String(s), getVisualOrderText: function () { return String(s) } } } },
+        global: {}
+    }
+    cliSb.globalThis = cliSb
+    vm.createContext(cliSb)
+    loadStartupBase(cliSb)
+    runScriptIn(cliSb, RENDERER_PATH)
+
+    var Cli  = cliSb.global.ScreenDanmakuClient
+    var Pure = Cli._pure
+    assert.ok(Pure != null, 'ScreenDanmakuClient._pure must exist')
+
+    // 1. hashUnit (bit-mixer) range, determinism, and sensitivity to adjacent fractional seeds
+    var seen = new Set()
+    for (var hi = 0; hi < 200; hi++) {
+        var h = Pure.hashUnit(37.0 + hi * 0.7)
+        assert.ok(isFinite(h) && h >= 0 && h < 1, 'hashUnit out of [0,1): ' + h)
+        assert.strictEqual(Pure.hashUnit(37.0 + hi * 0.7), h, 'hashUnit must be deterministic')
+        seen.add(Math.floor(h * 1000000))
+    }
+    assert.ok(seen.size >= 195, 'bit-mixer hashUnit must have high uniqueness across adjacent fractional seeds')
+
+    // 2. Trig LUT accuracy across positive, negative, and wrapped turns
+    for (var ti = -30; ti <= 30; ti++) {
+        var tr = ti * 0.137
+        assert.ok(Math.abs(Pure.fastSinTurns(tr) - Math.sin(tr * Math.PI * 2.0)) < 0.03, 'fastSinTurns error too high at ' + tr)
+        assert.ok(Math.abs(Pure.fastCosTurns(tr) - Math.cos(tr * Math.PI * 2.0)) < 0.03, 'fastCosTurns error too high at ' + tr)
+    }
+
+    var ev = {
+        width: 300, height: 200, level: 'minecraft:overworld',
+        font: { width: function (s) { return String(s || '').length * 6 }, drawInBatch: function () {} },
+        text: function (txt, x, y) {
+            var s = (txt && txt.string != null) ? String(txt.string) : String(txt)
+            draws.push({ text: s, x: x, y: y })
+        },
+        graphics: { bufferSource: function () { return { endBatch: function () {} } }, flush: function () {} },
+        getMatrix: function () { return {} },
+        push: function () {}, pop: function () {}, translate: function () {}, scale: function () {}, rotate: function () {}
+    }
+
+    // 3. 【可以】vs【不能】共用 pulse / wave 检查（触发不可共用条件时必须写为 NaN 非法哨兵）
+    // Case A: Unified frequency (800..800) + omni -> CAN share!
+    Cli.push({
+        key: 'shared_ok', title: 'ABCDE', perCharShake: true, charShakeStyle: 'omni',
+        shakeFreqMin: 800, shakeFreqMax: 800, typewriter: false, shadow: false, stay: 200
+    })
+    paints[0](ev)
+    var itemOk = Pure.inspectOverlays()[0]
+    assert.strictEqual(itemOk._sharedShakeTiming.canShare, true, 'unified freq omni must enable shared timing')
+    assert.strictEqual(itemOk._sharedShakeTiming.illegalReason, '')
+    assert.ok(isFinite(itemOk._sharedShakeTiming.pulse) && isFinite(itemOk._sharedShakeTiming.frac))
+
+    // Steady-state snapshot verification (omni frac >= jitterWin=0.26 -> settles after 250ms)
+    nowMs = 1350 // age=350ms, frac=350/800=0.4375 >= 0.26
+    paints[0](ev)
+    var settledSample = Pure.sampleCharShakeOffset(itemOk.charShakeFrags[0], 350, 0.65, itemOk, { dx: 0, dy: 0, rotDeg: 0 }, itemOk._sharedShakeTiming)
+    assert.strictEqual(itemOk.charShakeFrags[0]._settledStep, 0)
+    assert.ok(isFinite(itemOk.charShakeFrags[0]._oCos) && isFinite(itemOk.charShakeFrags[0]._oSin))
+    var settledNext = Pure.sampleCharShakeOffset(itemOk.charShakeFrags[0], 500, 0.65, itemOk, { dx: 0, dy: 0, rotDeg: 0 }, itemOk._sharedShakeTiming)
+    assert.strictEqual(settledNext.dx, settledSample.dx, 'settled stage must reuse exact dx snapshot')
+    assert.strictEqual(settledNext.dy, settledSample.dy, 'settled stage must reuse exact dy snapshot')
+
+    // Case B: Non-unified freq (400..900) -> MUST mark illegal & poison shared pulse/wave to NaN
+    Cli.clear('*')
+    paints[0](ev)
+    nowMs = 2000
+    Cli.push({
+        key: 'shared_bad_freq', title: 'ABCDE', perCharShake: true, charShakeStyle: 'omni',
+        shakeFreqMin: 400, shakeFreqMax: 900, typewriter: false, shadow: false, stay: 200
+    })
+    paints[0](ev)
+    var itemBadFreq = Pure.inspectOverlays()[0]
+    assert.strictEqual(itemBadFreq._sharedShakeTiming.canShare, false, 'non-unified freq must forbid shared pulse/wave')
+    assert.strictEqual(itemBadFreq._sharedShakeTiming.illegalReason, 'NON_UNIFIED_CHAR_FREQ')
+    assert.ok(Number.isNaN(itemBadFreq._sharedShakeTiming.pulse), 'illegal pulse must be poisoned to NaN')
+    assert.ok(Number.isNaN(itemBadFreq._sharedShakeTiming.wave), 'illegal wave must be poisoned to NaN')
+    assert.ok(Number.isNaN(itemBadFreq._sharedShakeTiming.frac), 'illegal frac must be poisoned to NaN')
+    assert.ok(Number.isNaN(itemBadFreq._sharedShakeTiming.stepIdx), 'illegal stepIdx must be poisoned to NaN')
+
+    // Case C: styleCode === 2 ('smooth') even with unified freq -> MUST mark illegal & poison NaN
+    Cli.clear('*')
+    paints[0](ev)
+    nowMs = 3000
+    Cli.push({
+        key: 'shared_bad_smooth', title: 'ABC', perCharShake: true, charShakeStyle: 'smooth',
+        shakeFreqMin: 800, shakeFreqMax: 800, typewriter: false, shadow: false, stay: 200
+    })
+    paints[0](ev)
+    var itemSmooth = Pure.inspectOverlays()[0]
+    assert.strictEqual(itemSmooth._sharedShakeTiming.canShare, false, 'smooth mode must forbid shared pulse/wave')
+    assert.strictEqual(itemSmooth._sharedShakeTiming.illegalReason, 'STYLE_SMOOTH_PER_CHAR_PHASE')
+    assert.ok(Number.isNaN(itemSmooth._sharedShakeTiming.pulse), 'smooth mode must poison shared.pulse=NaN')
+    assert.ok(Number.isNaN(itemSmooth._sharedShakeTiming.wave), 'smooth mode must poison shared.wave=NaN')
+
+    // Case D: Per-char mismatch defense when consuming sharedTiming
+    var poisonedTiming = { canShare: true, styleCode: 0, periodMs: 800, phaseOff: 0, cyc: 0.1, stepIdx: 0, frac: 0.1, pulse: 999, wave: 0, transT: 1 }
+    var fakeCharCustomPeriod = { cSeed: 42, periodMs: 500, invPeriod: 1 / 500, phaseOff: 0 }
+    var directRef = Pure.sampleCharShakeOffset(fakeCharCustomPeriod, 100, 0.65, itemOk, { dx: 0, dy: 0, rotDeg: 0 })
+    var guardedOut = Pure.sampleCharShakeOffset(fakeCharCustomPeriod, 100, 0.65, itemOk, { dx: 0, dy: 0, rotDeg: 0 }, poisonedTiming)
+    assert.strictEqual(guardedOut.dx, directRef.dx, 'mismatched cf.periodMs must refuse sharedTiming even if canShare=true')
+    assert.strictEqual(guardedOut.dy, directRef.dy)
+
+    // 4. Static run merging + typewriter char-by-char slicing ("Hello <shake>XY</shake> World")
+    Cli.clear('*')
+    paints[0](ev)
+    nowMs = 4000
+    Cli.push({
+        key: 'mixed_static',
+        title: 'Hello <shake>XY</shake> World',
+        typewriter: true,
+        charMs: 100,
+        shadow: false,
+        stay: 200
+    })
+    paints[0](ev) // flushes queue & sets born = 4000
+    draws.length = 0
+    nowMs = 4200 // age=200 -> shownVis=3 ("Hel") -> partial slice inside merged "Hello"
+    paints[0](ev)
+    assert.strictEqual(
+        draws.filter(function (d) { return d.text !== '▌' }).map(function (d) { return d.text }).join(''),
+        'Hel',
+        'partial slice during typewriter must still render strictly 1 char at a time'
+    )
+
+    draws.length = 0
+    nowMs = 6000 // fully revealed -> "Hello", "X", "Y", "World" (4 draw calls instead of 12!)
+    paints[0](ev)
+    assert.deepStrictEqual(
+        draws.map(function (d) { return d.text }),
+        ['Hello', 'X', 'Y', 'World'],
+        'fully revealed static segments must merge while shaking chars stay separate and spaces never merge across'
+    )
+
+    // Binary search range verification
+    var mixedItem = Pure.inspectOverlays()[0]
+    var rSub = Pure.findVisibleUnitRange(mixedItem.charShakeUnits, 2, 7)
+    assert.strictEqual(rSub.lo, 0)
+    assert.strictEqual(rSub.hi, 2) // includes Hello [0..5) and X [6..7)
+
+    // 5. Off-screen viewport bounds culling for ultra-wide clamp=false wrap=false per-char banner
+    Cli.clear('*')
+    paints[0](ev)
+    nowMs = 7000
+    var longTxt = 'A'.repeat(200) // wrap:false -> 200 * 6px = 1200px wide on sw=300px!
+    Cli.push({
+        key: 'wide_offscreen',
+        title: longTxt,
+        perCharShake: true,
+        typewriter: false,
+        wrap: false,
+        clamp: false,
+        shadow: false,
+        stay: 200
+    })
+    draws.length = 0
+    paints[0](ev)
+    assert.ok(draws.length > 30 && draws.length < 90, 'bounds culling must draw middle visible chars and cull far offscreen chars; drawn=' + draws.length)
+    assert.strictEqual(warns.length, 0, 'v5.3 renderer optimization checks must produce zero warnings/errors: ' + JSON.stringify(warns))
+})
+
 var passed = 0
 for (var i = 0; i < tests.length; i++) {
     var t = tests[i]

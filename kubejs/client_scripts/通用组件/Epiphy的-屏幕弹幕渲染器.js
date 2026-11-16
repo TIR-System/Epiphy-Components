@@ -1,5 +1,5 @@
 // ============================================================================
-//  通用屏幕弹幕与泛用文本显示组件 —— 客户端渲染引擎 (ScreenDanmakuClient v5.2)
+//  通用屏幕弹幕与泛用文本显示组件 —— 客户端渲染引擎 (ScreenDanmakuClient v5.3)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
@@ -863,9 +863,49 @@
         return lines
     }
 
+    var IMUL32 = (typeof Math.imul === 'function') ? Math.imul : function (a, b) {
+        var ah = (a >>> 16) & 0xFFFF
+        var al = a & 0xFFFF
+        var bh = (b >>> 16) & 0xFFFF
+        var bl = b & 0xFFFF
+        return ((al * bl) + (((ah * bl + al * bh) << 16) >>> 0)) | 0
+    }
+
+    var INV_TWO_PI    = 0.15915494309189535
+    var TRIG_LUT_SIZE = 256
+    var TRIG_LUT_MASK = 255
+    var TRIG_COS_LUT  = []
+    var TRIG_SIN_LUT  = []
+    ;(function initTrigLut() {
+        var stepRad = (PI * 2.0) / TRIG_LUT_SIZE
+        for (var ti = 0; ti < TRIG_LUT_SIZE; ti++) {
+            var a = ti * stepRad
+            TRIG_COS_LUT.push(Math.cos(a))
+            TRIG_SIN_LUT.push(Math.sin(a))
+        }
+    })()
+
+    function fastSinTurns(turns) {
+        var idx = Math.floor(turns * TRIG_LUT_SIZE) & TRIG_LUT_MASK
+        return TRIG_SIN_LUT[idx]
+    }
+
+    function fastCosTurns(turns) {
+        var idx = Math.floor(turns * TRIG_LUT_SIZE) & TRIG_LUT_MASK
+        return TRIG_COS_LUT[idx]
+    }
+
     function hashUnit(seed) {
-        var x = Math.sin(seed * 12.9898 + 78.233) * 43758.5453
-        return x - Math.floor(x)
+        // 32 位整数 bit-mixer（替代 Math.sin 伪随机，零超越函数且分布均匀）
+        var s = Number(seed)
+        if (!isFinite(s)) s = 0.0
+        var lo = Math.floor(s * 65536.0) | 0
+        var hi = Math.floor(s) | 0
+        var h  = (lo ^ IMUL32(hi ^ 0x9E3779B9, 0x85EBCA6B)) | 0
+        h = IMUL32(h ^ (h >>> 16), 0x85EBCA6B)
+        h = IMUL32(h ^ (h >>> 13), 0xC2B2AE35)
+        h = (h ^ (h >>> 16)) >>> 0
+        return h * 2.3283064365386963e-10
     }
 
     function splitLineIntoFragments(lineText, baseOffsetPx, fullW, fontObj, chunkSize, letterSpacingPx, spacingMode) {
@@ -881,6 +921,8 @@
         var curX      = -fullW * 0.5 + baseOffsetPx
 
         var pendingText       = ''
+        var pendingPlain      = ''
+        var pendingFmtPref    = ''
         var pendingX          = 0
         var pendingW          = 0
         var pendingCount      = 0
@@ -924,6 +966,8 @@
                     if (pendingCount > 0) {
                         frags.push({
                             text:         pendingText,
+                            plainText:    pendingPlain,
+                            fmtPref:      pendingFmtPref,
                             x:            pendingX,
                             w:            pendingW,
                             visIndex:     pendingVisIndex,
@@ -932,9 +976,11 @@
                             outlineMode:  pendingOutMode,
                             outlineColor: pendingOutCol
                         })
-                        pendingText  = ''
-                        pendingW     = 0
-                        pendingCount = 0
+                        pendingText    = ''
+                        pendingPlain   = ''
+                        pendingFmtPref = ''
+                        pendingW       = 0
+                        pendingCount   = 0
                     }
                     applyInlineTagToState(tag, tagState)
                     i += tag.rawLen
@@ -951,6 +997,8 @@
                 if (pendingCount > 0) {
                     frags.push({
                         text:         pendingText,
+                        plainText:    pendingPlain,
+                        fmtPref:      pendingFmtPref,
                         x:            pendingX,
                         w:            pendingW,
                         visIndex:     pendingVisIndex,
@@ -959,9 +1007,11 @@
                         outlineMode:  pendingOutMode,
                         outlineColor: pendingOutCol
                     })
-                    pendingText  = ''
-                    pendingW     = 0
-                    pendingCount = 0
+                    pendingText    = ''
+                    pendingPlain   = ''
+                    pendingFmtPref = ''
+                    pendingW       = 0
+                    pendingCount   = 0
                 }
                 curX += cw + charSp
                 visOffset++
@@ -971,6 +1021,8 @@
 
             if (pendingCount === 0) {
                 pendingText      = fmtPref + g.cluster
+                pendingPlain     = g.cluster
+                pendingFmtPref   = fmtPref
                 pendingX         = curX
                 pendingW         = cw
                 pendingVisIndex  = visOffset
@@ -980,8 +1032,9 @@
                 pendingOutCol    = tagState.outlineColor
                 pendingCount     = 1
             } else {
-                pendingText += g.cluster
-                pendingW    += cw + charSp
+                pendingText  += g.cluster
+                pendingPlain += g.cluster
+                pendingW     += cw + charSp
                 pendingCount++
             }
             curX += cw + charSp
@@ -991,6 +1044,8 @@
             if (pendingCount >= maxClusterPerFrag) {
                 frags.push({
                     text:         pendingText,
+                    plainText:    pendingPlain,
+                    fmtPref:      pendingFmtPref,
                     x:            pendingX,
                     w:            pendingW,
                     visIndex:     pendingVisIndex,
@@ -999,14 +1054,18 @@
                     outlineMode:  pendingOutMode,
                     outlineColor: pendingOutCol
                 })
-                pendingText  = ''
-                pendingW     = 0
-                pendingCount = 0
+                pendingText    = ''
+                pendingPlain   = ''
+                pendingFmtPref = ''
+                pendingW       = 0
+                pendingCount   = 0
             }
         }
         if (pendingCount > 0) {
             frags.push({
                 text:         pendingText,
+                plainText:    pendingPlain,
+                fmtPref:      pendingFmtPref,
                 x:            pendingX,
                 w:            pendingW,
                 visIndex:     pendingVisIndex,
@@ -1017,6 +1076,27 @@
             })
         }
         return frags
+    }
+
+    var SHARED_TEXT_SEQ_CACHE = {}
+    var SHARED_TEXT_SEQ_KEYS  = []
+    var MAX_TEXT_SEQ_CACHE    = 512
+
+    function getCachedTextCompSeq(rawStr) {
+        var key = String(rawStr || '')
+        if (Object.prototype.hasOwnProperty.call(SHARED_TEXT_SEQ_CACHE, key)) {
+            return SHARED_TEXT_SEQ_CACHE[key]
+        }
+        var comp = Text.of(key)
+        var seq  = resolveVisualSeq(comp)
+        if (SHARED_TEXT_SEQ_KEYS.length >= MAX_TEXT_SEQ_CACHE) {
+            var oldest = SHARED_TEXT_SEQ_KEYS.shift()
+            if (oldest !== undefined) delete SHARED_TEXT_SEQ_CACHE[oldest]
+        }
+        var entry = { comp: comp, seq: seq }
+        SHARED_TEXT_SEQ_CACHE[key] = entry
+        SHARED_TEXT_SEQ_KEYS.push(key)
+        return entry
     }
 
     function resolveVisualSeq(comp) {
@@ -1452,20 +1532,82 @@
         return list
     }
 
-    // 构建逐字渲染缓存（按完整折行文本一次性构建，打字机推进时零重建）：
-    //   仅在开启 per_char 震动、字间距 letterSpacing != 0、外圈 outlineMode != 'none' 或含局部富文本标签时使用。
+    // 构建逐字与静态合并片段缓存（按完整折行文本一次性构建，打字机推进时零重建）：
+    //   - charShakeFrags：按单字粒度保存（兼容打字机逐字切分、char_first/char_last、局部区间震动与单字周期/相位）
+    //   - charShakeUnits：当 letterSpacing === 0 时将同一行内连续、样式一致且不震动的 1.0 倍字符合并为大块静态 unit；
+    //                     含震动/缩放/间隔字符保持独立单字 unit；打字机仅对跨越边界的半截静态块回退按 subFrags 绘制。
     function getOrBuildCharShakeCache(item, titleLines, subLines, titleLineCount, startY, lineStep, fontObj) {
         var minMs = max2(60, item.shakeFreqMin || CONFIG.charShakeDefaultMinMs)
         var maxMs = max2(minMs, item.shakeFreqMax || CONFIG.charShakeDefaultMaxMs)
         var isUnifiedFreq = (Math.abs(maxMs - minMs) <= 5)
-        var cacheKey = item.wrapKey + '|f:' + minMs + '-' + maxMs + '|c:' + item.color + ':' + item.subColor + '|ls:' + (item.letterSpacing || 0)
-        if (item.charShakeCacheKey === cacheKey && item.charShakeFrags != null) {
+        var isPerCharItem = (item.perCharShake === true || item.shakeMode === 'per_char')
+        var itemSpacing   = item.letterSpacing || 0
+        var cacheKey = item.wrapKey + '|f:' + minMs + '-' + maxMs + '|c:' + item.color + ':' + item.subColor + '|ls:' + itemSpacing + '|pc:' + (isPerCharItem ? 1 : 0)
+        if (item.charShakeCacheKey === cacheKey && item.charShakeFrags != null && item.charShakeUnits != null) {
             return item.charShakeFrags
         }
         var baseSeed  = item.shakeSeed || 37.0
         var fragSeq   = 0
         var visSeq    = 0
         var list      = []
+        var units     = []
+        var pendingRun = []
+
+        function flushStaticRun() {
+            if (pendingRun.length === 0) return
+            if (pendingRun.length === 1) {
+                var single = pendingRun[0]
+                single.visStart = single.visIndex
+                single.visEnd   = single.visIndex + 1
+                single.isMerged = false
+                units.push(single)
+                pendingRun.length = 0
+                return
+            }
+            var first = pendingRun[0]
+            var last  = pendingRun[pendingRun.length - 1]
+            var plainStr = ''
+            for (var pi = 0; pi < pendingRun.length; pi++) {
+                plainStr += pendingRun[pi].plainText
+            }
+            var mergedText = (first.fmtPref || '') + plainStr
+            var textEntry  = getCachedTextCompSeq(mergedText)
+            units.push({
+                isMerged:     true,
+                subFrags:     pendingRun.slice(),
+                visStart:     first.visIndex,
+                visEnd:       last.visIndex + 1,
+                visIndex:     last.visIndex,
+                comp:         textEntry.comp,
+                seq:          textEntry.seq,
+                rawText:      mergedText,
+                isBlank:      false,
+                color:        first.color,
+                baseX:        first.baseX,
+                baseY:        first.baseY,
+                w:            (last.baseX + last.w) - first.baseX,
+                charScale:    1.0,
+                shakeFlag:    0,
+                outlineMode:  first.outlineMode,
+                outlineColor: first.outlineColor,
+                _muiLayout:   null,
+                _muiEpoch:    -1,
+                _muiCheckMs:  0
+            })
+            pendingRun.length = 0
+        }
+
+        function canExtendStaticRun(cf) {
+            if (pendingRun.length === 0) return true
+            var prev = pendingRun[pendingRun.length - 1]
+            return cf.visIndex === (prev.visIndex + 1)
+                && cf.fmtPref === prev.fmtPref
+                && cf.outlineMode === prev.outlineMode
+                && cf.outlineColor === prev.outlineColor
+                && cf.color === prev.color
+                && cf.baseY === prev.baseY
+        }
+
         var allGroups = [
             { lines: titleLines || [], baseLineOffset: 0, color: item.color },
             { lines: subLines || [],   baseLineOffset: titleLineCount, color: item.subColor }
@@ -1476,7 +1618,7 @@
                 var ln = grp.lines[lIdx]
                 if (!ln || ln.empty || !ln.text) continue
                 var baseY    = startY + (grp.baseLineOffset + lIdx) * lineStep
-                var rawFrags = splitLineIntoFragments(ln.text, 0, ln.widthPx, fontObj, 1, item.letterSpacing, item.letterSpacingMode)
+                var rawFrags = splitLineIntoFragments(ln.text, 0, ln.widthPx, fontObj, 1, itemSpacing, item.letterSpacingMode)
                 for (var fIdx = 0; fIdx < rawFrags.length; fIdx++) {
                     var rf = rawFrags[fIdx]
                     fragSeq++
@@ -1485,22 +1627,30 @@
                         ? minMs
                         : (minMs + hashUnit(cSeed + 0.7) * max2(1, maxMs - minMs))
                     // 当 minMs === maxMs（如 [rnfmabj-测试] 要求统一 0.8s 震动一次）时，统一相位 0，使所有字同步触发抖动但方向各异
-                    var phaseOff = isUnifiedFreq ? 0.0 : (hashUnit(cSeed + 1.9) * 10.0)
-                    var cfComp = Text.of(rf.text)
-                    var rawTxt = rf.text || ''
-                    var isBlankFrag = (rawTxt.length > 0 && rawTxt.indexOf('§') < 0 && /^\s+$/.test(rawTxt))
-                    list.push({
-                        comp:         cfComp,
-                        seq:          resolveVisualSeq(cfComp),
+                    var phaseOff  = isUnifiedFreq ? 0.0 : (hashUnit(cSeed + 1.9) * 10.0)
+                    var rawTxt    = rf.text || ''
+                    var textPair  = getCachedTextCompSeq(rawTxt)
+                    var isBlankFrag = (rawTxt.length > 0 && rawTxt.charCodeAt(0) <= 32 && rawTxt.indexOf('§') < 0 && /^\s+$/.test(rawTxt))
+                    var absVisIdx = visSeq + (rf.visIndex != null ? rf.visIndex : fIdx)
+                    var sc        = rf.charScale || 1.0
+                    var sFlag     = rf.shakeFlag || 0
+                    var cfObj     = {
+                        comp:         textPair.comp,
+                        seq:          textPair.seq,
                         rawText:      rawTxt,
+                        plainText:    rf.plainText != null ? rf.plainText : rawTxt,
+                        fmtPref:      rf.fmtPref != null ? rf.fmtPref : '',
                         isBlank:      isBlankFrag,
                         color:        grp.color,
                         baseX:        rf.x,
                         baseY:        baseY,
                         w:            rf.w,
-                        visIndex:     visSeq + (rf.visIndex != null ? rf.visIndex : fIdx),
-                        charScale:    rf.charScale || 1.0,
-                        shakeFlag:    rf.shakeFlag || 0,
+                        visIndex:     absVisIdx,
+                        visStart:     absVisIdx,
+                        visEnd:       absVisIdx + 1,
+                        isMerged:     false,
+                        charScale:    sc,
+                        shakeFlag:    sFlag,
                         outlineMode:  rf.outlineMode || '',
                         outlineColor: rf.outlineColor != null ? rf.outlineColor : -1,
                         cSeed:        cSeed,
@@ -1511,16 +1661,41 @@
                         _hSeed:       NaN,
                         _oStepIdx:    NaN,
                         _oSeed:       NaN,
+                        _oTheta:      0.0,
+                        _oCos:        1.0,
+                        _oSin:        0.0,
+                        _settledStep: NaN,
+                        _settledSeed: NaN,
+                        _settledAmp:  -1,
+                        _settledCfg:  null,
+                        _settledDx:   0.0,
+                        _settledDy:   0.0,
+                        _settledRot:  0.0,
                         _muiLayout:   null,
                         _muiEpoch:    -1,
                         _muiCheckMs:  0
-                    })
+                    }
+                    list.push(cfObj)
+
+                    var charShakes = (sFlag === 1) || (isPerCharItem && sFlag !== -1)
+                    var mergeEligible = (!charShakes) && (itemSpacing === 0) && Math.abs(sc - 1.0) <= 0.01 && !isBlankFrag
+                    if (mergeEligible) {
+                        if (!canExtendStaticRun(cfObj)) flushStaticRun()
+                        pendingRun.push(cfObj)
+                    } else {
+                        flushStaticRun()
+                        units.push(cfObj)
+                    }
                 }
+                flushStaticRun()
                 visSeq += (ln.vis != null ? ln.vis : countVisibleChars(ln.text))
             }
         }
-        item.charShakeCacheKey = cacheKey
-        item.charShakeFrags    = list
+        item._charShakeUnifiedFreq    = isUnifiedFreq
+        item._charShakeSharedPeriodMs = isUnifiedFreq ? minMs : NaN
+        item.charShakeCacheKey        = cacheKey
+        item.charShakeFrags           = list
+        item.charShakeUnits           = units
         return list
     }
 
@@ -1564,11 +1739,138 @@
         return cfg
     }
 
+    var ILLEGAL_SHARED_TIMING_VAL = NaN
+
+    function markSharedTimingIllegal(shared, reason) {
+        if (shared == null) shared = {}
+        shared.canShare      = false
+        shared.illegalReason = reason || 'DISALLOWED'
+        shared.styleCode     = -1
+        shared.periodMs      = ILLEGAL_SHARED_TIMING_VAL
+        shared.invPeriod     = ILLEGAL_SHARED_TIMING_VAL
+        shared.phaseOff      = ILLEGAL_SHARED_TIMING_VAL
+        shared.cyc           = ILLEGAL_SHARED_TIMING_VAL
+        shared.stepIdx       = ILLEGAL_SHARED_TIMING_VAL
+        shared.frac          = ILLEGAL_SHARED_TIMING_VAL
+        shared.pulse         = ILLEGAL_SHARED_TIMING_VAL
+        shared.wave          = ILLEGAL_SHARED_TIMING_VAL
+        shared.transT        = ILLEGAL_SHARED_TIMING_VAL
+        return shared
+    }
+
+    // 弹幕级共享时序预计算：
+    //   【可以】整条弹幕仅计算一次 pulse / wave / transT 的场合（仅限全条共享同一周期与零相位偏移时）：
+    //     1) item._charShakeUnifiedFreq === true（即 Math.abs(shakeFreqMax - shakeFreqMin) <= 5ms，如默认统一 800ms）；
+    //     2) styleCode === 0 ('omni') 或 styleCode === 1 ('horizontal_step')；
+    //     3) ageMs >= 0 且 periodMs > 0 均有限。
+    //   【不能】共用一次 pulse / wave 的场合（触发即显式将共享时序字段置为非法哨兵 NaN，绝不沿用陈旧值）：
+    //     1) 非统一周期 [shakeFreqMin, shakeFreqMax]（每字拥有独立随机 periodMs 与 phaseOff -> 各自 cyc/stepIdx/frac 不同）；
+    //     2) styleCode === 2 ('smooth' 连续双谐波漂移 -> 相位直接乘入每字独有 seed)；
+    //     3) item / charFrags 为空、或 ageMs / periodMs 非法；
+    //     4) 单字消费端若发现 cf.periodMs !== shared.periodMs 或 cf.phaseOff !== shared.phaseOff，同样拒绝共享并转入单字采样。
+    function prepareSharedCharShakeTiming(item, ageMs, charFrags) {
+        var shared = (item != null && item._sharedShakeTiming != null) ? item._sharedShakeTiming : {}
+        if (item != null) item._sharedShakeTiming = shared
+        if (item == null || charFrags == null || charFrags.length === 0) {
+            return markSharedTimingIllegal(shared, 'EMPTY_OR_NULL')
+        }
+        if (item._charShakeUnifiedFreq !== true) {
+            return markSharedTimingIllegal(shared, 'NON_UNIFIED_CHAR_FREQ')
+        }
+        if (!(ageMs >= 0 && isFinite(ageMs))) {
+            return markSharedTimingIllegal(shared, 'INVALID_AGE')
+        }
+        var cfg = getCharShakeConfig(item)
+        if (cfg.styleCode === 2) {
+            return markSharedTimingIllegal(shared, 'STYLE_SMOOTH_PER_CHAR_PHASE')
+        }
+        var periodMs = item._charShakeSharedPeriodMs
+        if (!(periodMs > 0 && isFinite(periodMs))) {
+            var minMs = max2(60, item.shakeFreqMin || CONFIG.charShakeDefaultMinMs)
+            var maxMs = max2(minMs, item.shakeFreqMax || CONFIG.charShakeDefaultMaxMs)
+            if (Math.abs(maxMs - minMs) > 5) {
+                return markSharedTimingIllegal(shared, 'NON_UNIFIED_CHAR_FREQ')
+            }
+            periodMs = minMs
+        }
+        var invPer  = 1.0 / periodMs
+        var cyc     = ageMs * invPer
+        var stepIdx = Math.floor(cyc)
+        var frac    = cyc - stepIdx
+
+        var pulse  = 0.0
+        var wave   = 0.0
+        var transT = 1.0
+        if (cfg.styleCode === 1) {
+            if (!cfg.isSnap && cfg.transWin > 0 && frac < cfg.transWin) {
+                transT = frac / cfg.transWin
+            }
+            if (frac < cfg.swayWin) {
+                var u = frac / cfg.swayWin
+                wave  = fastSinTurns(u * 1.25) * (1.0 - u)
+            }
+        } else {
+            if (frac < cfg.jitterWin) {
+                var pu = frac / cfg.jitterWin
+                pulse  = fastSinTurns(pu * 1.5) * (1.0 - pu) * 0.85
+            }
+        }
+
+        shared.canShare      = true
+        shared.illegalReason = ''
+        shared.styleCode     = cfg.styleCode
+        shared.periodMs      = periodMs
+        shared.invPeriod     = invPer
+        shared.phaseOff      = 0.0
+        shared.cyc           = cyc
+        shared.stepIdx       = stepIdx
+        shared.frac          = frac
+        shared.pulse         = pulse
+        shared.wave          = wave
+        shared.transT        = transT
+        return shared
+    }
+
+    // 在有序 units 上二分定位与当前可见窗口 [startSkipVis, keepEndVis) 相交的下标区间 [lo, hi)
+    function findVisibleUnitRange(units, startSkipVis, keepEndVis) {
+        var n = units != null ? units.length : 0
+        if (n === 0 || keepEndVis <= startSkipVis) return { lo: 0, hi: 0 }
+        // 下界：首个 visEnd > startSkipVis 的位置
+        var l = 0
+        var r = n
+        while (l < r) {
+            var mid = (l + r) >>> 1
+            var uEnd = units[mid].visEnd != null ? units[mid].visEnd : (units[mid].visIndex + 1)
+            if (uEnd <= startSkipVis) l = mid + 1
+            else r = mid
+        }
+        var lo = l
+        // 上界：首个 visStart >= keepEndVis 的位置
+        l = lo
+        r = n
+        while (l < r) {
+            var mid2 = (l + r) >>> 1
+            var uStart = units[mid2].visStart != null ? units[mid2].visStart : units[mid2].visIndex
+            if (uStart < keepEndVis) l = mid2 + 1
+            else r = mid2
+        }
+        return { lo: lo, hi: l }
+    }
+
+    function isUnitOutOfViewport(localCx, localCy, halfW, halfH, px, py, mxx, mxy, myx, myy, sw, sh, extraPadPx) {
+        if (!(sw > 0 && sh > 0)) return false
+        var wx   = px + mxx * localCx + mxy * localCy
+        var wy   = py + myx * localCx + myy * localCy
+        var extX = Math.abs(mxx) * halfW + Math.abs(mxy) * halfH + extraPadPx
+        var extY = Math.abs(myx) * halfW + Math.abs(myy) * halfH + extraPadPx
+        return (wx + extX) < 0.0 || (wx - extX) > sw || (wy + extY) < 0.0 || (wy - extY) > sh
+    }
+
     // 计算单字在当前时刻的独立微抖动偏移（完全由样式参数控制，绝不在渲染器内写死单一效果）：
     //   - 'horizontal_step'：每 periodMs 触发 1 次轻微随机落点位移 (charShakeShift) + 初段水平/垂直阻尼晃动 (charShakeSwayX/Y, charShakeWin)
     //   - 'smooth'         ：按 periodMs 做连续双谐波平滑漂移
     //   - 'omni' (默认)    ：全向随机脉冲轻颤 + 极微弱残余偏移
-    function sampleCharShakeOffset(cf, ageMs, curAmp, item, outObj) {
+    function sampleCharShakeOffset(cf, ageMs, curAmp, item, outObj, sharedTiming) {
         var dst  = outObj || CHAR_OFFSET_SCRATCH
         var ampN = curAmp
         if (typeof ampN !== 'number') ampN = Number(curAmp)
@@ -1579,17 +1881,49 @@
             return dst
         }
         var effAmp  = ampN < 0.05 ? 0.05 : (ampN > 2.5 ? 2.5 : ampN)
-        var invPer  = (cf != null && cf.invPeriod > 0) ? cf.invPeriod : (1.0 / max2(60, Number(cf && cf.periodMs) || 800))
-        var ageN    = (ageMs >= 0 && isFinite(ageMs)) ? ageMs : 0.0
-        var cyc     = (ageN * invPer) + ((cf != null && cf.phaseOff) ? cf.phaseOff : 0.0)
-        var stepIdx = Math.floor(cyc)
-        var frac    = cyc - stepIdx
         var seed    = (cf != null && cf.cSeed) ? cf.cSeed : 1.0
         var cfg     = getCharShakeConfig(item)
 
-        var rawDx     = 0.0
-        var rawDy     = 0.0
-        var rawRotDeg = 0.0
+        var useShared = (
+            sharedTiming != null &&
+            sharedTiming.canShare === true &&
+            sharedTiming.styleCode === cfg.styleCode &&
+            isFinite(sharedTiming.cyc) &&
+            isFinite(sharedTiming.stepIdx) &&
+            isFinite(sharedTiming.frac) &&
+            isFinite(sharedTiming.pulse) &&
+            isFinite(sharedTiming.wave) &&
+            isFinite(sharedTiming.transT) &&
+            cf != null &&
+            Math.abs(cf.periodMs - sharedTiming.periodMs) <= 1e-3 &&
+            Math.abs((cf.phaseOff || 0.0) - (sharedTiming.phaseOff || 0.0)) <= 1e-6
+        )
+
+        var cyc, stepIdx, frac
+        if (useShared) {
+            cyc     = sharedTiming.cyc
+            stepIdx = sharedTiming.stepIdx
+            frac    = sharedTiming.frac
+        } else {
+            var invPer = (cf != null && cf.invPeriod > 0) ? cf.invPeriod : (1.0 / max2(60, Number(cf && cf.periodMs) || 800))
+            var ageN   = (ageMs >= 0 && isFinite(ageMs)) ? ageMs : 0.0
+            cyc     = (ageN * invPer) + ((cf != null && cf.phaseOff) ? cf.phaseOff : 0.0)
+            stepIdx = Math.floor(cyc)
+            frac    = cyc - stepIdx
+        }
+
+        // 稳态保持段快照：同一 stepIdx 且振幅/配置未变且已离开初段脉冲/过渡窗口，直接复用上一帧计算结果
+        if (cf != null && cf._settledStep === stepIdx && cf._settledSeed === seed && cf._settledAmp === effAmp && cf._settledCfg === cfg) {
+            dst.dx     = cf._settledDx
+            dst.dy     = cf._settledDy
+            dst.rotDeg = cf._settledRot
+            return dst
+        }
+
+        var rawDx      = 0.0
+        var rawDy      = 0.0
+        var rawRotDeg  = 0.0
+        var canSettle  = false
 
         if (cfg.styleCode === 1) {
             var needPrev = (!cfg.isSnap && cfg.transWin > 0 && frac < cfg.transWin)
@@ -1642,7 +1976,7 @@
                     hPrevY = hashUnit((stepIdx - 1) * 29.71 + seed + 5.3) * 2.0 - 1.0
                     hPrevR = cfg.rotDegAmp > 0 ? (hashUnit((stepIdx - 1) * 61.37 + seed + 13.7) * 2.0 - 1.0) : 0.0
                 }
-                var shiftT = frac / cfg.transWin
+                var shiftT = useShared ? sharedTiming.transT : (frac / cfg.transWin)
                 var prevDx = hPrevX * cfg.shiftXScale * effAmp
                 var prevDy = hPrevY * cfg.shiftYScale * effAmp
                 rawDx = prevDx + (nextDx - prevDx) * shiftT
@@ -1658,46 +1992,66 @@
             }
 
             if (frac < cfg.swayWin) {
-                var u    = frac / cfg.swayWin
-                var wave = Math.sin(u * PI * 2.5) * (1.0 - u)
+                var wave
+                if (useShared) {
+                    wave = sharedTiming.wave
+                } else {
+                    var u = frac / cfg.swayWin
+                    wave  = fastSinTurns(u * 1.25) * (1.0 - u)
+                }
                 rawDx += dirSignX * wave * effAmp * cfg.swayXScale
                 rawDy += dirSignY * wave * effAmp * cfg.swayYScale
                 if (cfg.rotDegAmp > 0) {
                     rawRotDeg += dirSignX * wave * cfg.rotDegAmp * 0.55
                 }
+            } else if (!needPrev && cfg.swayXScale === 0 && cfg.swayYScale === 0) {
+                canSettle = true
             }
+            var seedTurns = seed * INV_TWO_PI
             if (cfg.swayXScale !== 0) {
-                rawDx += Math.sin(frac * PI * 2.0 + seed) * 0.10 * cfg.swayXScale * effAmp
+                rawDx += fastSinTurns(frac + seedTurns) * 0.10 * cfg.swayXScale * effAmp
             }
             if (cfg.swayYScale !== 0) {
-                rawDy += Math.cos(frac * PI * 2.0 + seed * 1.3) * 0.10 * cfg.swayYScale * effAmp
+                rawDy += fastCosTurns(frac + seedTurns * 1.3) * 0.10 * cfg.swayYScale * effAmp
             }
         } else if (cfg.styleCode === 2) {
-            var phase = cyc * PI * 2.0
-            var nx = Math.sin(phase + seed * 1.73) * 0.72 + Math.cos(phase * 0.53 + seed * 3.11) * 0.28
-            var ny = Math.cos(phase * 0.87 + seed * 2.37) * 0.72 + Math.sin(phase * 0.47 + seed * 4.19) * 0.28
+            var sT = seed * INV_TWO_PI
+            var nx = fastSinTurns(cyc + sT * 1.73) * 0.72 + fastCosTurns(cyc * 0.53 + sT * 3.11) * 0.28
+            var ny = fastCosTurns(cyc * 0.87 + sT * 2.37) * 0.72 + fastSinTurns(cyc * 0.47 + sT * 4.19) * 0.28
             rawDx = nx * effAmp * 0.95
             rawDy = ny * effAmp * 1.15
         } else {
-            var theta
+            var cosTheta, sinTheta
             if (cf != null) {
                 if (cf._oStepIdx !== stepIdx || cf._oSeed !== seed) {
                     cf._oStepIdx = stepIdx
                     cf._oSeed    = seed
-                    cf._oTheta   = hashUnit(stepIdx * 19.37 + seed) * PI * 2.0
+                    var turn0    = hashUnit(stepIdx * 19.37 + seed)
+                    cf._oTheta   = turn0 * PI * 2.0
+                    cf._oCos     = fastCosTurns(turn0)
+                    cf._oSin     = fastSinTurns(turn0)
                 }
-                theta = cf._oTheta
+                cosTheta = cf._oCos
+                sinTheta = cf._oSin
             } else {
-                theta = hashUnit(stepIdx * 19.37 + seed) * PI * 2.0
+                var turn1 = hashUnit(stepIdx * 19.37 + seed)
+                cosTheta = fastCosTurns(turn1)
+                sinTheta = fastSinTurns(turn1)
             }
             var pulse = 0.0
             if (frac < cfg.jitterWin) {
-                var pu = frac / cfg.jitterWin
-                pulse = Math.sin(pu * PI * 3.0) * (1.0 - pu) * 0.85
+                if (useShared) {
+                    pulse = sharedTiming.pulse
+                } else {
+                    var pu = frac / cfg.jitterWin
+                    pulse  = fastSinTurns(pu * 1.5) * (1.0 - pu) * 0.85
+                }
+            } else {
+                canSettle = true
             }
             var mag = (0.22 + pulse) * effAmp
-            rawDx = Math.cos(theta) * mag * 0.78
-            rawDy = Math.sin(theta) * mag * 0.92
+            rawDx = cosTheta * mag * 0.78
+            rawDy = sinTheta * mag * 0.92
         }
 
         var maxDx = CONFIG.charShakeMaxDxPx
@@ -1705,6 +2059,16 @@
         dst.dx     = isFinite(rawDx) ? (rawDx < -maxDx ? -maxDx : (rawDx > maxDx ? maxDx : rawDx)) : 0.0
         dst.dy     = isFinite(rawDy) ? (rawDy < -maxDy ? -maxDy : (rawDy > maxDy ? maxDy : rawDy)) : 0.0
         dst.rotDeg = isFinite(rawRotDeg) ? rawRotDeg : 0.0
+
+        if (canSettle && cf != null) {
+            cf._settledStep = stepIdx
+            cf._settledSeed = seed
+            cf._settledAmp  = effAmp
+            cf._settledCfg  = cfg
+            cf._settledDx   = dst.dx
+            cf._settledDy   = dst.dy
+            cf._settledRot  = dst.rotDeg
+        }
         return dst
     }
 
@@ -2518,6 +2882,7 @@
                         exist.shatterFrags      = null
                         exist.charShakeCacheKey = ''
                         exist.charShakeFrags    = null
+                        exist.charShakeUnits    = null
                     }
                     exist.group        = group
                     exist.lifeMode     = lifeMode
@@ -2539,6 +2904,7 @@
                             exist.shatterFrags      = null
                             exist.charShakeCacheKey = ''
                             exist.charShakeFrags    = null
+                            exist.charShakeUnits    = null
                         }
                     }
                     if (!isRandColor) {
@@ -2577,6 +2943,7 @@
                     exist.charShakeSnap       = charShakeSnap
                     exist.charShakeTransition = charShakeTransition
                     exist._charShakeCfg       = null
+                    exist._sharedShakeTiming  = null
                     if (!isRandomFade) {
                         exist.fadeStyle = fadeStyle
                     }
@@ -2663,6 +3030,8 @@
             shatterFrags:      null,
             charShakeCacheKey: '',
             charShakeFrags:    null,
+            charShakeUnits:    null,
+            _sharedShakeTiming:null,
             titleLines:        null,
             subLines:          null,
             blockW:            0,
@@ -2856,7 +3225,18 @@
             if (maxPriority != null) payload.maxPriority = maxPriority
             enqueueDanmaku(payload)
         },
-        count:      function () { return activeOverlays.length + pendingActions.length }
+        count:      function () { return activeOverlays.length + pendingActions.length },
+        _pure: {
+            hashUnit:                     hashUnit,
+            fastSinTurns:                 fastSinTurns,
+            fastCosTurns:                 fastCosTurns,
+            prepareSharedCharShakeTiming: prepareSharedCharShakeTiming,
+            sampleCharShakeOffset:        sampleCharShakeOffset,
+            findVisibleUnitRange:         findVisibleUnitRange,
+            isUnitOutOfViewport:          isUnitOutOfViewport,
+            getOrBuildCharShakeCache:     getOrBuildCharShakeCache,
+            inspectOverlays:              function () { return activeOverlays }
+        }
     }
 
     ClientEvents.loggedOut(function () {
@@ -3232,10 +3612,22 @@
             var px = sw * item.rx + shakeVec.x
             var py = sh * item.ry + shakeVec.y
 
+            var angDeg = item.angle || 0
+            var cosR   = 1.0
+            var sinR   = 0.0
+            if (angDeg !== 0 && isFinite(angDeg)) {
+                var signedRad = angDeg * DEG_TO_RAD
+                cosR = Math.cos(signedRad)
+                sinR = Math.sin(signedRad)
+            }
+            var cosA = cosR >= 0 ? cosR : -cosR
+            var sinA = sinR >= 0 ? sinR : -sinR
+            var mxx  = cosR * scaleX
+            var mxy  = -sinR * scaleY
+            var myx  = sinR * scaleX
+            var myy  = cosR * scaleY
+
             if (item.clamp !== false) {
-                var rad      = Math.abs(item.angle || 0) * DEG_TO_RAD
-                var cosA     = Math.abs(Math.cos(rad))
-                var sinA     = Math.abs(Math.sin(rad))
                 var wScaled  = (item.blockW || 0) * Math.abs(scaleX)
                 var hScaled  = (item.blockH || 12) * Math.abs(scaleY)
                 var halfExtX = 0.5 * (wScaled * cosA + hScaled * sinA)
@@ -3248,6 +3640,11 @@
                 var maxY     = max2(halfSh, sh - halfExtY - CONFIG.clampPadPx)
                 px = clampNum(px, minX, maxX)
                 py = clampNum(py, minY, maxY)
+            } else if (sw > 0 && sh > 0) {
+                if (isUnitOutOfViewport(0.0, 0.0, (item.blockW || 0) * 0.5 + 16.0, (item.blockH || 12) * 0.5 + 16.0, px, py, mxx, mxy, myx, myy, sw, sh, 28.0)) {
+                    item.drawErrors = 0
+                    continue
+                }
             }
 
             ITEM_POSE_SCRATCH.needed = false
@@ -3368,16 +3765,23 @@
                     }
                 } else if (usePerCharRoute) {
                     var charFrags = getOrBuildCharShakeCache(item, item.titleLines, item.subLines, titleLineCount, startY, lineStep, fontObj)
+                    var charUnits = item.charShakeUnits || charFrags
                     var cShdBool  = Boolean(item.shadow)
                     var defOutMod = item.outlineMode || 'none'
                     var defOutCol = item.outlineColor != null ? item.outlineColor : -1
                     var defOutWid = item.outlineWidth || 0.75
+                    var maxAbsSc  = max2(Math.abs(scaleX), Math.abs(scaleY))
+                    var offPadPx  = 18.0 + ((defOutMod !== 'none' ? clampNum(defOutWid, 0.25, 2.5) : 0.0) + 8.0) * maxAbsSc
                     var lastVisCf = null
+                    var sharedTiming = prepareSharedCharShakeTiming(item, age, charFrags)
+
                     if ((item.debug || CONFIG.debug) && !item._debugLogged && charFrags.length > 0) {
                         item._debugLogged = true
                         var dbg0 = charFrags[0]
-                        var dbgOff = sampleCharShakeOffset(dbg0, age, item.shakeAmp || 0.65, item, { dx: 0.0, dy: 0.0, rotDeg: 0.0 })
+                        var dbgOff = sampleCharShakeOffset(dbg0, age, item.shakeAmp || 0.65, item, { dx: 0.0, dy: 0.0, rotDeg: 0.0 }, sharedTiming)
                         console.info('[ScreenDanmakuClient DEBUG] frags=' + charFrags.length +
+                            ' units=' + charUnits.length +
+                            ' shared=' + Boolean(sharedTiming && sharedTiming.canShare) +
                             ' shownVis=' + shownVis +
                             ' age=' + age +
                             ' amp=' + item.shakeAmp +
@@ -3395,18 +3799,90 @@
 
                     var baseShakeAmp = item.shakeAmp || 0.65
                     var activeShake  = curShake > 0 ? curShake : baseShakeAmp
-                    for (var cIdx = 0; cIdx < charFrags.length; cIdx++) {
-                        var cf = charFrags[cIdx]
+                    var visRange     = findVisibleUnitRange(charUnits, startSkipVis, keepEndVis)
+                    for (var uIdx = visRange.lo; uIdx < visRange.hi; uIdx++) {
+                        var unit = charUnits[uIdx]
+                        if (unit.isMerged) {
+                            if (startSkipVis <= unit.visStart && keepEndVis >= unit.visEnd) {
+                                lastVisCf = unit
+                                if (!isUnitOutOfViewport(unit.baseX + unit.w * 0.5, unit.baseY + 4.0, unit.w * 0.5 + 4.0, 6.0, px, py, mxx, mxy, myx, myy, sw, sh, offPadPx)) {
+                                    var mOutMode  = (unit.outlineMode && unit.outlineMode.length > 0) ? unit.outlineMode : defOutMod
+                                    var mOutColor = (unit.outlineColor != null && unit.outlineColor >= 0) ? unit.outlineColor : defOutCol
+                                    drawRichUnit(
+                                        event,
+                                        unit.comp,
+                                        unit.baseX,
+                                        unit.baseY,
+                                        unit.w * 0.5,
+                                        unit.color,
+                                        cShdBool,
+                                        mOutMode,
+                                        mOutColor,
+                                        defOutWid,
+                                        1.0,
+                                        item.fadeStyle,
+                                        inFade,
+                                        fadeProgress,
+                                        0.0,
+                                        batchCtx,
+                                        unit.seq,
+                                        unit
+                                    )
+                                }
+                            } else {
+                                var subFrags = unit.subFrags
+                                for (var sfIdx = 0; sfIdx < subFrags.length; sfIdx++) {
+                                    var cfSub = subFrags[sfIdx]
+                                    if (cfSub.visIndex < startSkipVis) continue
+                                    if (cfSub.visIndex >= keepEndVis) break
+                                    lastVisCf = cfSub
+                                    if (cfSub.isBlank) continue
+                                    if (isUnitOutOfViewport(cfSub.baseX + cfSub.w * 0.5, cfSub.baseY + 4.0, cfSub.w * 0.5 + 4.0, 6.0, px, py, mxx, mxy, myx, myy, sw, sh, offPadPx)) {
+                                        continue
+                                    }
+                                    var sfOutMode  = (cfSub.outlineMode && cfSub.outlineMode.length > 0) ? cfSub.outlineMode : defOutMod
+                                    var sfOutColor = (cfSub.outlineColor != null && cfSub.outlineColor >= 0) ? cfSub.outlineColor : defOutCol
+                                    drawRichUnit(
+                                        event,
+                                        cfSub.comp,
+                                        cfSub.baseX,
+                                        cfSub.baseY,
+                                        cfSub.w * 0.5,
+                                        cfSub.color,
+                                        cShdBool,
+                                        sfOutMode,
+                                        sfOutColor,
+                                        defOutWid,
+                                        cfSub.charScale,
+                                        item.fadeStyle,
+                                        inFade,
+                                        fadeProgress,
+                                        0.0,
+                                        batchCtx,
+                                        cfSub.seq,
+                                        cfSub
+                                    )
+                                }
+                            }
+                            continue
+                        }
+
+                        var cf = unit
                         if (cf.visIndex < startSkipVis || cf.visIndex >= keepEndVis) continue
                         lastVisCf = cf
                         if (cf.isBlank) continue
+
+                        var unitSc = (cf.charScale != null && cf.charScale > 0) ? cf.charScale : 1.0
+                        if (isUnitOutOfViewport(cf.baseX + cf.w * 0.5, cf.baseY + 4.0, cf.w * 0.5 * unitSc + 6.0, 6.0 * unitSc + 6.0, px, py, mxx, mxy, myx, myy, sw, sh, offPadPx)) {
+                            continue
+                        }
 
                         var shouldShakeChar = (cf.shakeFlag === 1) || (isPerCharShake && cf.shakeFlag !== -1)
                         var offDx  = 0.0
                         var offDy  = 0.0
                         var offRot = 0.0
                         if (shouldShakeChar) {
-                            sampleCharShakeOffset(cf, age, activeShake, item, CHAR_OFFSET_SCRATCH)
+                            sampleCharShakeOffset(cf, age, activeShake, item, CHAR_OFFSET_SCRATCH, sharedTiming)
                             offDx  = CHAR_OFFSET_SCRATCH.dx
                             offDy  = CHAR_OFFSET_SCRATCH.dy
                             offRot = CHAR_OFFSET_SCRATCH.rotDeg
