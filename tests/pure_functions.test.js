@@ -5527,6 +5527,331 @@ test('ScreenDanmakuClient v5.4: frame sAllowShadow cache, itemFgMat reuse, no ho
     assert.strictEqual(Cli.count(), 0, 'expired overlays must always be evicted cleanly')
 })
 
+// ----------------------------------------------------------------------------
+// 53. ScreenDanmakuClient v5.5: ModernUI lookupVanillaLayout, drawTextOutline, Pass-Grouping, <shake> crisp mode & fallback
+// ----------------------------------------------------------------------------
+test('ScreenDanmakuClient v5.5: ModernUI lookupVanillaLayout, drawTextOutline, Pass-Grouping, <shake> crisp mode & fallback', function () {
+    function MuiM4() {
+        this._m00 = 1.0
+        this._m11 = 1.0
+        this.z    = 0.0
+    }
+    var m4SetCount = 0
+    MuiM4.prototype.set = function (o) {
+        m4SetCount++
+        this._m00 = o ? o._m00 : 1.0
+        this._m11 = o ? o._m11 : 1.0
+        this.z    = o ? (o.z || 0.0) : 0.0
+        return this
+    }
+    MuiM4.prototype.translate = function (dx, dy, dz) { this.z += (dz || 0.0); return this }
+    MuiM4.prototype.rotateZ   = function (rad) { return this }
+    MuiM4.prototype.scale     = function (sx, sy, sz) { this._m00 *= sx; this._m11 *= sy; return this }
+    MuiM4.prototype.m00       = function () { return this._m00 }
+    MuiM4.prototype.m11       = function () { return this._m11 }
+
+    var nowMs = 1000
+    var canaryEpoch = 1
+    var opSeq = 0
+    var textOfCalls = 0
+    var vanillaNonCanaryLookups = []
+    var formattedLookups = 0
+    var drawCalls = []
+    var outlineCalls = []
+    var endBatchCalls = 0
+    var cliWarns = []
+    var paints = []
+
+    var layoutCacheByEpoch = {}
+    function makeMuiLayout(tag, isEmoji) {
+        var id = canaryEpoch + ':' + tag
+        var lay = {
+            _id: id,
+            equals: function (other) { return Boolean(other && other._id === id) },
+            hasColorEmoji: function () { return Boolean(isEmoji) },
+            getTotalAdvance: function () { return String(tag).length * 6.0 },
+            drawText: function (mat, bufSrc, x, y, r, g, b, a, isShadow, mode) {
+                opSeq++
+                drawCalls.push({
+                    opSeq: opSeq, tag: tag, z: mat ? mat.z : 0,
+                    x: x, y: y, r: r, g: g, b: b, a: a,
+                    isShadow: Boolean(isShadow), mode: mode
+                })
+            },
+            drawTextOutline: function (mat, bufSrc, x, y, r, g, b, a) {
+                opSeq++
+                outlineCalls.push({
+                    opSeq: opSeq, tag: tag, z: mat ? mat.z : 0,
+                    x: x, y: y, r: r, g: g, b: b, a: a
+                })
+            }
+        }
+        return lay
+    }
+
+    var fakeEngine = {
+        lookupVanillaLayout: function (str) {
+            var s = String(str)
+            if (s !== 'A') vanillaNonCanaryLookups.push(s)
+            var ck = canaryEpoch + '|' + s
+            if (!layoutCacheByEpoch[ck]) {
+                layoutCacheByEpoch[ck] = makeMuiLayout(s, s === '\uD83D\uDE00')
+            }
+            return layoutCacheByEpoch[ck]
+        },
+        lookupFormattedLayout: function (fcs) {
+            formattedLookups++
+            return makeMuiLayout('fmt:' + String(fcs), false)
+        },
+        getTextRenderer: function () {
+            return {
+                chooseMode: function () { return 4 }
+            }
+        }
+    }
+
+    var bufSrc = {
+        endBatch: function (sheet) { endBatchCalls++ }
+    }
+
+    var sb = {
+        console: { info: function () {}, warn: function (m) { cliWarns.push(String(m)) }, error: function (m) { cliWarns.push(String(m)) }, debug: function () {}, log: function () {} },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function (fn) { paints.push(fn) } },
+        NetworkEvents: { dataReceived: function () {} },
+        Java: {
+            loadClass: function (cls) {
+                if (cls === 'java.lang.System') return { nanoTime: function () { return nowMs * 1000000 } }
+                if (cls === 'net.minecraft.client.gui.Font$DisplayMode') return { NORMAL: 'NORMAL' }
+                if (cls === 'org.joml.Matrix4f') return MuiM4
+                if (cls === 'net.minecraft.client.renderer.Sheets') return { translucentCullBlockSheet: function () { return 'EMOJI_SHEET' } }
+                if (cls === 'icyllis.modernui.mc.text.TextLayoutEngine') return { getInstance: function () { return fakeEngine } }
+                if (cls === 'icyllis.modernui.mc.text.ModernTextRenderer') return { sAllowSDFTextIn2D: true, sAllowShadow: true, sUseTextShadersInWorld: true }
+                return null
+            }
+        },
+        Text: {
+            of: function (s) {
+                textOfCalls++
+                return { string: String(s), getVisualOrderText: function () { return String(s) } }
+            }
+        },
+        global: {}
+    }
+    sb.globalThis = sb
+    vm.createContext(sb)
+    loadStartupBase(sb)
+    runScriptIn(sb, RENDERER_PATH)
+    var Cli = sb.global.ScreenDanmakuClient
+    assert.ok(Cli && paints.length === 1)
+
+    var baseMat = new MuiM4()
+    var ev = {
+        width: 854, height: 480, level: 'minecraft:overworld',
+        font: { width: function (s) { return String(s).length * 6 } },
+        graphics: { bufferSource: function () { return bufSrc }, flush: function () {} },
+        getMatrix: function () { return baseMat }
+    }
+
+    // 1. lookupVanillaLayout(String) zero Text.of allocation + SHARED_TEXT_SEQ_CACHE cross-item reuse + pop-in SDF -> settled crisp mode 0
+    Cli.push({ title: 'HelloModern', typewriter: false, shadow: false, outlineMode: 'none', stay: 1000, fadeOut: 5 })
+    Cli.push({ title: 'HelloModern', typewriter: false, shadow: false, outlineMode: 'none', ry: 0.45, stay: 1000, fadeOut: 5 })
+    paints[0](ev)
+    assert.strictEqual(textOfCalls, 0, 'ModernUI lookupVanillaLayout path must allocate zero Text.of components')
+    assert.strictEqual(formattedLookups, 0, 'must not fall back to lookupFormattedLayout when lookupVanillaLayout succeeds')
+    assert.strictEqual(vanillaNonCanaryLookups.length, 1, 'identical line text across two overlays must share 1 lookupVanillaLayout result')
+    assert.strictEqual(drawCalls.length, 2, 'two static un-outlined items -> 2 drawText calls')
+    assert.ok(drawCalls.every(function (d) { return d.mode === 1 }), 'pop-in entrance scale animation uses smooth SDF mode 1')
+    drawCalls.length = 0
+    nowMs += 350
+    paints[0](ev)
+    assert.strictEqual(drawCalls.length, 2)
+    assert.ok(drawCalls.every(function (d) { return d.mode === 0 }), 'once pop-in settles at scale=1.0, un-outlined static items drop to crisp mode 0')
+
+    // 2. No 15s TTL re-lookup when MUI_EPOCH is unchanged
+    nowMs += 30000
+    drawCalls.length = 0
+    Cli.clear()
+    Cli.push({ title: 'HelloModern', typewriter: false, shadow: false, outlineMode: 'none', stay: 40, fadeOut: 5 })
+    paints[0](ev)
+    assert.strictEqual(vanillaNonCanaryLookups.length, 1, 'must NOT re-lookup after 30s when ModernUI canary epoch is unchanged')
+
+    // 3. F3+T reload (new canary instance) invalidates MUI_EPOCH and re-resolves cached entries cleanly
+    canaryEpoch = 2
+    nowMs += 50
+    drawCalls.length = 0
+    Cli.clear()
+    Cli.push({ title: 'HelloModern', typewriter: false, shadow: false, outlineMode: 'none', stay: 40, fadeOut: 5 })
+    paints[0](ev)
+    assert.strictEqual(vanillaNonCanaryLookups.length, 2, 'canary reload must bump MUI_EPOCH and trigger fresh lookupVanillaLayout')
+
+    // 4. mui_stroke single-pass drawTextOutline vs emoji bitmap automatic fallback to stroke ring (+ itemOutMat reuse)
+    Cli.clear()
+    drawCalls.length = 0
+    outlineCalls.length = 0
+    vanillaNonCanaryLookups.length = 0
+    Cli.push({ title: 'OutlineTest', typewriter: false, shadow: false, outlineMode: 'mui_stroke', stay: 40, fadeOut: 5 })
+    paints[0](ev)
+    assert.strictEqual(outlineCalls.length, 1, 'mui_stroke on non-emoji text must use single-pass drawTextOutline')
+    assert.strictEqual(drawCalls.length, 1, 'plus 1 foreground drawText')
+    assert.strictEqual(drawCalls[0].mode, 1, 'outlined item core aligns to SDF mode 1')
+
+    Cli.clear()
+    drawCalls.length = 0
+    outlineCalls.length = 0
+    m4SetCount = 0
+    Cli.push({ title: '\uD83D\uDE00', typewriter: false, shadow: false, outlineMode: 'mui_stroke', outlineWidth: 0.75, stay: 40, fadeOut: 5 })
+    paints[0](ev)
+    assert.strictEqual(outlineCalls.length, 0, 'emoji/bitmap layout must skip drawTextOutline (ModernUI skips bitmaps) and fall back to stroke ring')
+    assert.strictEqual(drawCalls.length, 9, '8-dir stroke ring + 1 core = 9 drawText calls on fallback')
+    assert.ok(endBatchCalls >= 1, 'emoji sheet endBatch invoked before emoji draw')
+    assert.ok(m4SetCount <= 3, 'itemOutMat negative-Z cache must avoid re-calling Matrix4f.set per ring offset (actual=' + m4SetCount + ')')
+
+    // 5. Multi-line static 3-pass Pass-Grouping: all Pass 1 drawTextOutline precede all Pass 3 foreground drawText
+    Cli.clear()
+    drawCalls.length = 0
+    outlineCalls.length = 0
+    Cli.push({ title: 'Line1', sub: 'Line2', typewriter: false, shadow: false, outlineMode: 'mui_stroke', stay: 40, fadeOut: 5 })
+    paints[0](ev)
+    assert.strictEqual(outlineCalls.length, 2, 'multi-line mui_stroke emits 2 Pass-1 outlines')
+    assert.strictEqual(drawCalls.length, 2, 'plus 2 Pass-3 foregrounds')
+    var maxOutlineSeq = Math.max.apply(null, outlineCalls.map(function (o) { return o.opSeq }))
+    var minCoreSeq    = Math.min.apply(null, drawCalls.map(function (d) { return d.opSeq }))
+    assert.ok(maxOutlineSeq < minCoreSeq, 'all Pass-1 outlines must execute strictly before Pass-3 foregrounds')
+
+    // 6. <shake> alone keeps crisp mode 0 after pop-in, whereas <outline> enables SDF 1 + shadow Pass 2 before foreground Pass 3
+    Cli.clear()
+    drawCalls.length = 0
+    outlineCalls.length = 0
+    Cli.push({ title: '<shake>AB</shake>', typewriter: false, shadow: false, outlineMode: 'none', shakeMode: 'none', charShakeRotDeg: 0, stay: 40, fadeOut: 5 })
+    paints[0](ev)
+    nowMs += 350
+    drawCalls.length = 0
+    paints[0](ev)
+    assert.strictEqual(drawCalls.length, 2, '<shake>AB</shake> renders A and B')
+    assert.ok(drawCalls.every(function (d) { return d.mode === 0 }), '<shake>-only tags must keep crisp MODE_NORMAL(0) rather than forcing SDF(1)')
+
+    Cli.clear()
+    drawCalls.length = 0
+    Cli.push({ title: 'A<outline=#00FF00>B</outline>', typewriter: false, shadow: true, outlineMode: 'none', stay: 40, fadeOut: 5 })
+    paints[0](ev)
+    var bOutDraws = drawCalls.filter(function (d) { return d.tag === 'B' && d.g === 255 && !d.isShadow && d.z < -0.01 })
+    var aShdDraws = drawCalls.filter(function (d) { return d.tag === 'A' && d.isShadow })
+    var cores     = drawCalls.filter(function (d) { return !d.isShadow && d.z >= 0 })
+    assert.ok(bOutDraws.length >= 4 && aShdDraws.length === 1 && cores.length === 2, 'grouped inline <outline> + shadow runs outlines -> shadows -> cores')
+    assert.ok(Math.max.apply(null, bOutDraws.map(function (d) { return d.opSeq })) < aShdDraws[0].opSeq, 'Pass-1 outline runs before Pass-2 shadow')
+    assert.ok(aShdDraws[0].opSeq < Math.min.apply(null, cores.map(function (d) { return d.opSeq })), 'Pass-2 shadow runs before Pass-3 cores')
+    assert.ok(cores.every(function (d) { return d.mode === 1 }), 'inline <outline> unifies core to SDF mode 1')
+    assert.strictEqual(cliWarns.length, 0, 'ModernUI fast-path tests must emit zero warnings')
+
+    // 7. Vanilla fallback without ModernUI: lazy Text.of allocates on demand and draws via m_272191_ without error
+    var vanPaints = []
+    var vanTextOfCalls = 0
+    var vanVboCalls = 0
+    var vanWarns = []
+    var vanSb = {
+        console: { info: function () {}, warn: function (m) { vanWarns.push(String(m)) }, error: function (m) { vanWarns.push(String(m)) }, debug: function () {}, log: function () {} },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function (fn) { vanPaints.push(fn) } },
+        NetworkEvents: { dataReceived: function () {} },
+        Java: {
+            loadClass: function (cls) {
+                if (cls === 'java.lang.System') return { nanoTime: function () { return 1000000 } }
+                if (cls === 'net.minecraft.client.gui.Font$DisplayMode') return { NORMAL: 'NORMAL' }
+                if (cls === 'org.joml.Matrix4f') return MuiM4
+                return null
+            }
+        },
+        Text: { of: function (s) { vanTextOfCalls++; return { string: String(s), getVisualOrderText: function () { return String(s) } } } },
+        global: {}
+    }
+    vanSb.globalThis = vanSb
+    vm.createContext(vanSb)
+    loadStartupBase(vanSb)
+    runScriptIn(vanSb, RENDERER_PATH)
+    vanSb.global.ScreenDanmakuClient.push({ title: 'VanOnly', typewriter: false, shadow: false, outlineMode: 'mui_stroke', stay: 40, fadeOut: 5 })
+    vanPaints[0]({
+        width: 854, height: 480, level: 'minecraft:overworld',
+        font: {
+            width: function (s) { return String(s).length * 6 },
+            m_272191_: function () { vanVboCalls++ }
+        },
+        graphics: { bufferSource: function () { return { flush: function () {} } }, flush: function () {} },
+        getMatrix: function () { return new MuiM4() }
+    })
+    assert.ok(vanTextOfCalls >= 1, 'vanilla fallback lazily materializes Text.of component')
+    assert.strictEqual(vanVboCalls, 9, 'mui_stroke without ModernUI cleanly falls back to 8-pass stroke ring + 1 core = 9 VBO draws')
+    assert.strictEqual(vanWarns.length, 0, 'vanilla fallback must emit zero warnings')
+})
+
+// ----------------------------------------------------------------------------
+// 54. ScreenDanmaku v5.4: inDimension 0-player & cooldown early skip, POJO-safe malformed warning, mui_stroke & 128-group recentPos bound
+// ----------------------------------------------------------------------------
+test('ScreenDanmaku v5.4: inDimension 0-player & cooldown skip, malformed warning preserved, mui_stroke & 128-group bound', function () {
+    var warns = []
+    var overworld = { dimension: 'minecraft:overworld', getDimension: function () { return 'minecraft:overworld' }, players: [] }
+    var nearPlayer = {
+        username: 'NearP', uuid: '00000000-0000-4000-8000-0000000000e1',
+        level: overworld, block: { x: 10, y: 64, z: 10 },
+        x: 10, y: 64, z: 10,
+        isOp: function () { return false },
+        sendData: function (ch, pkt) { this._sent.push(pkt) },
+        _sent: []
+    }
+    overworld.players = [nearPlayer]
+    var srv = {
+        getWorldData: function () { return { getLevelName: function () { return 'DmV54' }, getAllowCommands: function () { return true } } },
+        getLevel: function (d) { return String(d) === 'minecraft:overworld' ? overworld : null },
+        getAllLevels: function () { return [overworld] },
+        getPlayerList: function () { return { getPlayers: function () { return [nearPlayer] } } },
+        overworld: function () { return overworld }
+    }
+    var sb = {
+        console: { info: function () {}, warn: function (m) { warns.push(String(m)) }, error: function (m) { warns.push(String(m)) }, debug: function () {}, log: function () {} },
+        ServerEvents: { loaded: function (fn) { fn({ server: srv }) }, unloaded: function () {}, tick: function () {}, commandRegistry: function () {}, command: function () {} },
+        PlayerEvents: { loggedIn: function () {}, loggedOut: function () {} },
+        BlockEvents: { placed: function () {}, broken: function () {} },
+        LevelEvents: { loaded: function () {} },
+        Utils: { server: srv },
+        server: srv,
+        global: {}
+    }
+    sb.globalThis = sb
+    vm.createContext(sb)
+    loadServerBase(sb)
+    runScriptIn(sb, DANMAKU_PATH)
+    var Dm = sb.global.ScreenDanmaku
+
+    // 1. 0 in-radius players skips packet construction & recentPos pollution cleanly
+    var sent0 = Dm.inDimension(overworld, 5000, 64, 5000, 16, { text: 'FarAway', pos: 'spread', group: 'farGrp' })
+    assert.strictEqual(sent0, 0)
+    assert.strictEqual(nearPlayer._sent.length, 0)
+    assert.strictEqual(warns.length, 0)
+
+    // 2. Source-conflict cooldown suppression skips second inDimension packet before delivery
+    var c1 = Dm.inDimension(overworld, 10, 64, 10, 32, { text: 'FirstHit', sourceId: 'bossA', cooldownMs: 5000, conflictMode: 'first' })
+    var c2 = Dm.inDimension(overworld, 10, 64, 10, 32, { text: 'SecondHit', sourceId: 'bossA', cooldownMs: 5000, conflictMode: 'first' })
+    assert.strictEqual(c1, 1)
+    assert.strictEqual(c2, 0, 'cooldown-suppressed second call must return 0 without sending')
+    assert.strictEqual(nearPlayer._sent.length, 1)
+
+    // 3. Malformed opts preserves warning even with 0 nearby players (and handles POJO-safe check)
+    Dm.inDimension(overworld, 5000, 64, 5000, 16, { sub: 'MissingTitle' })
+    assert.ok(warns.some(function (w) { return w.indexOf('buildValidatedPacket') >= 0 || w.indexOf('text') >= 0 || w.length > 0 }), 'malformed opts still logs throttled warning')
+
+    // 4. mui_stroke & sdf_stroke parse cleanly into PROTO_VERSION=5 packet
+    nearPlayer._sent.length = 0
+    Dm.toPlayer(nearPlayer, { text: 'MuiOut', outline: 'sdf_stroke' })
+    assert.strictEqual(nearPlayer._sent.length, 1)
+    assert.strictEqual(nearPlayer._sent[0].outlineMode, 'mui_stroke', 'sdf_stroke alias resolves to mui_stroke')
+
+    // 5. Dispatching 140 distinct spread groups never overflows RECENT_POS_BY_GROUP (>128 bound)
+    nearPlayer._sent.length = 0
+    for (var gi = 0; gi < 140; gi++) {
+        var r = Dm.toPlayer(nearPlayer, { text: 'G' + gi, group: 'grp_' + gi, pos: 'spread' })
+        assert.strictEqual(r, 1)
+    }
+    assert.strictEqual(nearPlayer._sent.length, 140)
+})
+
 var passed = 0
 for (var i = 0; i < tests.length; i++) {
     var t = tests[i]

@@ -1,11 +1,11 @@
 // ============================================================================
-//  通用屏幕弹幕与泛用文本显示组件 —— 客户端渲染引擎 (ScreenDanmakuClient v5.4)
+//  通用屏幕弹幕与泛用文本显示组件 —— 客户端渲染引擎 (ScreenDanmakuClient v5.5)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-屏幕弹幕渲染器.js
 //  配套服务端组件：
-//    - kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js（服务端调度器 ScreenDanmaku v5.2）
+//    - kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js（服务端调度器 ScreenDanmaku v5.4）
 //    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀）
 //
 //  依赖与缺失降级：
@@ -121,11 +121,16 @@
     var MUI_ENGINE              = null
     var MUI_RENDERER            = null
     var MUI_CANARY_SEQ          = null
+    var MUI_CANARY_STR          = 'A'
     var MUI_CANARY_LAYOUT       = null
     var MUI_EPOCH               = 0
+    var MUI_HAS_VANILLA_LOOKUP  = false
+    var MUI_HAS_DRAW_OUTLINE    = false
     var CHAR_OFFSET_SCRATCH     = { dx: 0.0, dy: 0.0, rotDeg: 0.0 }
     var SHAKE_VEC_SCRATCH       = { x: 0.0, y: 0.0 }
     var FRAME_BATCH_CTX         = null
+    var PASS_UNIT_SCRATCH       = []
+    var PASS_MAT_POOL           = []
 
     // 环形外圈预计算采样表：
     //   - OUTLINE_8：0° 步进 45° 的 8 向实心描边环
@@ -596,6 +601,12 @@
         return /(?:<|\{)\/?(?:b|bold|big|scale|shake|noshake|outline|glow)\b/i.test(str)
     }
 
+    function hasSdfSpanTags(str) {
+        if (!str || str.length < 4) return false
+        if (str.indexOf('<') < 0 && str.indexOf('{') < 0) return false
+        return /(?:<|\{)\/?(?:big|scale|outline|glow)\b/i.test(str)
+    }
+
     function parseHexColorInline(rawVal, defCol) {
         if (!rawVal) return defCol
         var s = String(rawVal).trim().toLowerCase()
@@ -782,7 +793,60 @@
         return p
     }
 
-    function wrapStyledTextLines(str, maxLineWidthPx, fontObj, letterSpacingPx, spacingMode) {
+    function measureWholeLineWidthPx(fullLine, fontObj) {
+        if (!fullLine || fullLine.length === 0) return 0
+        if (MUI_ENGINE != null && MUI_HAS_VANILLA_LOOKUP) {
+            try {
+                var shared = getCachedTextCompSeq(fullLine, false)
+                var lay = (MUI_EPOCH > 0 && shared._muiEpoch === MUI_EPOCH) ? shared._muiLayout : null
+                if (lay == null && shared._muiEpoch !== MUI_EPOCH) {
+                    lay = MUI_ENGINE.lookupVanillaLayout(shared.rawText)
+                    if (lay != null && MUI_EPOCH > 0) {
+                        var hasEm = (typeof lay.hasColorEmoji === 'function') ? Boolean(lay.hasColorEmoji()) : false
+                        shared._muiLayout   = lay
+                        shared._muiEpoch    = MUI_EPOCH
+                        shared._muiHasEmoji = hasEm
+                    }
+                }
+                if (lay != null && typeof lay.getTotalAdvance === 'function') {
+                    var adv = Number(lay.getTotalAdvance())
+                    if (isFinite(adv) && adv >= 0) return adv
+                }
+            } catch (eMuiW) { }
+        }
+        return invokeFontWidth(fontObj, fullLine)
+    }
+
+    function scanPlainStyledSegmentMeta(seg, activeColor, activeFmt, isBold) {
+        var vis = 0
+        for (var i = 0; i < seg.length;) {
+            var code = seg.charCodeAt(i)
+            if (code === 167 && (i + 1) < seg.length) {
+                var nextCh = seg.charAt(i + 1)
+                var lower  = nextCh.toLowerCase()
+                if ((lower >= '0' && lower <= '9') || (lower >= 'a' && lower <= 'f')) {
+                    activeColor = '§' + lower
+                    activeFmt   = ''
+                    isBold      = false
+                } else if (lower === 'r') {
+                    activeColor = ''
+                    activeFmt   = ''
+                    isBold      = false
+                } else if (lower >= 'k' && lower <= 'o') {
+                    if (activeFmt.indexOf('§' + lower) < 0) activeFmt += '§' + lower
+                    if (lower === 'l') isBold = true
+                }
+                i += 2
+                continue
+            }
+            var g = readGraphemeCluster(seg, i)
+            vis++
+            i = g.nextIndex
+        }
+        return { vis: vis, activeColor: activeColor, activeFmt: activeFmt, isBold: isBold }
+    }
+
+    function wrapStyledTextLines(str, maxLineWidthPx, fontObj, letterSpacingPx, spacingMode, preferWholeMeasure) {
         if (!str || str.length === 0) return []
         var checkTags   = hasRichSpanTags(str)
         var spacing     = (letterSpacingPx != null && isFinite(letterSpacingPx)) ? Number(letterSpacingPx) : 0
@@ -792,12 +856,30 @@
         var activeFmt   = ''
         var isBold      = false
         var tagState    = { tagBold: false, charScale: 1.0, shakeFlag: 0, outlineMode: '', outlineColor: -1 }
+        var allowWholeFast = Boolean(preferWholeMeasure) && !checkTags && spacing === 0
 
         for (var p = 0; p < rawParts.length; p++) {
             var seg = rawParts[p]
             if (seg.length === 0) {
                 lines.push({ text: '', widthPx: 0, vis: 0, empty: true, hasTags: false })
                 continue
+            }
+
+            if (allowWholeFast) {
+                var fullPrefSeg = activeColor + activeFmt + seg
+                var wholeW = measureWholeLineWidthPx(fullPrefSeg, fontObj)
+                if (isFinite(wholeW) && wholeW >= 0 && (maxLineWidthPx >= 999999 || maxLineWidthPx < 12 || wholeW <= maxLineWidthPx)) {
+                    var meta = scanPlainStyledSegmentMeta(seg, activeColor, activeFmt, isBold)
+                    activeColor = meta.activeColor
+                    activeFmt   = meta.activeFmt
+                    isBold      = meta.isBold
+                    if (meta.vis > 0) {
+                        lines.push({ text: fullPrefSeg, widthPx: max2(0, wholeW), vis: meta.vis, hasTags: false })
+                    } else {
+                        lines.push({ text: '', widthPx: 0, vis: 0, empty: true, hasTags: false })
+                    }
+                    continue
+                }
             }
 
             var curLine = activeColor + activeFmt + (checkTags ? serializeActiveTagPrefix(tagState) : '')
@@ -1082,21 +1164,49 @@
     var SHARED_TEXT_SEQ_KEYS  = []
     var MAX_TEXT_SEQ_CACHE    = 512
 
-    function getCachedTextCompSeq(rawStr) {
+    function getCachedTextCompSeq(rawStr, eagerCompSeq) {
         var key = String(rawStr || '')
+        var entry
         if (Object.prototype.hasOwnProperty.call(SHARED_TEXT_SEQ_CACHE, key)) {
-            return SHARED_TEXT_SEQ_CACHE[key]
+            entry = SHARED_TEXT_SEQ_CACHE[key]
+        } else {
+            if (SHARED_TEXT_SEQ_KEYS.length >= MAX_TEXT_SEQ_CACHE) {
+                var oldest = SHARED_TEXT_SEQ_KEYS.shift()
+                if (oldest !== undefined) delete SHARED_TEXT_SEQ_CACHE[oldest]
+            }
+            entry = {
+                rawText:      key,
+                comp:         null,
+                seq:          null,
+                _muiLayout:   null,
+                _muiEpoch:    -1,
+                _muiHasEmoji: false
+            }
+            SHARED_TEXT_SEQ_CACHE[key] = entry
+            SHARED_TEXT_SEQ_KEYS.push(key)
         }
-        var comp = Text.of(key)
-        var seq  = resolveVisualSeq(comp)
-        if (SHARED_TEXT_SEQ_KEYS.length >= MAX_TEXT_SEQ_CACHE) {
-            var oldest = SHARED_TEXT_SEQ_KEYS.shift()
-            if (oldest !== undefined) delete SHARED_TEXT_SEQ_CACHE[oldest]
+        if (eagerCompSeq === true && (entry.comp == null || entry.seq == null)) {
+            ensureUnitCompSeq(entry)
         }
-        var entry = { comp: comp, seq: seq }
-        SHARED_TEXT_SEQ_CACHE[key] = entry
-        SHARED_TEXT_SEQ_KEYS.push(key)
         return entry
+    }
+
+    function ensureUnitCompSeq(unit) {
+        if (unit == null) return null
+        if (unit.comp != null && unit.seq != null) return unit
+        var raw = (unit.rawText != null) ? String(unit.rawText) : ''
+        if (unit.comp == null && raw.length > 0 && typeof Text !== 'undefined' && Text != null && typeof Text.of === 'function') {
+            unit.comp = Text.of(raw)
+        }
+        if (unit.seq == null && unit.comp != null) {
+            unit.seq = resolveVisualSeq(unit.comp)
+        }
+        if (raw.length > 0 && Object.prototype.hasOwnProperty.call(SHARED_TEXT_SEQ_CACHE, raw)) {
+            var cached = SHARED_TEXT_SEQ_CACHE[raw]
+            if (cached.comp == null && unit.comp != null) cached.comp = unit.comp
+            if (cached.seq == null && unit.seq != null) cached.seq = unit.seq
+        }
+        return unit
     }
 
     function resolveVisualSeq(comp) {
@@ -1131,14 +1241,42 @@
         SheetsClass             = loadJavaClass('net.minecraft.client.renderer.Sheets')
         try {
             var eng = TextLayoutEngineClass.getInstance()
-            if (eng == null || typeof eng.lookupFormattedLayout !== 'function') return false
-            if (MUI_CANARY_SEQ == null && typeof Text !== 'undefined' && Text != null && typeof Text.of === 'function') {
-                MUI_CANARY_SEQ = resolveVisualSeq(Text.of('A'))
+            if (eng == null) return false
+
+            var probeLayout = null
+            var hasVanillaLookup = false
+            try {
+                if (typeof eng.lookupVanillaLayout === 'function') {
+                    var vanillaLayout = eng.lookupVanillaLayout(MUI_CANARY_STR)
+                    if (vanillaLayout != null && typeof vanillaLayout.drawText === 'function') {
+                        probeLayout = vanillaLayout
+                        hasVanillaLookup = true
+                    }
+                }
+            } catch (eMuiVanilla) {
+                probeLayout = null
+                hasVanillaLookup = false
             }
-            if (MUI_CANARY_SEQ == null) return false
-            // 验证 2 参重载 (FormattedCharSequence, int) 在 Rhino 中无二义性（Style 未注册 TypeWrapper）
-            var probeLayout = eng.lookupFormattedLayout(MUI_CANARY_SEQ, 0)
-            if (probeLayout == null || typeof probeLayout.drawText !== 'function') return false
+
+            if (probeLayout == null) {
+                if (typeof eng.lookupFormattedLayout !== 'function') return false
+                if (MUI_CANARY_SEQ == null && typeof Text !== 'undefined' && Text != null && typeof Text.of === 'function') {
+                    MUI_CANARY_SEQ = resolveVisualSeq(Text.of('A'))
+                }
+                if (MUI_CANARY_SEQ == null) return false
+                // 验证 2 参重载 (FormattedCharSequence, int) 在 Rhino 中无二义性（Style 未注册 TypeWrapper）
+                probeLayout = eng.lookupFormattedLayout(MUI_CANARY_SEQ, 0)
+                if (probeLayout == null || typeof probeLayout.drawText !== 'function') return false
+            }
+
+            MUI_HAS_VANILLA_LOOKUP = hasVanillaLookup
+            var canOutline = false
+            try {
+                canOutline = (typeof probeLayout.drawTextOutline === 'function')
+            } catch (eOutProbe) {
+                canOutline = false
+            }
+            MUI_HAS_DRAW_OUTLINE = canOutline
             MUI_CANARY_LAYOUT = probeLayout
             MUI_EPOCH++
             MUI_ENGINE = eng
@@ -1149,9 +1287,11 @@
             }
             return true
         } catch (eMuiInit) {
-            MUI_ENGINE        = null
-            MUI_RENDERER      = null
-            MUI_CANARY_LAYOUT = null
+            MUI_ENGINE             = null
+            MUI_RENDERER           = null
+            MUI_CANARY_LAYOUT      = null
+            MUI_HAS_VANILLA_LOOKUP = false
+            MUI_HAS_DRAW_OUTLINE   = false
             logErrorThrottled('ModernUI TextLayout probe fallback', eMuiInit)
             return false
         }
@@ -1218,24 +1358,30 @@
                 BATCH_RETRY_AT_MS = nowMs + BATCH_RETRY_COOLDOWN_MS
                 return null
             }
-            var matItem   = null
-            var matUnit   = null
-            var matOut    = null
-            var matFg     = null
-            var matItemFg = null
+            var matItem    = null
+            var matUnit    = null
+            var matOut     = null
+            var matFg      = null
+            var matItemFg  = null
+            var matItemOut = null
+            var matItemO2  = null
             if (Matrix4fClass != null) {
                 try {
-                    matItem   = new Matrix4fClass()
-                    matUnit   = new Matrix4fClass()
-                    matOut    = new Matrix4fClass()
-                    matFg     = new Matrix4fClass()
-                    matItemFg = new Matrix4fClass()
+                    matItem    = new Matrix4fClass()
+                    matUnit    = new Matrix4fClass()
+                    matOut     = new Matrix4fClass()
+                    matFg      = new Matrix4fClass()
+                    matItemFg  = new Matrix4fClass()
+                    matItemOut = new Matrix4fClass()
+                    matItemO2  = new Matrix4fClass()
                 } catch (eM) {
-                    matItem   = null
-                    matUnit   = null
-                    matOut    = null
-                    matFg     = null
-                    matItemFg = null
+                    matItem    = null
+                    matUnit    = null
+                    matOut     = null
+                    matFg      = null
+                    matItemFg  = null
+                    matItemOut = null
+                    matItemO2  = null
                 }
             }
             var canDirect = (matItem != null && matUnit != null &&
@@ -1246,34 +1392,40 @@
             probeModernUiBridge()
             var emojiSheet = resolveEmojiSheet()
             FRAME_BATCH_CTX = {
-                font:            null,
-                drawFn:          null,
-                useDirectSrgDraw:false,
-                hasGetMatrixFn:  (typeof event.getMatrix === 'function'),
-                graphics:        gfx,
-                bufSrc:          bufSrc,
-                displayMode:     modeNormal,
-                muiActive:       false,
-                muiRetryAtMs:    0,
-                muiEngine:       MUI_ENGINE,
-                muiRenderer:     MUI_RENDERER,
-                muiAllowSdf:     true,
-                muiAllowShadow:  true,
-                muiEmojiSheet:   emojiSheet,
-                muiEndBatchFn:   null,
-                canDirectMatrix: canDirect,
-                baseFrameMat:    null,
-                _itemScratch:    matItem,
-                itemMat:         null,
-                itemFgMat:       matItemFg,
-                itemFgReady:     false,
-                unitMat:         matUnit,
-                outMat:          matOut,
-                fgMat:           matFg,
-                drawn:           0,
-                nowMs:           now || 0,
-                needBlendRestore:false,
-                prevBlend:       null
+                font:              null,
+                drawFn:            null,
+                useDirectSrgDraw:  false,
+                hasGetMatrixFn:    (typeof event.getMatrix === 'function'),
+                graphics:          gfx,
+                bufSrc:            bufSrc,
+                displayMode:       modeNormal,
+                muiActive:         false,
+                muiRetryAtMs:      0,
+                muiEngine:         MUI_ENGINE,
+                muiRenderer:       MUI_RENDERER,
+                muiHasVanilla:     MUI_HAS_VANILLA_LOOKUP,
+                muiHasDrawOutline: MUI_HAS_DRAW_OUTLINE,
+                muiAllowSdf:       true,
+                muiAllowShadow:    true,
+                muiEmojiSheet:     emojiSheet,
+                muiEndBatchFn:     null,
+                canDirectMatrix:   canDirect,
+                baseFrameMat:      null,
+                _itemScratch:      matItem,
+                itemMat:           null,
+                itemFgMat:         matItemFg,
+                itemFgReady:       false,
+                itemOutMat:        matItemOut,
+                itemOutMat2:       matItemO2,
+                itemOutZ1:         NaN,
+                itemOutZ2:         NaN,
+                unitMat:           matUnit,
+                outMat:            matOut,
+                fgMat:             matFg,
+                drawn:             0,
+                nowMs:             now || 0,
+                needBlendRestore:  false,
+                prevBlend:         null
             }
         }
 
@@ -1286,6 +1438,10 @@
         ctx.baseFrameMat     = null
         ctx.itemMat          = null
         ctx.itemFgReady      = false
+        ctx.itemOutZ1        = NaN
+        ctx.itemOutZ2        = NaN
+        ctx.muiHasVanilla     = MUI_HAS_VANILLA_LOOKUP
+        ctx.muiHasDrawOutline = MUI_HAS_DRAW_OUTLINE
         ctx.needBlendRestore = false
         ctx.prevBlend        = null
 
@@ -1335,12 +1491,16 @@
             }
         }
 
-        if (ctx.muiActive && MUI_CANARY_SEQ != null) {
+        if (ctx.muiActive && (ctx.muiHasVanilla || MUI_CANARY_SEQ != null)) {
             try {
-                var curCanary = ctx.muiEngine.lookupFormattedLayout(MUI_CANARY_SEQ, 0)
+                var curCanary = ctx.muiHasVanilla
+                    ? ctx.muiEngine.lookupVanillaLayout(MUI_CANARY_STR)
+                    : ctx.muiEngine.lookupFormattedLayout(MUI_CANARY_SEQ, 0)
                 if (!isSameJavaRef(curCanary, MUI_CANARY_LAYOUT)) {
                     MUI_CANARY_LAYOUT = curCanary
                     MUI_EPOCH++
+                    GLYPH_WIDTH_MAP  = {}
+                    GLYPH_CACHE_SIZE = 0
                 }
                 if (ModernTextRendererClass != null) {
                     ctx.muiAllowSdf    = (ModernTextRendererClass.sAllowSDFTextIn2D !== false)
@@ -1378,25 +1538,54 @@
     }
 
     function resolveUnitMuiLayout(batchCtx, seq, ownerObj) {
-        if (batchCtx == null || !batchCtx.muiActive || seq == null) return null
-        var now = batchCtx.nowMs
-        if (ownerObj != null && ownerObj._muiLayout != null && ownerObj._muiEpoch === MUI_EPOCH && (now - (ownerObj._muiCheckMs || 0)) < 15000) {
+        if (batchCtx == null || !batchCtx.muiActive) return null
+        if (ownerObj != null && ownerObj._muiLayout != null && ownerObj._muiEpoch === MUI_EPOCH) {
             return ownerObj._muiLayout
         }
+        var raw = (ownerObj != null && ownerObj.rawText != null) ? String(ownerObj.rawText) : ''
+        var hasSharedKey = (raw.length > 0 && Object.prototype.hasOwnProperty.call(SHARED_TEXT_SEQ_CACHE, raw))
+        if (hasSharedKey) {
+            var sharedEntry = SHARED_TEXT_SEQ_CACHE[raw]
+            if (sharedEntry._muiLayout != null && sharedEntry._muiEpoch === MUI_EPOCH) {
+                if (ownerObj != null) {
+                    ownerObj._muiLayout   = sharedEntry._muiLayout
+                    ownerObj._muiEpoch    = MUI_EPOCH
+                    ownerObj._muiHasEmoji = sharedEntry._muiHasEmoji
+                }
+                return sharedEntry._muiLayout
+            }
+        }
         try {
-            var layout = batchCtx.muiEngine.lookupFormattedLayout(seq, 0)
-            if (ownerObj != null && layout != null) {
-                ownerObj._muiLayout   = layout
-                ownerObj._muiEpoch    = MUI_EPOCH
-                ownerObj._muiHasEmoji = (typeof layout.hasColorEmoji === 'function') ? Boolean(layout.hasColorEmoji()) : false
-                // 按字符序号错峰刷新，避免多字在同一帧集中到期刷新导致抖动
-                var staggerMs = ((ownerObj.visIndex || 0) & 15) * 60
-                ownerObj._muiCheckMs = now - staggerMs
+            var layout = null
+            if (batchCtx.muiHasVanilla && raw.length > 0) {
+                layout = batchCtx.muiEngine.lookupVanillaLayout(raw)
+            } else {
+                var effSeq = seq
+                if (effSeq == null && ownerObj != null) {
+                    ensureUnitCompSeq(ownerObj)
+                    effSeq = ownerObj.seq
+                }
+                if (effSeq == null) return null
+                layout = batchCtx.muiEngine.lookupFormattedLayout(effSeq, 0)
+            }
+            if (layout != null) {
+                var hasEm = (typeof layout.hasColorEmoji === 'function') ? Boolean(layout.hasColorEmoji()) : false
+                if (ownerObj != null) {
+                    ownerObj._muiLayout   = layout
+                    ownerObj._muiEpoch    = MUI_EPOCH
+                    ownerObj._muiHasEmoji = hasEm
+                }
+                if (raw.length > 0) {
+                    var targetCache = hasSharedKey ? SHARED_TEXT_SEQ_CACHE[raw] : getCachedTextCompSeq(raw, false)
+                    targetCache._muiLayout   = layout
+                    targetCache._muiEpoch    = MUI_EPOCH
+                    targetCache._muiHasEmoji = hasEm
+                }
             }
             return layout
         } catch (eLookup) {
             markMuiDegraded(batchCtx)
-            logErrorThrottled('ModernUI lookupFormattedLayout fallback', eLookup)
+            logErrorThrottled('ModernUI lookupLayout fallback', eLookup)
             return null
         }
     }
@@ -1528,20 +1717,24 @@
                     var dirRad   = hashUnit(fSeed + 2.3) * PI * 2.0
                     var spd      = 10.0 + hashUnit(fSeed + 3.7) * 24.0
                     var rotMax   = (hashUnit(fSeed + 5.9) - 0.5) * 95.0
-                    var rfComp = Text.of(rf.text)
+                    var fragEntry = getCachedTextCompSeq(rf.text, false)
                     list.push({
-                        comp:       rfComp,
-                        seq:        resolveVisualSeq(rfComp),
-                        color:      grp.color,
-                        cx:         rf.x + rf.w * 0.5,
-                        cy:         baseY + 4.5,
-                        halfW:      -rf.w * 0.5,
-                        vanishAt:   vanishAt,
-                        invVanish:  1.0 / vanishAt,
-                        vx:         Math.cos(dirRad) * spd,
-                        vy:         Math.sin(dirRad) * spd * 0.75,
-                        rotMax:     rotMax,
-                        phaseShift: fragSeq * 23
+                        rawText:     fragEntry.rawText,
+                        comp:        fragEntry.comp,
+                        seq:         fragEntry.seq,
+                        _muiLayout:  fragEntry._muiLayout,
+                        _muiEpoch:   fragEntry._muiEpoch,
+                        _muiHasEmoji:fragEntry._muiHasEmoji,
+                        color:       grp.color,
+                        cx:          rf.x + rf.w * 0.5,
+                        cy:          baseY + 4.5,
+                        halfW:       -rf.w * 0.5,
+                        vanishAt:    vanishAt,
+                        invVanish:   1.0 / vanishAt,
+                        vx:          Math.cos(dirRad) * spd,
+                        vy:          Math.sin(dirRad) * spd * 0.75,
+                        rotMax:      rotMax,
+                        phaseShift:  fragSeq * 23
                     })
                 }
             }
@@ -1590,7 +1783,7 @@
                 plainStr += pendingRun[pi].plainText
             }
             var mergedText = (first.fmtPref || '') + plainStr
-            var textEntry  = getCachedTextCompSeq(mergedText)
+            var textEntry  = getCachedTextCompSeq(mergedText, false)
             units.push({
                 isMerged:     true,
                 subFrags:     pendingRun.slice(),
@@ -1609,9 +1802,9 @@
                 shakeFlag:    0,
                 outlineMode:  first.outlineMode,
                 outlineColor: first.outlineColor,
-                _muiLayout:   null,
-                _muiEpoch:    -1,
-                _muiCheckMs:  0
+                _muiLayout:   textEntry._muiLayout,
+                _muiEpoch:    textEntry._muiEpoch,
+                _muiHasEmoji: textEntry._muiHasEmoji
             })
             pendingRun.length = 0
         }
@@ -1648,7 +1841,7 @@
                     // 当 minMs === maxMs（如 [rnfmabj-测试] 要求统一 0.8s 震动一次）时，统一相位 0，使所有字同步触发抖动但方向各异
                     var phaseOff  = isUnifiedFreq ? 0.0 : (hashUnit(cSeed + 1.9) * 10.0)
                     var rawTxt    = rf.text || ''
-                    var textPair  = getCachedTextCompSeq(rawTxt)
+                    var textPair  = getCachedTextCompSeq(rawTxt, false)
                     var isBlankFrag = (rawTxt.length > 0 && rawTxt.charCodeAt(0) <= 32 && rawTxt.indexOf('§') < 0 && /^\s+$/.test(rawTxt))
                     var absVisIdx = visSeq + (rf.visIndex != null ? rf.visIndex : fIdx)
                     var sc        = rf.charScale || 1.0
@@ -1690,9 +1883,9 @@
                         _settledDx:   0.0,
                         _settledDy:   0.0,
                         _settledRot:  0.0,
-                        _muiLayout:   null,
-                        _muiEpoch:    -1,
-                        _muiCheckMs:  0
+                        _muiLayout:   textPair._muiLayout,
+                        _muiEpoch:    textPair._muiEpoch,
+                        _muiHasEmoji: textPair._muiHasEmoji
                     }
                     list.push(cfObj)
 
@@ -2176,9 +2369,38 @@
         }
     }
 
-    // 负 Z 分层辅助：每组外圈/虚化环仅设置 1 次负 Z 矩阵，避免逐 pass 多次 translate JNI 调用
+    // 负 Z 分层辅助：对非旋转/缩放单元按 Z 偏移复用整条 item 的缓存矩阵，避免逐字重复 set+translate JNI 调用
     function startOutlineZMat(batchCtx, baseMat, zStart) {
-        if (batchCtx != null && batchCtx.outMat != null && baseMat != null) {
+        if (batchCtx == null || baseMat == null) return baseMat
+        if (batchCtx.itemMat != null && baseMat === batchCtx.itemMat) {
+            if (batchCtx.itemOutMat != null) {
+                if (batchCtx.itemOutZ1 === zStart) return batchCtx.itemOutMat
+                if (isNaN(batchCtx.itemOutZ1)) {
+                    try {
+                        batchCtx.itemOutMat.set(baseMat)
+                        batchCtx.itemOutMat.translate(0.0, 0.0, zStart)
+                        batchCtx.itemOutZ1 = zStart
+                        return batchCtx.itemOutMat
+                    } catch (eZ1) {
+                        batchCtx.itemOutMat = null
+                    }
+                }
+            }
+            if (batchCtx.itemOutMat2 != null) {
+                if (batchCtx.itemOutZ2 === zStart) return batchCtx.itemOutMat2
+                if (isNaN(batchCtx.itemOutZ2)) {
+                    try {
+                        batchCtx.itemOutMat2.set(baseMat)
+                        batchCtx.itemOutMat2.translate(0.0, 0.0, zStart)
+                        batchCtx.itemOutZ2 = zStart
+                        return batchCtx.itemOutMat2
+                    } catch (eZ2) {
+                        batchCtx.itemOutMat2 = null
+                    }
+                }
+            }
+        }
+        if (batchCtx.outMat != null) {
             try {
                 if (typeof batchCtx.outMat.set === 'function') {
                     batchCtx.outMat.set(baseMat)
@@ -2192,28 +2414,77 @@
         return baseMat
     }
 
-    function drawBatchedPassRgb(batchCtx, effSeq, preLayout, drawMode, x, y, r, g, b, byteA, packedCol, shadow, mat) {
+    function drawBatchedPassRgb(batchCtx, effSeq, preLayout, drawMode, x, y, r, g, b, byteA, packedCol, shadow, mat, ownerUnit) {
         if (preLayout != null && batchCtx.muiActive) {
             return drawMuiLayoutPassRgb(batchCtx, preLayout, x, y, r, g, b, byteA, shadow, mat, drawMode)
         }
-        return drawBatchedGlyph(batchCtx, effSeq, x, y, packedCol, shadow, mat, null, drawMode)
+        var useSeq = effSeq
+        if (useSeq == null && ownerUnit != null) {
+            ensureUnitCompSeq(ownerUnit)
+            useSeq = ownerUnit.seq
+        }
+        return drawBatchedGlyph(batchCtx, useSeq, x, y, packedCol, shadow, mat, null, drawMode)
     }
 
-    function drawBatchedRing(batchCtx, effSeq, preLayout, outlineMuiMode, gx, gy, mat, zOffset, dxTbl, dyTbl, rad, oR, oG, oB, byteA, oColRgb) {
+    function drawBatchedRing(batchCtx, effSeq, preLayout, outlineMuiMode, gx, gy, mat, zOffset, dxTbl, dyTbl, rad, oR, oG, oB, byteA, oColRgb, ownerUnit) {
+        if (batchCtx == null || BATCH_FAILED || mat == null) return false
         var rMat = startOutlineZMat(batchCtx, mat, zOffset)
-        var packedCol = (preLayout != null && batchCtx.muiActive) ? 0 : packArgb(oColRgb, byteA)
-        for (var i = 0; i < dxTbl.length; i++) {
-            if (!drawBatchedPassRgb(batchCtx, effSeq, preLayout, outlineMuiMode, gx + dxTbl[i] * rad, gy + dyTbl[i] * rad, oR, oG, oB, byteA, packedCol, false, rMat)) {
+        var n    = dxTbl.length
+        if (preLayout != null && batchCtx.muiActive) {
+            var aVal = byteA <= 2 ? 255 : byteA
+            var bufSrc = batchCtx.bufSrc
+            try {
+                for (var mi = 0; mi < n; mi++) {
+                    preLayout.drawText(rMat, bufSrc, gx + dxTbl[mi] * rad, gy + dyTbl[mi] * rad, oR, oG, oB, aVal, false, outlineMuiMode, false, 1.0, 0, 15728880)
+                }
+                batchCtx.drawn += n
+                return true
+            } catch (eMuiRing) {
+                markMuiDegraded(batchCtx)
+                logErrorThrottled('ModernUI TextLayout.drawText ring fallback', eMuiRing)
                 return false
             }
         }
-        return true
+
+        var useSeq = effSeq
+        if (useSeq == null && ownerUnit != null) {
+            ensureUnitCompSeq(ownerUnit)
+            useSeq = ownerUnit.seq
+        }
+        if (useSeq == null) return false
+        var packedCol = packArgb(oColRgb, byteA)
+        var buf = batchCtx.bufSrc
+        var font = batchCtx.font
+        var disp = batchCtx.displayMode
+        try {
+            if (batchCtx.drawFn != null) {
+                var df = batchCtx.drawFn
+                for (var di = 0; di < n; di++) {
+                    df.call(font, useSeq, gx + dxTbl[di] * rad, gy + dyTbl[di] * rad, packedCol, false, rMat, buf, disp, 0, 15728880)
+                }
+            } else if (batchCtx.useDirectSrgDraw) {
+                for (var si = 0; si < n; si++) {
+                    font.m_272191_(useSeq, gx + dxTbl[si] * rad, gy + dyTbl[si] * rad, packedCol, false, rMat, buf, disp, 0, 15728880)
+                }
+            } else {
+                for (var bi = 0; bi < n; bi++) {
+                    font.drawInBatch(useSeq, gx + dxTbl[bi] * rad, gy + dyTbl[bi] * rad, packedCol, false, rMat, buf, disp, 0, 15728880)
+                }
+            }
+            batchCtx.drawn += n
+            return true
+        } catch (eRingBatch) {
+            markBatchFailed(batchCtx)
+            logErrorThrottled('drawInBatch ring fallback', eRingBatch)
+            return false
+        }
     }
 
     // 合批路径外圈采样：
     //   - glow：4 向 45° 对称柔光 (0.90 * oRad, alpha ~0.41)，仅设 1 次负 Z 矩阵
     //   - stroke：8 向外环轮廓 + 大半径时 4 向内环桥接 (ModernUI SDF 模式下 1.15px 以下 8 向已无缝闭合)
-    function drawBatchedOutline(batchCtx, effSeq, preLayout, outlineMuiMode, gx, gy, mat, outMode, oColRgb, oRad, baseA) {
+    //   - mui_stroke：显式调用 ModernUI 原生 1-Pass GPU SDF 空心描边；缺 ModernUI/含 Emoji 时自动落回标准 8 向 stroke
+    function drawBatchedOutline(batchCtx, effSeq, preLayout, outlineMuiMode, gx, gy, mat, outMode, oColRgb, oRad, baseA, ownerUnit) {
         var oR = (oColRgb >>> 16) & 0xFF
         var oG = (oColRgb >>> 8) & 0xFF
         var oB = oColRgb & 0xFF
@@ -2221,18 +2492,30 @@
         if (outMode === 'glow') {
             var glowByte = Math.round(0.41 * baseA * 255)
             if (glowByte < OUTLINE_ALPHA_CUTOFF) return true
-            return drawBatchedRing(batchCtx, effSeq, preLayout, outlineMuiMode, gx, gy, mat, -0.055, GLOW_4_DX, GLOW_4_DY, oRad * 0.90, oR, oG, oB, glowByte, oColRgb)
+            return drawBatchedRing(batchCtx, effSeq, preLayout, outlineMuiMode, gx, gy, mat, -0.055, GLOW_4_DX, GLOW_4_DY, oRad * 0.90, oR, oG, oB, glowByte, oColRgb, ownerUnit)
+        }
+
+        var strokeByte = Math.round(0.92 * baseA * 255)
+        if (strokeByte < OUTLINE_ALPHA_CUTOFF) return true
+
+        if (outMode === 'mui_stroke' && preLayout != null && batchCtx.muiActive && batchCtx.muiHasDrawOutline && !(ownerUnit != null && ownerUnit._muiHasEmoji)) {
+            var mOutMat = startOutlineZMat(batchCtx, mat, -0.045)
+            try {
+                preLayout.drawTextOutline(mOutMat, batchCtx.bufSrc, gx, gy, oR, oG, oB, strokeByte <= 2 ? 255 : strokeByte, 15728880)
+                batchCtx.drawn++
+                return true
+            } catch (eMuiOut) {
+                logErrorThrottled('ModernUI TextLayout.drawTextOutline fallback', eMuiOut)
+            }
         }
 
         // stroke 实心描边：8 向圆周轮廓 + 较大半径时的 4 向内环桥接
-        var strokeByte = Math.round(0.92 * baseA * 255)
-        if (strokeByte < OUTLINE_ALPHA_CUTOFF) return true
-        if (!drawBatchedRing(batchCtx, effSeq, preLayout, outlineMuiMode, gx, gy, mat, -0.045, OUTLINE_8_DX, OUTLINE_8_DY, oRad, oR, oG, oB, strokeByte, oColRgb)) {
+        if (!drawBatchedRing(batchCtx, effSeq, preLayout, outlineMuiMode, gx, gy, mat, -0.045, OUTLINE_8_DX, OUTLINE_8_DY, oRad, oR, oG, oB, strokeByte, oColRgb, ownerUnit)) {
             return false
         }
         var midThresh = (preLayout != null && batchCtx.muiActive && batchCtx.muiAllowSdf) ? 1.15 : 0.82
         if (oRad > midThresh) {
-            drawBatchedRing(batchCtx, effSeq, preLayout, outlineMuiMode, gx, gy, mat, -0.018, CARDINAL_4_DX, CARDINAL_4_DY, oRad * 0.48, oR, oG, oB, strokeByte, oColRgb)
+            drawBatchedRing(batchCtx, effSeq, preLayout, outlineMuiMode, gx, gy, mat, -0.018, CARDINAL_4_DX, CARDINAL_4_DY, oRad * 0.48, oR, oG, oB, strokeByte, oColRgb, ownerUnit)
         }
         return true
     }
@@ -2246,6 +2529,9 @@
         defOutCol:           -1,
         outWidth:            0.75,
         outlineMuiMode:      0,
+        itemBaseCoreMode:    0,
+        itemMixedSdfMode:    0,
+        canGroupPasses:      false,
         fadeStyle:           'shrink',
         inFade:              false,
         fadeProgress:        0.0,
@@ -2279,21 +2565,36 @@
 
         var rCtx = ITEM_RENDER_CTX_SCRATCH
         var shd  = Boolean(item.shadow)
-        rCtx.event          = event
-        rCtx.batchCtx       = itemBatchCtx
-        rCtx.baseItemMat    = (itemBatchCtx != null) ? itemBatchCtx.itemMat : null
-        rCtx.shadow         = shd
-        rCtx.defOutMod      = defOutMod || 'none'
-        rCtx.defOutCol      = defOutCol != null ? defOutCol : -1
-        rCtx.outWidth       = defOutWid || 0.75
-        rCtx.outlineMuiMode = (itemBatchCtx != null && itemBatchCtx.muiAllowSdf) ? 1 : 0
-        rCtx.fadeStyle      = fadeStyle
-        rCtx.inFade         = Boolean(inFade)
-        rCtx.fadeProgress   = fadeProgress
-        rCtx.isBlurFade     = isBlurFade
-        rCtx.isSplitFade    = isSplitFade
-        rCtx.invP           = invP
-        rCtx.baseA          = baseA
+        var outM = defOutMod || 'none'
+        var baseMat = (itemBatchCtx != null) ? itemBatchCtx.itemMat : null
+        var outMuiMode = (itemBatchCtx != null && itemBatchCtx.muiAllowSdf) ? 1 : 0
+        var baseCoreMode = 0
+        if (itemBatchCtx != null && itemBatchCtx.muiActive && baseMat != null) {
+            baseCoreMode = (outM !== 'none' || isBlurFade || isSplitFade)
+                ? outMuiMode
+                : computeMuiDrawMode(itemBatchCtx, baseMat, false)
+        }
+        var isPerCharItem = (item.perCharShake === true || item.shakeMode === 'per_char')
+        var hasSdfInline  = (item.hasSdfInlineTags === true)
+        var hasMixedSdf   = (outM !== 'none' || isBlurFade || isSplitFade || hasSdfInline || (isPerCharItem && (item.charShakeRotDeg || 0) > 0))
+        rCtx.event            = event
+        rCtx.batchCtx         = itemBatchCtx
+        rCtx.baseItemMat      = baseMat
+        rCtx.shadow           = shd
+        rCtx.defOutMod        = outM
+        rCtx.defOutCol        = defOutCol != null ? defOutCol : -1
+        rCtx.outWidth         = defOutWid || 0.75
+        rCtx.outlineMuiMode   = outMuiMode
+        rCtx.itemBaseCoreMode = baseCoreMode
+        rCtx.itemMixedSdfMode = hasMixedSdf ? outMuiMode : baseCoreMode
+        rCtx.canGroupPasses   = (itemBatchCtx != null && itemBatchCtx.canDirectMatrix && !isBlurFade && !isSplitFade && (outM !== 'none' || shd || hasSdfInline))
+        rCtx.fadeStyle        = fadeStyle
+        rCtx.inFade           = Boolean(inFade)
+        rCtx.fadeProgress     = fadeProgress
+        rCtx.isBlurFade       = isBlurFade
+        rCtx.isSplitFade      = isSplitFade
+        rCtx.invP             = invP
+        rCtx.baseA            = baseA
 
         if (isSplitFade) {
             var haloBellS    = Math.sin(clampNum(fadeProgress, 0.05, 0.95) * PI)
@@ -2322,20 +2623,22 @@
         var baseItemMat = rCtx.baseItemMat
         if (batchCtx == null || BATCH_FAILED || baseItemMat == null) return false
 
-        var comp   = unit.comp
-        var effSeq = unit.seq || resolveVisualSeq(comp)
-        if (effSeq == null) return false
-
-        var preLayout = resolveUnitMuiLayout(batchCtx, effSeq, unit)
-        if (preLayout != null && batchCtx.muiActive) {
+        var preLayout = resolveUnitMuiLayout(batchCtx, unit.seq, unit)
+        var useMuiCore = (preLayout != null && batchCtx.muiActive)
+        var effSeq = unit.seq
+        if (!useMuiCore) {
+            ensureUnitCompSeq(unit)
+            effSeq = unit.seq
+            if (effSeq == null) return false
+        } else {
             flushEmojiSheetIfNeeded(batchCtx, preLayout, unit)
         }
 
         var sc = (charScale != null && isFinite(charScale) && charScale > 0.2) ? charScale : 1.0
         var hasUnitScale = (Math.abs(sc - 1.0) > 0.01)
         var needUnitTransform = (hasUnitScale || hasUnitRot)
-        var hasAnyOutline = (outMode === 'stroke' || outMode === 'glow')
-        // 统一让同字符的外圈与主体沿用 SDF(1)（当启用外圈/旋转/虚化时），防止 BufferSource 在外圈与主体间来回切换 RenderType 触发断批冲洗
+        var hasAnyOutline = (outMode === 'stroke' || outMode === 'glow' || outMode === 'mui_stroke')
+        // 统一让同字符/同混排条目的外圈与主体沿用 SDF(1)，防止 BufferSource 在 MODE_NORMAL(0) 与 SDF(1) 间频繁切换触发断批冲洗
         var outlineMuiMode = rCtx.outlineMuiMode
         var event          = rCtx.event
 
@@ -2343,14 +2646,20 @@
             var haloAlphaS = rCtx.splitHaloAlpha
             var spreadPxS  = rCtx.splitSpreadPx
             if (haloAlphaS >= OUTLINE_ALPHA_CUTOFF) {
-                var hColB = packArgb(rgbColor, haloAlphaS)
+                var hColB = useMuiCore ? 0 : packArgb(rgbColor, haloAlphaS)
                 var hMatS = startOutlineZMat(batchCtx, baseItemMat, -0.024)
-                if (!drawBatchedGlyph(batchCtx, effSeq, floatX - spreadPxS, floatY, hColB, false, hMatS, preLayout, outlineMuiMode)) return false
-                drawBatchedGlyph(batchCtx, effSeq, floatX + spreadPxS, floatY, hColB, false, hMatS, preLayout, outlineMuiMode)
-                drawBatchedGlyph(batchCtx, effSeq, floatX, floatY - spreadPxS * 0.78, hColB, false, hMatS, preLayout, outlineMuiMode)
-                drawBatchedGlyph(batchCtx, effSeq, floatX, floatY + spreadPxS * 0.78, hColB, false, hMatS, preLayout, outlineMuiMode)
+                var hcR = (rgbColor >>> 16) & 0xFF
+                var hcG = (rgbColor >>> 8) & 0xFF
+                var hcB = rgbColor & 0xFF
+                if (!drawBatchedPassRgb(batchCtx, effSeq, preLayout, outlineMuiMode, floatX - spreadPxS, floatY, hcR, hcG, hcB, haloAlphaS, hColB, false, hMatS, unit)) return false
+                drawBatchedPassRgb(batchCtx, effSeq, preLayout, outlineMuiMode, floatX + spreadPxS, floatY, hcR, hcG, hcB, haloAlphaS, hColB, false, hMatS, unit)
+                drawBatchedPassRgb(batchCtx, effSeq, preLayout, outlineMuiMode, floatX, floatY - spreadPxS * 0.78, hcR, hcG, hcB, haloAlphaS, hColB, false, hMatS, unit)
+                drawBatchedPassRgb(batchCtx, effSeq, preLayout, outlineMuiMode, floatX, floatY + spreadPxS * 0.78, hcR, hcG, hcB, haloAlphaS, hColB, false, hMatS, unit)
             }
-            return drawBatchedGlyph(batchCtx, effSeq, floatX, floatY, packArgb(rgbColor, rCtx.splitCoreByte), rCtx.splitCoreShd, baseItemMat, preLayout, outlineMuiMode)
+            var sR = (rgbColor >>> 16) & 0xFF
+            var sG = (rgbColor >>> 8) & 0xFF
+            var sB = rgbColor & 0xFF
+            return drawBatchedPassRgb(batchCtx, effSeq, preLayout, outlineMuiMode, floatX, floatY, sR, sG, sB, rCtx.splitCoreByte, useMuiCore ? 0 : packArgb(rgbColor, rCtx.splitCoreByte), rCtx.splitCoreShd, baseItemMat, unit)
         }
 
         var unitPushed = false
@@ -2402,7 +2711,7 @@
                 if (effOutAlpha > 0.01) {
                     var oColRgb = (outColor != null && outColor >= 0) ? outColor : (outMode === 'glow' ? rgbColor : 0x050A10)
                     var oRad    = clampNum(rCtx.outWidth || (outMode === 'glow' ? 0.85 : 0.72), 0.25, 2.5)
-                    if (!drawBatchedOutline(batchCtx, effSeq, preLayout, outlineMuiMode, gx, gy, mat, outMode, oColRgb, oRad, effOutAlpha)) {
+                    if (!drawBatchedOutline(batchCtx, effSeq, preLayout, outlineMuiMode, gx, gy, mat, outMode, oColRgb, oRad, effOutAlpha, unit)) {
                         return false
                     }
                 }
@@ -2410,8 +2719,7 @@
 
             var coreMuiMode  = (hasAnyOutline || rCtx.isBlurFade || needUnitTransform)
                 ? outlineMuiMode
-                : computeMuiDrawMode(batchCtx, mat, false)
-            var useMuiCore   = (preLayout != null && batchCtx.muiActive)
+                : rCtx.itemMixedSdfMode
             var cR           = (rgbColor >>> 16) & 0xFF
             var cG           = (rgbColor >>> 8) & 0xFF
             var cB           = rgbColor & 0xFF
@@ -2423,20 +2731,182 @@
                     var blurY   = rCtx.blurY
                     var mMatB   = startOutlineZMat(batchCtx, mat, -0.020)
                     var mistCol = useMuiCore ? 0 : packArgb(rgbColor, mistEffB)
-                    if (!drawBatchedPassRgb(batchCtx, effSeq, preLayout, outlineMuiMode, gx - blurRad, gy - blurY, cR, cG, cB, mistEffB, mistCol, false, mMatB)) return false
-                    drawBatchedPassRgb(batchCtx, effSeq, preLayout, outlineMuiMode, gx + blurRad, gy + blurY, cR, cG, cB, mistEffB, mistCol, false, mMatB)
+                    if (!drawBatchedPassRgb(batchCtx, effSeq, preLayout, outlineMuiMode, gx - blurRad, gy - blurY, cR, cG, cB, mistEffB, mistCol, false, mMatB, unit)) return false
+                    drawBatchedPassRgb(batchCtx, effSeq, preLayout, outlineMuiMode, gx + blurRad, gy + blurY, cR, cG, cB, mistEffB, mistCol, false, mMatB, unit)
                 }
                 var coreEffB = rCtx.blurCoreByte
                 var blurShd  = rCtx.blurAllowShadowTime && (outMode === 'none')
-                return drawBatchedPassRgb(batchCtx, effSeq, preLayout, coreMuiMode, gx, gy, cR, cG, cB, coreEffB, useMuiCore ? 0 : packArgb(rgbColor, coreEffB), blurShd, mat)
+                return drawBatchedPassRgb(batchCtx, effSeq, preLayout, coreMuiMode, gx, gy, cR, cG, cB, coreEffB, useMuiCore ? 0 : packArgb(rgbColor, coreEffB), blurShd, mat, unit)
             }
 
             var useShadow = rCtx.shadow && (outMode === 'none')
-            return drawBatchedPassRgb(batchCtx, effSeq, preLayout, coreMuiMode, gx, gy, cR, cG, cB, 255, useMuiCore ? 0 : packArgb(rgbColor, 255), useShadow, mat)
+            if (useMuiCore && useShadow && batchCtx.muiAllowShadow !== false && needUnitTransform && batchCtx.canDirectMatrix && mat === batchCtx.unitMat) {
+                try {
+                    preLayout.drawText(mat, batchCtx.bufSrc, gx, gy, cR >>> 2, cG >>> 2, cB >>> 2, 255, true, coreMuiMode, false, 1.0, 0, 15728880)
+                    mat.translate(0.0, 0.0, 0.03)
+                    preLayout.drawText(mat, batchCtx.bufSrc, gx, gy, cR, cG, cB, 255, false, coreMuiMode, false, 1.0, 0, 15728880)
+                    batchCtx.drawn += 2
+                    return true
+                } catch (eShdInline) {
+                    markMuiDegraded(batchCtx)
+                    logErrorThrottled('ModernUI TextLayout.drawText inline shadow fallback', eShdInline)
+                    return false
+                }
+            }
+            return drawBatchedPassRgb(batchCtx, effSeq, preLayout, coreMuiMode, gx, gy, cR, cG, cB, 255, useMuiCore ? 0 : packArgb(rgbColor, 255), useShadow, mat, unit)
         } finally {
             if (unitPushed) {
                 try { event.pop() } catch (eUPop) { }
             }
+        }
+    }
+
+    function acquirePassMat(idx) {
+        if (idx < PASS_MAT_POOL.length) return PASS_MAT_POOL[idx]
+        if (Matrix4fClass == null) return null
+        var m = new Matrix4fClass()
+        PASS_MAT_POOL.push(m)
+        return m
+    }
+
+    // 分 Pass 合批渲染（Pass1: 全员外圈 -> Pass2: ModernUI 全员阴影 -> Pass3: 全员正文前景）：
+    //   1) 彻底消灭同一条弹幕内部“外圈/MODE_SDF_STROKE/MODE_NORMAL/MODE_SDF_FILL”交错导致的 BufferSource 断批 Flush；
+    //   2) 消除邻近字外圈/阴影覆盖前字亮边；
+    //   3) 结合 itemOutMat / itemFgMat 与单位就地 Z 平移，最大化削减 Matrix4f JNI 复制与传参。
+    function drawUnitsPassGrouped(rCtx, entries, count) {
+        if (rCtx == null || count <= 0) return
+        var batchCtx    = rCtx.batchCtx
+        var baseItemMat = rCtx.baseItemMat
+        if (batchCtx == null || BATCH_FAILED || baseItemMat == null) {
+            for (var fi = 0; fi < count; fi++) {
+                var fe = entries[fi]
+                drawRichUnit(rCtx, fe.unit, fe.floatX, fe.floatY, fe.unitRotDeg)
+            }
+            return
+        }
+
+        var anyOutline   = false
+        var anyMuiShadow = false
+        var muiAllowShd  = (batchCtx.muiAllowShadow !== false)
+        var passMatUsed  = 0
+        var outlineMuiMode = rCtx.outlineMuiMode
+        var coreMuiMode    = rCtx.itemMixedSdfMode
+        var useMuiGlobal   = batchCtx.muiActive
+
+        // 预准备所有可视单元的布局与变换矩阵（每个变换单元仅构建一次 uMat）
+        for (var i = 0; i < count; i++) {
+            var en   = entries[i]
+            var unit = en.unit
+            var preLayout = useMuiGlobal ? resolveUnitMuiLayout(batchCtx, unit.seq, unit) : null
+            var useMui    = (preLayout != null && batchCtx.muiActive)
+            en.preLayout  = preLayout
+            en.useMui     = useMui
+            if (useMui) {
+                flushEmojiSheetIfNeeded(batchCtx, preLayout, unit)
+            } else {
+                ensureUnitCompSeq(unit)
+            }
+
+            if (en.needTransform) {
+                var pMat = acquirePassMat(passMatUsed)
+                if (pMat != null) {
+                    passMatUsed++
+                    pMat.set(baseItemMat)
+                    pMat.translate(en.floatX + en.halfW, en.floatY + 4.0, 0.0)
+                    if (en.hasUnitRot) pMat.rotateZ(en.unitRotDeg * DEG_TO_RAD)
+                    if (en.hasUnitScale) pMat.scale(en.charScale, en.charScale, 1.0)
+                    en.mat = pMat
+                    en.gx  = -en.halfW
+                    en.gy  = -4.0
+                } else {
+                    // Matrix 池无法分配时退回单字路径
+                    for (var ri = i; ri < count; ri++) {
+                        var remE = entries[ri]
+                        drawRichUnit(rCtx, remE.unit, remE.floatX, remE.floatY, remE.unitRotDeg)
+                    }
+                    count = i
+                    break
+                }
+            } else {
+                en.mat = baseItemMat
+                en.gx  = en.floatX
+                en.gy  = en.floatY
+            }
+
+            if (en.outMode !== 'none') anyOutline = true
+            else if (rCtx.shadow && useMui && muiAllowShd) anyMuiShadow = true
+            en.outlineOk = false
+        }
+        if (count <= 0) return
+
+        // Pass 1：统一绘制所有单元的外圈层（z = -0.045 / -0.055 / -0.018）
+        if (anyOutline) {
+            var baseA  = rCtx.baseA
+            var oRad   = clampNum(rCtx.outWidth || 0.75, 0.25, 2.5)
+            for (var p1 = 0; p1 < count; p1++) {
+                var e1 = entries[p1]
+                if (e1.outMode === 'none') continue
+                if (!e1.useMui && e1.unit.seq == null) continue
+                var oColRgb = (e1.outColor != null && e1.outColor >= 0) ? e1.outColor : (e1.outMode === 'glow' ? e1.rgbColor : 0x050A10)
+                e1.outlineOk = drawBatchedOutline(batchCtx, e1.unit.seq, e1.preLayout, outlineMuiMode, e1.gx, e1.gy, e1.mat, e1.outMode, oColRgb, oRad, baseA, e1.unit)
+            }
+        }
+
+        // Pass 2：统一绘制 ModernUI 阴影层（z = 0.0）
+        var bufSrc = batchCtx.bufSrc
+        if (anyMuiShadow && batchCtx.muiActive) {
+            for (var p2 = 0; p2 < count; p2++) {
+                var e2 = entries[p2]
+                if (!e2.useMui || e2.preLayout == null || e2.outMode !== 'none' || !rCtx.shadow) continue
+                try {
+                    var c2 = e2.rgbColor
+                    e2.preLayout.drawText(e2.mat, bufSrc, e2.gx, e2.gy, ((c2 >>> 16) & 0xFF) >>> 2, ((c2 >>> 8) & 0xFF) >>> 2, (c2 & 0xFF) >>> 2, 255, true, coreMuiMode, false, 1.0, 0, 15728880)
+                    batchCtx.drawn++
+                } catch (eShdPass) {
+                    markMuiDegraded(batchCtx)
+                    e2.useMui = false
+                    logErrorThrottled('ModernUI TextLayout.drawText shadow pass fallback', eShdPass)
+                }
+            }
+        }
+
+        // Pass 3：统一绘制全员正文前景层（z = +0.03 或 0.0）
+        for (var p3 = 0; p3 < count; p3++) {
+            var e3   = entries[p3]
+            var u3   = e3.unit
+            var shd3 = rCtx.shadow && (e3.outMode === 'none')
+            if (e3.useMui && e3.preLayout != null && batchCtx.muiActive) {
+                var fgMat = e3.mat
+                if (shd3 && muiAllowShd) {
+                    if (e3.mat === baseItemMat && batchCtx.itemFgMat != null) {
+                        if (!batchCtx.itemFgReady) {
+                            batchCtx.itemFgMat.set(baseItemMat)
+                            batchCtx.itemFgMat.translate(0.0, 0.0, 0.03)
+                            batchCtx.itemFgReady = true
+                        }
+                        fgMat = batchCtx.itemFgMat
+                    } else if (e3.needTransform && e3.mat != null) {
+                        e3.mat.translate(0.0, 0.0, 0.03)
+                        fgMat = e3.mat
+                    }
+                }
+                var c3 = e3.rgbColor
+                try {
+                    e3.preLayout.drawText(fgMat, bufSrc, e3.gx, e3.gy, (c3 >>> 16) & 0xFF, (c3 >>> 8) & 0xFF, c3 & 0xFF, 255, false, coreMuiMode, false, 1.0, 0, 15728880)
+                    batchCtx.drawn++
+                    continue
+                } catch (eCorePass) {
+                    markMuiDegraded(batchCtx)
+                    ensureUnitCompSeq(u3)
+                    logErrorThrottled('ModernUI TextLayout.drawText core pass fallback', eCorePass)
+                }
+            }
+            if (u3.seq != null && !BATCH_FAILED) {
+                if (drawBatchedGlyph(batchCtx, u3.seq, e3.gx, e3.gy, packArgb(e3.rgbColor, 255), shd3, e3.mat, null, 0)) {
+                    continue
+                }
+            }
+            drawRichUnit(rCtx, u3, e3.floatX, e3.floatY, e3.unitRotDeg)
         }
     }
 
@@ -2462,6 +2932,7 @@
         }
 
         var event      = rCtx.event
+        ensureUnitCompSeq(unit)
         var comp       = unit.comp
         var isBlurFade = rCtx.isBlurFade
         var shadow     = rCtx.shadow
@@ -2473,7 +2944,7 @@
                          (Math.abs(floatY - Math.round(floatY)) > 0.01) ||
                          (charScale != null && Math.abs(charScale - 1.0) > 0.01) ||
                          hasUnitRot ||
-                         (outMode === 'stroke' || outMode === 'glow') ||
+                         (outMode === 'stroke' || outMode === 'glow' || outMode === 'mui_stroke') ||
                          isBlurFade
 
         if (!needMatrix && !rCtx.isSplitFade) {
@@ -2527,8 +2998,8 @@
                 event.translate(floatX, floatY)
             }
 
-            // 1. 外圈绘制（回退路径与合批路径一致：glow 4 向对称柔光，stroke 8 向轮廓，增量平移消除内层 push/pop）
-            if (outMode === 'stroke' || outMode === 'glow') {
+            // 1. 外圈绘制（回退路径与合批路径一致：glow 4 向对称柔光，stroke/mui_stroke 8 向轮廓，增量平移消除内层 push/pop）
+            if (outMode === 'stroke' || outMode === 'glow' || outMode === 'mui_stroke') {
                 var isGlowFb      = (outMode === 'glow')
                 var effOutAlphaFb = (isBlurFade && isGlowFb) ? rCtx.blurGlowOutAlpha : rCtx.baseA
                 if (effOutAlphaFb > 0.01) {
@@ -2618,11 +3089,12 @@
         return dst
     }
 
-    function buildRenderedLines(wrappedLines, startSkipVis, keepEndVis, appendCursor, fontObj, letterSpacingPx, spacingMode) {
+    function buildRenderedLines(wrappedLines, startSkipVis, keepEndVis, appendCursor, fontObj, letterSpacingPx, spacingMode, needEndPx) {
         if (!wrappedLines || wrappedLines.length === 0) return []
         var out = []
         var cursorIdx = 0
         var lastActiveIdx = -1
+        var calcEndPx = (needEndPx !== false)
 
         for (var i = 0; i < wrappedLines.length; i++) {
             var ln        = wrappedLines[i]
@@ -2641,9 +3113,12 @@
             var sliced  = (localKeep < ln.vis) ? sliceVisibleChars(ln.text, localKeep) : ln.text
             var dropped = (localSkip > 0) ? dropFirstVisibleChars(sliced, localSkip, fontObj, letterSpacingPx, spacingMode) : { text: sliced, offsetPx: 0 }
             if (dropped.text && dropped.text.length > 0) {
-                var endPx = (localKeep >= ln.vis)
-                    ? ((ln.widthPx || 0) + (letterSpacingPx > 0 ? computeClusterSpacing(9, letterSpacingPx, spacingMode) : 0))
-                    : dropFirstVisibleChars(sliced, 999999, fontObj, letterSpacingPx, spacingMode).offsetPx
+                var endPx = 0
+                if (calcEndPx) {
+                    endPx = (localKeep >= ln.vis)
+                        ? ((ln.widthPx || 0) + (letterSpacingPx > 0 ? computeClusterSpacing(9, letterSpacingPx, spacingMode) : 0))
+                        : dropFirstVisibleChars(sliced, 999999, fontObj, letterSpacingPx, spacingMode).offsetPx
+                }
                 out.push({
                     text:      dropped.text,
                     fullW:     ln.widthPx,
@@ -2871,11 +3346,8 @@
         var sub   = truncateSafeText(readStr(raw, 'sub', readStr(raw, 'subtitle', '')), CONFIG.maxSubChars)
         if (title.length === 0 && sub.length === 0) return
 
-        var titleVis   = countVisibleChars(title)
-        var subVis     = countVisibleChars(sub)
-        var totalVis   = titleVis + subVis
         var hasTags    = hasRichSpanTags(title) || hasRichSpanTags(sub)
-
+        var hasSdfTags = hasTags ? (hasSdfSpanTags(title) || hasSdfSpanTags(sub)) : false
         var typewriter = readBool(raw, 'typewriter', false)
         var charMs     = Math.round(readNonNegNum(raw, 'charMs', 30, 8))
         var lifeMode   = readStr(raw, 'lifeMode', 'once')
@@ -2900,6 +3372,20 @@
         } else if (key && namespace && key.indexOf(namespace + ':') !== 0) {
             key = namespace + ':' + key
         }
+
+        var exist = null
+        if (key.length > 0) {
+            for (var kFindIdx = 0; kFindIdx < activeOverlays.length; kFindIdx++) {
+                if (activeOverlays[kFindIdx].key === key) {
+                    exist = activeOverlays[kFindIdx]
+                    break
+                }
+            }
+        }
+        var sameTextAsExist = (exist != null && exist.title === title && exist.sub === sub)
+        var titleVis = sameTextAsExist ? exist.titleVis : countVisibleChars(title)
+        var subVis   = sameTextAsExist ? exist.subVis   : countVisibleChars(sub)
+        var totalVis = titleVis + subVis
 
         var jitterBool   = readBool(raw, 'jitter', false)
         var perCharBool  = readBool(raw, 'perCharShake', false)
@@ -2940,7 +3426,8 @@
         var letterSpacing     = clampNum(readNum(raw, 'letterSpacing', readNum(raw, 'spacing', 0.0)), -2.0, 20.0)
         var letterSpacingMode = readStr(raw, 'letterSpacingMode', 'relative').toLowerCase() === 'fixed' ? 'fixed' : 'relative'
         var outlineMode   = readStr(raw, 'outlineMode', 'none').toLowerCase()
-        if (outlineMode !== 'stroke' && outlineMode !== 'glow') outlineMode = 'none'
+        if (outlineMode === 'sdf_stroke') outlineMode = 'mui_stroke'
+        if (outlineMode !== 'stroke' && outlineMode !== 'glow' && outlineMode !== 'mui_stroke') outlineMode = 'none'
         var outlineColor  = Math.round(readNum(raw, 'outlineColor', -1))
         var outlineWidth  = clampNum(readNonNegNum(raw, 'outlineWidth', outlineMode === 'glow' ? 0.85 : 0.72, 0.2), 0.2, 2.5)
 
@@ -2955,10 +3442,7 @@
         var maxGroupSize = Math.round(readNonNegNum(raw, 'maxGroup', readNonNegNum(raw, 'maxGroupSize', 0, 0), 0))
         var debugEnabled = readBool(raw, 'debug', false)
 
-        if (key.length > 0) {
-            for (var kIdx = 0; kIdx < activeOverlays.length; kIdx++) {
-                var exist = activeOverlays[kIdx]
-                if (exist.key === key) {
+        if (exist != null) {
                     exist.tier         = tier
                     exist.maxGroupSize = maxGroupSize
                     exist.priority     = priority
@@ -2971,6 +3455,7 @@
                         exist.subVis            = subVis
                         exist.totalVis          = totalVis
                         exist.hasInlineTags     = hasTags
+                        exist.hasSdfInlineTags  = hasSdfTags
                         exist.letterSpacing     = letterSpacing
                         exist.letterSpacingMode = letterSpacingMode
                         exist.wrapKey           = ''
@@ -3063,8 +3548,6 @@
                     exist.drawErrors     = 0
                     enforceOverlayCaps(now, group, tier, namespace, maxGroupSize)
                     return
-                }
-            }
         }
 
         var initSched = computeOverlaySchedule(lifeMode, holdTicks, fadeTicks, typewriter, totalVis, charMs, now, 0)
@@ -3083,6 +3566,7 @@
             subVis:            subVis,
             totalVis:          totalVis,
             hasInlineTags:     hasTags,
+            hasSdfInlineTags:  hasSdfTags,
             letterSpacing:     letterSpacing,
             letterSpacingMode: letterSpacingMode,
             outlineMode:       outlineMode,
@@ -3479,26 +3963,52 @@
 
     function drawTypewriterCursor(rCtx, item, blinkCursor, cursorX, cursorY, color) {
         if (rCtx == null || !blinkCursor || blinkCursor.length === 0) return
-        if (item._cursorText !== blinkCursor || item._cursorComp == null) {
+        if (item._cursorText !== blinkCursor || item._cursorOwner == null) {
+            var curEntry = getCachedTextCompSeq(blinkCursor, false)
             item._cursorText  = blinkCursor
-            item._cursorComp  = Text.of(blinkCursor)
-            item._cursorSeq   = resolveVisualSeq(item._cursorComp)
+            item._cursorComp  = curEntry.comp
+            item._cursorSeq   = curEntry.seq
             item._cursorOwner = {
-                comp:         item._cursorComp,
-                seq:          item._cursorSeq,
+                rawText:      curEntry.rawText,
+                comp:         curEntry.comp,
+                seq:          curEntry.seq,
                 w:            6.0,
                 color:        color,
                 charScale:    1.0,
                 outlineMode:  '',
                 outlineColor: -1,
-                _muiLayout:   null,
-                _muiEpoch:    -1,
-                _muiCheckMs:  0
+                _muiLayout:   curEntry._muiLayout,
+                _muiEpoch:    curEntry._muiEpoch,
+                _muiHasEmoji: curEntry._muiHasEmoji
             }
         }
         var curUnit = item._cursorOwner
         curUnit.color = color
         drawRichUnit(rCtx, curUnit, cursorX, cursorY, 0.0)
+    }
+
+    function pushPassUnitSlot(passCount, unit, floatX, floatY, unitRotDeg, rCtx) {
+        var slot = PASS_UNIT_SCRATCH[passCount]
+        if (slot == null) {
+            slot = {}
+            PASS_UNIT_SCRATCH[passCount] = slot
+        }
+        var sc = (unit.charScale != null && isFinite(unit.charScale) && unit.charScale > 0.2) ? unit.charScale : 1.0
+        var hasSc  = (Math.abs(sc - 1.0) > 0.01)
+        var hasRot = (unitRotDeg != null && isFinite(unitRotDeg) && Math.abs(unitRotDeg) > 0.15)
+        slot.unit          = unit
+        slot.floatX        = floatX
+        slot.floatY        = floatY
+        slot.unitRotDeg    = unitRotDeg || 0.0
+        slot.halfW         = (unit.w != null) ? (unit.w * 0.5) : 0.0
+        slot.rgbColor      = unit.color
+        slot.outMode       = (unit.outlineMode && unit.outlineMode.length > 0) ? unit.outlineMode : rCtx.defOutMod
+        slot.outColor      = (unit.outlineColor != null && unit.outlineColor >= 0) ? unit.outlineColor : rCtx.defOutCol
+        slot.charScale     = sc
+        slot.hasUnitScale  = hasSc
+        slot.hasUnitRot    = hasRot
+        slot.needTransform = (hasSc || hasRot)
+        return passCount + 1
     }
 
     var DRAW_ORDER_SCRATCH = []
@@ -3626,8 +4136,9 @@
                 item._lastSpacingMode = itemSpacingMode
                 if (item.wrapKey !== rebuiltWrapKey || !item.titleLines || !item.subLines) {
                     item.wrapKey    = rebuiltWrapKey
-                    item.titleLines = wrapStyledTextLines(item.title, effMaxLineW, fontObj, itemSpacing, itemSpacingMode)
-                    item.subLines   = wrapStyledTextLines(item.sub, effMaxLineW, fontObj, itemSpacing, itemSpacingMode)
+                    var preferWholeWrap = (itemSpacing === 0 && !(item.perCharShake === true || item.shakeMode === 'per_char') && item.hasInlineTags !== true)
+                    item.titleLines = wrapStyledTextLines(item.title, effMaxLineW, fontObj, itemSpacing, itemSpacingMode, preferWholeWrap)
+                    item.subLines   = wrapStyledTextLines(item.sub, effMaxLineW, fontObj, itemSpacing, itemSpacingMode, preferWholeWrap)
                     var maxW = 0
                     for (var twi = 0; twi < item.titleLines.length; twi++) {
                         if (item.titleLines[twi].widthPx > maxW) maxW = item.titleLines[twi].widthPx
@@ -3760,7 +4271,11 @@
             ITEM_POSE_SCRATCH.needed = false
             ITEM_POSE_SCRATCH.pushed = false
             try {
-                if (batchCtx != null) batchCtx.itemFgReady = false
+                if (batchCtx != null) {
+                    batchCtx.itemFgReady = false
+                    batchCtx.itemOutZ1   = NaN
+                    batchCtx.itemOutZ2   = NaN
+                }
                 if (batchCtx != null && !BATCH_FAILED && batchCtx.canDirectMatrix && baseFrameM != null) {
                     var iMat = batchCtx._itemScratch
                     iMat.set(baseFrameM)
@@ -3796,8 +4311,8 @@
                     var titleKeepS   = min2(item.titleVis, keepEndVis)
                     var subSkipS     = max2(0, startSkipVis - item.titleVis)
                     var subKeepS     = max2(0, keepEndVis - item.titleVis)
-                    var sTitleLines  = buildRenderedLines(item.titleLines, titleSkipS, titleKeepS, '', fontObj, itemSpacing, itemSpacingMode)
-                    var sSubLines    = buildRenderedLines(item.subLines, subSkipS, subKeepS, '', fontObj, itemSpacing, itemSpacingMode)
+                    var sTitleLines  = buildRenderedLines(item.titleLines, titleSkipS, titleKeepS, '', fontObj, itemSpacing, itemSpacingMode, false)
+                    var sSubLines    = buildRenderedLines(item.subLines, subSkipS, subKeepS, '', fontObj, itemSpacing, itemSpacingMode, false)
                     var cachedFrags  = getOrBuildShatterCache(item, sTitleLines, sSubLines, titleLineCount, startY, lineStep, shownVis, fontObj)
                     var fastMode     = (activeOverlays.length > CONFIG.shatterFastThreshold)
                     var shShdBool    = Boolean(item.shadow)
@@ -3813,14 +4328,16 @@
                         var rotDeg = frag.rotMax * burstP
                         var fScale = max2(0.12, 1.0 - localP * 0.78)
                         var fCol   = ((frag.color != null && isFinite(frag.color)) ? Math.round(frag.color) : 0xFF5555) | 0xFF000000
-                        var fSeq   = frag.seq || (frag.seq = resolveVisualSeq(frag.comp))
-                        var fLay   = (itemBatchCtx != null) ? resolveUnitMuiLayout(itemBatchCtx, fSeq, frag) : null
-                        var fMode  = (fLay != null && itemBatchCtx.muiAllowSdf) ? 1 : 0
+                        var fLay   = (itemBatchCtx != null) ? resolveUnitMuiLayout(itemBatchCtx, frag.seq, frag) : null
+                        var fUseMui = (fLay != null && itemBatchCtx != null && itemBatchCtx.muiActive)
+                        var fSeq   = fUseMui ? frag.seq : ensureUnitCompSeq(frag).seq
+                        var fMode  = (fUseMui && itemBatchCtx.muiAllowSdf) ? 1 : 0
 
                         if (fastMode || (Math.abs(rotDeg) < 2.0 && fScale > 0.92)) {
                             var fxRaw = (frag.cx || 0) + (dx || 0) + (frag.halfW || 0)
                             var fyRaw = (frag.cy || 0) + (dy || 0) - 4.5
                             if (!(itemBatchCtx != null && drawBatchedGlyph(itemBatchCtx, fSeq, fxRaw, fyRaw, fCol, shShdBool, itemBatchCtx.itemMat, fLay, fMode))) {
+                                ensureUnitCompSeq(frag)
                                 ensureFallbackBlend(event, itemBatchCtx)
                                 ensureItemPosePushed(event)
                                 event.text(frag.comp, Math.round(fxRaw) || 0, Math.round(fyRaw) || 0, fCol, shShdBool)
@@ -3832,6 +4349,7 @@
                             if (rotDeg !== 0 && isFinite(rotDeg)) fMatDirect.rotateZ(rotDeg * DEG_TO_RAD)
                             if (fScale !== 1.0 && isFinite(fScale)) fMatDirect.scale(fScale, fScale, 1.0)
                             if (!drawBatchedGlyph(itemBatchCtx, fSeq, frag.halfW || 0, -4.5, fCol, shShdBool, fMatDirect, fLay, fMode)) {
+                                ensureUnitCompSeq(frag)
                                 ensureFallbackBlend(event, itemBatchCtx)
                                 ensureItemPosePushed(event)
                                 var fpDirect = false
@@ -3866,6 +4384,7 @@
                                 var fhx = Math.round(frag.halfW || 0) || 0
                                 var fMat = (itemBatchCtx != null) ? (itemBatchCtx.hasGetMatrixFn ? event.getMatrix() : event.matrix) : null
                                 if (!(fMat != null && drawBatchedGlyph(itemBatchCtx, fSeq, frag.halfW || 0, -4.5, fCol, shShdBool, fMat, fLay, fMode))) {
+                                    ensureUnitCompSeq(frag)
                                     ensureFallbackBlend(event, itemBatchCtx)
                                     event.text(frag.comp, fhx, -4, fCol, shShdBool)
                                 }
@@ -3917,13 +4436,19 @@
                         var baseShakeAmp = item.shakeAmp || 0.65
                         var activeShake  = curShake > 0 ? curShake : baseShakeAmp
                         var visRange     = findVisibleUnitRange(charUnits, startSkipVis, keepEndVis)
+                        var groupPasses  = rCtx.canGroupPasses
+                        var passCount    = 0
                         for (var uIdx = visRange.lo; uIdx < visRange.hi; uIdx++) {
                             var unit = charUnits[uIdx]
                             if (unit.isMerged) {
                                 if (startSkipVis <= unit.visStart && keepEndVis >= unit.visEnd) {
                                     lastVisCf = unit
                                     if (!isUnitOutOfViewport(unit.baseX + unit.w * 0.5, unit.baseY + 4.0, unit.w * 0.5 + 4.0, 6.0, px, py, mxx, mxy, myx, myy, sw, sh, offPadPx)) {
-                                        drawRichUnit(rCtx, unit, unit.baseX, unit.baseY, 0.0)
+                                        if (groupPasses) {
+                                            passCount = pushPassUnitSlot(passCount, unit, unit.baseX, unit.baseY, 0.0, rCtx)
+                                        } else {
+                                            drawRichUnit(rCtx, unit, unit.baseX, unit.baseY, 0.0)
+                                        }
                                     }
                                 } else {
                                     var subFrags = unit.subFrags
@@ -3936,7 +4461,11 @@
                                         if (isUnitOutOfViewport(cfSub.baseX + cfSub.w * 0.5, cfSub.baseY + 4.0, cfSub.w * 0.5 + 4.0, 6.0, px, py, mxx, mxy, myx, myy, sw, sh, offPadPx)) {
                                             continue
                                         }
-                                        drawRichUnit(rCtx, cfSub, cfSub.baseX, cfSub.baseY, 0.0)
+                                        if (groupPasses) {
+                                            passCount = pushPassUnitSlot(passCount, cfSub, cfSub.baseX, cfSub.baseY, 0.0, rCtx)
+                                        } else {
+                                            drawRichUnit(rCtx, cfSub, cfSub.baseX, cfSub.baseY, 0.0)
+                                        }
                                     }
                                 }
                                 continue
@@ -3962,7 +4491,20 @@
                                 offDy  = CHAR_OFFSET_SCRATCH.dy
                                 offRot = CHAR_OFFSET_SCRATCH.rotDeg
                             }
-                            drawRichUnit(rCtx, cf, cf.baseX + offDx, cf.baseY + offDy, offRot)
+                            if (groupPasses) {
+                                passCount = pushPassUnitSlot(passCount, cf, cf.baseX + offDx, cf.baseY + offDy, offRot, rCtx)
+                            } else {
+                                drawRichUnit(rCtx, cf, cf.baseX + offDx, cf.baseY + offDy, offRot)
+                            }
+                        }
+
+                        if (groupPasses && passCount > 0) {
+                            if (passCount === 1) {
+                                var p0 = PASS_UNIT_SCRATCH[0]
+                                drawRichUnit(rCtx, p0.unit, p0.floatX, p0.floatY, p0.unitRotDeg)
+                            } else {
+                                drawUnitsPassGrouped(rCtx, PASS_UNIT_SCRATCH, passCount)
+                            }
                         }
 
                         if (blinkCursor.length > 0 && lastVisCf != null) {
@@ -3978,24 +4520,26 @@
                     } else {
                         var lineCacheKey = curWrapKey + '|s:' + startSkipVis + '|k:' + keepEndVis + '|y:' + startY
                         var lCache       = item._lineRenderCache
-                        if (lCache == null || lCache.key !== lineCacheKey) {
+                        var needCursorMeasure = (item.typewriter && !inFade && shownVis < item.totalVis && item.totalVis > 0)
+                        if (lCache == null || lCache.key !== lineCacheKey || (needCursorMeasure && lCache.cursorAnchor == null)) {
                             var titleSkip = min2(item.titleVis, startSkipVis)
                             var titleKeep = min2(item.titleVis, keepEndVis)
                             var subSkip   = max2(0, startSkipVis - item.titleVis)
                             var subKeep   = max2(0, keepEndVis - item.titleVis)
 
-                            var renderTitleLines = buildRenderedLines(item.titleLines, titleSkip, titleKeep, '', fontObj, itemSpacing, itemSpacingMode)
-                            var renderSubLines   = buildRenderedLines(item.subLines, subSkip, subKeep, '', fontObj, itemSpacing, itemSpacingMode)
+                            var renderTitleLines = buildRenderedLines(item.titleLines, titleSkip, titleKeep, '', fontObj, itemSpacing, itemSpacingMode, needCursorMeasure)
+                            var renderSubLines   = buildRenderedLines(item.subLines, subSkip, subKeep, '', fontObj, itemSpacing, itemSpacingMode, needCursorMeasure)
 
                             var tItems = []
                             for (var tIdx = 0; tIdx < renderTitleLines.length; tIdx++) {
                                 var rLine1 = renderTitleLines[tIdx]
-                                var tComp  = Text.of(rLine1.text)
+                                var tEntryShared = getCachedTextCompSeq(rLine1.text, false)
                                 var tBaseX = -Math.floor((rLine1.fullW || 0) * 0.5)
                                 var tFullW = rLine1.fullW || 0
                                 tItems.push({
-                                    comp:         tComp,
-                                    seq:          resolveVisualSeq(tComp),
+                                    rawText:      tEntryShared.rawText,
+                                    comp:         tEntryShared.comp,
+                                    seq:          tEntryShared.seq,
                                     x:            tBaseX + (rLine1.offsetPx || 0),
                                     endX:         tBaseX + (rLine1.endPx || 0),
                                     y:            startY + (rLine1.lineIndex || 0) * lineStep,
@@ -4004,20 +4548,21 @@
                                     charScale:    1.0,
                                     outlineMode:  '',
                                     outlineColor: -1,
-                                    _muiLayout:   null,
-                                    _muiEpoch:    -1,
-                                    _muiCheckMs:  0
+                                    _muiLayout:   tEntryShared._muiLayout,
+                                    _muiEpoch:    tEntryShared._muiEpoch,
+                                    _muiHasEmoji: tEntryShared._muiHasEmoji
                                 })
                             }
                             var sItems = []
                             for (var sIdx = 0; sIdx < renderSubLines.length; sIdx++) {
                                 var rLine2 = renderSubLines[sIdx]
-                                var sComp  = Text.of(rLine2.text)
+                                var sEntryShared = getCachedTextCompSeq(rLine2.text, false)
                                 var sBaseX = -Math.floor((rLine2.fullW || 0) * 0.5)
                                 var sFullW = rLine2.fullW || 0
                                 sItems.push({
-                                    comp:         sComp,
-                                    seq:          resolveVisualSeq(sComp),
+                                    rawText:      sEntryShared.rawText,
+                                    comp:         sEntryShared.comp,
+                                    seq:          sEntryShared.seq,
                                     x:            sBaseX + (rLine2.offsetPx || 0),
                                     endX:         sBaseX + (rLine2.endPx || 0),
                                     y:            startY + (titleLineCount + (rLine2.lineIndex || 0)) * lineStep,
@@ -4026,20 +4571,22 @@
                                     charScale:    1.0,
                                     outlineMode:  '',
                                     outlineColor: -1,
-                                    _muiLayout:   null,
-                                    _muiEpoch:    -1,
-                                    _muiCheckMs:  0
+                                    _muiLayout:   sEntryShared._muiLayout,
+                                    _muiEpoch:    sEntryShared._muiEpoch,
+                                    _muiHasEmoji: sEntryShared._muiHasEmoji
                                 })
                             }
                             var cursorAnchor = null
-                            if (shownVis <= item.titleVis) {
-                                if (tItems.length > 0) {
-                                    var lastT = tItems[tItems.length - 1]
-                                    cursorAnchor = { x: lastT.endX, y: lastT.y, isSub: false }
+                            if (needCursorMeasure) {
+                                if (shownVis <= item.titleVis) {
+                                    if (tItems.length > 0) {
+                                        var lastT = tItems[tItems.length - 1]
+                                        cursorAnchor = { x: lastT.endX, y: lastT.y, isSub: false }
+                                    }
+                                } else if (sItems.length > 0) {
+                                    var lastS = sItems[sItems.length - 1]
+                                    cursorAnchor = { x: lastS.endX, y: lastS.y, isSub: true }
                                 }
-                            } else if (sItems.length > 0) {
-                                var lastS = sItems[sItems.length - 1]
-                                cursorAnchor = { x: lastS.endX, y: lastS.y, isSub: true }
                             }
                             lCache = { key: lineCacheKey, tItems: tItems, sItems: sItems, cursorAnchor: cursorAnchor }
                             item._lineRenderCache = lCache
@@ -4048,15 +4595,30 @@
                         var rawMainCol = (item.color != null && isFinite(item.color)) ? Math.round(item.color) : 0xFF5555
                         var rawSubCol  = (item.subColor != null && isFinite(item.subColor)) ? Math.round(item.subColor) : 0xFFCC44
 
-                        for (var ti = 0; ti < lCache.tItems.length; ti++) {
-                            var tEntry = lCache.tItems[ti]
-                            tEntry.color = rawMainCol
-                            drawRichUnit(rCtx, tEntry, tEntry.x, tEntry.y, 0.0)
-                        }
-                        for (var si = 0; si < lCache.sItems.length; si++) {
-                            var sEntry = lCache.sItems[si]
-                            sEntry.color = rawSubCol
-                            drawRichUnit(rCtx, sEntry, sEntry.x, sEntry.y, 0.0)
+                        if (rCtx.canGroupPasses && (lCache.tItems.length + lCache.sItems.length) > 1) {
+                            var staticPassCount = 0
+                            for (var tiG = 0; tiG < lCache.tItems.length; tiG++) {
+                                var tEnG = lCache.tItems[tiG]
+                                tEnG.color = rawMainCol
+                                staticPassCount = pushPassUnitSlot(staticPassCount, tEnG, tEnG.x, tEnG.y, 0.0, rCtx)
+                            }
+                            for (var siG = 0; siG < lCache.sItems.length; siG++) {
+                                var sEnG = lCache.sItems[siG]
+                                sEnG.color = rawSubCol
+                                staticPassCount = pushPassUnitSlot(staticPassCount, sEnG, sEnG.x, sEnG.y, 0.0, rCtx)
+                            }
+                            drawUnitsPassGrouped(rCtx, PASS_UNIT_SCRATCH, staticPassCount)
+                        } else {
+                            for (var ti = 0; ti < lCache.tItems.length; ti++) {
+                                var tEntry = lCache.tItems[ti]
+                                tEntry.color = rawMainCol
+                                drawRichUnit(rCtx, tEntry, tEntry.x, tEntry.y, 0.0)
+                            }
+                            for (var si = 0; si < lCache.sItems.length; si++) {
+                                var sEntry = lCache.sItems[si]
+                                sEntry.color = rawSubCol
+                                drawRichUnit(rCtx, sEntry, sEntry.x, sEntry.y, 0.0)
+                            }
                         }
                         if (blinkCursor.length > 0 && lCache.cursorAnchor != null) {
                             var ca = lCache.cursorAnchor

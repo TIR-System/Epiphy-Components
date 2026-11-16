@@ -1,11 +1,11 @@
 // priority: 500
 // ============================================================================
-//  通用屏幕弹幕与泛用文本显示组件 —— 服务端调度器 (ScreenDanmaku v5.3)
+//  通用屏幕弹幕与泛用文本显示组件 —— 服务端调度器 (ScreenDanmaku v5.4)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js
-//  配套客户端渲染器：kubejs/client_scripts/通用组件/Epiphy的-屏幕弹幕渲染器.js (ScreenDanmakuClient v5.2)
+//  配套客户端渲染器：kubejs/client_scripts/通用组件/Epiphy的-屏幕弹幕渲染器.js (ScreenDanmakuClient v5.5)
 //  配套权限阀组件：kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（管理 /epiphy 根命令、执行权限与 actorTier 资源分级）
 //
 //  依赖与缺失降级行为：
@@ -111,7 +111,7 @@
     //   fade               | @deprecated fadeStyle               | string                | 'shrink'  | ✓ fadeStyle
     //   fadeOut            | -                                   | ticks >= 0            | 10        | ✓
     //   letterSpacing      | @deprecated charSpacing / spacing   | number [-2, 24]       | 0         | ✓
-    //   outline            | @deprecated outlineMode             | 'none'|'stroke'|'glow'| 'none'    | ✓
+    //   outline            | @deprecated outlineMode             | 'none'|'stroke'|'glow'|'mui_stroke'| 'none' | ✓
     //   lifeMode           | -                                   | 'once'|'active'       | 'once'    | ✓
     //   priority           | @deprecated importance              | 0..10                 | 2 / 5     | ✓ (client fallback 2 / 5)
     //   group / namespace  | @deprecated ns                      | string                | 'default'/''| ✓
@@ -158,7 +158,7 @@
         fadeOut:           10,        // 淡出持续时间（tick）
         letterSpacing:     0,         // 额外字间距（默认 0 关闭）
         letterSpacingMode: 'relative',// 'relative'(按字素宽度等比缩放，中英文观感一致) | 'fixed'(固定像素)
-        outlineMode:       'none',    // 外圈模式：'none'(默认关闭) | 'stroke'(描边外圈) | 'glow'(发光外圈)
+        outlineMode:       'none',    // 外圈模式：'none'(默认关闭) | 'stroke'(描边外圈) | 'glow'(发光外圈) | 'mui_stroke'(ModernUI单Pass SDF描边，无ModernUI时自动回退stroke)
         outlineColor:   0x000000,  // 外圈默认颜色（黑色描边或自定义发光色）
         outlineWidth:   0.75,      // 外圈默认半径（亚像素级 0.75px）
         lifeMode:       'once',    // 'once' | 'active'
@@ -537,16 +537,52 @@
     }
 
     var RECENT_POS_BY_GROUP = {}
+    var RECENT_POS_GROUP_COUNT = 0
 
     function pruneRecentPos(groupKey, nowMs) {
         var arr = RECENT_POS_BY_GROUP[groupKey]
-        if (!arr || arr.length === 0) return []
+        if (!arr || arr.length === 0) {
+            if (arr != null) {
+                delete RECENT_POS_BY_GROUP[groupKey]
+                if (RECENT_POS_GROUP_COUNT > 0) RECENT_POS_GROUP_COUNT--
+            }
+            return []
+        }
         var kept = []
         for (var i = 0; i < arr.length; i++) {
             if (arr[i].expireAt > nowMs) kept.push(arr[i])
         }
+        if (kept.length === 0) {
+            delete RECENT_POS_BY_GROUP[groupKey]
+            if (RECENT_POS_GROUP_COUNT > 0) RECENT_POS_GROUP_COUNT--
+            return []
+        }
         RECENT_POS_BY_GROUP[groupKey] = kept
         return kept
+    }
+
+    function storeRecentPos(groupKey, entry, nowMs) {
+        if (!groupKey) return
+        if (!Object.prototype.hasOwnProperty.call(RECENT_POS_BY_GROUP, groupKey)) {
+            if (RECENT_POS_GROUP_COUNT >= 128) {
+                var gKeys = Object.keys(RECENT_POS_BY_GROUP)
+                for (var gi = 0; gi < gKeys.length; gi++) {
+                    pruneRecentPos(gKeys[gi], nowMs)
+                }
+                if (RECENT_POS_GROUP_COUNT >= 128 && gKeys.length > 0 && RECENT_POS_BY_GROUP[gKeys[0]] != null) {
+                    delete RECENT_POS_BY_GROUP[gKeys[0]]
+                    RECENT_POS_GROUP_COUNT--
+                }
+            }
+            RECENT_POS_GROUP_COUNT++
+        }
+        var arr = pruneRecentPos(groupKey, nowMs)
+        if (arr.length === 0 && !Object.prototype.hasOwnProperty.call(RECENT_POS_BY_GROUP, groupKey)) {
+            RECENT_POS_GROUP_COUNT++
+        }
+        arr.push(entry)
+        if (arr.length > 8) arr.shift()
+        RECENT_POS_BY_GROUP[groupKey] = arr
     }
 
     function scoreSeparation(rx, ry, recentList, minSepX, minSepY) {
@@ -614,11 +650,9 @@
         }
         var recordPickedPos = function (p) {
             if (!sepCtx.enabled || !p) return p
-            var arr = pruneRecentPos(sepGroup, Date.now())
+            var nowPick  = Date.now()
             var durTicks = parseNonNegNum(opts.duration, DEFAULTS.duration, 10)
-            arr.push({ rx: p.rx, ry: p.ry, expireAt: Date.now() + durTicks * 50 + 3000 })
-            if (arr.length > 8) arr.shift()
-            RECENT_POS_BY_GROUP[sepGroup] = arr
+            storeRecentPos(sepGroup, { rx: p.rx, ry: p.ry, expireAt: nowPick + durTicks * 50 + 3000 }, nowPick)
             return p
         }
 
@@ -887,6 +921,8 @@
             var outBool = parseBool(rawOut, null)
             if (outBool === false || outStr === 'none' || outStr === 'off') {
                 mode = 'none'
+            } else if (outStr === 'mui_stroke' || outStr === 'sdf_stroke') {
+                mode = 'mui_stroke'
             } else if (outBool === true || outStr === 'stroke' || outStr === 'border' || outStr === 'outline' || outStr === '描边' || outStr === '外圈') {
                 mode = 'stroke'
             } else if (outStr === 'glow' || outStr === 'halo' || outStr === '发光') {
@@ -1301,13 +1337,39 @@
             reportConfigWarning('无法解析目标维度: ' + String(levelOrDim))
             return 0
         }
+        var normProbe = normalizeOptionsObject(opts)
+        if (!BASE.isObjectLike(normProbe) ||
+            (normProbe.action !== 'clear' && normProbe.action !== 'deactivate' && normProbe.action !== 'stop' && pickNonEmpty(normProbe, ['text', 'title'], null) == null)) {
+            return buildValidatedPacket(prepareSourceConflictOpts(opts), null) ? 0 : 0
+        }
+
+        var radiusTargets = []
+        forEachPlayerInRadius(lv, cx, cy, cz, r, function (p) {
+            radiusTargets.push(p)
+        })
+        if (radiusTargets.length === 0) return 0
+
         var effOpts = prepareSourceConflictOpts(opts)
+        var eligibleTargets = []
+        for (var ti = 0; ti < radiusTargets.length; ti++) {
+            if (allowSourceConflictForPlayer(radiusTargets[ti], effOpts)) {
+                eligibleTargets.push(radiusTargets[ti])
+            }
+        }
+        if (eligibleTargets.length === 0) return 0
+
         var pkt = buildValidatedPacket(effOpts, null)
         if (pkt == null) return 0
-        return forEachPlayerInRadius(lv, cx, cy, cz, r, function (p) {
-            if (!allowSourceConflictForPlayer(p, effOpts)) return
-            try { p.sendData(CHANNEL, pkt) } catch (e) { reportCatch('radiusSend', e) }
-        })
+        var sentCount = 0
+        for (var si = 0; si < eligibleTargets.length; si++) {
+            try {
+                eligibleTargets[si].sendData(CHANNEL, pkt)
+                sentCount++
+            } catch (e) {
+                reportCatch('radiusSend', e)
+            }
+        }
+        return sentCount
     }
 
     function atEvent(event, radiusOrOpts, maybeOpts) {

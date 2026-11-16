@@ -95,6 +95,7 @@
 | 实机 KubeJS `ClassFilter` 屏蔽 `java.io`/`java.nio` 且 `JsonIO.read` 触发 `[Ljava.lang.reflect.Constructor;` 致同一世界每次重进重生成目录、`epiphy-data` 缺子目录且运行日志未落至世界子文件夹 | `Epiphy的-日志.js v1.2` / `Epiphy的-服务端基础.js v2.3` / `tests/pure_functions.test.js` | `ensureDirExists` 增加 `KubeJSPaths.dir` 兜底；`readTextSafe`/`readJsonSafe` 优先使用 `JsonIO.readString` 并加固 `javaToJsPlain` 防误触 Java `.class`；新增 `worlds/worlds_index.json` 与 `anchor.folderName` 探测替代 `File.listFiles()` 恢复同档识别与复制分叉；`EpiphyLog` 增加 `KubeJSPaths.dir + JsonIO` 写盘兜底并于进档后自动切换至 `worlds/<slug>__<shortId>/logs/` | [x] |
 | 逐字震动/内联混排热路径开销过大（静态字未合批、全表 $O(N)$ 扫描、每帧重算 `cos`/`sin`/`Math.sin` 哈希、无屏幕外裁剪与不可共享时序缺少非法哨兵） | `Epiphy的-屏幕弹幕渲染器.js v5.3` / `tests/pure_functions.test.js` | 合并同样式连续静态片段并保留打字机边界单字回退；可见 `visIndex` 二分定界 ($O(\text{vis})$) 与 2D 视口外 bounds 裁剪；`hashUnit` 改 32 位位混洗与 256 档三角 LUT；`omni` 缓存 `_oCos`/`_oSin` 与稳态快照；统一周期支持弹幕级一次预计算，不可共享场合（随机频率区间 / `smooth` 等）显式置 `NaN` 非法哨兵并拒绝消费 | [x] |
 | 逐字渲染器 JNI 字段查找（`sAllowShadow`/`fgMat`/热路径 `getMatrix`）、18~21 参传递与 `12ms` 帧预算误闪烁 | `Epiphy的-屏幕弹幕渲染器.js v5.4` / `tests/pure_functions.test.js` | 将 `sAllowShadow` 移入 `ensureFrameBatchCtx` 帧级缓存；`itemFgMat` 复用免去无旋转/缩放字阴影 `set+translate` JNI；进循环前校验并收敛 `itemBatchCtx` 移除热路径 `event.getMatrix()`；仅将严格恒定字段（含预计算 fade 参数）打入 5 参 `ITEM_RENDER_CTX_SCRATCH`，保留 `color`/`charScale`/`outlineMode`/`outlineColor` 单字覆盖；开帧统一清过期项、按 `priority` 绘制并上调紧急熔断线至 `45ms` 防正常重特效闪屏（不降级特效） | [x] |
+| ModernUI 存在下弹幕未深度利用直连管线（`Text.of` 冗余构建、15s 轮询重查、绕路换算宽度、描边多 Pass Flush）及服务端 `inDimension` 冗余发包构筑 | `Epiphy的-屏幕弹幕渲染器.js v5.5` / `Epiphy的-屏幕弹幕组件.js v5.4` / `tests/pure_functions.test.js` | 客户端探测 `lookupVanillaLayout(String)` 与 `drawTextOutline`；`SHARED_TEXT_SEQ_CACHE` 惰性延后 `Text.of` 构造，合并静态行跳过 `resolveVisualSeq`，消除 15s TTL 重查（纯金丝雀 `MUI_EPOCH` 失效并清字宽缓存）；新增 `measureWholeLineWidthPx` 整段换行快路与 `needEndPx` 按需计算；复用 `itemOutMat` 并展平 `drawBatchedRing`；支持 `'mui_stroke'` 单 Pass 描边（Emoji/无 ModernUI 自动回退 `'stroke'`）及 `per_char`/多行静态 `drawUnitsPassGrouped` 三阶段分 Pass 合批；纯 `<shake>` 标签维持清晰 `MODE_NORMAL(0)`；同文本续期复用 `titleVis`/`subVis`；服务端 `v5.4` 前置筛除 0 玩家与源冷却避免 `recentPos` 污染（保留非法入参告警）、POJO 安全检查改 `!BASE.isObjectLike` 并对 `RECENT_POS_BY_GROUP` 实施 128 组上限清理 | [x] |
 
 ---
 
@@ -117,6 +118,7 @@
 4. **长期原生化迁出计划**：
    - 本项目在脚本阶段功能与契约充分稳定后，将整体迁往 **Kotlin + Java** 原生模组，KubeJS 仅作此前过渡依赖。
    - **渲染缓存架构备忘（未来原生模组）**：进入独立 Kotlin + Java 实现阶段时，屏幕弹幕的静态片段与离散/稳态逐字缓冲改为采用独立 **`TextureTarget`** 离屏缓存池（自行管理 FBO 生命周期、离屏渲染与 Quad 贴回），直接绕开 MC 原版高频重复走文字渲染管线的开销。
+   - **ModernUI 专有快路径与原版回退契约**：ModernUI（LGPL-3.0，兼容 RAL-1.6）专有特性（如 `lookupVanillaLayout(String)`、`'mui_stroke'`/`'sdf_stroke'` `drawTextOutline`、三阶段 `drawUnitsPassGrouped`）允许作为可选快路径调用，但不得改变既有 `'stroke'`/`'glow'`/`'per_char'`/`blur`/`split` 视觉效果，且在缺失 ModernUI、关闭 SDF 着色器或命中 Emoji 位图字体时须无感回退至原版实现并保持 `PROTO_VERSION = 5` 向后兼容。
 
 ---
 
