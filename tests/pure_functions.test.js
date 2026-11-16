@@ -6196,6 +6196,7 @@ test('hidden items: epiphy:chaos_crystal registers IItemRenderer on inventory Mo
     var baseColoursSeen = []
     var scaleArgs = []
     var registeredItems = []
+    var itemModelJsons = {}
 
     function ResourceLocation(ns, p) {
         this.ns = ns; this.p = p
@@ -6287,7 +6288,7 @@ test('hidden items: epiphy:chaos_crystal registers IItemRenderer on inventory Mo
                                 displayName: function () { return b },
                                 texture: function () { return b },
                                 rarity: function () { return b },
-                                modelJson: function () { return b }
+                                modelJson: function (json) { itemModelJsons[id] = json; return b }
                             }
                             return b
                         }
@@ -6361,6 +6362,9 @@ test('hidden items: epiphy:chaos_crystal registers IItemRenderer on inventory Mo
     runScriptIn(sb, HIDDEN_PATH)
 
     assert.ok(registeredItems.indexOf('epiphy:chaos_crystal') >= 0, 'epiphy:chaos_crystal item must be registered')
+    assert.ok(itemModelJsons['epiphy:end_gateway'] && Array.isArray(itemModelJsons['epiphy:end_gateway'].elements) && itemModelJsons['epiphy:end_gateway'].elements.length === 3, 'epiphy:end_gateway must use 3-element gateway shrine model')
+    assert.strictEqual(itemModelJsons['epiphy:end_gateway'].textures.core, 'minecraft:block/sculk')
+    assert.strictEqual(itemModelJsons['epiphy:end_gateway'].textures.cap, 'minecraft:block/bedrock')
     var bakingCb = modBusListeners['net.minecraftforge.client.event.ModelEvent$ModifyBakingResult']
     assert.strictEqual(typeof bakingCb, 'function', 'ModifyBakingResult must register via ForgeModEvents without denied FML classes')
 

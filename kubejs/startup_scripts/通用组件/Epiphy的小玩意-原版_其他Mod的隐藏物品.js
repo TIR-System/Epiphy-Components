@@ -22,7 +22,7 @@
     // 原版下界传送门、末地传送门、末地折跃门，以及龙之研究 1.20.1 的混沌晶体（DEContent 中注释了 ITEM_CHAOS_CRYSTAL）仅有 Block 而无对应 Item：
     //   注意：原版并不存在名为 `minecraft:block/end_portal` 的方块图集纹理（原版末地传送门使用的是 Special BlockEntity 渲染器与 `entity/end_portal.png`，
     //   直接写 `.texture('minecraft:block/end_portal')` 会因找不到贴图变成紫黑丢失材质块）。
-    //   因此这里为末地传送门与末地折跃门直接生成引用原版真实存在的方块图集纹理（`end_portal_frame_top` / `obsidian` / `crying_obsidian`）的 3D 模型；
+    //   因此这里为末地传送门与末地折跃门直接生成引用原版真实存在的方块图集纹理（`end_portal_frame_top` / `black_concrete` / `sculk` / `bedrock`）的 3D 模型；
     //   为 `epiphy:chaos_crystal` 挂载与 DE `RenderTileChaosCrystal` / `RenderItemChaosShard` 同源的 CCL 3D OBJ + Chaos Shader 物品渲染器（直接读取 `draconicevolution:models/block/chaos_crystal.obj` 与 DE 纹理/着色器，不在 kubejs/assets/epiphy 下新增任何资源文件）。
     StartupEvents.registry('item', function (event) {
         // 1. 下界传送门（使用原版真实存在的动态流体纹理 minecraft:block/nether_portal）
@@ -59,18 +59,55 @@
             ]
         })
 
-        // 3. 末地折跃门（完整方块立体模型，使用原版图集内真实存在的 crying_obsidian 与 obsidian 纹理，消除紫黑块）
+        // 3. 末地折跃门（还原天然折跃门“上下基岩夹星芒暗域核心”的 3 层立体模型：与扁平的末地传送门风格呼应而轮廓有别）
         var endGatewayItem = event.create('epiphy:end_gateway')
             .displayName('末地折跃门')
             .rarity('epic')
         endGatewayItem.modelJson({
-            parent: 'minecraft:block/cube_bottom_top',
+            parent: 'minecraft:block/block',
             textures: {
-                top:      'minecraft:block/crying_obsidian',
-                bottom:   'minecraft:block/crying_obsidian',
-                side:     'minecraft:block/obsidian',
-                particle: 'minecraft:block/crying_obsidian'
-            }
+                particle: 'minecraft:block/sculk',
+                core:     'minecraft:block/sculk',
+                cap:      'minecraft:block/bedrock'
+            },
+            elements: [
+                {
+                    from: [2, 2.5, 2],
+                    to:   [14, 13.5, 14],
+                    faces: {
+                        down:  { texture: '#core' },
+                        up:    { texture: '#core' },
+                        north: { texture: '#core' },
+                        south: { texture: '#core' },
+                        west:  { texture: '#core' },
+                        east:  { texture: '#core' }
+                    }
+                },
+                {
+                    from: [3.5, 0, 3.5],
+                    to:   [12.5, 2.5, 12.5],
+                    faces: {
+                        down:  { texture: '#cap' },
+                        up:    { texture: '#cap' },
+                        north: { texture: '#cap' },
+                        south: { texture: '#cap' },
+                        west:  { texture: '#cap' },
+                        east:  { texture: '#cap' }
+                    }
+                },
+                {
+                    from: [3.5, 13.5, 3.5],
+                    to:   [12.5, 16, 12.5],
+                    faces: {
+                        down:  { texture: '#cap' },
+                        up:    { texture: '#cap' },
+                        north: { texture: '#cap' },
+                        south: { texture: '#cap' },
+                        west:  { texture: '#cap' },
+                        east:  { texture: '#cap' }
+                    }
+                }
+            ]
         })
 
         // 4. 混沌晶体（方块物品形式：直接复用 draconicevolution 命名空间下的资源与 CCL OBJ + Shader 渲染管线）
