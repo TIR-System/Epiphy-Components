@@ -234,4 +234,4 @@ Summary (the Chinese original in [`LICENSE.md`](LICENSE.md) governs in case of a
 - **Source-Available Reciprocal License**: Preserves modification and fork freedoms with mandatory attribution;
 - **Strict Reciprocity**: Modifications, derivatives, static linking, and dynamic linking dependencies trigger reciprocal source disclosure; wrapper layers cannot be used to evade obligations;
 - **Commercial Boundaries**: Commercial integration as a non-primary component is permitted, **direct standalone resale is prohibited**, and Managed SaaS requires full-stack open source;
-- **Incompatible Licenses**: Conflicting non-forkable licenses (e.g., PolyForm Shield 1.0.0) are barred from inclusion or bridging.
+- **Incompatible Licenses**: Conflicting non-forkable licenses (e.g., PolyForm Shield 1.0.0) are barred from inclusion or bridging (except source-isolated Pure Compatibility Code permitted as a special exception under `r2` Sections 2.12 & 11.8).

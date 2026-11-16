@@ -129,4 +129,4 @@
    - **更新脚本头部注释与版本号**：修改任意 `.js` 组件涉及职责、依赖、降级策略或接口行为变化时，提交前必须检查并同步更新该脚本顶部注释的版本号（如 `EpiphyLog v1.1`、`EpiphyServerBase v2.1`、`EpiphyPermissionValve v5.1`、`ScreenDanmaku v5.2`、`EpiphyAudio v5.4` 等）、职责列表与依赖说明；若涉及共享语义版本常量（如 `EpiphySpec` 中 `AUDIO_SEMVER` 与端侧兜底 `VERSION`），须双端同步递增（网络包 `PROTO_VERSION` 仅在不兼容包结构变更时递增）。不得删除或篡改与改动无关的已有注释。
    - **同步仓库文档**：须同步检查并更新 [`README.md`](README.md)、[`README_EN.md`](README_EN.md)（工程架构表、组件版本号、核心能力与指令/目录说明），以及本文档 [`README-LLM.md`](README-LLM.md) 第 4 节（已解决问题基线表打 `[x]`）与第 5 节（现行契约状态）。
 3. **测试定位**：`npm test`（`node tests/pure_functions.test.js`）运行在 Node.js V8 沙盒中，可回归纯函数与模拟命令/权限/音频/弹幕隔离链路，但**无法捕获 Rhino 引擎缺陷与客户端渲染问题**；涉及运行期或画面修改后必须进服核验。
-4. **许可证约束（RAL 1.6）**：本项目受 [`LICENSE.md`](LICENSE.md) 约束（作者：`Epiphy-iLLUMs + Gemini 4 系列 + Claude 5.5 系列`；吉祥物：`DeepSeek`）。修改代码须保留既有 `RAL-1.6` 文件头与署名；严禁切换为非官方修改/衍生许可证，严禁引入不可调和冲突协议（如 PolyForm Shield License 1.0.0）或绕开桥接隔离规范直接混编冲突组件。
+4. **许可证约束（RAL 1.6）**：本项目受 [`LICENSE.md`](LICENSE.md)（现行 `r2`）约束（作者：`Epiphy-iLLUMs + Gemini 4 系列 + Claude 5.5 系列`；吉祥物：`DeepSeek`）。修改代码须保留既有 `RAL-1.6` 文件头与署名；严禁切换为非官方修改/衍生许可证，严禁引入不可调和冲突协议（如 PolyForm Shield License 1.0.0；符合第 2.12/11.8 条源码层隔离标准的纯粹兼容性代码特例除外）或绕开桥接隔离规范直接混编冲突组件。
