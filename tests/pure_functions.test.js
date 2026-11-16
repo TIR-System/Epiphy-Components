@@ -3778,10 +3778,9 @@ test('P1 regressions (renderer): renewal sync, caps, batch error isolation & rec
     cli.push({ key: 'renew_k', tier: 'system', ns: 'mod:demo', group: 'grpA', maxGroup: 5, title: 'V1', stay: 200 })
     cli.push({ key: 'renew_k', tier: 'player', ns: 'mod:demo', group: 'grpA', maxGroup: 1, title: 'V2', stay: 200 })
     paints[0](rEv)
-    var snap1 = cli.list ? cli.list() : []
-    if (snap1.length > 0) {
-        assert.strictEqual(snap1[0].tier, 'player', 'renewal must update tier')
-    }
+    var snap1 = cli.list()
+    assert.strictEqual(snap1.length, 1, 'snap1 must contain renewed overlay unconditionally')
+    assert.strictEqual(snap1[0].tier, 'player', 'renewal must update tier')
     cli.push({ key: 'other_k', tier: 'player', ns: 'mod:demo', group: 'grpA', maxGroup: 1, title: 'V3', stay: 200 })
     paints[0](rEv)
     cli.push({ action: 'clear', tier: 'player', ns: 'mod:demo', group: 'grpA', maxPriority: 5 })
@@ -3796,16 +3795,22 @@ test('P1 regressions (renderer): renewal sync, caps, batch error isolation & rec
     cli.clear('*')
     paints[0](rEv)
 
-    // 3. P1-2 & P1-3: Queue cap preserves control packets; batch mid-throw isolates broken item without downgrading batch
+    // 3. P1-2 & P1-3: Queue cap preserves control packets even at queue head; batch mid-throw isolates broken item without downgrading batch
+    cli.push({ title: 'FloodBeforeCtrl', stay: 200 })
+    paints[0](rEv)
+    assert.strictEqual(cli.count(), 1)
+    cli.push({ action: 'deactivate', key: '*', includeOnce: true, fadeOut: 1 })
     for (var qi = 0; qi < 270; qi++) {
         cli.push({ title: 'Flood_' + qi, stay: 40 })
     }
-    cli.push({ action: 'clear', group: '*' })
-    for (var fl = 0; fl < 5; fl++) {
-        nowMs += 50
+    for (var fl = 0; fl < 6; fl++) {
+        nowMs += 100
         paints[0](rEv)
     }
-    assert.strictEqual(cli.count(), 0, 'control clear pushed after queue saturation must survive cap & clear flood')
+    var hasDeactivatedSurvived = cli._pure.inspectOverlays().every(function (ov) { return ov.title !== 'FloodBeforeCtrl' })
+    assert.ok(hasDeactivatedSurvived, 'control action queued BEFORE flood must survive maxPendingActions eviction and stop prior overlay')
+    cli.clear('*')
+    paints[0](rEv)
 
     var badTagItem = new FakeCompoundTag({ title: 'Bad' }, 'title')
     cli.push({
@@ -3824,13 +3829,14 @@ test('P1 regressions (renderer): renewal sync, caps, batch error isolation & rec
     nowMs = 20000
     cli.push({ key: 'tw_cache', title: 'Hello World', typewriter: true, charMs: 2000, stay: 200, scale: 1.0 })
     paints[0](rEv)
-    var beforeBlinkKey = (cli.list && cli.list()[0]) ? cli.list()[0].lineCacheKey : null
+    var beforeBlinkList = cli.list()
+    assert.strictEqual(beforeBlinkList.length, 1)
+    var beforeBlinkKey = beforeBlinkList[0].lineCacheKey
+    assert.ok(typeof beforeBlinkKey === 'string' && beforeBlinkKey.length > 0, 'beforeBlinkKey must be materialized on static typewriter line')
     nowMs = 20600 // toggled blink phase, same shownVis=1 (charMs=2000)
     paints[0](rEv)
-    var afterBlinkKey = (cli.list && cli.list()[0]) ? cli.list()[0].lineCacheKey : null
-    if (beforeBlinkKey != null) {
-        assert.strictEqual(afterBlinkKey, beforeBlinkKey, 'blinkCursor phase change alone must NOT bust lineCacheKey')
-    }
+    var afterBlinkKey = cli.list()[0].lineCacheKey
+    assert.strictEqual(afterBlinkKey, beforeBlinkKey, 'blinkCursor phase change alone must NOT bust lineCacheKey')
 })
 
 // ----------------------------------------------------------------------------
@@ -5850,6 +5856,335 @@ test('ScreenDanmaku v5.4: inDimension 0-player & cooldown skip, malformed warnin
         assert.strictEqual(r, 1)
     }
     assert.strictEqual(nearPlayer._sent.length, 140)
+})
+
+// ----------------------------------------------------------------------------
+// 55. P2 audit fixes: grapheme ZWJ/flags/Extend, FIFO glyph eviction, rotated tryDrawUnitBatched, a<=2 fix, Valve __proto__/getContext/at sync, late tracker upgrade & v18 fallbackPkt proto:5
+// ----------------------------------------------------------------------------
+test('P2 fixes: grapheme ZWJ/flags/Extend, FIFO glyph eviction, rotated batched unit, low-alpha fidelity, Valve hardening, late tracker upgrade & v18 fallbackPkt', function () {
+    // Part A: Client v5.6 pure & render behavior
+    function M4() { this._rotZ = []; this._m00 = 1; this._m11 = 1; this.z = 0 }
+    M4.prototype.set = function (o) { this._m00 = o ? o._m00 : 1; this._m11 = o ? o._m11 : 1; this.z = o ? (o.z || 0) : 0; return this }
+    M4.prototype.translate = function (dx, dy, dz) { this.z += (dz || 0); return this }
+    M4.prototype.rotateZ = function (rad) { this._rotZ.push(rad); return this }
+    M4.prototype.scale = function (sx, sy) { this._m00 *= sx; this._m11 *= sy; return this }
+    M4.prototype.m00 = function () { return this._m00 }
+    M4.prototype.m11 = function () { return this._m11 }
+
+    var nowMs = 1000
+    var paints = []
+    var netHandlers = {}
+    var fontWidthCalls = {}
+    var rotAnglesSeen = []
+    var muiAlphasSeen = []
+    var fakeEngine = {
+        lookupVanillaLayout: function (s) {
+            return {
+                _id: String(s),
+                equals: function (o) { return Boolean(o && o._id === String(s)) },
+                hasColorEmoji: function () { return false },
+                getTotalAdvance: function () { return String(s).length * 6 },
+                drawText: function (mat, buf, x, y, r, g, b, a) {
+                    muiAlphasSeen.push(a)
+                    if (mat && mat._rotZ && mat._rotZ.length > 0) {
+                        for (var ri = 0; ri < mat._rotZ.length; ri++) rotAnglesSeen.push(mat._rotZ[ri])
+                    }
+                }
+            }
+        },
+        getTextRenderer: function () { return { chooseMode: function () { return 1 } } }
+    }
+    var sb = {
+        console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function (fn) { paints.push(fn) } },
+        NetworkEvents: { dataReceived: function (ch, fn) { netHandlers[ch] = fn } },
+        Java: {
+            loadClass: function (cls) {
+                if (cls === 'java.lang.System') return { nanoTime: function () { return nowMs * 1000000 } }
+                if (cls === 'net.minecraft.client.gui.Font$DisplayMode') return { NORMAL: 'NORMAL' }
+                if (cls === 'org.joml.Matrix4f') return M4
+                if (cls === 'icyllis.modernui.mc.text.TextLayoutEngine') return { getInstance: function () { return fakeEngine } }
+                if (cls === 'icyllis.modernui.mc.text.ModernTextRenderer') return { sAllowSDFTextIn2D: true, sAllowShadow: false }
+                return null
+            }
+        },
+        Text: { of: function (s) { return { string: String(s), getVisualOrderText: function () { return String(s) } } } },
+        global: {}
+    }
+    sb.globalThis = sb
+    vm.createContext(sb)
+    loadStartupBase(sb)
+    runScriptIn(sb, RENDERER_PATH)
+    var Cli = sb.global.ScreenDanmakuClient
+
+    // 1. Grapheme clusters: Extend (0301/1AB0/20D0), paired flags, ZWJ families, keycap
+    var rgc = Cli._pure.readGraphemeCluster
+    var gExt = rgc('e\u0301\u1AB0\u20D0X', 0)
+    assert.strictEqual(gExt.cluster, 'e\u0301\u1AB0\u20D0', 'Extended combining marks stay grouped')
+    assert.strictEqual(gExt.nextIndex, 4)
+
+    var flags = '\uD83C\uDDE8\uD83C\uDDF3\uD83C\uDDFA\uD83C\uDDF8' // CN + US
+    var f1 = rgc(flags, 0)
+    var f2 = rgc(flags, f1.nextIndex)
+    assert.strictEqual(f1.cluster, '\uD83C\uDDE8\uD83C\uDDF3', 'first flag pair grouped as 1 cluster')
+    assert.strictEqual(f2.cluster, '\uD83C\uDDFA\uD83C\uDDF8', 'second flag pair does not merge into first flag')
+    assert.strictEqual(f2.nextIndex, flags.length)
+
+    var fam = '\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67' // family ZWJ
+    var gFam = rgc(fam + 'A', 0)
+    assert.strictEqual(gFam.cluster, fam, 'ZWJ emoji sequence stays 1 grapheme cluster')
+    assert.strictEqual(gFam.nextIndex, fam.length)
+
+    var keycap = '1\uFE0F\u20E3!'
+    assert.strictEqual(rgc(keycap, 0).cluster, '1\uFE0F\u20E3', 'keycap sequence grouped')
+
+    // 2. Rotated per_char unit passes rotation cleanly without unitRotDegSafeValue
+    var ev = {
+        width: 854, height: 480, level: 'minecraft:overworld',
+        font: {
+            width: function (s) {
+                var k = String(s)
+                fontWidthCalls[k] = (fontWidthCalls[k] || 0) + 1
+                return k.length * 6
+            }
+        },
+        graphics: { bufferSource: function () { return { endBatch: function () {} } }, flush: function () {} },
+        getMatrix: function () { return new M4() }
+    }
+    Cli.push({ title: 'RotTest', typewriter: false, shadow: false, shakeMode: 'per_char', charShakeStyle: 'horizontal_step', charShakeWin: 1.0, shakeAmp: 1.5, charShakeRotDeg: 18, stay: 40, fadeOut: 5 })
+    for (var rf = 0; rf < 5; rf++) {
+        nowMs += 50
+        paints[0](ev)
+    }
+    assert.ok(rotAnglesSeen.some(function (rad) { return Math.abs(rad) > 0.002 }), 'per_char rotDeg propagates directly to Matrix4f.rotateZ')
+
+    // 3. FIFO glyph cache eviction (small limit=4 preserves recently used glyph instead of wiping whole table)
+    Cli.clear('*')
+    paints[0](ev)
+    Cli.CONFIG.glyphCacheLimit = 4
+    fontWidthCalls = {}
+    // Push 5 distinct chars sequentially: A, B, C, D, E -> only A evicted, E & D retained!
+    Cli.push({ title: 'ABCDE', typewriter: false, shadow: false, shakeMode: 'per_char', shakeAmp: 0, letterSpacing: 1, stay: 40, fadeOut: 5 })
+    paints[0](ev)
+    var probesAfterFirst = fontWidthCalls['D'] || 0
+    Cli.clear('*')
+    paints[0](ev)
+    Cli.push({ title: 'ED', typewriter: false, shadow: false, shakeMode: 'per_char', shakeAmp: 0, letterSpacing: 1, stay: 40, fadeOut: 5 })
+    paints[0](ev)
+    assert.strictEqual(fontWidthCalls['D'], probesAfterFirst, 'FIFO eviction keeps warm glyph D cached instead of full table wipe')
+
+    // 4. PermissionValve v5.2: __proto__/constructor protection, null getContext() fallback, and at ISO synced with atMs
+    var vWarns = []
+    var cmdHook = null
+    var nonOpMsgs = []
+    var nonOpPlayer = {
+        username: 'Peasant', uuid: '00000000-0000-4000-8000-0000000000f1',
+        isOp: function () { return false },
+        hasPermissions: function () { return false },
+        tell: function (m) { nonOpMsgs.push(String(m)) }
+    }
+    nonOpPlayer.source = nonOpPlayer
+    nonOpPlayer.sendSuccess = function (m) { nonOpMsgs.push(String(m)) }
+    var memValveFiles = {}
+    var fixedValveNow = 1700000000000
+    var FakeValveDate = function (ms) {
+        if (!(this instanceof FakeValveDate)) return new Date(fixedValveNow).toISOString()
+        return new Date(ms !== undefined ? ms : fixedValveNow)
+    }
+    FakeValveDate.now = function () { return fixedValveNow }
+    FakeValveDate.parse = Date.parse
+    var vSrv = {
+        getWorldData: function () { return { getLevelName: function () { return 'ValveV52' }, getAllowCommands: function () { return true } } },
+        getPlayerList: function () { return { getPlayers: function () { return [nonOpPlayer] }, isOp: function () { return false } } }
+    }
+    var vsb = {
+        Date: FakeValveDate,
+        console: { info: function () {}, warn: function (m) { vWarns.push(String(m)) }, error: function (m) { vWarns.push(String(m)) }, debug: function () {}, log: function () {} },
+        Text: { of: function (s) { return String(s) } },
+        JsonIO: {
+            read: function (p) { return memValveFiles[String(p)] || null },
+            write: function (p, obj) { memValveFiles[String(p)] = JSON.parse(JSON.stringify(obj)) }
+        },
+        KubeJSPaths: {
+            DIRECTORY: { getParent: function () { return 'test_game_dir' } },
+            dir: function (d) { return String(d) }
+        },
+        ServerEvents: { loaded: function (fn) { fn({ server: vSrv }) }, unloaded: function () {}, tick: function () {}, commandRegistry: function () {}, command: function (fn) { cmdHook = fn } },
+        PlayerEvents: { loggedIn: function () {}, loggedOut: function () {} },
+        BlockEvents: { placed: function () {}, broken: function () {} },
+        Utils: { server: vSrv },
+        server: vSrv,
+        global: {}
+    }
+    vsb.globalThis = vsb
+    vm.createContext(vsb)
+    loadServerBase(vsb)
+    runScriptIn(vsb, VALVE_PATH)
+    var Valve52 = vsb.global.EpiphyPermissionValve
+    assert.strictEqual(Valve52.registerSubcommand({ name: '__proto__', permission: 'public' }), false, 'reject __proto__ subcommand name')
+    assert.strictEqual(Valve52.registerSubcommand({ name: 'constructor', permission: 'public' }), false, 'reject constructor subcommand name')
+    assert.strictEqual(Valve52.registerSubcommand({ name: 'toString', permission: 'public' }), false, 'reject toString subcommand name')
+    assert.strictEqual(Valve52.registerSubcommand({ name: 'demo52', permission: 'admin' }), true)
+
+    // /epiphy constructor must NOT resolve Object.prototype.constructor as a subcommand
+    var ctorCancelled = false
+    cmdHook({
+        getInput: function () { return 'epiphy constructor' },
+        getParseResults: function () { return { getContext: function () { return null } } },
+        getSource: function () { return nonOpPlayer },
+        cancel: function () { ctorCancelled = true }
+    })
+    assert.strictEqual(ctorCancelled, false, 'prototype property name constructor must NOT trigger command interception')
+
+    // /epiphy demo52 with parseResults.getContext() === null falls back to event.getSource()
+    var demoCancelled = false
+    cmdHook({
+        getInput: function () { return 'epiphy demo52' },
+        getParseResults: function () { return { getContext: function () { return null } } },
+        getSource: function () { return nonOpPlayer },
+        cancel: function () { demoCancelled = true }
+    })
+    assert.strictEqual(demoCancelled, true, 'null parseResults.getContext() falls back to event.getSource() and intercepts')
+    assert.ok(nonOpMsgs.some(function (m) { return m.indexOf('demo52') >= 0 || m.indexOf('权限') >= 0 }))
+
+    // Revocation followed by grant at exact same Date.now() bumps both atMs AND ISO string at
+    var testUid = '00000000-0000-4000-8000-0000000000f1'
+    assert.strictEqual(Valve52.revokePlayer(vSrv, testUid, 'demo52', 'Console'), true)
+    assert.strictEqual(Valve52.grantPlayer(vSrv, testUid, 'demo52', 'Console'), true)
+    var permFileKeys = Object.keys(memValveFiles).filter(function (k) { return k.indexOf('permissions.json') >= 0 })
+    assert.ok(permFileKeys.length >= 1, 'permissions.json persisted to disk store')
+    var savedPerms52 = memValveFiles[permFileKeys[0]]
+    var meta52 = savedPerms52.users[testUid].scopes.demo52
+    assert.strictEqual(meta52.atMs, fixedValveNow + 1, 'atMs must advance past same-ms revocation tombstone')
+    assert.strictEqual(Date.parse(meta52.at), meta52.atMs, 'ISO at must match bumped atMs unconditionally')
+
+    // 5. Fallback tracker upgrades cleanly when global.EpiphyBlockTracker loads later
+    var lvUp = { dimension: 'minecraft:overworld', getDimension: function () { return 'minecraft:overworld' }, players: [] }
+    var upSrv = {
+        getWorldData: function () { return { getLevelName: function () { return 'UpTrk' }, getAllowCommands: function () { return true } } },
+        getLevel: function () { return lvUp },
+        getAllLevels: function () { return [lvUp] },
+        getPlayerList: function () { return { getPlayers: function () { return [] } } }
+    }
+    var upSb = {
+        console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+        ServerEvents: { loaded: function (fn) { fn({ server: upSrv }) }, unloaded: function () {}, tick: function () {}, commandRegistry: function () {}, command: function () {} },
+        PlayerEvents: { loggedIn: function () {}, loggedOut: function () {} },
+        BlockEvents: { placed: function () {}, broken: function () {} },
+        Utils: { server: upSrv },
+        server: upSrv,
+        global: {}
+    }
+    upSb.globalThis = upSb
+    vm.createContext(upSb)
+    loadServerBase(upSb)
+    runScriptIn(upSb, DANMAKU_PATH)
+    runScriptIn(upSb, AUDIO_PATH)
+    var DmUp  = upSb.global.ScreenDanmaku
+    var AudUp = upSb.global.EpiphyAudio
+    assert.strictEqual(DmUp.bindBlock('test:late_dm', { title: 'Hi' }), true)
+    assert.strictEqual(AudUp.bindBlock('test:late_au', { sound: 'minecraft:block.note_block.harp' }), true)
+    assert.strictEqual(DmUp.scanBlocksNow(), 0, 'fallback tracker returns 0 for scanNow')
+    assert.strictEqual(AudUp.scanBlocksNow(), 0, 'fallback audio tracker returns 0 for scanNow')
+
+    var realBinds = []
+    var realScans = []
+    upSb.global.EpiphyBlockTracker = {
+        createTracker: function (cfg) {
+            return {
+                name: cfg.name,
+                isFallback: false,
+                bind: function (bid) { realBinds.push(cfg.name + ':' + bid); return true },
+                unbind: function () { return 0 },
+                scanNow: function () { realScans.push(cfg.name); return 7 },
+                hasBinding: function () { return false },
+                getBinding: function () { return null },
+                getBindingCount: function () { return 1 },
+                getTrackedRecords: function () { return [] },
+                destroy: function () {}
+            }
+        }
+    }
+    assert.strictEqual(DmUp.scanBlocksNow(), 7, 'ScreenDanmaku must upgrade fallback tracker when EpiphyBlockTracker appears')
+    assert.strictEqual(AudUp.scanBlocksNow(), 7, 'EpiphyAudio must upgrade fallback tracker when EpiphyBlockTracker appears')
+    assert.ok(realBinds.indexOf('danmaku:test:late_dm') >= 0 && realBinds.indexOf('audio:test:late_au') >= 0, 'existing bindings replay onto upgraded real trackers')
+
+    // 6. v18 meltdown fallbackPkt (without ScreenDanmaku loaded) includes proto:5 and passes client dataReceived fail-closed check
+    var V18_PATH = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '合成表-暮色森林', '拆解台-混沌殉爆.v18.js')
+    var v18Pkts = []
+    var v18Placed = {}
+    var v18Ticks = []
+    var v18Player = {
+        username: 'V18Pl', uuid: '00000000-0000-4000-8000-0000000000e9',
+        block: { x: 0, y: 64, z: 0 },
+        getX: function () { return 0 }, getY: function () { return 64 }, getZ: function () { return 0 },
+        x: 0, y: 64, z: 0,
+        tell: function () {},
+        playSound: function () {},
+        sendData: function (ch, pkt) { if (ch === 'epiphy:screen_danmaku') v18Pkts.push(pkt) }
+    }
+    var v18Lv = {
+        dimension: 'minecraft:overworld',
+        getDimension: function () { return 'minecraft:overworld' },
+        players: { size: function () { return 1 }, get: function () { return v18Player } },
+        getPlayers: function () { return [v18Player] },
+        getBlock: function () { return { id: 'minecraft:air', set: function () {} } },
+        spawnParticles: function () {},
+        runCommandSilent: function () {},
+        server: null
+    }
+    var v18Srv = {
+        getWorldData: function () { return { getLevelName: function () { return 'V18Test' } } },
+        getLevel: function () { return v18Lv },
+        getAllLevels: function () { return [v18Lv] },
+        getPlayerList: function () { return { getPlayers: function () { return [v18Player] } } },
+        scheduleInTicks: function () {},
+        runCommandSilent: function () {}
+    }
+    v18Lv.server = v18Srv
+    var v18Sb = {
+        console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+        Java: {
+            loadClass: function (cls) {
+                if (cls === 'net.minecraft.world.level.Level') return { OVERWORLD: 'minecraft:overworld', NETHER: 'minecraft:the_nether', END: 'minecraft:the_end' }
+                if (cls === 'net.minecraft.world.level.Level$ExplosionInteraction') return { NONE: 'NONE', TNT: 'TNT' }
+                return function () {}
+            }
+        },
+        ServerEvents: { loaded: function (fn) { fn({ server: v18Srv }) }, unloaded: function () {}, tick: function (fn) { v18Ticks.push(fn) }, recipes: function () {} },
+        LevelEvents: { loaded: function () {}, unloaded: function () {} },
+        PlayerEvents: { loggedIn: function () {}, loggedOut: function () {} },
+        BlockEvents: {
+            placed: function (id, fn) { v18Placed[id] = fn },
+            broken: function () {},
+            rightClicked: function () {}
+        },
+        ItemEvents: { rightClicked: function () {} },
+        Utils: { server: v18Srv },
+        server: v18Srv,
+        global: {}
+    }
+    v18Sb.globalThis = v18Sb
+    vm.createContext(v18Sb)
+    loadStartupBase(v18Sb)
+    runScriptIn(v18Sb, V18_PATH)
+    assert.ok(typeof v18Placed['epiphy:ultra_uncrafting_instability_1'] === 'function')
+    v18Placed['epiphy:ultra_uncrafting_instability_1']({
+        level: v18Lv,
+        block: { id: 'epiphy:ultra_uncrafting_instability_1', x: 0, y: 64, z: 0 },
+        player: v18Player,
+        cancel: function () {}
+    })
+    for (var vt = 0; vt < 10 && v18Pkts.length === 0; vt++) {
+        for (var ti = 0; ti < v18Ticks.length; ti++) v18Ticks[ti]({ server: v18Srv })
+    }
+    assert.ok(v18Pkts.length >= 1, 'v18 sends fallback danmaku packet when ScreenDanmaku absent')
+    assert.strictEqual(v18Pkts[0].proto, 5, 'v18 fallbackPkt must include proto:5')
+    Cli.clear('*')
+    paints[0](ev)
+    var beforeCnt = Cli.count()
+    netHandlers['epiphy:screen_danmaku']({ data: v18Pkts[0] })
+    assert.strictEqual(Cli.count(), beforeCnt + 1, 'ScreenDanmakuClient accepts v18 fallbackPkt through fail-closed dataReceived')
 })
 
 var passed = 0

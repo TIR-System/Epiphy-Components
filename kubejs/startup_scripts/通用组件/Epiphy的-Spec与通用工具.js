@@ -36,7 +36,7 @@
 
     var AUDIO_CHANNEL         = 'epiphy:audio';
     var AUDIO_PROTO_VERSION   = 5;
-    var AUDIO_SEMVER          = '5.4.0';
+    var AUDIO_SEMVER          = '5.5.0';
 
     function isProtoCompatible(expectedVer, incomingVer) {
         if (incomingVer === undefined || incomingVer === null) return false;

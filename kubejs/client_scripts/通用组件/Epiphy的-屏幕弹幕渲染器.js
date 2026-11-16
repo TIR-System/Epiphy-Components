@@ -1,12 +1,12 @@
 // ============================================================================
-//  通用屏幕弹幕与泛用文本显示组件 —— 客户端渲染引擎 (ScreenDanmakuClient v5.5)
+//  通用屏幕弹幕与泛用文本显示组件 —— 客户端渲染引擎 (ScreenDanmakuClient v5.6)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-屏幕弹幕渲染器.js
 //  配套服务端组件：
-//    - kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js（服务端调度器 ScreenDanmaku v5.4）
-//    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀）
+//    - kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js（服务端调度器 ScreenDanmaku v5.5）
+//    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀 EpiphyPermissionValve v5.2）
 //
 //  依赖与缺失降级：
 //    - 可选前置：kubejs/startup_scripts/通用组件/Epiphy的-Spec与通用工具.js (EpiphySpec / EpiphyProtocol, priority: 1200)
@@ -55,7 +55,7 @@
         maxPlayerOverlaysPerNamespace: 16,    // 单个玩家指令命名空间 (u:<uuid>) 同屏最多保留条数
         maxPendingActions:            256,    // 未消费入队动作上限（防单帧包洪泛 OOM）
         maxPendingPerFrame:           64,     // 单帧最多消费入队动作数
-        frameBudgetMs:                45.0,   // 单帧紧急熔断阈值 (ms，仅防极端洪泛冻结；常规高开销特效不允许截断闪屏或降级)
+        frameBudgetMs:                45.0,   // 单帧硬防卡死熔断上限 (ms，正常高特效帧不触及；仅当超重负载累计超过阈值时截断本帧尾部条目防客户端冻结，不降级单条特效本身)
         maxTitleChars:                2048,   // 客户端主标题安全截断长度
         maxSubChars:                  1024,   // 客户端副标题安全截断长度
         maxScale:                     8.0,    // 客户端缩放倍率先天上限
@@ -107,6 +107,8 @@
     var FONT_SIGNATURE          = ''
     var LAST_FONT_CHECK_MS      = -99999
     var GLYPH_WIDTH_MAP         = {}
+    var GLYPH_WIDTH_KEYS        = []
+    var GLYPH_CACHE_HEAD        = 0
     var GLYPH_CACHE_SIZE        = 0
     var LAST_LEVEL_KEY          = ''
     var lastErrorLogAt          = 0
@@ -346,8 +348,7 @@
             if (CACHED_FONT !== f || FONT_SIGNATURE !== sig) {
                 CACHED_FONT      = f
                 FONT_SIGNATURE   = sig
-                GLYPH_WIDTH_MAP  = {}
-                GLYPH_CACHE_SIZE = 0
+                resetGlyphWidthCache()
             }
         }
         return f
@@ -361,13 +362,23 @@
     }
     function isGraphemeExtendCode(code) {
         return (code >= 0xFE00 && code <= 0xFE0F) ||
+               (code >= 0xFE20 && code <= 0xFE2F) ||
                (code >= 0x0300 && code <= 0x036F) ||
+               (code >= 0x1AB0 && code <= 0x1AFF) ||
+               (code >= 0x1DC0 && code <= 0x1DFF) ||
+               (code >= 0x20D0 && code <= 0x20FF) ||
                (code >= 0x3099 && code <= 0x309A) ||
                code === 0x20E3 ||
                code === 0x200D
     }
     function isSkinToneModifierPair(high, low) {
         return high === 0xD83C && low >= 0xDFFB && low <= 0xDFFF
+    }
+    function isRegionalIndicatorPair(high, low) {
+        return high === 0xD83C && low >= 0xDDE6 && low <= 0xDDFF
+    }
+    function isSupplementaryExtendPair(high, low) {
+        return high === 0xDB40 && ((low >= 0xDC20 && low <= 0xDC7F) || (low >= 0xDD00 && low <= 0xDDEF))
     }
 
     function readGraphemeCluster(str, startIdx) {
@@ -377,7 +388,10 @@
 
         if (i < len) {
             var code = str.charCodeAt(i)
+            var isRiStart = false
             if (isHighSurrogate(code) && (i + 1) < len && isLowSurrogate(str.charCodeAt(i + 1))) {
+                var low0 = str.charCodeAt(i + 1)
+                isRiStart = isRegionalIndicatorPair(code, low0)
                 out += str.charAt(i) + str.charAt(i + 1)
                 i += 2
             } else {
@@ -385,17 +399,42 @@
                 i += 1
             }
 
+            if (isRiStart && (i + 1) < len && isRegionalIndicatorPair(str.charCodeAt(i), str.charCodeAt(i + 1))) {
+                out += str.charAt(i) + str.charAt(i + 1)
+                i += 2
+            }
+
             while (i < len) {
                 var c = str.charCodeAt(i)
+                if (c === 0x200D) {
+                    out += str.charAt(i)
+                    i += 1
+                    if (i < len) {
+                        var jHi = str.charCodeAt(i)
+                        if (jHi !== 10 && jHi !== 13 && jHi !== 167) {
+                            if (isHighSurrogate(jHi) && (i + 1) < len && isLowSurrogate(str.charCodeAt(i + 1))) {
+                                out += str.charAt(i) + str.charAt(i + 1)
+                                i += 2
+                            } else {
+                                out += str.charAt(i)
+                                i += 1
+                            }
+                        }
+                    }
+                    continue
+                }
                 if (isGraphemeExtendCode(c)) {
                     out += str.charAt(i)
                     i += 1
                     continue
                 }
-                if (isHighSurrogate(c) && (i + 1) < len && isSkinToneModifierPair(c, str.charCodeAt(i + 1))) {
-                    out += str.charAt(i) + str.charAt(i + 1)
-                    i += 2
-                    continue
+                if ((i + 1) < len) {
+                    var cLow = str.charCodeAt(i + 1)
+                    if (isSkinToneModifierPair(c, cLow) || isSupplementaryExtendPair(c, cLow)) {
+                        out += str.charAt(i) + str.charAt(i + 1)
+                        i += 2
+                        continue
+                    }
                 }
                 break
             }
@@ -550,22 +589,42 @@
         return defVal
     }
 
+    function resetGlyphWidthCache() {
+        GLYPH_WIDTH_MAP  = {}
+        GLYPH_WIDTH_KEYS = []
+        GLYPH_CACHE_HEAD = 0
+        GLYPH_CACHE_SIZE = 0
+    }
+
     function measureClusterWidthPx(cluster, isBold, fontObj) {
         if (!cluster || cluster.length === 0) return 0
         var f = fontObj || getClientFont(null)
         if (f != null) {
             var cacheKey = (isBold ? '1:' : '0:') + cluster
-            var cached   = GLYPH_WIDTH_MAP[cacheKey]
-            if (cached !== undefined && isFinite(cached)) return cached
+            if (Object.prototype.hasOwnProperty.call(GLYPH_WIDTH_MAP, cacheKey)) {
+                var cached = GLYPH_WIDTH_MAP[cacheKey]
+                if (cached !== undefined && isFinite(cached)) return cached
+            }
             var probe = isBold ? ('§l' + cluster) : cluster
             var w = invokeFontWidth(f, probe)
             if (isFinite(w) && w >= 0) {
-                if (GLYPH_CACHE_SIZE > CONFIG.glyphCacheLimit) {
-                    GLYPH_WIDTH_MAP  = {}
-                    GLYPH_CACHE_SIZE = 0
+                if (!Object.prototype.hasOwnProperty.call(GLYPH_WIDTH_MAP, cacheKey)) {
+                    // 按 FIFO 淘汰最旧字形宽度条目，避免超限全表清空造成后续帧 Font.width JNI 毛刺
+                    while (GLYPH_CACHE_SIZE >= CONFIG.glyphCacheLimit && GLYPH_CACHE_HEAD < GLYPH_WIDTH_KEYS.length) {
+                        var oldKey = GLYPH_WIDTH_KEYS[GLYPH_CACHE_HEAD++]
+                        if (oldKey !== undefined && Object.prototype.hasOwnProperty.call(GLYPH_WIDTH_MAP, oldKey)) {
+                            delete GLYPH_WIDTH_MAP[oldKey]
+                            GLYPH_CACHE_SIZE--
+                        }
+                    }
+                    if (GLYPH_CACHE_HEAD >= 512) {
+                        GLYPH_WIDTH_KEYS = GLYPH_WIDTH_KEYS.slice(GLYPH_CACHE_HEAD)
+                        GLYPH_CACHE_HEAD = 0
+                    }
+                    GLYPH_WIDTH_KEYS.push(cacheKey)
+                    GLYPH_CACHE_SIZE++
                 }
                 GLYPH_WIDTH_MAP[cacheKey] = w
-                GLYPH_CACHE_SIZE++
                 return w
             }
         }
@@ -1499,8 +1558,7 @@
                 if (!isSameJavaRef(curCanary, MUI_CANARY_LAYOUT)) {
                     MUI_CANARY_LAYOUT = curCanary
                     MUI_EPOCH++
-                    GLYPH_WIDTH_MAP  = {}
-                    GLYPH_CACHE_SIZE = 0
+                    resetGlyphWidthCache()
                 }
                 if (ModernTextRendererClass != null) {
                     ctx.muiAllowSdf    = (ModernTextRendererClass.sAllowSDFTextIn2D !== false)
@@ -1622,12 +1680,13 @@
     function drawMuiLayoutPassRgb(batchCtx, layout, x, y, r, g, b, a, shadow, mat, drawMode) {
         if (batchCtx == null || !batchCtx.muiActive || layout == null || mat == null) return false
         try {
-            if (a <= 2) a = 255
+            var effA = clampNum(Math.round(a), 0, 255)
+            if (effA <= 0) return true
             var allowShadow = Boolean(shadow) && (batchCtx.muiAllowShadow !== false)
             if (allowShadow) {
                 // TextLayout.drawText 第 9 参是 isShadow（是否为阴影层），非 dropShadow；
                 // 必须先以 RGB 右移 2 位 (25% 亮度) + isShadow=true 绘制阴影，再沿 +Z (+0.03) 以 isShadow=false 绘制全亮度主字。
-                layout.drawText(mat, batchCtx.bufSrc, x, y, r >>> 2, g >>> 2, b >>> 2, a, true, drawMode, false, 1.0, 0, 15728880)
+                layout.drawText(mat, batchCtx.bufSrc, x, y, r >>> 2, g >>> 2, b >>> 2, effA, true, drawMode, false, 1.0, 0, 15728880)
                 var fgMat = mat
                 if (batchCtx.itemMat != null && mat === batchCtx.itemMat && batchCtx.itemFgMat != null) {
                     if (!batchCtx.itemFgReady) {
@@ -1641,10 +1700,10 @@
                     batchCtx.fgMat.translate(0.0, 0.0, 0.03)
                     fgMat = batchCtx.fgMat
                 }
-                layout.drawText(fgMat, batchCtx.bufSrc, x, y, r, g, b, a, false, drawMode, false, 1.0, 0, 15728880)
+                layout.drawText(fgMat, batchCtx.bufSrc, x, y, r, g, b, effA, false, drawMode, false, 1.0, 0, 15728880)
                 batchCtx.drawn += 2
             } else {
-                layout.drawText(mat, batchCtx.bufSrc, x, y, r, g, b, a, false, drawMode, false, 1.0, 0, 15728880)
+                layout.drawText(mat, batchCtx.bufSrc, x, y, r, g, b, effA, false, drawMode, false, 1.0, 0, 15728880)
                 batchCtx.drawn++
             }
             return true
@@ -2431,7 +2490,8 @@
         var rMat = startOutlineZMat(batchCtx, mat, zOffset)
         var n    = dxTbl.length
         if (preLayout != null && batchCtx.muiActive) {
-            var aVal = byteA <= 2 ? 255 : byteA
+            var aVal = clampNum(Math.round(byteA), 0, 255)
+            if (aVal <= 0) return true
             var bufSrc = batchCtx.bufSrc
             try {
                 for (var mi = 0; mi < n; mi++) {
@@ -2501,7 +2561,7 @@
         if (outMode === 'mui_stroke' && preLayout != null && batchCtx.muiActive && batchCtx.muiHasDrawOutline && !(ownerUnit != null && ownerUnit._muiHasEmoji)) {
             var mOutMat = startOutlineZMat(batchCtx, mat, -0.045)
             try {
-                preLayout.drawTextOutline(mOutMat, batchCtx.bufSrc, gx, gy, oR, oG, oB, strokeByte <= 2 ? 255 : strokeByte, 15728880)
+                preLayout.drawTextOutline(mOutMat, batchCtx.bufSrc, gx, gy, oR, oG, oB, clampNum(Math.round(strokeByte), 0, 255), 15728880)
                 batchCtx.drawn++
                 return true
             } catch (eMuiOut) {
@@ -2618,7 +2678,7 @@
         return rCtx
     }
 
-    function tryDrawUnitBatched(rCtx, unit, floatX, floatY, halfW, rgbColor, outMode, outColor, charScale, hasUnitRot) {
+    function tryDrawUnitBatched(rCtx, unit, floatX, floatY, halfW, rgbColor, outMode, outColor, charScale, hasUnitRot, unitRotDeg) {
         var batchCtx = rCtx.batchCtx
         var baseItemMat = rCtx.baseItemMat
         if (batchCtx == null || BATCH_FAILED || baseItemMat == null) return false
@@ -2671,7 +2731,7 @@
                     var uMat = batchCtx.unitMat
                     uMat.set(baseItemMat)
                     uMat.translate(floatX + hw, floatY + 4.0, 0.0)
-                    if (hasUnitRot) uMat.rotateZ(unitRotDegSafeValue * DEG_TO_RAD)
+                    if (hasUnitRot) uMat.rotateZ(unitRotDeg * DEG_TO_RAD)
                     if (hasUnitScale) uMat.scale(sc, sc, 1.0)
                     mat = uMat
                     gx  = -hw
@@ -2684,7 +2744,7 @@
                     var cy = floatY + 4.0
                     event.translate(cx, cy)
                     if (hasUnitRot && typeof event.rotateDeg === 'function') {
-                        event.rotateDeg(unitRotDegSafeValue)
+                        event.rotateDeg(unitRotDeg)
                     }
                     if (hasUnitScale) {
                         if (typeof event['scale(float,float)'] === 'function') {
@@ -2910,8 +2970,6 @@
         }
     }
 
-    var unitRotDegSafeValue = 0.0
-
     // 统一绘制函数：仅接收严格恒定的 item 级上下文 rCtx + 单元对象 unit + (floatX, floatY, unitRotDeg) 共 5 参，消除 18~21 参热路径传参分配
     function drawRichUnit(rCtx, unit, floatX, floatY, unitRotDeg) {
         if (rCtx == null || unit == null) return
@@ -2923,10 +2981,9 @@
         var charScale  = unit.charScale
         var halfW      = (unit.w != null) ? (unit.w * 0.5) : 0.0
         var hasUnitRot = (unitRotDeg != null && isFinite(unitRotDeg) && Math.abs(unitRotDeg) > 0.15)
-        if (hasUnitRot) unitRotDegSafeValue = unitRotDeg
 
         if (rCtx.batchCtx != null && !BATCH_FAILED) {
-            if (tryDrawUnitBatched(rCtx, unit, floatX, floatY, halfW, rgbColor, outMode, outColor, charScale, hasUnitRot)) {
+            if (tryDrawUnitBatched(rCtx, unit, floatX, floatY, halfW, rgbColor, outMode, outColor, charScale, hasUnitRot, unitRotDeg)) {
                 return
             }
         }
@@ -3167,6 +3224,8 @@
     }
 
     function applyStopToOverlay(ov, now, customFadeTicks) {
+        // 先解除 'active' 持续状态，确保已越过 fadeStartAt 正在淡出的条目不再作为 active 保留；
+        // 再检查 now < ov.fadeStartAt：若已处于淡出后半段则沿用原 fadeStartAt，避免把 alpha 重置回 1.0 引起闪烁。
         ov.lifeMode = 'once'
         var fMs = customFadeTicks > 0 ? max2(CONFIG.minFadeMs, customFadeTicks * 50) : (ov.fadeMs || 500)
         if (now < ov.fadeStartAt) {
@@ -3714,16 +3773,22 @@
         }
     }
 
+    function isControlPacket(raw) {
+        if (raw == null) return false
+        var act = readStr(raw, 'action', '')
+        return act === 'deactivate' || act === 'stop' || act === 'clear'
+    }
+
     // 外部调用与网络包统一入队，由 paintScreen 帧首在渲染线程一次性出队消费，避免遍历 activeOverlays 期间发生并发/重入修改
     function enqueueDanmaku(raw) {
         if (raw == null) return
         if (pendingActions.length >= CONFIG.maxPendingActions) {
-            var incomingCtrl = hasKeyInTag(raw, 'stop') || hasKeyInTag(raw, 'clear')
+            var incomingCtrl = isControlPacket(raw)
             var dropQIdx = 0
             if (incomingCtrl) {
                 for (var qi = 0; qi < pendingActions.length; qi++) {
                     var qItem = pendingActions[qi]
-                    if (qItem != null && !hasKeyInTag(qItem, 'stop') && !hasKeyInTag(qItem, 'clear')) {
+                    if (qItem != null && !isControlPacket(qItem)) {
                         dropQIdx = qi
                         break
                     }
@@ -3806,10 +3871,30 @@
             enqueueDanmaku(payload)
         },
         count:      function () { return activeOverlays.length + pendingActions.length },
+        list:       function () {
+            var out = []
+            for (var i = 0; i < activeOverlays.length; i++) {
+                var ov = activeOverlays[i]
+                if (ov == null) continue
+                out.push({
+                    key:          ov.key,
+                    slotId:       ov.slotId,
+                    tier:         ov.tier,
+                    namespace:    ov.namespace,
+                    group:        ov.group,
+                    lifeMode:     ov.lifeMode,
+                    priority:     ov.priority,
+                    maxGroupSize: ov.maxGroupSize,
+                    lineCacheKey: ov._lineRenderCache != null ? ov._lineRenderCache.key : null
+                })
+            }
+            return out
+        },
         _pure: {
             hashUnit:                     hashUnit,
             fastSinTurns:                 fastSinTurns,
             fastCosTurns:                 fastCosTurns,
+            readGraphemeCluster:          readGraphemeCluster,
             prepareSharedCharShakeTiming: prepareSharedCharShakeTiming,
             sampleCharShakeOffset:        sampleCharShakeOffset,
             findVisibleUnitRange:         findVisibleUnitRange,
@@ -4077,6 +4162,8 @@
                 continue
             }
 
+            // 单帧硬防卡死熔断（至少完成 1 条后累计超过 45ms 才跳出）：常规/高特效帧通常远低于此值；
+            // 若极重洪泛触及该上限，将截断本帧尾部低优先级条目以保护客户端不卡死（不降级单条特效本身）。
             if (drawnCount >= 1 && (monotonicNowMs() - frameStartMs) >= CONFIG.frameBudgetMs) {
                 break
             }
@@ -4248,6 +4335,8 @@
             var myx  = sinR * scaleX
             var myy  = cosR * scaleY
 
+            // 注：HUD 禁区避让（HUD_FORBIDDEN_PRESETS）仅在服务端 pos='edge'/'spread'/'random' 采样阶段生效；
+            // 客户端仅负责屏幕边缘 clampBounds 兜底而不二次踢开固定坐标，确保显式指定 rx/ry 位置不被擅自改写。
             if (item.clamp !== false) {
                 var wScaled  = (item.blockW || 0) * Math.abs(scaleX)
                 var hScaled  = (item.blockH || 12) * Math.abs(scaleY)

@@ -540,6 +540,7 @@
         return false;
     }
 
+    // 用于须随存档状态同步回滚的世界内文件（如方块追踪、退出 HP 修复）；抗回滚权限与外部日志走 resolveEpiphyWorldContext (epiphy-data/)
     function resolveWorldStorageInfo(server, worldFileName, fallbackDir) {
         var srv = resolveServer(server);
         var fileName = String(worldFileName || 'kubejs_epiphy_store.json');

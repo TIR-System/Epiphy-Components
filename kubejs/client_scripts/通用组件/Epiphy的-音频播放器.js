@@ -1,11 +1,11 @@
 // ============================================================================
-//  通用空间音频与流式声场组件 —— 客户端播放引擎 (EpiphyAudioClient v5.4, ES6)
+//  通用空间音频与流式声场组件 —— 客户端播放引擎 (EpiphyAudioClient v5.5, ES6)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-音频播放器.js
 //  配套服务端组件：
-//    - kubejs/server_scripts/通用组件/Epiphy的-音频组件.js（服务端调度器 EpiphyAudio v5.4）
+//    - kubejs/server_scripts/通用组件/Epiphy的-音频组件.js（服务端调度器 EpiphyAudio v5.5）
 //    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀）
 
 //  依赖与缺失降级：
@@ -32,7 +32,7 @@
     }
     var CHANNEL       = (PROTO && PROTO.AUDIO_CHANNEL) || 'epiphy:audio'
     var PROTO_VERSION = (PROTO && PROTO.AUDIO_PROTO_VERSION) || 5
-    var VERSION       = (PROTO && PROTO.AUDIO_SEMVER) || '5.4.0'
+    var VERSION       = (PROTO && PROTO.AUDIO_SEMVER) || '5.5.0'
 
     var CONFIG = {
         sweepIntervalTicks:     10,   // 慢速巡检周期（负责死链清理、异常断流重连、超时判定）
@@ -90,7 +90,8 @@
 
     var RANDOM             = createRandomSource()
     var entries            = new Map() // handleId (number) -> entry
-    var attCache           = new Map() // soundId -> attenuation_distance (仅缓存有效正值)
+    // soundId -> attenuation_distance（仅缓存有效正值；F3+T 重载界面结束/恢复焦点/切服时由 prepareEntriesForResume 与 resetClientState 清空重建）
+    var attCache           = new Map()
     var missingSoundUntil  = new Map() // soundId -> 下次重探 getSoundEvent 的 tick（避免永久毒化 attCache）
     var duckedMusicInsts   = new Set() // 被 duckMusic 暂停的原版/第三方 MUSIC 频道 SoundInstance
     var pendingActions     = []
@@ -99,7 +100,6 @@
     var wasPaused            = false
     var wasWindowInactive    = false
     var wasScreenOpen        = false
-    var unpauseGraceUntil    = 0
     var postResumeResyncUntil = 0
     var lastLevelKey         = ''
     var lastErrorLogAt    = 0
@@ -1307,6 +1307,7 @@
     // ======================================================================== 客户端 Tick 驱动与巡检
 
     var prepareEntriesForResume = () => {
+        // 清空衰减缓存：兼容 F3+T 资源包重载（LoadingOverlay 结束）或设备切换后音效 attenuation_distance 变更
         attCache.clear()
         missingSoundUntil.clear()
         for (var e of entries.values()) {
@@ -1384,7 +1385,6 @@
     }
 
     var sweepEntries = (lv, localPlayer) => {
-        if (clientTicks < unpauseGraceUntil) return
         var sm = getSoundManager()
         if (sm == null) return
 
@@ -1485,7 +1485,6 @@
 
             if (resumedNow) {
                 // ESC/暂停界面关闭或切屏切回窗口时，立刻强制重同步各活跃通道增益、尝试唤醒 OpenAL 暂停态并放行断流巡检，无需等待玩家移动
-                unpauseGraceUntil     = 0
                 postResumeResyncUntil = clientTicks + 12
                 prepareEntriesForResume()
             }
@@ -1526,7 +1525,6 @@
         wasPaused             = false
         wasWindowInactive     = false
         wasScreenOpen         = false
-        unpauseGraceUntil     = 0
         postResumeResyncUntil = 0
     }
     ClientEvents.loggedOut(() => {

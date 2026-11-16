@@ -1,11 +1,11 @@
 // priority: 500
 // ============================================================================
-//  通用空间音频与流式声场组件 —— 服务端调度器 (EpiphyAudio v5.4, ES6)
+//  通用空间音频与流式声场组件 —— 服务端调度器 (EpiphyAudio v5.5, ES6)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/server_scripts/通用组件/Epiphy的-音频组件.js
-//  配套客户端播放器：kubejs/client_scripts/通用组件/Epiphy的-音频播放器.js (EpiphyAudioClient v5.4)
+//  配套客户端播放器：kubejs/client_scripts/通用组件/Epiphy的-音频播放器.js (EpiphyAudioClient v5.5)
 //  配套权限阀组件：kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（管理 /epiphy 根命令、执行权限与 actorTier 资源分级）
 //
 //  依赖与缺失降级行为：
@@ -2242,6 +2242,7 @@
         if (rec.key != null) {
             var existing = boundAudioSeqByKey.get(rec.key)
             if (existing != null) return existing
+            // 常规移除/解绑会在 L2438/L2577 精确 delete；8192 仅作异常长期不卸载场景的防爆内存兜底
             if (boundAudioSeqByKey.size >= 8192) boundAudioSeqByKey.clear()
             var nextSeq = ++boundAudioSeqCounter
             boundAudioSeqByKey.set(rec.key, nextSeq)
@@ -2505,34 +2506,53 @@
         return play(playSpec) > 0
     }
 
-    var audioBlockTracker    = null
-    var ensureAudioBlockTracker = () => {
-        if (audioBlockTracker != null) return audioBlockTracker
-        audioBlockTracker = BASE.acquireBlockTracker({
-            name:             'audio',
-            maintainInterval: 20,
-            maintainOffset:   2,
-            makeRecordExtra: function (blockId, dim, ix, iy, iz) {
-                return { audioKey: makeBoundAudioKey(blockId, dim, ix, iy, iz) }
-            },
-            onFound: function (rec, binding, foundSource) {
-                ensureBoundAudioSeq(rec)
-                if (findActiveClusterHandleForKey(rec.audioKey) == null) {
-                    startBoundBlockAudio(rec, binding, null, null, foundSource)
-                }
-            },
-            onTick: function (rec, binding, tickNum, lv, curBlock) {
-                if (findActiveClusterHandleForKey(rec.audioKey) == null) {
-                    startBoundBlockAudio(rec, binding, lv, curBlock, 'tick')
-                }
-            },
-            onRemoved: function (rec, binding, reason, fadeOut) {
-                handleBoundBlockRemoved(rec.audioKey, rec.key, fadeOut)
-            },
-            onBrokenUnregistered: function (dim, x, y, z, bid) {
-                handleBoundBlockRemoved(makeBoundAudioKey(bid, dim, x, y, z), `${dim}|${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`, null)
+    var audioBlockTracker     = null
+    var audioBoundMetaByBlockId = new Map()
+    var createAudioBlockTrackerInstance = () => BASE.acquireBlockTracker({
+        name:             'audio',
+        maintainInterval: 20,
+        maintainOffset:   2,
+        makeRecordExtra: function (blockId, dim, ix, iy, iz) {
+            return { audioKey: makeBoundAudioKey(blockId, dim, ix, iy, iz) }
+        },
+        onFound: function (rec, binding, foundSource) {
+            ensureBoundAudioSeq(rec)
+            if (findActiveClusterHandleForKey(rec.audioKey) == null) {
+                startBoundBlockAudio(rec, binding, null, null, foundSource)
             }
-        })
+        },
+        onTick: function (rec, binding, tickNum, lv, curBlock) {
+            if (findActiveClusterHandleForKey(rec.audioKey) == null) {
+                startBoundBlockAudio(rec, binding, lv, curBlock, 'tick')
+            }
+        },
+        onRemoved: function (rec, binding, reason, fadeOut) {
+            handleBoundBlockRemoved(rec.audioKey, rec.key, fadeOut)
+        },
+        onBrokenUnregistered: function (dim, x, y, z, bid) {
+            handleBoundBlockRemoved(makeBoundAudioKey(bid, dim, x, y, z), `${dim}|${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`, null)
+        }
+    })
+    var ensureAudioBlockTracker = () => {
+        var hasReal = (typeof global !== 'undefined' && global.EpiphyBlockTracker != null && typeof global.EpiphyBlockTracker.createTracker === 'function')
+        if (audioBlockTracker != null) {
+            if (!audioBlockTracker.isFallback || !hasReal) {
+                return audioBlockTracker
+            }
+            var oldFallback = audioBlockTracker
+            var upgraded    = createAudioBlockTrackerInstance()
+            if (upgraded != null && !upgraded.isFallback) {
+                audioBoundMetaByBlockId.forEach((meta, bid) => {
+                    upgraded.bind(bid, meta)
+                })
+                try {
+                    if (typeof oldFallback.destroy === 'function') oldFallback.destroy()
+                } catch (eOldAudioFb) { }
+                audioBlockTracker = upgraded
+            }
+            return audioBlockTracker
+        }
+        audioBlockTracker = createAudioBlockTrackerInstance()
         return audioBlockTracker
     }
 
@@ -2542,11 +2562,13 @@
         if (tracker == null) return false
         var idStr = String(blockId).trim()
         var range = (typeof specOrFn === 'object' && specOrFn.range != null) ? Number(specOrFn.range) : 32
-        tracker.bind(idStr, {
+        var metaEntry = {
             blockId:    idStr,
             specOrFn:   specOrFn,
             scanRadius: clampNum(isFinite(range) ? range + 6 : 38, 16, 128)
-        })
+        }
+        audioBoundMetaByBlockId.set(idStr, metaEntry)
+        tracker.bind(idStr, metaEntry)
         if (!global.EpiphyAudioBlockBindings || typeof global.EpiphyAudioBlockBindings !== 'object') {
             global.EpiphyAudioBlockBindings = {}
         }
@@ -2559,6 +2581,7 @@
         var tracker = ensureAudioBlockTracker()
         if (tracker == null) return 0
         var idStr = String(blockId).trim()
+        audioBoundMetaByBlockId.delete(idStr)
         if (global.EpiphyAudioBlockBindings && typeof global.EpiphyAudioBlockBindings === 'object') {
             delete global.EpiphyAudioBlockBindings[idStr]
         }

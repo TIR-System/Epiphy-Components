@@ -1,11 +1,11 @@
 // priority: 500
 // ============================================================================
-//  通用屏幕弹幕与泛用文本显示组件 —— 服务端调度器 (ScreenDanmaku v5.4)
+//  通用屏幕弹幕与泛用文本显示组件 —— 服务端调度器 (ScreenDanmaku v5.5)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js
-//  配套客户端渲染器：kubejs/client_scripts/通用组件/Epiphy的-屏幕弹幕渲染器.js (ScreenDanmakuClient v5.5)
+//  配套客户端渲染器：kubejs/client_scripts/通用组件/Epiphy的-屏幕弹幕渲染器.js (ScreenDanmakuClient v5.6)
 //  配套权限阀组件：kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（管理 /epiphy 根命令、执行权限与 actorTier 资源分级）
 //
 //  依赖与缺失降级行为：
@@ -2074,9 +2074,8 @@
 
     var danmakuBlockTracker = null
 
-    function ensureDanmakuBlockTracker() {
-        if (danmakuBlockTracker != null) return danmakuBlockTracker
-        danmakuBlockTracker = BASE.acquireBlockTracker({
+    function createDanmakuBlockTrackerInstance() {
+        return BASE.acquireBlockTracker({
             name:             'danmaku',
             maintainInterval: 1,
             onBindingChanged: function () {
@@ -2105,12 +2104,33 @@
                 }
             },
             onRemoved: function (rec, binding, reason) {
-                if (reason === 'unbind' && rec != null && rec.key != null) {
-                    blockSeqByKey.delete(rec.key)
-                }
+                // handleBoundBlockRemoved 内部统一通过 invalidateScopeCache(rec.key, ...) 清理 blockSeqByKey（覆盖 unbind/broken/block_changed）
                 handleBoundBlockRemoved(rec, binding)
             }
         })
+    }
+
+    function ensureDanmakuBlockTracker() {
+        var hasReal = (typeof global !== 'undefined' && global.EpiphyBlockTracker != null && typeof global.EpiphyBlockTracker.createTracker === 'function')
+        if (danmakuBlockTracker != null) {
+            if (!danmakuBlockTracker.isFallback || !hasReal) {
+                return danmakuBlockTracker
+            }
+            var oldFallback = danmakuBlockTracker
+            var upgraded    = createDanmakuBlockTrackerInstance()
+            if (upgraded != null && !upgraded.isFallback) {
+                boundMetaByBlockId.forEach(function (metaEntry, bid) {
+                    upgraded.bind(bid, metaEntry)
+                })
+                try {
+                    if (typeof oldFallback.destroy === 'function') oldFallback.destroy()
+                } catch (eOldFb) { }
+                danmakuBlockTracker = upgraded
+                invalidateScopeCache(null)
+            }
+            return danmakuBlockTracker
+        }
+        danmakuBlockTracker = createDanmakuBlockTrackerInstance()
         return danmakuBlockTracker
     }
 

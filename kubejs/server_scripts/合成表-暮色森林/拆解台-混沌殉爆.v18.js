@@ -1770,8 +1770,12 @@
             global.ScreenDanmaku.inDimension(level, x, y, z, radius, opts)
             return
         }
-        // 兼容兜底：若 ScreenDanmaku 尚未加载，转换基础字段为客户端可识别结构后发送
+        // 兼容兜底：若 ScreenDanmaku 尚未加载，转换基础字段并附带 proto 版本号，避免被客户端 fail-closed 拒收
+        var protoVer = (typeof global !== 'undefined' && global.EpiphyProtocol != null && global.EpiphyProtocol.DANMAKU_PROTO_VERSION != null)
+            ? Number(global.EpiphyProtocol.DANMAKU_PROTO_VERSION)
+            : 5
         var fallbackPkt = {
+            proto:    protoVer,
             action:   opts.action || 'push',
             group:    opts.group,
             title:    String(opts.text || opts.title || ''),
@@ -1781,6 +1785,11 @@
             stay:     Number(opts.duration || opts.stay || 65),
             fadeOut:  Number(opts.fadeOut || 10)
         }
+        if (typeof opts.color === 'number') fallbackPkt.color = opts.color
+        if (typeof opts.subColor === 'number') fallbackPkt.subColor = opts.subColor
+        if (typeof opts.scale === 'number') fallbackPkt.scale = opts.scale
+        if (typeof opts.shakeMode === 'string') fallbackPkt.shakeMode = opts.shakeMode
+        if (typeof opts.fadeStyle === 'string') fallbackPkt.fadeStyle = opts.fadeStyle
         forEachPlayerNear(level, x, y, z, radius, function (p) {
             try {
                 p.sendData('epiphy:screen_danmaku', fallbackPkt)

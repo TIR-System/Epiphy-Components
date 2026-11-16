@@ -26,6 +26,7 @@
 
 ;(function () {
     var PERSIST_KEY     = 'epiphy_tracked_blocks_v2'
+    // 注意：trackedBlocks 记录物理方块坐标状态，须随存档备份还原同步回滚，因此刻意保存在 saves/<world>/ 而非抗回滚的 epiphy-data/（见 README-LLM.md §5.1）
     var WORLD_FILE_NAME = 'kubejs_epiphy_tracked_blocks.json'
     var FALLBACK_DIR    = 'kubejs/config/epiphy_tracked_blocks'
 
@@ -765,6 +766,8 @@
                     if (needVerify) {
                         lv = resolveLevel(rec.dim, null)
                         if (lv == null || !isChunkLoaded(lv, rec.x, rec.z)) {
+                            // 卸载区块内条目刻意保留在 trackedBlocks 与持久化文件中（仅跳过 per-tick 回调），以便玩家重返区块时恢复追踪；
+                            // 方块实际破坏/替换/unbind 时会通过 delete 立即清理。
                             rec.chunkLoaded = false
                             return
                         }

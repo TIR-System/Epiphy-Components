@@ -1,6 +1,6 @@
 // priority: 1000
 // ============================================================================
-//  通用指令权限阀与 /epiphy 根命令注册中心 (EpiphyPermissionValve v5.1)
+//  通用指令权限阀与 /epiphy 根命令注册中心 (EpiphyPermissionValve v5.2)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
@@ -94,6 +94,30 @@
     var RESERVED_SUBCOMMANDS = {
         auth: true,
         help: true
+    }
+    var FORBIDDEN_PROP_KEYS = {
+        __proto__:            true,
+        constructor:          true,
+        prototype:            true,
+        toString:             true,
+        tostring:             true,
+        valueOf:              true,
+        valueof:              true,
+        hasOwnProperty:       true,
+        hasownproperty:       true,
+        isPrototypeOf:        true,
+        isprototypeof:        true,
+        propertyIsEnumerable: true,
+        propertyisenumerable: true,
+        toLocaleString:       true,
+        tolocalestring:       true
+    }
+    function isForbiddenSubcommandKey(k) {
+        return !k || Boolean(FORBIDDEN_PROP_KEYS[k])
+    }
+    function getRegisteredSubcommand(key) {
+        if (!key || isForbiddenSubcommandKey(key)) return null
+        return Object.prototype.hasOwnProperty.call(subcommands, key) ? subcommands[key] : null
     }
     // 按存档隔离的内存缓存（统一存储在 epiphy-data/worlds/<slug>__<shortId>/ 下）
     var worldAuthStore               = {}
@@ -730,6 +754,8 @@
         if (mainRaw != null) {
             parseUsersMapInto(readMapField(mainRaw, 'users'), grants)
         } else if (Array.isArray(info.legacyFiles)) {
+            // 设计约束：info.legacyFiles 按“单存档精准路径 (<world>/kubejs_epiphy_permissions.json) -> 旧版共享世界名路径 (<slug>.json)”排序；
+            // 一旦命中优先级更高、按世界精准隔离的旧文件，必须立即 break，绝不继续合并后续旧共享目录文件，防止跨同名存档权限污染或覆盖已变更状态。
             for (var lf = 0; lf < info.legacyFiles.length; lf++) {
                 var legPath = info.legacyFiles[lf]
                 var legRaw = readJsonFile(legPath)
@@ -1037,14 +1063,16 @@
                 grantsMap[key].displayName = displayName
             }
         }
-        var revTs = getRevocationMs(revocationsMap, key, scope)
+        var revTs     = getRevocationMs(revocationsMap, key, scope)
         var finalAtMs = (auditMeta.atMs != null && isFinite(auditMeta.atMs)) ? auditMeta.atMs : Date.now()
+        var finalAt   = auditMeta.at
         if (revTs > 0 && finalAtMs <= revTs) {
             finalAtMs = revTs + 1
+            try { finalAt = new Date(finalAtMs).toISOString() } catch (eIso) { }
         }
         grantsMap[key].scopes[scope] = {
             by:   auditMeta.by,
-            at:   auditMeta.at,
+            at:   finalAt,
             atMs: finalAtMs
         }
     }
@@ -1738,7 +1766,7 @@
             return { allowed: false, reason: '无效的指令执行源。' }
         }
         var subKey  = normalizeKey(subCommandName)
-        var subSpec = subKey ? subcommands[subKey] : null
+        var subSpec = getRegisteredSubcommand(subKey)
         var policy  = normalizePermissionPolicy(
             policyOverride !== undefined ? policyOverride : (subSpec != null ? subSpec.policy : null),
             POLICY_PRESETS.admin
@@ -1930,6 +1958,10 @@
         if (spec == null || !spec.name) return false
         var name = normalizeKey(spec.name)
         if (!name) return false
+        if (isForbiddenSubcommandKey(name)) {
+            logWarn('registerSubcommand', '拒绝使用原型保留键名注册子命令: "' + name + '"。')
+            return false
+        }
         if (RESERVED_SUBCOMMANDS[name]) {
             logWarn('registerSubcommand', '拒绝注册保留子命令名 "/' + ROOT_LITERAL + ' ' + name + '"。')
             return false
@@ -1943,7 +1975,7 @@
         }
         var policy = normalizePermissionPolicy(rawPerm, POLICY_PRESETS.admin)
 
-        if (subcommands[name] == null) {
+        if (!Object.prototype.hasOwnProperty.call(subcommands, name)) {
             subcmdOrder.push(name)
         }
         subcommands[name] = {
@@ -1993,7 +2025,7 @@
                 sendSourceMessage(source, '§3§l----------------------------------------------------')
                 return 1
             }
-            var target = subcommands[key]
+            var target = getRegisteredSubcommand(key)
             if (target == null) {
                 sendSourceMessage(source, '§c[Epiphy 指令中心] 未找到名为 [' + key + '] 的子模块。输入 §f/epiphy help §c查看已加载模块列表。')
                 return 0
@@ -2023,13 +2055,14 @@
             sendSourceMessage(source, header[i])
         }
 
+        // 总览有意向所有玩家展示已加载模块与当前授权状态徽标，方便发现功能；真实指令树仍受 .requires 严格隐藏。
         sendSourceMessage(source, '§6【已挂载业务插件 (' + subcmdOrder.length + ')】：')
         if (subcmdOrder.length === 0) {
             sendSourceMessage(source, '§7  （当前暂无已注册的业务子模块）')
         } else {
             for (var s = 0; s < subcmdOrder.length; s++) {
                 var sName = subcmdOrder[s]
-                var entry = subcommands[sName]
+                var entry = getRegisteredSubcommand(sName)
                 if (entry == null) continue
                 var subAccess = evaluateSourceAccessCore(source, sName, makeModuleRootPolicy(entry.policy), false)
                 var badge     = subAccess.allowed ? '§a[可用]' : '§c[未授权]'
@@ -2067,7 +2100,7 @@
             return false
         }
 
-        var targetSpec = subcommands[headWord]
+        var targetSpec = getRegisteredSubcommand(headWord)
         if (targetSpec != null) {
             var rootCheckPolicy = makeModuleRootPolicy(targetSpec.policy)
             if (!canSeeSubcommand(source, headWord, rootCheckPolicy)) {
@@ -2105,6 +2138,9 @@
         }
     }
 
+    // 资源分级定位说明（仅划分 'system' 与 'player' 两级配额/隔离池）：
+    //   - 普通非 OP 玩家划入 'player'（由业务组件套用命名空间隔离与频次/目标数限制）；
+    //   - 真 OP、控制台、命令方块及经 evaluateSourceAccessCore 校验的声明函数调用均属系统权威调度，统一归入 'system'（细粒度来源权限已在入栈评估层判定）。
     function getCommandActorTier(source) {
         if (source == null) {
             return { tier: 'system', isPlayer: false, isOp: true, uuid: '', name: '', player: null }
@@ -2300,7 +2336,7 @@
                             for (var si = 0; si < subcmdOrder.length; si++) {
                                 var mName = subcmdOrder[si]
                                 if (filterMod && mName !== filterMod) continue
-                                var mSpec = subcommands[mName]
+                                var mSpec = getRegisteredSubcommand(mName)
                                 if (mSpec == null) continue
                                 sendSourceMessage(ctx.source, '§6  ▸ §f' + mName + ' §8(' + mSpec.policy.label + ')')
                                 if (Array.isArray(mSpec.scopes) && mSpec.scopes.length > 0) {
@@ -2462,7 +2498,7 @@
         // 挂载各业务模块声明的子命令，并挂载安全包裹 try/catch 的 .requires(...) 以隐藏无权限玩家的 Tab 补全树
         for (var idx = 0; idx < subcmdOrder.length; idx++) {
             var subName = subcmdOrder[idx]
-            var subSpec = subcommands[subName]
+            var subSpec = getRegisteredSubcommand(subName)
             if (subSpec == null || typeof subSpec.buildNode !== 'function') continue
             ;(function (boundName, boundSpec) {
                 try {
@@ -2507,6 +2543,9 @@
             var parseRes = (typeof event.getParseResults === 'function') ? event.getParseResults() : event.parseResults
             var ctx      = (parseRes != null && typeof parseRes.getContext === 'function') ? parseRes.getContext() : (parseRes != null ? parseRes.context : null)
             var source   = (ctx != null && typeof ctx.getSource === 'function') ? ctx.getSource() : (ctx != null ? ctx.source : null)
+            if (source == null) {
+                source = (typeof event.getSource === 'function') ? event.getSource() : event.source
+            }
             if (source != null && interceptUnauthorizedCommandInput(source, input)) {
                 event.cancel()
             }
@@ -2537,7 +2576,7 @@
             ]
             for (var i = 0; i < subcmdOrder.length; i++) {
                 var sk = subcmdOrder[i]
-                var sp = subcommands[sk]
+                var sp = getRegisteredSubcommand(sk)
                 if (sp != null) {
                     lines.push('policy[' + sk + ']: mode=' + sp.policy.mode + ', console=' + sp.policy.allowConsole + ', declared=' + sp.policy.allowDeclaredCallers)
                 }
