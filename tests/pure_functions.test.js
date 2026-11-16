@@ -6187,10 +6187,10 @@ test('P2 fixes: grapheme ZWJ/flags/Extend, FIFO glyph eviction, rotated batched 
     assert.strictEqual(Cli.count(), beforeCnt + 1, 'ScreenDanmakuClient accepts v18 fallbackPkt through fail-closed dataReceived')
 })
 
-test('hidden items: epiphy:chaos_crystal supports both Rhino-remapped Mojmap calls and SRG fallback with dual BakedModel methods', function () {
+test('hidden items: epiphy:chaos_crystal avoids createCompositeState(boolean) EnumTypeWrapper trap across Mojmap, no-AT, and SRG modes', function () {
     var HIDDEN_PATH = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的小玩意-原版_其他Mod的隐藏物品.js')
 
-    function runHiddenItemsCase(useRemappedMojmap) {
+    function runHiddenItemsCase(useRemappedMojmap, exposeOutlineEnum) {
         var modBusListeners = {}
         var registeredModels = {}
         var boundTypes = []
@@ -6199,6 +6199,8 @@ test('hidden items: epiphy:chaos_crystal supports both Rhino-remapped Mojmap cal
         var scaleArgs = []
         var registeredItems = []
         var itemModelJsons = {}
+        var compositeOutlineArgs = []
+        var OUTLINE_NONE = { outline: 'NONE' }
 
         function makeStrictClassProxy(clsName, membersObj) {
             return new Proxy(membersObj, {
@@ -6208,6 +6210,17 @@ test('hidden items: epiphy:chaos_crystal supports both Rhino-remapped Mojmap cal
                     throw new Error('InternalError: Java class "' + clsName + '" has no public instance field or method named "' + String(prop) + '".')
                 }
             })
+        }
+
+        function assertValidOutlineArg(arg) {
+            // 还原 Rhino EnumTypeWrapper + CompositeStateBuilder.createCompositeState 重载陷阱：
+            // 传入 boolean (false) 会误命中 enum 重载并抛 IllegalArgumentException: argument type mismatch
+            if (typeof arg === 'boolean') {
+                throw new Error('IllegalArgumentException: argument type mismatch (boolean rejected by EnumTypeWrapper)')
+            }
+            assert.ok(arg === 'none' || arg === OUTLINE_NONE, 'expected OutlineProperty.NONE or "none", got: ' + arg)
+            compositeOutlineArgs.push(arg)
+            return { composite: true }
         }
 
         function ResourceLocation(ns, p) {
@@ -6227,7 +6240,7 @@ test('hidden items: epiphy:chaos_crystal supports both Rhino-remapped Mojmap cal
             setCullState: function (v) { assert.strictEqual(v, 'NO_CULL'); return fakeCompositeBuilder },
             setLightmapState: function (v) { assert.strictEqual(v, 'LIGHTMAP'); return fakeCompositeBuilder },
             setOverlayState: function (v) { assert.strictEqual(v, 'OVERLAY'); return fakeCompositeBuilder },
-            createCompositeState: function (b) { assert.strictEqual(b, false); return { composite: true } }
+            createCompositeState: assertValidOutlineArg
         } : {
             m_173292_: function (s) { assert.ok(s && s.sup, 'ShaderStateShard required'); return fakeCompositeBuilder },
             m_173290_: function (t) { assert.ok(t && t.rl, 'TextureStateShard required'); return fakeCompositeBuilder },
@@ -6235,7 +6248,7 @@ test('hidden items: epiphy:chaos_crystal supports both Rhino-remapped Mojmap cal
             m_110661_: function (v) { assert.strictEqual(v, 'NO_CULL'); return fakeCompositeBuilder },
             m_110671_: function (v) { assert.strictEqual(v, 'LIGHTMAP'); return fakeCompositeBuilder },
             m_110677_: function (v) { assert.strictEqual(v, 'OVERLAY'); return fakeCompositeBuilder },
-            m_110691_: function (b) { assert.strictEqual(b, false); return { composite: true } }
+            m_110689_: assertValidOutlineArg
         })
 
         var fakeCcrs = {
@@ -6382,6 +6395,9 @@ test('hidden items: epiphy:chaos_crystal supports both Rhino-remapped Mojmap cal
                             ? { builder: function () { return fakeCompositeBuilder } }
                             : { m_110628_: function () { return fakeCompositeBuilder } })
                     }
+                    if (cls === 'net.minecraft.client.renderer.RenderType$OutlineProperty') {
+                        return makeStrictClassProxy('RenderType$OutlineProperty', exposeOutlineEnum ? { NONE: OUTLINE_NONE } : {})
+                    }
                     if (cls === 'com.mojang.blaze3d.vertex.DefaultVertexFormat') {
                         return makeStrictClassProxy('DefaultVertexFormat', useRemappedMojmap
                             ? { NEW_ENTITY: 'NEW_ENTITY' }
@@ -6432,11 +6448,18 @@ test('hidden items: epiphy:chaos_crystal supports both Rhino-remapped Mojmap cal
         assert.deepStrictEqual(boundTypes, ['draconicevolution:chaos_crystal_item_inner', 'draconicevolution:chaos_crystal_item_outer'])
         assert.deepStrictEqual(baseColoursSeen, [-1, -16])
         assert.strictEqual(renderCalls, 2)
+        assert.strictEqual(compositeOutlineArgs.length, 2)
+        if (exposeOutlineEnum) {
+            assert.deepStrictEqual(compositeOutlineArgs, [OUTLINE_NONE, OUTLINE_NONE])
+        } else {
+            assert.deepStrictEqual(compositeOutlineArgs, ['none', 'none'])
+        }
         assert.strictEqual(scaleArgs[0], 0.22)
     }
 
-    runHiddenItemsCase(true)
-    runHiddenItemsCase(false)
+    runHiddenItemsCase(true, false)
+    runHiddenItemsCase(true, true)
+    runHiddenItemsCase(false, true)
 })
 
 var passed = 0

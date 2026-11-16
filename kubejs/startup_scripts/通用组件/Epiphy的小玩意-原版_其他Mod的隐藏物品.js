@@ -122,9 +122,12 @@
     //   完全调用 Draconic Evolution 1.20.1 与 BrandonsCore / CodeChickenLib 内部资源：
     //   - 通过 KubeJS 原生 Platform / ForgeModEvents 挂载 ModelEvent$ModifyBakingResult，
     //     避开 ClassFilter 对 net.minecraftforge.fml.* 的拦截；
-    //   - KubeJS/Rhino 在运行期加载了 MinecraftRemapper (mm.jsmappings)：JS 调用 MC 类时须用 Mojmap
-    //     (如 RenderType.create / builder / NEW_ENTITY)，而在 JS 代理对象被 Java 回调时 InterfaceAdapter
-    //     按原生字节码名查找，须提供 SRG (m_7541_ / m_7539_ / m_7547_) 并兼容 Mojmap；
+    //   - KubeJS/Rhino 在运行期加载了 MinecraftRemapper (mm.jsmappings) 与 TypeWrappers (EnumTypeWrapper)：
+    //     1) JS 调用 MC 类须用 Mojmap（仅当 Mojmap 成员不存在时才回退 SRG，切勿吞掉方法调用异常）；
+    //     2) CompositeStateBuilder.createCompositeState 同时存在 (boolean) 与 (OutlineProperty) 重载，
+    //        因 EnumTypeWrapper 对 enum 权重为 0，传 boolean false 会误匹配 enum 重载并抛 argument type mismatch，
+    //        故须显式传入 OutlineProperty.NONE（或无 AT 时的字符串 'none'）命中 m_110689_；
+    //     3) JS 代理对象被 Java InterfaceAdapter 回调时按原生字节码名查找，须提供 SRG (m_7541_/m_7539_/m_7547_)；
     //   - 替换模型 key 使用标准物品变体 'inventory'；
     //   - 模型：draconicevolution:models/block/chaos_crystal.obj（与 RenderTileChaosCrystal 相同，多面体水晶柱）
     //   - 内层着色器：BCShaders.CHAOS_ENTITY_SHADER + draconicevolution:textures/item/equipment/chaos_shader.png
@@ -133,25 +136,48 @@
     // ------------------------------------------------------------------------
     var readMcMember = function (target, mojName, srgName) {
         if (target == null) return null
-        try { return target[mojName] } catch (eMoj) { }
-        try { return target[srgName] } catch (eSrg) { }
-        throw new Error('Missing Java member ' + mojName + ' / ' + srgName)
+        var val
+        var found = false
+        try {
+            val = target[mojName]
+            if (val !== undefined) found = true
+        } catch (eMoj) { }
+        if (found) return val
+        return target[srgName]
     }
     var callMcMember = function (target, mojName, srgName, arg0, arg1, arg2, arg3, arg4, arg5, arg6) {
-        var argc = arguments.length - 3
-        try {
-            switch (argc) {
-                case 0: return target[mojName]()
-                case 1: return target[mojName](arg0)
-                case 7: return target[mojName](arg0, arg1, arg2, arg3, arg4, arg5, arg6)
+        if (target == null) {
+            throw new Error('Cannot call ' + mojName + ' / ' + srgName + ' on null target')
+        }
+        var fn
+        try { fn = target[mojName] } catch (eMoj) { }
+        var name = (typeof fn === 'function') ? mojName : srgName
+        if (typeof fn !== 'function') {
+            var srgFn = target[srgName]
+            if (typeof srgFn !== 'function') {
+                throw new Error('Missing Java method ' + mojName + ' / ' + srgName)
             }
-        } catch (eMoj) { }
+        }
+        var argc = arguments.length - 3
         switch (argc) {
-            case 0: return target[srgName]()
-            case 1: return target[srgName](arg0)
-            case 7: return target[srgName](arg0, arg1, arg2, arg3, arg4, arg5, arg6)
+            case 0: return target[name]()
+            case 1: return target[name](arg0)
+            case 7: return target[name](arg0, arg1, arg2, arg3, arg4, arg5, arg6)
         }
         throw new Error('Unsupported callMcMember argc=' + argc)
+    }
+    var buildCompositeStateNone = function (builder) {
+        var outlineNone = null
+        try {
+            var $OutlineProperty = Java.loadClass('net.minecraft.client.renderer.RenderType$OutlineProperty')
+            if ($OutlineProperty != null) {
+                outlineNone = readMcMember($OutlineProperty, 'NONE', 'NONE')
+            }
+        } catch (eOutline) { }
+        if (outlineNone != null) {
+            return callMcMember(builder, 'createCompositeState', 'm_110689_', outlineNone)
+        }
+        return callMcMember(builder, 'createCompositeState', 'm_110689_', 'none')
     }
 
     if (typeof Platform !== 'undefined' && Platform.isClientEnvironment() && typeof ForgeModEvents !== 'undefined') {
@@ -209,7 +235,7 @@
                     innerBuilder = callMcMember(innerBuilder, 'setCullState', 'm_110661_', noCull)
                     innerBuilder = callMcMember(innerBuilder, 'setLightmapState', 'm_110671_', lightmapShard)
                     innerBuilder = callMcMember(innerBuilder, 'setOverlayState', 'm_110677_', overlayShard)
-                    var innerState = callMcMember(innerBuilder, 'createCompositeState', 'm_110691_', false)
+                    var innerState = buildCompositeStateNone(innerBuilder)
                     var innerType = callMcMember(
                         $RenderType, 'create', 'm_173215_',
                         'draconicevolution:chaos_crystal_item_inner',
@@ -232,7 +258,7 @@
                     outerBuilder = callMcMember(outerBuilder, 'setTransparencyState', 'm_110685_', translucentTrans)
                     outerBuilder = callMcMember(outerBuilder, 'setLightmapState', 'm_110671_', lightmapShard)
                     outerBuilder = callMcMember(outerBuilder, 'setOverlayState', 'm_110677_', overlayShard)
-                    var outerState = callMcMember(outerBuilder, 'createCompositeState', 'm_110691_', false)
+                    var outerState = buildCompositeStateNone(outerBuilder)
                     var outerType = callMcMember(
                         $RenderType, 'create', 'm_173215_',
                         'draconicevolution:chaos_crystal_item_outer',
