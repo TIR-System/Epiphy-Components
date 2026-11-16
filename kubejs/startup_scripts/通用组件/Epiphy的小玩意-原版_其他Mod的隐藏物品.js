@@ -134,37 +134,35 @@
     //   - 外层半透明纹理：GameRenderer.getRendertypeCutoutShader() + draconicevolution:textures/block/chaos_crystal.png
     //   - 视角变换：TransformUtils.DEFAULT_BLOCK（标准 3D 方块物品视角，随游戏时间缓慢自转）
     // ------------------------------------------------------------------------
+    var probeMcMember = function (target, mojName, srgName) {
+        if (typeof target !== 'object' && typeof target !== 'function') {
+            throw new Error('Cannot inspect member ' + mojName + ' / ' + srgName + ' on non-object target')
+        }
+        var names = (srgName != null && srgName !== mojName) ? [mojName, srgName] : [mojName]
+        for (var i = 0; i < names.length; i++) {
+            var nm = names[i]
+            if (!nm) continue
+            if (nm in target) {
+                var val = target[nm]
+                if (val !== undefined) return { name: nm, value: val }
+            }
+        }
+        throw new Error('Missing Java member ' + mojName + ' / ' + srgName)
+    }
     var readMcMember = function (target, mojName, srgName) {
         if (target == null) return null
-        var val
-        var found = false
-        try {
-            val = target[mojName]
-            if (val !== undefined) found = true
-        } catch (eMoj) { }
-        if (found) return val
-        return target[srgName]
+        return probeMcMember(target, mojName, srgName).value
     }
-    var callMcMember = function (target, mojName, srgName, arg0, arg1, arg2, arg3, arg4, arg5, arg6) {
+    var callMcMember = function (target, mojName, srgName) {
         if (target == null) {
             throw new Error('Cannot call ' + mojName + ' / ' + srgName + ' on null target')
         }
-        var fn
-        try { fn = target[mojName] } catch (eMoj) { }
-        var name = (typeof fn === 'function') ? mojName : srgName
-        if (typeof fn !== 'function') {
-            var srgFn = target[srgName]
-            if (typeof srgFn !== 'function') {
-                throw new Error('Missing Java method ' + mojName + ' / ' + srgName)
-            }
+        var resolved = probeMcMember(target, mojName, srgName)
+        if (typeof resolved.value !== 'function') {
+            throw new Error('Java member is not a function: ' + resolved.name + ' (' + mojName + ' / ' + srgName + ')')
         }
-        var argc = arguments.length - 3
-        switch (argc) {
-            case 0: return target[name]()
-            case 1: return target[name](arg0)
-            case 7: return target[name](arg0, arg1, arg2, arg3, arg4, arg5, arg6)
-        }
-        throw new Error('Unsupported callMcMember argc=' + argc)
+        var args = Array.prototype.slice.call(arguments, 3)
+        return resolved.value.apply(target, args)
     }
     var buildCompositeStateNone = function (builder) {
         var outlineNone = null

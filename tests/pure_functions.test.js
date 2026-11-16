@@ -6233,7 +6233,8 @@ test('hidden items: epiphy:chaos_crystal avoids createCompositeState(boolean) En
         }
         ModelResourceLocation.prototype.toString = function () { return String(this.rl) + '#' + this.variant }
 
-        var fakeCompositeBuilder = makeStrictClassProxy('RenderType$CompositeState$CompositeStateBuilder', useRemappedMojmap ? {
+        // 与真实 Rhino 保持一致：实例对象 (NativeJavaObject) 访问缺失属性返回 undefined 而不抛错；静态类 (NativeJavaClass) 则抛 InternalError
+        var fakeCompositeBuilder = useRemappedMojmap ? {
             setShaderState: function (s) { assert.ok(s && s.sup, 'ShaderStateShard required'); return fakeCompositeBuilder },
             setTextureState: function (t) { assert.ok(t && t.rl, 'TextureStateShard required'); return fakeCompositeBuilder },
             setTransparencyState: function (v) { assert.strictEqual(v, 'TRANSLUCENT'); return fakeCompositeBuilder },
@@ -6249,7 +6250,7 @@ test('hidden items: epiphy:chaos_crystal avoids createCompositeState(boolean) En
             m_110671_: function (v) { assert.strictEqual(v, 'LIGHTMAP'); return fakeCompositeBuilder },
             m_110677_: function (v) { assert.strictEqual(v, 'OVERLAY'); return fakeCompositeBuilder },
             m_110689_: assertValidOutlineArg
-        })
+        }
 
         var fakeCcrs = {
             brightness: 0,
@@ -6362,9 +6363,9 @@ test('hidden items: epiphy:chaos_crystal avoids createCompositeState(boolean) En
                     if (cls === 'com.brandon3055.brandonscore.client.shader.BCShaders') return fakeBCShaders
                     if (cls === 'com.brandon3055.brandonscore.api.TimeKeeper') return { getClientTick: function () { return 40 } }
                     if (cls === 'net.minecraft.client.Minecraft') {
-                        var mcInst = makeStrictClassProxy('Minecraft', useRemappedMojmap
+                        var mcInst = useRemappedMojmap
                             ? { getFrameTime: function () { return 0.5 } }
-                            : { m_91296_: function () { return 0.5 } })
+                            : { m_91296_: function () { return 0.5 } }
                         return makeStrictClassProxy('Minecraft', useRemappedMojmap
                             ? { getInstance: function () { return mcInst } }
                             : { m_91087_: function () { return mcInst } })
@@ -6460,6 +6461,53 @@ test('hidden items: epiphy:chaos_crystal avoids createCompositeState(boolean) En
     runHiddenItemsCase(true, false)
     runHiddenItemsCase(true, true)
     runHiddenItemsCase(false, true)
+})
+
+test('hidden items helpers: callMcMember supports arbitrary argc and readMcMember falls back cleanly without swallowing errors or returning silent undefined', function () {
+    var HIDDEN_PATH = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的小玩意-原版_其他Mod的隐藏物品.js')
+    var src = fs.readFileSync(HIDDEN_PATH, 'utf8')
+    var startIdx = src.indexOf('var probeMcMember = function')
+    var endIdx = src.indexOf('var buildCompositeStateNone = function')
+    assert.ok(startIdx >= 0 && endIdx > startIdx, 'helper block markers must exist in hidden items script')
+    var helperCode = src.slice(startIdx, endIdx) + '\nglobalThis.__mcHelpers = { probeMcMember: probeMcMember, readMcMember: readMcMember, callMcMember: callMcMember };\n'
+    var sb = { globalThis: null }
+    sb.globalThis = sb
+    vm.createContext(sb)
+    vm.runInContext(helperCode, sb)
+    var h = sb.__mcHelpers
+
+    // 1. callMcMember 覆盖 2/3/8 等任意参数个数（不再限制 0/1/7），且正确绑定 this
+    var inst = {
+        prefix: 'P:',
+        add2: function (a, b) { return this.prefix + a + '+' + b },
+        sum8: function (a, b, c, d, e, f, g, i) { return this.prefix + (a + b + c + d + e + f + g + i) },
+        m_srg3_: function (x, y, z) { return this.prefix + [x, y, z].join(',') },
+        f_srgField_: 42,
+        nullableField: null
+    }
+    assert.strictEqual(h.callMcMember(inst, 'add2', 'm_add2_', 'x', 'y'), 'P:x+y')
+    assert.strictEqual(h.callMcMember(inst, 'sum8', 'm_sum8_', 1, 2, 3, 4, 5, 6, 7, 8), 'P:36')
+    // Mojmap 方法在实例上返回 undefined（不抛错）时正确回退 SRG 并传入 3 个参数
+    assert.strictEqual(h.callMcMember(inst, 'missingMoj3', 'm_srg3_', 10, 20, 30), 'P:10,20,30')
+
+    // 2. readMcMember 在 mojName 返回 undefined（不抛错）时回退 srgName，合法 null 不误判为缺失
+    assert.strictEqual(h.readMcMember(inst, 'missingMojField', 'f_srgField_'), 42)
+    assert.strictEqual(h.readMcMember(inst, 'nullableField', 'f_null_'), null)
+
+    // 3. 双名均缺失时即使实例返回 undefined 也必须显式抛错，不能静默返回 undefined
+    assert.throws(function () {
+        h.readMcMember(inst, 'noSuchMoj', 'noSuchSrg')
+    }, /Missing Java member noSuchMoj \/ noSuchSrg/)
+
+    // 4. 成员存在但访问抛非“成员不存在”异常（如 IllegalAccessException）时不能被静默吞掉
+    var guarded = {}
+    Object.defineProperty(guarded, 'NONE', {
+        enumerable: true,
+        get: function () { throw new Error('IllegalAccessException: package-private enum') }
+    })
+    assert.throws(function () {
+        h.readMcMember(guarded, 'NONE', 'NONE')
+    }, /IllegalAccessException/)
 })
 
 var passed = 0
