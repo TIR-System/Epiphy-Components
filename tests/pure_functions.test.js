@@ -6187,6 +6187,210 @@ test('P2 fixes: grapheme ZWJ/flags/Extend, FIFO glyph eviction, rotated batched 
     assert.strictEqual(Cli.count(), beforeCnt + 1, 'ScreenDanmakuClient accepts v18 fallbackPkt through fail-closed dataReceived')
 })
 
+test('hidden items: epiphy:chaos_crystal registers IItemRenderer on inventory ModelResourceLocation with SRG Forge methods and renders 3D passes', function () {
+    var HIDDEN_PATH = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的小玩意-原版_其他Mod的隐藏物品.js')
+    var modBusListeners = {}
+    var registeredModels = {}
+    var boundTypes = []
+    var renderCalls = 0
+    var baseColoursSeen = []
+    var scaleArgs = []
+    var registeredItems = []
+
+    function ResourceLocation(ns, p) {
+        this.ns = ns; this.p = p
+    }
+    ResourceLocation.prototype.toString = function () { return this.ns + ':' + this.p }
+
+    function ModelResourceLocation(rl, variant) {
+        this.rl = rl; this.variant = variant
+    }
+    ModelResourceLocation.prototype.toString = function () { return String(this.rl) + '#' + this.variant }
+
+    var fakeCompositeBuilder = {
+        m_173292_: function (s) { assert.ok(s && s.sup, 'ShaderStateShard required'); return this },
+        m_173290_: function (t) { assert.ok(t && t.rl, 'TextureStateShard required'); return this },
+        m_110685_: function (v) { assert.strictEqual(v, 'TRANSLUCENT'); return this },
+        m_110661_: function (v) { assert.strictEqual(v, 'NO_CULL'); return this },
+        m_110671_: function (v) { assert.strictEqual(v, 'LIGHTMAP'); return this },
+        m_110677_: function (v) { assert.strictEqual(v, 'OVERLAY'); return this },
+        m_110691_: function (b) { assert.strictEqual(b, false); return { composite: true } }
+    }
+
+    var fakeCcrs = {
+        brightness: 0,
+        overlay: 0,
+        baseColour: -1,
+        reset: function () { this.baseColour = -1 },
+        bind: function (rt, getter) {
+            boundTypes.push(rt.name)
+            baseColoursSeen.push(this.baseColour)
+            assert.strictEqual(getter, 'FAKE_GETTER')
+            assert.strictEqual(typeof rt.state, 'object')
+        }
+    }
+
+    var fakeMatOps = []
+    function FakeMatrix4(src) {
+        this.src = src || null
+        this.translate = function () { return this }
+        this.rotate = function () { return this }
+        this.scale = function (s) { scaleArgs.push(s); return this }
+    }
+
+    var fakeCrystalModel = {
+        render: function (ccrs, mat) {
+            assert.strictEqual(ccrs, fakeCcrs)
+            fakeMatOps.push(mat)
+            renderCalls++
+        }
+    }
+
+    var shaderCalls = { inner: 0, outer: 0 }
+    var fakeBCShaders = {
+        CHAOS_ENTITY_SHADER: {
+            getShaderInstance: function () { shaderCalls.inner++; return { shader: 'chaos' } },
+            hasModelMatUniform: function () { return true },
+            getModelMatUniform: function () { return { glUniformMatrix4f: function () {} } },
+            hasSimpleLightUniform: function () { return true },
+            getSimpleLightUniform: function () { return { glUniform1b: function () {} } },
+            hasDisableLightUniform: function () { return true },
+            getDisableLightUniform: function () { return { glUniform1b: function () {} } },
+            hasDisableOverlayUniform: function () { return true },
+            getDisableOverlayUniform: function () { return { glUniform1b: function () {} } }
+        }
+    }
+
+    function FakeSupplier(impl) {
+        this.get = impl.get
+    }
+    function FakeIItemRenderer(impl) {
+        this.impl = impl
+    }
+
+    var sb = {
+        console: { info: function () {}, warn: function (m) { throw new Error('unexpected warn: ' + m) }, error: function () {}, debug: function () {}, log: function () {} },
+        Platform: { isClientEnvironment: function () { return true } },
+        ForgeModEvents: {
+            onEvent: function (evName, cb) {
+                modBusListeners[evName] = cb
+            }
+        },
+        ForgeEvents: { onEvent: function () {} },
+        StartupEvents: {
+            registry: function (kind, cb) {
+                if (kind === 'item') {
+                    cb({
+                        create: function (id) {
+                            registeredItems.push(id)
+                            var b = {
+                                displayName: function () { return b },
+                                texture: function () { return b },
+                                rarity: function () { return b },
+                                modelJson: function () { return b }
+                            }
+                            return b
+                        }
+                    })
+                }
+            }
+        },
+        Java: {
+            loadClass: function (cls) {
+                if (cls.indexOf('net.minecraftforge.fml.') === 0) {
+                    throw new Error('ClassFilter denied: ' + cls)
+                }
+                if (cls === 'net.minecraft.client.resources.model.ModelResourceLocation') return ModelResourceLocation
+                if (cls === 'net.minecraft.resources.ResourceLocation') return ResourceLocation
+                if (cls === 'codechicken.lib.render.model.OBJParser') {
+                    return function () {
+                        return {
+                            ignoreMtl: function () { return this },
+                            parse: function () { return { isEmpty: function () { return false }, values: function () { return ['mesh'] } } }
+                        }
+                    }
+                }
+                if (cls === 'codechicken.lib.render.CCModel') {
+                    return {
+                        combine: function () {
+                            return {
+                                backfacedCopy: function () { return this },
+                                computeNormals: function () { return fakeCrystalModel }
+                            }
+                        }
+                    }
+                }
+                if (cls === 'codechicken.lib.render.CCRenderState') return { instance: function () { return fakeCcrs } }
+                if (cls === 'codechicken.lib.render.item.IItemRenderer') return FakeIItemRenderer
+                if (cls === 'codechicken.lib.util.TransformUtils') return { DEFAULT_BLOCK: 'DEFAULT_BLOCK_STATE' }
+                if (cls === 'codechicken.lib.vec.Matrix4') return FakeMatrix4
+                if (cls === 'codechicken.lib.vec.Vector3') return { Y_POS: 'Y_POS' }
+                if (cls === 'com.brandon3055.brandonscore.client.shader.BCShaders') return fakeBCShaders
+                if (cls === 'com.brandon3055.brandonscore.api.TimeKeeper') return { getClientTick: function () { return 40 } }
+                if (cls === 'net.minecraft.client.Minecraft') {
+                    return { m_91087_: function () { return { m_91296_: function () { return 0.5 } } } }
+                }
+                if (cls === 'net.minecraft.client.renderer.GameRenderer') {
+                    return { m_172646_: function () { shaderCalls.outer++; return { shader: 'entity_translucent' } } }
+                }
+                if (cls === 'net.minecraft.client.renderer.RenderStateShard') {
+                    return { f_110139_: 'TRANSLUCENT', f_110110_: 'NO_CULL', f_110152_: 'LIGHTMAP', f_110154_: 'OVERLAY' }
+                }
+                if (cls === 'net.minecraft.client.renderer.RenderStateShard$ShaderStateShard') {
+                    return function (sup) { this.sup = sup; this.sup.get() }
+                }
+                if (cls === 'net.minecraft.client.renderer.RenderStateShard$TextureStateShard') {
+                    return function (rl) { this.rl = rl }
+                }
+                if (cls === 'net.minecraft.client.renderer.RenderType') {
+                    return { m_173215_: function (name, fmt, mode, sz, crumb, sort, state) { return { name: name, fmt: fmt, mode: mode, sz: sz, state: state } } }
+                }
+                if (cls === 'net.minecraft.client.renderer.RenderType$CompositeState') {
+                    return { m_110628_: function () { return fakeCompositeBuilder } }
+                }
+                if (cls === 'com.mojang.blaze3d.vertex.DefaultVertexFormat') return { f_85812_: 'NEW_ENTITY' }
+                if (cls === 'com.mojang.blaze3d.vertex.VertexFormat$Mode') return { TRIANGLES: 'TRIANGLES' }
+                if (cls === 'java.util.function.Supplier') return FakeSupplier
+                return function () {}
+            }
+        },
+        global: {}
+    }
+    sb.globalThis = sb
+    vm.createContext(sb)
+    runScriptIn(sb, HIDDEN_PATH)
+
+    assert.ok(registeredItems.indexOf('epiphy:chaos_crystal') >= 0, 'epiphy:chaos_crystal item must be registered')
+    var bakingCb = modBusListeners['net.minecraftforge.client.event.ModelEvent$ModifyBakingResult']
+    assert.strictEqual(typeof bakingCb, 'function', 'ModifyBakingResult must register via ForgeModEvents without denied FML classes')
+
+    bakingCb({
+        getModels: function () {
+            return {
+                put: function (mrl, model) {
+                    registeredModels[String(mrl)] = model
+                }
+            }
+        }
+    })
+
+    var rendererProxy = registeredModels['epiphy:chaos_crystal#inventory']
+    assert.ok(rendererProxy != null && rendererProxy.impl != null, 'renderer must be bound to epiphy:chaos_crystal#inventory (not empty variant)')
+    assert.strictEqual(registeredModels['epiphy:chaos_crystal#'], undefined, 'empty variant must not be used for item renderer')
+    assert.strictEqual(rendererProxy.impl.getModelState(), 'DEFAULT_BLOCK_STATE')
+    assert.strictEqual(rendererProxy.impl.m_7541_(), false)
+    assert.strictEqual(rendererProxy.impl.m_7539_(), true)
+    assert.strictEqual(rendererProxy.impl.m_7547_(), true)
+    assert.strictEqual(shaderCalls.inner, 1)
+    assert.strictEqual(shaderCalls.outer, 1)
+
+    rendererProxy.impl.renderItem({}, 'GUI', 'POSE_STACK', 'FAKE_GETTER', 15728880, 655360)
+    assert.deepStrictEqual(boundTypes, ['draconicevolution:chaos_crystal_item_inner', 'draconicevolution:chaos_crystal_item_outer'])
+    assert.deepStrictEqual(baseColoursSeen, [-1, -16])
+    assert.strictEqual(renderCalls, 2)
+    assert.strictEqual(scaleArgs[0], 0.22)
+})
+
 var passed = 0
 for (var i = 0; i < tests.length; i++) {
     var t = tests[i]

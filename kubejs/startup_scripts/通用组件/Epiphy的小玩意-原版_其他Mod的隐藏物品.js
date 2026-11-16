@@ -83,20 +83,17 @@
     // ------------------------------------------------------------------------
     // 客户端：为 epiphy:chaos_crystal 注册与 DE 原生一致的 3D 混沌晶体方块物品渲染器 (IItemRenderer)
     //   完全调用 Draconic Evolution 1.20.1 与 BrandonsCore / CodeChickenLib 内部资源：
-    //   - 模型：draconicevolution:models/block/chaos_crystal.obj（与 RenderTileChaosCrystal 相同，5 格高多面体水晶柱）
+    //   - 通过 KubeJS 原生 Platform / ForgeModEvents 挂载 ModelEvent$ModifyBakingResult，
+    //     避开 ClassFilter 对 net.minecraftforge.fml.* 的拦截；
+    //   - 替换模型 key 使用标准物品变体 'inventory'，并在代理与 RenderType 构建中使用 1.20.1 Forge SRG 成员名；
+    //   - 模型：draconicevolution:models/block/chaos_crystal.obj（与 RenderTileChaosCrystal 相同，多面体水晶柱）
     //   - 内层着色器：BCShaders.CHAOS_ENTITY_SHADER + draconicevolution:textures/item/equipment/chaos_shader.png
-    //   - 外层半透明纹理：draconicevolution:textures/block/chaos_crystal.png
+    //   - 外层半透明纹理：GameRenderer.m_172646_() + draconicevolution:textures/block/chaos_crystal.png
     //   - 视角变换：TransformUtils.DEFAULT_BLOCK（标准 3D 方块物品视角，随游戏时间缓慢自转）
     // ------------------------------------------------------------------------
-    try {
-        var $FMLEnvironment = Java.loadClass('net.minecraftforge.fml.loading.FMLEnvironment')
-        if ($FMLEnvironment.dist.isClient()) {
-            var $FMLJavaModLoadingContext = Java.loadClass('net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext')
-            var $ModelEventModifyBaking   = Java.loadClass('net.minecraftforge.client.event.ModelEvent$ModifyBakingResult')
-            var $EventPriority            = Java.loadClass('net.minecraftforge.eventbus.api.EventPriority')
-
-            var modBus = $FMLJavaModLoadingContext.get().getModEventBus()
-            modBus.addListener($EventPriority.LOWEST, false, $ModelEventModifyBaking, function (event) {
+    if (typeof Platform !== 'undefined' && Platform.isClientEnvironment() && typeof ForgeModEvents !== 'undefined') {
+        try {
+            ForgeModEvents.onEvent('net.minecraftforge.client.event.ModelEvent$ModifyBakingResult', function (event) {
                 try {
                     var $ModelResourceLocation = Java.loadClass('net.minecraft.client.resources.model.ModelResourceLocation')
                     var $ResourceLocation      = Java.loadClass('net.minecraft.resources.ResourceLocation')
@@ -112,51 +109,69 @@
                     var $Minecraft             = Java.loadClass('net.minecraft.client.Minecraft')
                     var $GameRenderer          = Java.loadClass('net.minecraft.client.renderer.GameRenderer')
                     var $RenderStateShard      = Java.loadClass('net.minecraft.client.renderer.RenderStateShard')
+                    var $ShaderStateShard      = Java.loadClass('net.minecraft.client.renderer.RenderStateShard$ShaderStateShard')
+                    var $TextureStateShard     = Java.loadClass('net.minecraft.client.renderer.RenderStateShard$TextureStateShard')
                     var $RenderType            = Java.loadClass('net.minecraft.client.renderer.RenderType')
+                    var $CompositeState        = Java.loadClass('net.minecraft.client.renderer.RenderType$CompositeState')
                     var $DefaultVertexFormat   = Java.loadClass('com.mojang.blaze3d.vertex.DefaultVertexFormat')
                     var $VertexFormatMode      = Java.loadClass('com.mojang.blaze3d.vertex.VertexFormat$Mode')
+                    var $Supplier              = Java.loadClass('java.util.function.Supplier')
 
                     var map = new $OBJParser(new $ResourceLocation('draconicevolution', 'models/block/chaos_crystal.obj'))
                         .ignoreMtl()
                         .parse()
+                    if (map == null || map.isEmpty()) {
+                        console.warn('[Epiphy] 挂载混沌晶体 3D 物品模型失败：chaos_crystal.obj 解析为空')
+                        return
+                    }
                     var crystalModel = $CCModel.combine(map.values())
                         .backfacedCopy()
                         .computeNormals()
 
-                    var innerType = $RenderType.create(
+                    var innerShaderSup = new $Supplier({
+                        get: function () {
+                            return $BCShaders.CHAOS_ENTITY_SHADER.getShaderInstance()
+                        }
+                    })
+                    var innerType = $RenderType.m_173215_(
                         'draconicevolution:chaos_crystal_item_inner',
-                        $DefaultVertexFormat.NEW_ENTITY,
+                        $DefaultVertexFormat.f_85812_,
                         $VertexFormatMode.TRIANGLES,
                         256,
-                        $RenderType.CompositeState.builder()
-                            .setShaderState(new $RenderStateShard.ShaderStateShard(function () {
-                                return $BCShaders.CHAOS_ENTITY_SHADER.getShaderInstance()
-                            }))
-                            .setTextureState(new $RenderStateShard.TextureStateShard(new $ResourceLocation('draconicevolution', 'textures/item/equipment/chaos_shader.png'), true, false))
-                            .setTransparencyState($RenderStateShard.TRANSLUCENT_TRANSPARENCY)
-                            .setCullState($RenderStateShard.NO_CULL)
-                            .setLightmapState($RenderStateShard.LIGHTMAP)
-                            .setOverlayState($RenderStateShard.OVERLAY)
-                            .createCompositeState(false)
+                        false,
+                        false,
+                        $CompositeState.m_110628_()
+                            .m_173292_(new $ShaderStateShard(innerShaderSup))
+                            .m_173290_(new $TextureStateShard(new $ResourceLocation('draconicevolution', 'textures/item/equipment/chaos_shader.png'), true, false))
+                            .m_110685_($RenderStateShard.f_110139_)
+                            .m_110661_($RenderStateShard.f_110110_)
+                            .m_110671_($RenderStateShard.f_110152_)
+                            .m_110677_($RenderStateShard.f_110154_)
+                            .m_110691_(false)
                     )
 
-                    var outerType = $RenderType.create(
+                    var outerShaderSup = new $Supplier({
+                        get: function () {
+                            return $GameRenderer.m_172646_()
+                        }
+                    })
+                    var outerType = $RenderType.m_173215_(
                         'draconicevolution:chaos_crystal_item_outer',
-                        $DefaultVertexFormat.NEW_ENTITY,
+                        $DefaultVertexFormat.f_85812_,
                         $VertexFormatMode.TRIANGLES,
                         256,
-                        $RenderType.CompositeState.builder()
-                            .setShaderState(new $RenderStateShard.ShaderStateShard(function () {
-                                return $GameRenderer.getRendertypeCutoutShader()
-                            }))
-                            .setTextureState(new $RenderStateShard.TextureStateShard(new $ResourceLocation('draconicevolution', 'textures/block/chaos_crystal.png'), false, false))
-                            .setTransparencyState($RenderStateShard.TRANSLUCENT_TRANSPARENCY)
-                            .setLightmapState($RenderStateShard.LIGHTMAP)
-                            .setOverlayState($RenderStateShard.OVERLAY)
-                            .createCompositeState(false)
+                        false,
+                        false,
+                        $CompositeState.m_110628_()
+                            .m_173292_(new $ShaderStateShard(outerShaderSup))
+                            .m_173290_(new $TextureStateShard(new $ResourceLocation('draconicevolution', 'textures/block/chaos_crystal.png'), false, false))
+                            .m_110685_($RenderStateShard.f_110139_)
+                            .m_110671_($RenderStateShard.f_110152_)
+                            .m_110677_($RenderStateShard.f_110154_)
+                            .m_110691_(false)
                     )
 
-                    var renderer = new JavaAdapter($IItemRenderer, {
+                    var renderer = new $IItemRenderer({
                         renderItem: function (stack, displayContext, mStack, getter, packedLight, packedOverlay) {
                             var mat = new $Matrix4(mStack)
                             var ccrs = $CCRenderState.instance()
@@ -164,17 +179,21 @@
                             ccrs.brightness = packedLight
                             ccrs.overlay = packedOverlay
 
-                            var mc = $Minecraft.getInstance()
-                            var rot = ($TimeKeeper.getClientTick() + mc.getFrameTime()) / 40.0
+                            var mc = $Minecraft.m_91087_()
+                            var frameTime = (mc != null) ? mc.m_91296_() : 0.0
+                            var rot = ($TimeKeeper.getClientTick() + frameTime) / 40.0
                             mat.translate(0.5, 0.5, 0.5)
                             mat.rotate(rot, $Vector3.Y_POS)
                             // chaos_crystal.obj 高度跨度为 [-3.55, 3.29]（约 6.84 格），缩放到 0.22 使其刚好饱满呈现在物品栏与手持方块视角中
                             mat.scale(0.22)
 
-                            $BCShaders.CHAOS_ENTITY_SHADER.getModelMatUniform().glUniformMatrix4f(new $Matrix4())
-                            $BCShaders.CHAOS_ENTITY_SHADER.getSimpleLightUniform().glUniform1b(true)
-                            $BCShaders.CHAOS_ENTITY_SHADER.getDisableLightUniform().glUniform1b(false)
-                            $BCShaders.CHAOS_ENTITY_SHADER.getDisableOverlayUniform().glUniform1b(false)
+                            var chaosShader = $BCShaders.CHAOS_ENTITY_SHADER
+                            if (chaosShader != null) {
+                                if (chaosShader.hasModelMatUniform()) chaosShader.getModelMatUniform().glUniformMatrix4f(new $Matrix4())
+                                if (chaosShader.hasSimpleLightUniform()) chaosShader.getSimpleLightUniform().glUniform1b(true)
+                                if (chaosShader.hasDisableLightUniform()) chaosShader.getDisableLightUniform().glUniform1b(false)
+                                if (chaosShader.hasDisableOverlayUniform()) chaosShader.getDisableOverlayUniform().glUniform1b(false)
+                            }
 
                             ccrs.bind(innerType, getter)
                             crystalModel.render(ccrs, mat)
@@ -186,25 +205,27 @@
                         getModelState: function () {
                             return $TransformUtils.DEFAULT_BLOCK
                         },
-                        useAmbientOcclusion: function () {
+                        m_7541_: function () {
                             return false
                         },
-                        isGui3d: function () {
+                        m_7539_: function () {
                             return true
                         },
-                        usesBlockLight: function () {
-                            return false
+                        m_7547_: function () {
+                            return true
                         }
                     })
 
-                    var mrl = new $ModelResourceLocation(new $ResourceLocation('epiphy', 'chaos_crystal'), '')
+                    var mrl = new $ModelResourceLocation(new $ResourceLocation('epiphy', 'chaos_crystal'), 'inventory')
                     event.getModels().put(mrl, renderer)
                 } catch (eBake) {
                     console.warn('[Epiphy] 挂载混沌晶体 3D 物品模型失败：' + eBake)
                 }
             })
+        } catch (eClientInit) {
+            console.warn('[Epiphy] 注册混沌晶体 3D 渲染监听失败：' + eClientInit)
         }
-    } catch (eClientInit) { }
+    }
 
     // ------------------------------------------------------------------------
     // 手持 epiphy:nether_portal / epiphy:end_portal / epiphy:end_gateway / epiphy:chaos_crystal 右键方块时，
