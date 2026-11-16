@@ -15,7 +15,7 @@
 
 ;(function () {
     var BLOCK_ID       = 'epiphy:rnfmabj_test'
-    // 公开仓库因版权与体积原因不随库分发 children_of_the_city.ogg（详见 assets/epiphy/sounds/README.txt）；
+    // 公开仓库因版权与体积原因不随库分发 children_of_the_city.ogg（详见 docs/audio-assets.md）；
     // 仍保留该 SoundEvent 槽位供本地自备或替换为自定义音频，缺省时测试方块的其余功能可正常运行。
     var SOUND_ID       = 'epiphy:children_of_the_city'
     var DANMAKU_GROUP  = 'rnfmabj_test'

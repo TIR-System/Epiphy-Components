@@ -122,12 +122,38 @@
     //   完全调用 Draconic Evolution 1.20.1 与 BrandonsCore / CodeChickenLib 内部资源：
     //   - 通过 KubeJS 原生 Platform / ForgeModEvents 挂载 ModelEvent$ModifyBakingResult，
     //     避开 ClassFilter 对 net.minecraftforge.fml.* 的拦截；
-    //   - 替换模型 key 使用标准物品变体 'inventory'，并在代理与 RenderType 构建中使用 1.20.1 Forge SRG 成员名；
+    //   - KubeJS/Rhino 在运行期加载了 MinecraftRemapper (mm.jsmappings)：JS 调用 MC 类时须用 Mojmap
+    //     (如 RenderType.create / builder / NEW_ENTITY)，而在 JS 代理对象被 Java 回调时 InterfaceAdapter
+    //     按原生字节码名查找，须提供 SRG (m_7541_ / m_7539_ / m_7547_) 并兼容 Mojmap；
+    //   - 替换模型 key 使用标准物品变体 'inventory'；
     //   - 模型：draconicevolution:models/block/chaos_crystal.obj（与 RenderTileChaosCrystal 相同，多面体水晶柱）
     //   - 内层着色器：BCShaders.CHAOS_ENTITY_SHADER + draconicevolution:textures/item/equipment/chaos_shader.png
-    //   - 外层半透明纹理：GameRenderer.m_172646_() + draconicevolution:textures/block/chaos_crystal.png
+    //   - 外层半透明纹理：GameRenderer.getRendertypeCutoutShader() + draconicevolution:textures/block/chaos_crystal.png
     //   - 视角变换：TransformUtils.DEFAULT_BLOCK（标准 3D 方块物品视角，随游戏时间缓慢自转）
     // ------------------------------------------------------------------------
+    var readMcMember = function (target, mojName, srgName) {
+        if (target == null) return null
+        try { return target[mojName] } catch (eMoj) { }
+        try { return target[srgName] } catch (eSrg) { }
+        throw new Error('Missing Java member ' + mojName + ' / ' + srgName)
+    }
+    var callMcMember = function (target, mojName, srgName, arg0, arg1, arg2, arg3, arg4, arg5, arg6) {
+        var argc = arguments.length - 3
+        try {
+            switch (argc) {
+                case 0: return target[mojName]()
+                case 1: return target[mojName](arg0)
+                case 7: return target[mojName](arg0, arg1, arg2, arg3, arg4, arg5, arg6)
+            }
+        } catch (eMoj) { }
+        switch (argc) {
+            case 0: return target[srgName]()
+            case 1: return target[srgName](arg0)
+            case 7: return target[srgName](arg0, arg1, arg2, arg3, arg4, arg5, arg6)
+        }
+        throw new Error('Unsupported callMcMember argc=' + argc)
+    }
+
     if (typeof Platform !== 'undefined' && Platform.isClientEnvironment() && typeof ForgeModEvents !== 'undefined') {
         try {
             ForgeModEvents.onEvent('net.minecraftforge.client.event.ModelEvent$ModifyBakingResult', function (event) {
@@ -165,49 +191,61 @@
                         .backfacedCopy()
                         .computeNormals()
 
+                    var newEntityFormat = readMcMember($DefaultVertexFormat, 'NEW_ENTITY', 'f_85812_')
+                    var translucentTrans = readMcMember($RenderStateShard, 'TRANSLUCENT_TRANSPARENCY', 'f_110139_')
+                    var noCull = readMcMember($RenderStateShard, 'NO_CULL', 'f_110110_')
+                    var lightmapShard = readMcMember($RenderStateShard, 'LIGHTMAP', 'f_110152_')
+                    var overlayShard = readMcMember($RenderStateShard, 'OVERLAY', 'f_110154_')
+
                     var innerShaderSup = new $Supplier({
                         get: function () {
                             return $BCShaders.CHAOS_ENTITY_SHADER.getShaderInstance()
                         }
                     })
-                    var innerType = $RenderType.m_173215_(
+                    var innerBuilder = callMcMember($CompositeState, 'builder', 'm_110628_')
+                    innerBuilder = callMcMember(innerBuilder, 'setShaderState', 'm_173292_', new $ShaderStateShard(innerShaderSup))
+                    innerBuilder = callMcMember(innerBuilder, 'setTextureState', 'm_173290_', new $TextureStateShard(new $ResourceLocation('draconicevolution', 'textures/item/equipment/chaos_shader.png'), true, false))
+                    innerBuilder = callMcMember(innerBuilder, 'setTransparencyState', 'm_110685_', translucentTrans)
+                    innerBuilder = callMcMember(innerBuilder, 'setCullState', 'm_110661_', noCull)
+                    innerBuilder = callMcMember(innerBuilder, 'setLightmapState', 'm_110671_', lightmapShard)
+                    innerBuilder = callMcMember(innerBuilder, 'setOverlayState', 'm_110677_', overlayShard)
+                    var innerState = callMcMember(innerBuilder, 'createCompositeState', 'm_110691_', false)
+                    var innerType = callMcMember(
+                        $RenderType, 'create', 'm_173215_',
                         'draconicevolution:chaos_crystal_item_inner',
-                        $DefaultVertexFormat.f_85812_,
+                        newEntityFormat,
                         $VertexFormatMode.TRIANGLES,
                         256,
                         false,
                         false,
-                        $CompositeState.m_110628_()
-                            .m_173292_(new $ShaderStateShard(innerShaderSup))
-                            .m_173290_(new $TextureStateShard(new $ResourceLocation('draconicevolution', 'textures/item/equipment/chaos_shader.png'), true, false))
-                            .m_110685_($RenderStateShard.f_110139_)
-                            .m_110661_($RenderStateShard.f_110110_)
-                            .m_110671_($RenderStateShard.f_110152_)
-                            .m_110677_($RenderStateShard.f_110154_)
-                            .m_110691_(false)
+                        innerState
                     )
 
                     var outerShaderSup = new $Supplier({
                         get: function () {
-                            return $GameRenderer.m_172646_()
+                            return callMcMember($GameRenderer, 'getRendertypeCutoutShader', 'm_172646_')
                         }
                     })
-                    var outerType = $RenderType.m_173215_(
+                    var outerBuilder = callMcMember($CompositeState, 'builder', 'm_110628_')
+                    outerBuilder = callMcMember(outerBuilder, 'setShaderState', 'm_173292_', new $ShaderStateShard(outerShaderSup))
+                    outerBuilder = callMcMember(outerBuilder, 'setTextureState', 'm_173290_', new $TextureStateShard(new $ResourceLocation('draconicevolution', 'textures/block/chaos_crystal.png'), false, false))
+                    outerBuilder = callMcMember(outerBuilder, 'setTransparencyState', 'm_110685_', translucentTrans)
+                    outerBuilder = callMcMember(outerBuilder, 'setLightmapState', 'm_110671_', lightmapShard)
+                    outerBuilder = callMcMember(outerBuilder, 'setOverlayState', 'm_110677_', overlayShard)
+                    var outerState = callMcMember(outerBuilder, 'createCompositeState', 'm_110691_', false)
+                    var outerType = callMcMember(
+                        $RenderType, 'create', 'm_173215_',
                         'draconicevolution:chaos_crystal_item_outer',
-                        $DefaultVertexFormat.f_85812_,
+                        newEntityFormat,
                         $VertexFormatMode.TRIANGLES,
                         256,
                         false,
                         false,
-                        $CompositeState.m_110628_()
-                            .m_173292_(new $ShaderStateShard(outerShaderSup))
-                            .m_173290_(new $TextureStateShard(new $ResourceLocation('draconicevolution', 'textures/block/chaos_crystal.png'), false, false))
-                            .m_110685_($RenderStateShard.f_110139_)
-                            .m_110671_($RenderStateShard.f_110152_)
-                            .m_110677_($RenderStateShard.f_110154_)
-                            .m_110691_(false)
+                        outerState
                     )
 
+                    var fnFalse = function () { return false }
+                    var fnTrue = function () { return true }
                     var renderer = new $IItemRenderer({
                         renderItem: function (stack, displayContext, mStack, getter, packedLight, packedOverlay) {
                             var mat = new $Matrix4(mStack)
@@ -216,8 +254,8 @@
                             ccrs.brightness = packedLight
                             ccrs.overlay = packedOverlay
 
-                            var mc = $Minecraft.m_91087_()
-                            var frameTime = (mc != null) ? mc.m_91296_() : 0.0
+                            var mc = callMcMember($Minecraft, 'getInstance', 'm_91087_')
+                            var frameTime = (mc != null) ? callMcMember(mc, 'getFrameTime', 'm_91296_') : 0.0
                             var rot = ($TimeKeeper.getClientTick() + frameTime) / 40.0
                             mat.translate(0.5, 0.5, 0.5)
                             mat.rotate(rot, $Vector3.Y_POS)
@@ -242,15 +280,12 @@
                         getModelState: function () {
                             return $TransformUtils.DEFAULT_BLOCK
                         },
-                        m_7541_: function () {
-                            return false
-                        },
-                        m_7539_: function () {
-                            return true
-                        },
-                        m_7547_: function () {
-                            return true
-                        }
+                        m_7541_: fnFalse,
+                        useAmbientOcclusion: fnFalse,
+                        m_7539_: fnTrue,
+                        isGui3d: fnTrue,
+                        m_7547_: fnTrue,
+                        usesBlockLight: fnTrue
                     })
 
                     var mrl = new $ModelResourceLocation(new $ResourceLocation('epiphy', 'chaos_crystal'), 'inventory')
