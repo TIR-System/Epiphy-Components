@@ -6,7 +6,7 @@
 //    kubejs/assets/epiphy/textures/block/ultra_uncrafting_instability_1~5_*.png   ← 唯一必须的实体资源
 //    kubejs/assets/epiphy/lang/zh_cn.json                                          ← 可选，显示名同脚本内 displayName
 //  模型与方块状态：**不放磁盘文件**，由本脚本的 .texture() 与 builder.modelJson 在运行时生成，
-//    与 E:\Minecraft\Deuterium_VIII 实例中 minia 命名空间的做法一致（该实例 assets 下只有 textures）。
+//    与参考实例 <mc-instance> 中 minia 命名空间的做法一致（该实例 assets 下只有 textures）。
 //    若在 assets 下另放 models/ blockstates/，会以同名 key 覆盖运行时生成的内容，反而引发资源异常。
 //  归档副本（普通文件，纯备份，不参与加载）：
 //    kubejs/startup_scripts/拆解台-混沌殉爆/models/

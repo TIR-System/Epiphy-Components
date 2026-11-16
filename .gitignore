@@ -6,3 +6,14 @@ probe/
 *.bak
 epiphy-data/
 kubejs/config/epiphy_permissions/
+
+# Excluded media / redundant source audio (user-supplied locally if needed)
+*.mp3
+kubejs/assets/epiphy/sounds/children_of_the_city.ogg
+
+# Local tooling / OS / Node artifacts
+node_modules/
+coverage/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,7 +1,7 @@
 // ============================================================================
 //  通用空间音频与流式声场组件 —— 客户端播放引擎 (EpiphyAudioClient v5.5, ES6)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
-//  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
+//  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 <repo-root> 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-音频播放器.js
 //  配套服务端组件：

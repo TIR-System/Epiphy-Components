@@ -184,11 +184,10 @@ Epiphy的-音频播放器.js:
 ```text
 .
 ├── kubejs/
-│   ├── assets/epiphy/            # 音频资源 (.ogg/.mp3)、模型、材质、方块状态与简体中文语言文件
+│   ├── assets/epiphy/            # 音效资源 (.ogg，说明见 sounds/README.txt)、模型、材质、方块状态与简体中文语言文件
 │   ├── client_scripts/           # 客户端屏幕弹幕渲染器、空间音频播放器与 Tooltip 描述
 │   ├── server_scripts/           # 服务端底座、权限/调试/Bug修复、弹幕/音频调度与玩法配方
-│   ├── startup_scripts/          # 启动期 Spec/协议底座、物品/方块/创造栏注册
-│   └── config/                   # KubeJS 基础配置
+│   └── startup_scripts/          # 启动期 Spec/协议底座、物品/方块/创造栏注册
 ├── docs/
 │   └── kube-mods-rhino-es5-es6-compatibility.md  # kube-mods/rhino 实测兼容性与语义偏移参考
 ├── tests/
@@ -207,6 +206,9 @@ Epiphy的-音频播放器.js:
 1. 当前过渡期运行要求：**Minecraft 1.20.1 / Forge 47.x / KubeJS 2001.6.x**（理论上兼容 Fabric，未实测）。
 2. 将 `kubejs/` 合并放入客户端 `.minecraft/` 与服务端根目录。
 3. 管理员可在游戏内通过 `/epiphy help`、`/epiphy auth list`、`/epiphy auth where`、`/epiphy debug` 查看帮助、授权状态、外部数据路径与性能面板；运行期自动在游戏根目录生成并维护 `epiphy-data/`（已在 `.gitignore` 中忽略，请勿提交至源码仓库）。
+4. **公开仓已剔除的资源说明**：
+   - 第三方商业版权曲目 `children_of_the_city.ogg` 未随仓库分发（已在 `.gitignore` 中忽略，详见 [`sounds/README.txt`](kubejs/assets/epiphy/sounds/README.txt)）；[`sounds.json`](kubejs/assets/epiphy/sounds.json) 与测试方块脚本仍保留 `epiphy:children_of_the_city` 槽位，缺省时不崩溃，本地如需测试 BGM 可自行补放同名 `.ogg` 或改用其他音效 ID。
+   - 仅保留游戏实际读取的 `.ogg` 音效，已移除冗余 `.mp3` 源文件、历史 `.bak` 备份文件，以及 KubeJS 默认占位资源/本地工具配置（`example_*`、`kubejs/README.txt`、`kubejs/config/*.properties`、`probejs.json`、`jsconfig.json`），避免合并 `kubejs/` 时覆盖既有整合包配置。
 
 ### 本地沙盒单元测试
 ```bash

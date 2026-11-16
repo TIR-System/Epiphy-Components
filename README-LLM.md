@@ -125,7 +125,7 @@
 
 ## 6. 工作流、文档同步、版本规范与协议合规
 
-1. **Git 规范与 MC 实例同步**：主仓库位于 `D:\Git-Epiphy`；每次修改脚本、完成验证并提交至 `D:\Git-Epiphy` 后，须同步将 `D:\Git-Epiphy\kubejs` 更新到实机测试实例 `E:\Minecraft\[1.20.1-测试]\.minecraft\kubejs`（保持 `assets/`、`client_scripts/`、`server_scripts/`、`startup_scripts/` 等目录完全一致，勿误删实例内 `probe/` 与运行数据）。重大重构或模块改动前须先提交当前可用基准；严禁将运行期生成的 `epiphy-data/`、`_backup_*/`、`probe/`、`*.log`、`*.tmp`、`*.bak`、`kubejs/config/epiphy_permissions/` 等提交进版本库。所有读写均须使用 **UTF-8** 编码。
+1. **Git 规范与 MC 实例同步**：主仓库位于 `<repo-root>`；每次修改脚本、完成验证并提交至 `<repo-root>` 后，须同步将 `<repo-root>/kubejs` 更新到实机测试实例 `<mc-instance>/.minecraft/kubejs`（保持 `assets/`、`client_scripts/`、`server_scripts/`、`startup_scripts/` 等目录完全一致，勿误删实例内 `probe/`、用户自备版权音乐与运行数据）。重大重构或模块改动前须先提交当前可用基准；严禁将运行期生成的 `epiphy-data/`、`_backup_*/`、`probe/`、`*.log`、`*.tmp`、`*.bak`、`*.mp3`、版权音乐 `children_of_the_city.ogg`、`kubejs/config/epiphy_permissions/` 等提交进版本库。所有读写均须使用 **UTF-8** 编码。
 2. **文档与头部版本号同步规范（每次功能/架构改动必做）**：
    - **更新脚本头部注释与版本号**：修改任意 `.js` 组件涉及职责、依赖、降级策略或接口行为变化时，提交前必须检查并同步更新该脚本顶部注释的版本号（如 `EpiphyLog v1.1`、`EpiphyServerBase v2.1`、`EpiphyPermissionValve v5.1`、`ScreenDanmaku v5.2`、`EpiphyAudio v5.4` 等）、职责列表与依赖说明；若涉及共享语义版本常量（如 `EpiphySpec` 中 `AUDIO_SEMVER` 与端侧兜底 `VERSION`），须双端同步递增（网络包 `PROTO_VERSION` 仅在不兼容包结构变更时递增）。不得删除或篡改与改动无关的已有注释。
    - **同步仓库文档**：须同步检查并更新 [`README.md`](README.md)、[`README_EN.md`](README_EN.md)（工程架构表、组件版本号、核心能力与指令/目录说明），以及本文档 [`README-LLM.md`](README-LLM.md) 第 4 节（已解决问题基线表打 `[x]`）与第 5 节（现行契约状态）。

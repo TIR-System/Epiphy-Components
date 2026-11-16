@@ -184,11 +184,10 @@ Epiphy的-音频播放器.js:
 ```text
 .
 ├── kubejs/
-│   ├── assets/epiphy/            # Audio assets (.ogg/.mp3), models, textures, blockstates, zh_cn lang
+│   ├── assets/epiphy/            # Sound assets (.ogg, see sounds/README.txt), models, textures, blockstates, zh_cn lang
 │   ├── client_scripts/           # Client danmaku renderer, audio player, custom item tooltips
 │   ├── server_scripts/           # Server foundation, valve/debug/bugfix, danmaku/audio schedulers, gameplay scripts
-│   ├── startup_scripts/          # Startup Spec/Protocol base, item/block/creative-tab registrations
-│   └── config/                   # KubeJS properties
+│   └── startup_scripts/          # Startup Spec/Protocol base, item/block/creative-tab registrations
 ├── docs/
 │   └── kube-mods-rhino-es5-es6-compatibility.md  # Bytecode & runtime audit of kube-mods/rhino
 ├── tests/
@@ -207,6 +206,9 @@ Epiphy的-音频播放器.js:
 1. Current transitional runtime requirement: **Minecraft 1.20.1 / Forge 47.x / KubeJS 2001.6.x** (theoretically compatible with Fabric; untested).
 2. Merge `kubejs/` into both client `.minecraft/` and dedicated server root.
 3. In-game (OP required for admin actions), use `/epiphy help`, `/epiphy auth list`, `/epiphy auth where`, and `/epiphy debug`; runtime data is stored in `<gameDir>/epiphy-data/` (git-ignored; never commit runtime artifacts).
+4. **Excluded Assets & Config Notice**:
+   - The third-party commercial track `children_of_the_city.ogg` is intentionally omitted from this public repository (and git-ignored; see [`sounds/README.txt`](kubejs/assets/epiphy/sounds/README.txt)). [`sounds.json`](kubejs/assets/epiphy/sounds.json) and the test block script retain the `epiphy:children_of_the_city` sound event slot for optional user-supplied audio without breaking the block's danmaku/placement behavior when absent.
+   - Only runtime-loaded `.ogg` sound effects are included; redundant `.mp3` sources, leftover `.bak` backups, and KubeJS default templates/IDE configs (`example_*`, `kubejs/README.txt`, `kubejs/config/*.properties`, `probejs.json`, `jsconfig.json`) were removed so merging `kubejs/` will not overwrite existing modpack configs.
 
 ### Running Sandbox Unit Tests
 ```bash

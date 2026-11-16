@@ -1,6 +1,6 @@
 // ============================================================================
 //  Epiphy 的小玩意 —— 功能测试组件 ([rnfmabj-测试] 指令广播方块)
-//  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 D:\Git-Epiphy 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
+//  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 <repo-root> 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/startup_scripts/通用组件/Epiphy的小玩意_功能测试.js
 //  依赖组件：
@@ -15,6 +15,8 @@
 
 ;(function () {
     var BLOCK_ID       = 'epiphy:rnfmabj_test'
+    // 公开仓库因版权与体积原因不随库分发 children_of_the_city.ogg（详见 assets/epiphy/sounds/README.txt）；
+    // 仍保留该 SoundEvent 槽位供本地自备或替换为自定义音频，缺省时测试方块的其余功能可正常运行。
     var SOUND_ID       = 'epiphy:children_of_the_city'
     var DANMAKU_GROUP  = 'rnfmabj_test'
     var EFFECT_RADIUS  = 30

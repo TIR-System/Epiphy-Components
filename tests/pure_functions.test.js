@@ -2785,7 +2785,7 @@ test('regressions: Rhino ServerPlayer null-check, WindowsPath string-join + Kube
     var winPathMock = {
         toAbsolutePath: function () { return this },
         normalize: function () { return this },
-        toString: function () { return 'E:\\Minecraft\\[1.20.1-测试]\\.minecraft\\saves\\New World\\.' },
+        toString: function () { return 'X:\\<mc-instance>\\.minecraft\\saves\\New World\\.' },
         resolve: function () { throw new Error('Rhino overload ambiguity on WindowsPath.resolve(String)') }
     }
     audioSb.server = {
@@ -2819,13 +2819,13 @@ test('regressions: Rhino ServerPlayer null-check, WindowsPath string-join + Kube
     // WindowsPath.resolve 绝不能再被调用；ensureParentDir 应通过 KubeJSPaths.dir 成功建目录（无 java.io.File）
     var st = audioSb.global.EpiphyServerBase.resolveWorldStorageInfo(audioSb.server, 'kubejs_tracked_blocks.json', 'kubejs/data/epiphy_block_tracker')
     assert.strictEqual(st.isWorldRoot, true)
-    assert.strictEqual(st.filePath, 'E:/Minecraft/[1.20.1-测试]/.minecraft/saves/New World/kubejs_tracked_blocks.json')
+    assert.strictEqual(st.filePath, 'X:/<mc-instance>/.minecraft/saves/New World/kubejs_tracked_blocks.json')
     assert.strictEqual(audioSb.global.EpiphyServerBase.ensureParentDir(st.filePath), true)
     for (var li = 0; li < logoutHandlers.length; li++) {
         logoutHandlers[li]({ server: audioSb.server, player: fakePlayerObj })
     }
-    assert.ok(jsonWritePaths.indexOf('E:/Minecraft/[1.20.1-测试]/.minecraft/saves/New World/kubejs_epiphy_bugfix_hp.json') >= 0, 'EpiphyBugfix must resolve world path without WindowsPath.resolve')
-    assert.ok(dirCalls.length >= 2 && dirCalls.every(function (d) { return d === 'E:/Minecraft/[1.20.1-测试]/.minecraft/saves/New World' }))
+    assert.ok(jsonWritePaths.indexOf('X:/<mc-instance>/.minecraft/saves/New World/kubejs_epiphy_bugfix_hp.json') >= 0, 'EpiphyBugfix must resolve world path without WindowsPath.resolve')
+    assert.ok(dirCalls.length >= 2 && dirCalls.every(function (d) { return d === 'X:/<mc-instance>/.minecraft/saves/New World' }))
 
     // EpiphyAudio.play 对真实玩家位置不应因 !ServerPlayer 崩溃，能正确向玩家发包
     for (var ti = 0; ti < serverTicks.length; ti++) {

@@ -1,6 +1,6 @@
 # `kube-mods/rhino` ES5 / ES6 兼容性与语义偏移说明
 
-> 分析依据：`kube-mods/rhino` 架构与本地实包 [`rhino-forge-2001.2.3-build.10.jar`](file:///E:/Minecraft/%5B1.20.1-%E6%B5%8B%E8%AF%95%5D/.minecraft/mods/rhino-forge-2001.2.3-build.10.jar)（共 446 个 `.class` 文件）的字节码结构检查（`javap`）与解释器实测结果。
+> 分析依据：`kube-mods/rhino` 架构与实包 `<mc-instance>/mods/rhino-forge-2001.2.3-build.10.jar`（共 446 个 `.class` 文件）的字节码结构检查（`javap`）与解释器实测结果。
 
 ---
 
