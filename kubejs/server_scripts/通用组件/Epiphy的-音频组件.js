@@ -21,6 +21,8 @@
 //
 //  适用环境：Minecraft 1.20.1 / Forge 47.x / KubeJS 2001.6.x
 //
+//  [组件边界 / 禁止直接复用] 本组件属于 L3 业务调度层（非 L1/L2 通用基础设施），内部逻辑不得被其他模块
+//    或兄弟 L3 组件（如屏幕弹幕组件）直接复制或跨模块复用；外部玩法脚本仅应通过 global.EpiphyAudio 公开 API 调用。
 //  [语法规范] 遵循 README-LLM.md §1 强制语法基准（与 docs/kube-mods-rhino-es5-es6-compatibility.md）：
 //    以 ES5 + `var` 为主，可按需谨慎使用经实测无语义偏移的 ES6/ES2020 扩展语法；
 //    严禁使用 `??`、`let`/`const`、对象属性简写/计算属性、展开与默认参数等已确认高危/失效特性。
@@ -118,25 +120,23 @@
     var loginReadyTick = new Map() // uuid -> tickCounter
     var listenersGlobal = { start: [], join: [], leave: [], end: [] }
 
-    var serverRef       = null
-    var loadedPersistSrv = null
-    var tickCounter     = 0
-    var pendingReset    = true
+    var serverRef          = null
+    var tickCounter        = 0
+    var pendingReset       = true
     var nextHandleId       = 1
     var listenerTriggerSeq = 0
-    // ======================================================================== 基础工具与限频告警（委托 EpiphySpec / EpiphyServerBase）
+    // ======================================================================== 基础工具与限频告警（复用 L1/L2 EpiphySpec / EpiphyServerCore）
 
-    var min2     = SPEC.min2
-    var max2     = SPEC.max2
-    var clampNum = (v, lo, hi) => (v < lo ? lo : (v > hi ? hi : v))
+    var min2          = SPEC.min2
+    var max2          = SPEC.max2
+    var clampNum      = (v, lo, hi) => SPEC.clampNum(v, lo, hi, lo)
+    var safeTypeOf    = BASE.safeTypeOf
+    var isObjectLike  = BASE.isObjectLike
+    var safeReadProp  = BASE.safeReadProp
+    var safeHasMethod = BASE.safeHasMethod
 
-    var reportWarning = (where, msg, notifyPlayer) => {
-        return LOGGER.warn(where, msg, notifyPlayer, CONFIG.errorLogIntervalMs)
-    }
-
-    var reportCatch = (tag, err) => {
-        return LOGGER.catchWarn(tag, err, null, CONFIG.errorLogIntervalMs)
-    }
+    var reportWarning = (where, msg, notifyPlayer) => LOGGER.warn(where, msg, notifyPlayer, CONFIG.errorLogIntervalMs)
+    var reportCatch   = (tag, err) => LOGGER.catchWarn(tag, err, null, CONFIG.errorLogIntervalMs)
 
     var parseFiniteNum = (val, defVal) => {
         var n = SPEC.parseFiniteNum(val)
@@ -153,19 +153,7 @@
 
     var parsePriority = (val, defVal) => SPEC.parsePriority(val, defVal, { map: PRIORITY_MAP, min: 0, max: 10 })
 
-    var parseTicks    = SPEC.parseTicks
-    var safeTypeOf    = BASE.safeTypeOf
-    var isObjectLike  = BASE.isObjectLike
-
-    var safeReadProp = (o, p) => {
-        if (o == null) return undefined
-        try { return o[p] } catch (e) { return undefined }
-    }
-
-    var safeHasMethod = (o, p) => {
-        if (o == null) return false
-        try { return safeTypeOf(o[p]) === 'function' } catch (e) { return false }
-    }
+    var parseTicks = SPEC.parseTicks
 
     var normalizeSoundId = (v) => {
         if (v == null) return null

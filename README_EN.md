@@ -73,9 +73,9 @@ A collection of shared server/client infrastructure modules, audiovisual present
 | **L2 Access Control** | `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v5.3` (`/epiphy`, 3-state scopes, command-block mutation lock, tombstones, fail-closed auth) |
 | **L2 Diagnostics** | `Epiphy的-调试组件.js` | `server` / `950` | `EpiphyDebug v1` (`/epiphy debug`) |
 | **L2 Standalone Fix** | `Epiphy的-基础bug修复.js` | `server` / `900` | `EpiphyBugfix v1` (logout HP restoration) |
-| **L3 Presentation** | `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `ScreenDanmaku v5.6` |
-| **L3 Presentation** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.6` |
-| **L3 Gameplay** | `拆解台-混沌殉爆.v18.js` & `合成表-*` | `server` | Meltdown progression (persisted countdown, anti-spoof relic & mainhand pickaxe check) & recipe tweaks |
+| **L3 Presentation** | `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `ScreenDanmaku v5.6` (standalone scheduler; internal logic not for cross-module reuse) |
+| **L3 Presentation** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.6` (standalone scheduler; internal logic not for cross-module reuse) |
+| **L3 Gameplay** | `拆解台-混沌殉爆.v18.js` & `合成表-*` | `server` | Meltdown progression (hard-requiring Core/WorldOps/Danmaku; persisted countdown, anti-spoof relic & mainhand pickaxe check) |
 | **L4 Client** | `屏幕弹幕渲染器` / `音频播放器` / `拆解台描述` | `client` | `ScreenDanmakuClient v5.7`, `EpiphyAudioClient v5.6` |
 
 ### 3. Dependency & Fallback Specification (YAML)
@@ -147,11 +147,13 @@ Epiphy的-音频组件.js:
   on_missing:
     no_client: Server handles run normally with no client audio output
     optional:  Each optional module triggers a clean single-layer fallback
+  note:     L3 schedulers (ScreenDanmaku / EpiphyAudio) must only be consumed via their public global APIs; internal logic cannot be reused across modules
 
 拆解台-混沌殉爆.v18.js:
   requires:
-    hard:     [Epiphy的小玩意-终极拆解台_不稳定.js, ScreenDanmaku]
-    optional: [kubejs/assets/epiphy/ lang & assets]
+    hard:     [Epiphy的小玩意-终极拆解台_不稳定.js, EpiphyServerCore, EpiphyWorldOps, ScreenDanmaku]
+    optional: [EpiphyAudio, kubejs/assets/epiphy/ lang & assets]
+  on_missing: Throws Fail-Fast on load if any hard dependency is missing (no redundant gameplay-layer fallbacks)
 
 # ==================== Layer 4 · Client ====================
 Epiphy的-屏幕弹幕渲染器.js:

@@ -2,8 +2,13 @@
 //  拆解台 · 混沌殉爆 v18（3 分钟五阶段方块演进 & 终望珍珠吞噬停机 & 防破坏保护版）
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/server_scripts/合成表-暮色森林/拆解台-混沌殉爆.v18.js
-//  配套启动脚本：kubejs/startup_scripts/拆解台-混沌殉爆/拆解台-混沌殉爆-方块注册.js
-//  配套弹幕组件：kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js (ScreenDanmaku v5)
+//  硬前置  ：
+//    - kubejs/startup_scripts/拆解台-混沌殉爆/Epiphy的小玩意-终极拆解台_不稳定.js
+//    - kubejs/server_scripts/通用组件/Epiphy的-服务端核心.js (EpiphyServerCore, priority: 1080)
+//    - kubejs/server_scripts/通用组件/Epiphy的-方块与区块组件.js (EpiphyWorldOps, priority: 1050)
+//    - kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js (ScreenDanmaku, priority: 500)
+//  可选增强：kubejs/server_scripts/通用组件/Epiphy的-音频组件.js (EpiphyAudio, priority: 500)
+//  [语法规范] 遵循 README-LLM.md §1 强制语法基准（与 docs/kube-mods-rhino-es5-es6-compatibility.md）
 //  资源位置：kubejs/assets/epiphy/（models / textures / blockstates / lang）—— 加载根，普通文件；
 //            另有纯备份副本位于 kubejs/startup_scripts/拆解台-混沌殉爆/models/，不参与加载。
 //            全部为普通文件，无符号链接/硬链接/联接点，打包换机后行为一致。
@@ -93,14 +98,9 @@
         STAGE_MAP[STAGE_META[sIdx].id] = sIdx
     }
 
-    // 拆解台挖掘硬度（黑曜石为 50.0；防爆抗性与活塞推动保持原版不变）
-    // 注意：实际硬度由 startup_scripts/拆解台-混沌殉爆-方块注册.js 的 BlockEvents.modification 统一设置，
-    //       这里不再用反射改 BlockState（反射改字段在脚本环境下既不可靠也多余）。
-    var TARGET_DESTROY_SPEED = 50.0
-
     // ------------------------------------------------------------------------
     // 至高遗物：背包 / 饰品栏持有即可正常破坏终极拆解台
-    //   goety_revelation 的两个环由 Curios 提供，数据存在玩家 NBT 的 curios 标签内
+    //   goety_revelation 的两个环由 Curios 提供，统一交由 EpiphyServerCore.findPlayerItem 校验
     // ------------------------------------------------------------------------
     var RELIC_CURSED_RING  = 'enigmaticlegacy:cursed_ring'        // 七咒之戒
     var RELIC_INFINITY_SWD = 'avaritia:infinity_sword'            // 寰宇支配之剑
@@ -283,44 +283,17 @@
     })
 
     // ------------------------------------------------------------------------
-    // 第二部分：通用组件绑定 & Java 类软降级加载
+    // 第二部分：硬前置校验与组件绑定（玩法层不重复实现底座工具）
     // ------------------------------------------------------------------------
-    function resolveBase() {
-        return (typeof global !== 'undefined' && global != null)
-            ? (global.EpiphyServerCore || global.EpiphyServerBase || null)
-            : null
+    var BASE      = (typeof global !== 'undefined') ? (global.EpiphyServerCore || global.EpiphyServerBase) : null
+    var WORLD_OPS = (typeof global !== 'undefined') ? (global.EpiphyWorldOps || global.EpiphyChunkEngine || global.EpiphyBlockTracker) : null
+    var DANMAKU   = (typeof global !== 'undefined') ? global.ScreenDanmaku : null
+    if (!BASE || !WORLD_OPS || !DANMAKU) {
+        throw new Error('[拆解台-混沌殉爆] 缺少必需前置组件（EpiphyServerCore / EpiphyWorldOps / ScreenDanmaku），请确认 server_scripts/通用组件/ 已完整加载')
     }
-    function resolveWorldOps() {
-        return (typeof global !== 'undefined' && global != null)
-            ? (global.EpiphyWorldOps || global.EpiphyChunkEngine || global.EpiphyBlockTracker || null)
-            : null
-    }
-    function resolveAudio() {
-        return (typeof global !== 'undefined' && global != null) ? (global.EpiphyAudio || null) : null
-    }
-
-    var BASE_INIT = resolveBase()
-    var LOGGER    = (BASE_INIT != null && typeof BASE_INIT.createLogger === 'function')
-        ? BASE_INIT.createLogger('UncraftingChaos', 5000)
-        : {
-            info:      function (_t, m) { try { console.info('[拆解台] ' + m) } catch (e) { } },
-            warn:      function (_t, m) { try { console.warn('[拆解台] ' + m) } catch (e) { } },
-            error:     function (_t, m) { try { console.error('[拆解台] ' + m) } catch (e) { } },
-            catchWarn: function (t, err) { try { console.warn('[拆解台:' + t + '] ' + err) } catch (e) { } }
-        }
-
-    function safeLoadClass(className) {
-        var b = resolveBase()
-        if (b != null && typeof b.loadJavaClass === 'function') {
-            return b.loadJavaClass(className, true)
-        }
-        try {
-            if (typeof Java !== 'undefined' && Java != null && typeof Java.loadClass === 'function') {
-                return Java.loadClass(className)
-            }
-        } catch (e) { }
-        return null
-    }
+    var AUDIO         = (typeof global !== 'undefined' && global.EpiphyAudio != null) ? global.EpiphyAudio : null
+    var LOGGER        = BASE.createLogger('UncraftingChaos', 5000)
+    var safeLoadClass = (cls) => BASE.loadJavaClass(cls, true)
 
     var ProcessChaosImplosion = safeLoadClass('com.brandon3055.draconicevolution.entity.ProcessChaosImplosion')
     var ProcessHandler        = safeLoadClass('com.brandon3055.brandonscore.handlers.ProcessHandler')
@@ -333,7 +306,6 @@
     var AABB                  = safeLoadClass('net.minecraft.world.phys.AABB')
     var Level                 = safeLoadClass('net.minecraft.world.level.Level')
     var ExplosionInteraction  = safeLoadClass('net.minecraft.world.level.Level$ExplosionInteraction')
-    var CuriosApi             = safeLoadClass('top.theillusivec4.curios.api.CuriosApi')
 
     function rawClassOf(wrapper) {
         if (wrapper == null) return null
@@ -469,28 +441,16 @@
     var lastUnstableSaveTick = -9999
     var uncraftingTracker   = null
 
-    function resolveLevelByDim(dim, fallbackLevel) {
-        if (fallbackLevel != null) return fallbackLevel
-        var b = resolveBase()
-        if (b != null && typeof b.resolveLevel === 'function') {
-            var lv = b.resolveLevel(dim, SERVER)
-            if (lv != null) return lv
-        }
-        if (SERVER != null && typeof SERVER.getLevel === 'function') {
-            try { return SERVER.getLevel(dim) } catch (eLv) { }
-        }
-        return null
-    }
+    var resolveLevelByDim = (dim, fallbackLevel) => (fallbackLevel != null) ? fallbackLevel : BASE.resolveLevel(dim, SERVER)
 
     function saveUnstableJobs(forceNow) {
         unstableStoreDirty = true
         if (!forceNow && (tickCounter - lastUnstableSaveTick) < 40) return
-        var b = resolveBase()
-        if (b == null || SERVER == null || typeof b.resolveWorldStorageInfo !== 'function') return
+        if (SERVER == null) return
         lastUnstableSaveTick = tickCounter
         unstableStoreDirty   = false
         try {
-            var info = b.resolveWorldStorageInfo(SERVER, UNSTABLE_STORE_FILE, UNSTABLE_STORE_DIR)
+            var info = BASE.resolveWorldStorageInfo(SERVER, UNSTABLE_STORE_FILE, UNSTABLE_STORE_DIR)
             var records = []
             for (var i = 0; i < unstableJobs.length; i++) {
                 var j = unstableJobs[i]
@@ -507,9 +467,7 @@
                 })
             }
             var payload = { version: 2, jobs: records }
-            if (typeof b.writeJsonAtomic === 'function') {
-                b.writeJsonAtomic(info.filePath, payload, true, LOGGER)
-            }
+            BASE.writeJsonAtomic(info.filePath, payload, true, LOGGER)
             if (SERVER.persistentData != null && typeof SERVER.persistentData.putString === 'function') {
                 SERVER.persistentData.putString(UNSTABLE_PDATA_KEY, JSON.stringify(payload))
             }
@@ -520,11 +478,9 @@
 
     function ensureUnstableJobsLoaded() {
         if (unstableStoreLoaded || SERVER == null) return
-        var b = resolveBase()
-        if (b == null || typeof b.resolveWorldStorageInfo !== 'function') return
         unstableStoreLoaded = true
         try {
-            var info = b.resolveWorldStorageInfo(SERVER, UNSTABLE_STORE_FILE, UNSTABLE_STORE_DIR)
+            var info = BASE.resolveWorldStorageInfo(SERVER, UNSTABLE_STORE_FILE, UNSTABLE_STORE_DIR)
             // 优先读取随 level.dat 同步保存的 persistentData，确保崩溃/回档后与区块存档时间戳一致；外部 JSON 仅作跨存储兜底
             var data = null
             if (SERVER.persistentData != null && typeof SERVER.persistentData.getString === 'function') {
@@ -533,8 +489,8 @@
                     try { data = JSON.parse(String(rawP)) } catch (eP) { data = null }
                 }
             }
-            if (data == null && typeof b.readJsonSafe === 'function') {
-                data = b.readJsonSafe(info.filePath, LOGGER)
+            if (data == null) {
+                data = BASE.readJsonSafe(info.filePath, LOGGER)
             }
             var list = (data != null && Array.isArray(data.jobs)) ? data.jobs : []
             for (var i = 0; i < list.length; i++) {
@@ -623,21 +579,8 @@
         }
     }
 
-    // 检查指定世界坐标所在的区块当前是否已在内存中加载（绝不触发磁盘同步加载）
-    function isBlockChunkLoaded(level, x, z) {
-        if (level == null) return false
-        var chX = x >> 4
-        var chZ = z >> 4
-        try {
-            var cs = level.getChunkSource()
-            if (cs != null && cs.getChunkNow(chX, chZ) != null) return true
-        } catch (e0) { }
-        try {
-            return Boolean(level.hasChunk(chX, chZ))
-        } catch (e1) {
-            return false
-        }
-    }
+    // 检查指定世界坐标所在的区块当前是否已在内存中加载（直接委托 EpiphyServerCore）
+    var isBlockChunkLoaded = BASE.isChunkLoaded
 
     function setStageBlockSafely(level, dim, x, y, z, blockId) {
         var k = keyOf(dim, x, y, z)
@@ -647,104 +590,15 @@
         } catch (e) { }
     }
 
-    function isCreativePlayer(player) {
-        if (player == null) return false
-        try {
-            if (typeof player.isCreative === 'function') return Boolean(player.isCreative())
-            if (player.creative != null) return Boolean(player.creative)
-        } catch (e) { }
-        try {
-            if (player.abilities != null && player.abilities.instabuild != null) {
-                return Boolean(player.abilities.instabuild)
-            }
-        } catch (e) { }
-        return false
-    }
+    var isCreativePlayer = BASE.isCreativePlayer
 
     // ------------------------------------------------------------------------
-    // 遗物持有检测与主手钻石镐校验（委托 EpiphyServerCore.findPlayerItem，彻底移除 String(player.nbt) 改名伪造漏洞）
+    // 遗物持有检测与主手钻石镐校验（直接委托 EpiphyServerCore）
     // ------------------------------------------------------------------------
-    function findPlayerRelic(player, ids) {
-        if (player == null || ids == null || ids.length === 0) return null
-        if (isCreativePlayer(player)) return null
-        var b = resolveBase()
-        if (b != null && typeof b.findPlayerItem === 'function') {
-            return b.findPlayerItem(player, ids, { skipCreative: true })
-        }
+    var findPlayerRelic = (player, ids) => BASE.findPlayerItem(player, ids, { skipCreative: true })
 
-        // 独立运行降级（仅检查主副手、inventory 槽位与 CuriosApi，绝不序列化玩家 NBT 字符串）
-        var foundSet = {}
-        for (var h = 0; h < ids.length; h++) {
-            try {
-                if (typeof player.isHolding === 'function' && player.isHolding(ids[h])) foundSet[ids[h]] = true
-            } catch (e) { }
-        }
-        try {
-            var inv = player.inventory
-            if (inv != null && typeof inv.find === 'function') {
-                for (var k = 0; k < ids.length; k++) {
-                    if (!foundSet[ids[k]] && inv.find(ids[k]) >= 0) {
-                        foundSet[ids[k]] = true
-                    }
-                }
-            }
-        } catch (e) { }
-
-        if (foundSet[ids[0]]) return ids[0]
-
-        var targetSet = {}
-        for (var i = 0; i < ids.length; i++) targetSet[ids[i]] = true
-        if (CuriosApi != null) {
-            try {
-                var opt = CuriosApi.getCuriosInventory(player)
-                if (opt != null && opt.isPresent()) {
-                    var handler = opt.resolve().get()
-                    var stacksMap = handler.getCurios()
-                    var iter = stacksMap.values().iterator()
-                    while (iter.hasNext()) {
-                        var stacksHandler = iter.next()
-                        var dynStacks = stacksHandler.getStacks()
-                        var slots = dynStacks.getSlots()
-                        for (var s = 0; s < slots; s++) {
-                            var stack = dynStacks.getStackInSlot(s)
-                            if (stack != null && !stack.isEmpty()) {
-                                var sid = String(stack.id)
-                                if (targetSet[sid]) foundSet[sid] = true
-                            }
-                        }
-                    }
-                }
-            } catch (e) { }
-        }
-
-        for (var pIdx = 0; pIdx < ids.length; pIdx++) {
-            if (foundSet[ids[pIdx]]) return ids[pIdx]
-        }
-        return null
-    }
-
-    // 要求主手拿着钻石镐挖掘才算安全拆除（不再允许仅放在背包角落即豁免）
-    function playerHasDiamondPickaxe(player) {
-        if (player == null) return false
-        var b = resolveBase()
-        if (b != null && typeof b.isHoldingMainHand === 'function') {
-            return b.isHoldingMainHand(player, SAFE_TOOL)
-        }
-        try {
-            var mh = player.mainHandItem
-            if (mh == null && typeof player.getMainHandItem === 'function') mh = player.getMainHandItem()
-            if (mh != null && mh.id != null) {
-                if (typeof mh.isEmpty === 'function' && mh.isEmpty()) return false
-                return String(mh.id) === SAFE_TOOL
-            }
-        } catch (eMh) { }
-        try {
-            var oh = player.offHandItem
-            if (oh != null && String(oh.id) === SAFE_TOOL) return false
-            if (typeof player.isHolding === 'function' && player.isHolding(SAFE_TOOL)) return true
-        } catch (e) { }
-        return false
-    }
+    // 要求主手拿着钻石镐挖掘才算安全拆除
+    var playerHasDiamondPickaxe = (player) => BASE.isHoldingMainHand(player, SAFE_TOOL)
 
     // 计算失稳核心的真实剩余倒计时秒数（兼容已登记任务与回退推算，绝不写死 0.0）
     function getRemainingSecondsText(job, fallbackStageIdx) {
@@ -757,11 +611,6 @@
             : (job != null && job.stageIndex != null ? job.stageIndex : 0)
         var estTicks = Math.max(0, UNSTABLE_TICKS - idx * STAGE_DURATION_TICKS)
         return (estTicks / 20).toFixed(1)
-    }
-
-    // 是否持有任意一件至高遗物（用于普通拆解台的合法拆除）
-    function hasAnyDivineRelic(player) {
-        return findPlayerRelic(player, DIVINE_RELICS) != null
     }
 
     // ------------------------------------------------------------------------
@@ -780,67 +629,17 @@
         return inSafeRadius(x, z)
     }
 
-    // ------------------------------------------------------------------------
-    // 范围玩家检索、音效、粒子与屏幕报错显示工具
-    //   注意：KubeJS 6 的 EntityKJS 仅定义了 setX/setY/setZ（只写 setter），因此直接访问 ent.x 会返回 undefined，
-    //   而 Rhino 的 Number(undefined) 为 0（而非 NaN），会导致所有玩家坐标被误判为 (0,0,0)！
-    //   必须优先调用 ent.getX()/getY()/getZ() 或读取 ent.block.x/y/z。
-    // ------------------------------------------------------------------------
-    function readEntityPos(ent) {
-        if (ent == null) return null
-        try {
-            var b = ent.block
-            if (b != null) {
-                var bx = Number(b.x)
-                var by = Number(b.y)
-                var bz = Number(b.z)
-                if (isFinite(bx) && isFinite(by) && isFinite(bz)) {
-                    return { x: bx, y: by, z: bz }
-                }
-            }
-        } catch (e0) { }
-        try {
-            if (typeof ent.getX === 'function' && typeof ent.getY === 'function' && typeof ent.getZ === 'function') {
-                var gx = Number(ent.getX())
-                var gy = Number(ent.getY())
-                var gz = Number(ent.getZ())
-                if (isFinite(gx) && isFinite(gy) && isFinite(gz)) {
-                    return { x: gx, y: gy, z: gz }
-                }
-            }
-        } catch (e1) { }
-        return null
+    // 范围玩家检索、音效、粒子与消息工具（直接委托 EpiphyServerCore）
+    var readEntityPos     = BASE.readPos
+    var forEachPlayerNear = BASE.forEachPlayerNear
+    var hasPlayerNear     = BASE.hasPlayerNear
+    var particleAt        = BASE.spawnParticlesSafe
+    var sendActionBarNear = BASE.actionBarNear
+    var sendChatNear      = (level, dim, x, y, z, radius, rawJson) => {
+        if (level != null && isAllowedDim(dim) && rawJson != null) BASE.tellNear(level, x, y, z, radius, rawJson)
     }
-
-    function forEachPlayerNear(level, x, y, z, radius, callback) {
-        if (level == null || typeof callback !== 'function') return
-        var core = resolveBase()
-        if (core && typeof core.forEachPlayerNear === 'function') {
-            core.forEachPlayerNear(level, x, y, z, radius, callback)
-            return
-        }
-        var cx = Number(x)
-        var cy = Number(y)
-        var cz = Number(z)
-        var r  = Number(radius)
-        if (!isFinite(cx) || !isFinite(cy) || !isFinite(cz) || !isFinite(r) || r < 0) return
-        var d2 = r * r
-        var list = level.players
-        if (list == null) return
-        var isJavaList = typeof list.size === 'function' && typeof list.get === 'function'
-        var len = isJavaList ? list.size() : (list.length || 0)
-        for (var i = 0; i < len; i++) {
-            var p = isJavaList ? list.get(i) : list[i]
-            var pos = readEntityPos(p)
-            if (pos == null) continue
-            var dx = pos.x - cx
-            var dy = pos.y - cy
-            var dz = pos.z - cz
-            var distSq = dx * dx + dy * dy + dz * dz
-            if (isFinite(distSq) && distSq <= d2) {
-                callback(p, distSq)
-            }
-        }
+    var sendChatLinesNear = (level, dim, x, y, z, radius, lines) => {
+        if (level != null && isAllowedDim(dim) && Array.isArray(lines)) BASE.tellNear(level, x, y, z, radius, lines)
     }
 
     var SOUND_ID_MAP = {
@@ -874,15 +673,11 @@
         if (sound == null || level == null) return
         var limit  = maxDist != null ? maxDist : SOUND_RANGE
         var sndId  = resolveSoundIdStr(sound)
-        var dimStr = 'minecraft:overworld'
-        try {
-            if (level.dimension != null) dimStr = String(level.dimension)
-        } catch (eDim) { }
+        var dimStr = BASE.dimOfLevel(level) || 'minecraft:overworld'
 
-        var aud = resolveAudio()
-        if (aud != null && typeof aud.play === 'function' && sndId) {
+        if (AUDIO != null && typeof AUDIO.play === 'function' && sndId) {
             try {
-                aud.play({
+                AUDIO.play({
                     sound:    sndId,
                     dim:      dimStr,
                     at:       [x + 0.5, y + 0.5, z + 0.5],
@@ -910,12 +705,11 @@
     function playCustomSoundAt(level, dim, x, y, z, soundId, volume, pitch, maxDist) {
         if (!soundId || level == null) return
         var limit = maxDist != null ? maxDist : SOUND_RANGE
-        var aud   = resolveAudio()
-        if (aud != null && typeof aud.play === 'function') {
+        if (AUDIO != null && typeof AUDIO.play === 'function') {
             try {
                 var keyTag = (soundId === CUSTOM_SND_SIREN)
-                    ? ('uncrafting_siren_' + x + '_' + y + '_' + z)
-                    : ((soundId === CUSTOM_SND_HW_ERROR) ? ('uncrafting_hw_' + x + '_' + y + '_' + z + '_' + (tickCounter % 8)) : '')
+                    ? `uncrafting_siren_${x}_${y}_${z}`
+                    : ((soundId === CUSTOM_SND_HW_ERROR) ? `uncrafting_hw_${x}_${y}_${z}_${tickCounter % 8}` : '')
                 var playOpts = {
                     sound:    soundId,
                     dim:      dim,
@@ -927,7 +721,7 @@
                     priority: soundId === CUSTOM_SND_ATOMIC_EXP ? 'critical' : 'high'
                 }
                 if (keyTag) playOpts.key = keyTag
-                aud.play(playOpts)
+                AUDIO.play(playOpts)
                 return
             } catch (eAud2) { }
         }
@@ -946,34 +740,21 @@
 
     // 当终望珍珠吞噬或创造模式强行终止时，立即停止周围玩家的自定义长音频
     function stopCustomSoundsNear(level, dim, x, y, z, maxDist) {
-        var aud = resolveAudio()
-        if (aud != null && typeof aud.stop === 'function') {
+        if (AUDIO != null && typeof AUDIO.stop === 'function') {
             try {
-                aud.stop('uncrafting_siren_' + x + '_' + y + '_' + z)
+                AUDIO.stop(`uncrafting_siren_${x}_${y}_${z}`)
                 for (var hi = 0; hi < 8; hi++) {
-                    aud.stop('uncrafting_hw_' + x + '_' + y + '_' + z + '_' + hi)
+                    AUDIO.stop(`uncrafting_hw_${x}_${y}_${z}_${hi}`)
                 }
             } catch (eStop) { }
         }
-        var server = SERVER || (level != null ? level.server : null)
+        var server = SERVER || level?.server
         if (server == null || !isAllowedDim(dim)) return
         var limit = maxDist != null ? maxDist : SOUND_RANGE
-        var prefix = 'execute in ' + dim + ' positioned ' + x + ' ' + y + ' ' + z + ' run stopsound @a[distance=..' + limit + '] * '
+        var prefix = `execute in ${dim} positioned ${x} ${y} ${z} run stopsound @a[distance=..${limit}] * `
         try {
             server.runCommandSilent(prefix + CUSTOM_SND_SIREN)
             server.runCommandSilent(prefix + CUSTOM_SND_HW_ERROR)
-        } catch (e) { }
-    }
-
-    function particleAt(level, type, x, y, z, dx, dy, dz, count, speed) {
-        var b = resolveBase()
-        if (b != null && typeof b.spawnParticlesSafe === 'function') {
-            b.spawnParticlesSafe(level, type, x, y, z, dx, dy, dz, count, speed)
-            return
-        }
-        if (type == null || level == null) return
-        try {
-            level.spawnParticles(type, true, x, y, z, dx, dy, dz, count, speed)
         } catch (e) { }
     }
 
@@ -1006,88 +787,30 @@
         if (!tInfo.text && !sInfo.text) return
 
         var totalStay = (stay != null ? stay : 50) + (fadeIn != null ? fadeIn : 4) + (fadeOut != null ? fadeOut : 8)
-
-        if (typeof global !== 'undefined' && global.ScreenDanmaku != null) {
-            var extra = extraOpts || {}
-            global.ScreenDanmaku.inDimension(level, x, y, z, radius, {
-                namespace: 'uncrafting_chaos',
-                group:     extra.group || 'uncrafting_chaos',
-                key:       extra.key != null ? extra.key : ('main_alert_' + x + '_' + y + '_' + z),
-                priority:  extra.priority != null ? extra.priority : 'critical',
-                text:      tInfo.text,
-                sub:       sInfo.text,
-                pos:       extra.pos || [0.47 + Math.random() * 0.06, 0.23 + Math.random() * 0.08],
-                movable:   true,
-                restart:   true,
-                size:      extra.size || [1.28, 1.52],
-                tilt:      extra.tilt != null ? extra.tilt : [-3.5, 3.5],
-                color:     tInfo.color || 'red',
-                subColor:  sInfo.color || 'yellow',
-                mode:      extra.mode || 'all',
-                charMs:    extra.charMs || 22,
-                lifeMode:  'once',
-                duration:  totalStay,
-                shakeMode: extra.shakeMode || 'decay',
-                shakeAmp:  extra.shakeAmp != null ? extra.shakeAmp : 3.2,
-                fadeStyle: extra.fadeStyle || 'random',
-                fadeOut:   fadeOut != null ? fadeOut : 12
-            })
-            return
-        }
-
-        var server = SERVER || level.server
-        if (server == null) return
-        var prefix = 'execute in ' + dim + ' positioned ' + x + ' ' + y + ' ' + z + ' run title @a[distance=..' + radius + '] '
-        if (fadeIn != null && stay != null && fadeOut != null) {
-            server.runCommandSilent(prefix + 'times ' + fadeIn + ' ' + stay + ' ' + fadeOut)
-        }
-        if (subtitleJson != null) {
-            server.runCommandSilent(prefix + 'subtitle ' + subtitleJson)
-        }
-        if (titleJson != null) {
-            server.runCommandSilent(prefix + 'title ' + titleJson)
-        }
-    }
-
-    function sendActionBarNear(level, x, y, z, radius, text) {
-        var b = resolveBase()
-        if (b != null && typeof b.actionBarNear === 'function') {
-            b.actionBarNear(level, x, y, z, radius, text)
-            return
-        }
-        forEachPlayerNear(level, x, y, z, radius, function (p) {
-            try {
-                p.statusMessage = text
-            } catch (e) { }
+        var extra = extraOpts || {}
+        sendDanmakuNear(level, x, y, z, radius, {
+            namespace: DANMAKU_NAMESPACE,
+            group:     extra.group || DANMAKU_GROUP,
+            key:       extra.key != null ? extra.key : `main_alert_${x}_${y}_${z}`,
+            priority:  extra.priority != null ? extra.priority : 'critical',
+            text:      tInfo.text,
+            sub:       sInfo.text,
+            pos:       extra.pos || [0.47 + Math.random() * 0.06, 0.23 + Math.random() * 0.08],
+            movable:   true,
+            restart:   true,
+            size:      extra.size || [1.28, 1.52],
+            tilt:      extra.tilt != null ? extra.tilt : [-3.5, 3.5],
+            color:     tInfo.color || 'red',
+            subColor:  sInfo.color || 'yellow',
+            mode:      extra.mode || 'all',
+            charMs:    extra.charMs || 22,
+            lifeMode:  'once',
+            duration:  totalStay,
+            shakeMode: extra.shakeMode || 'decay',
+            shakeAmp:  extra.shakeAmp != null ? extra.shakeAmp : 3.2,
+            fadeStyle: extra.fadeStyle || 'random',
+            fadeOut:   fadeOut != null ? fadeOut : 12
         })
-    }
-
-    function sendChatNear(level, dim, x, y, z, radius, rawJson) {
-        if (level == null || !isAllowedDim(dim) || rawJson == null) return
-        var b = resolveBase()
-        if (b != null && typeof b.tellNear === 'function') {
-            b.tellNear(level, x, y, z, radius, rawJson)
-            return
-        }
-        var parsed = parseJsonTextToLegacy(rawJson)
-        var textOut = parsed.text || String(rawJson)
-        forEachPlayerNear(level, x, y, z, radius, function (p) {
-            try {
-                if (typeof p.tell === 'function') p.tell(textOut)
-            } catch (e) { }
-        })
-    }
-
-    function sendChatLinesNear(level, dim, x, y, z, radius, lines) {
-        if (level == null || !isAllowedDim(dim) || !Array.isArray(lines)) return
-        var b = resolveBase()
-        if (b != null && typeof b.tellNear === 'function') {
-            b.tellNear(level, x, y, z, radius, lines)
-            return
-        }
-        for (var i = 0; i < lines.length; i++) {
-            sendChatNear(level, dim, x, y, z, radius, lines[i])
-        }
     }
 
     var PROGRESS_BAR_CACHE = []
@@ -1173,24 +896,11 @@
             }
 
             if (LEGACY_KILL) {
-                var b = resolveBase()
-                if (b != null && typeof b.forEachEntityNear === 'function') {
-                    b.forEachEntityNear(level, x + 0.5, y + 0.5, z + 0.5, MSG_RADIUS, function (ne) {
-                        return ne != null && String(ne.type) !== 'minecraft:item'
-                    }, function (ne) {
-                        inflictChaosCrystalDamage(level, ne, 'crystal_move', 3.4028235e38)
-                    })
-                } else if (AABB != null && typeof level.getEntitiesWithin === 'function') {
-                    try {
-                        var killBox = new AABB(x - MSG_RADIUS, y - MSG_RADIUS, z - MSG_RADIUS, x + MSG_RADIUS + 1, y + MSG_RADIUS + 1, z + MSG_RADIUS + 1)
-                        var nearEnts = level.getEntitiesWithin(killBox)
-                        for (var ei = 0, elen = nearEnts.size(); ei < elen; ei++) {
-                            var ne = nearEnts.get(ei)
-                            if (ne == null || String(ne.type) === 'minecraft:item') continue
-                            inflictChaosCrystalDamage(level, ne, 'crystal_move', 3.4028235e38)
-                        }
-                    } catch (eBox) { }
-                }
+                BASE.forEachEntityNear(level, x + 0.5, y + 0.5, z + 0.5, MSG_RADIUS, (ne) => {
+                    return ne != null && String(ne.type) !== 'minecraft:item'
+                }, (ne) => {
+                    inflictChaosCrystalDamage(level, ne, 'crystal_move', 3.4028235e38)
+                })
             }
         }
 
@@ -1753,17 +1463,6 @@
         RAPID_FINAL_ERROR_MAP[RAPID_FINAL_ERRORS[rfeIdx].remain] = RAPID_FINAL_ERRORS[rfeIdx]
     }
 
-    var RAPID_GLITCH_CODES = [
-        '0x7FFF_NEUTRON_FAULT',
-        '0xDEAD_CATALYST_OVERFLOW',
-        '0xC000_CHRONOS_DESYNC',
-        '0xBAD0_AE2_65M_CORRUPT',
-        '0xFFFF_ABYSSAL_LEAK',
-        '0x0000_SINGULARITY_BREACH',
-        '0xE004_MATRIX_DELAMINATE',
-        '0x9999_ENTROPY_COLLAPSE'
-    ]
-
     // 最后 10 秒高频散射叠层碎片池（去除硬编码颜色码，由渲染时动态注入随机配色与来源模块）
     var RAPID_SCATTER_SHARDS = [
         { title: '[SEGFAULT // 0xDEAD_BEEF]',      sub: 'core_dump: 锟斤拷烫烫烫' },
@@ -1820,16 +1519,6 @@
         return GLITCH_COLOR_PALETTES[Math.floor(Math.random() * GLITCH_COLOR_PALETTES.length)]
     }
 
-    // 底部 ActionBar 歪斜/正向错位前缀模板
-    var RAPID_ACTIONBAR_FRAMES = [
-        { pre: '',            ital: '',   borderL: '§4§k##§r ', borderR: ' §4§k##' },
-        { pre: '      §o',    ital: '§o', borderL: '§6╱╱ ',     borderR: ' ╱╱'     },
-        { pre: '§o',          ital: '§o', borderL: '§c\\\\ ',   borderR: ' \\\\    ' },
-        { pre: '   ',         ital: '',   borderL: '§4╔═ ',     borderR: ' ═╗'     },
-        { pre: '         §o', ital: '§o', borderL: '§e»» ',     borderR: ' ««'     },
-        { pre: '  §o',        ital: '§o', borderL: '§5┗━ ',     borderR: ' ━┛   '  }
-    ]
-
     // 统一挂载到新版 global.ScreenDanmaku v5（支持独立 namespace 隔离、持续激活 HUD 遥测面板、逐字碎片崩解与优先级保护）
     var DANMAKU_NAMESPACE = 'uncrafting_chaos'
     var DANMAKU_GROUP     = 'uncrafting_chaos'
@@ -1843,10 +1532,6 @@
         return false
     }
 
-    function isInMinimapZone(rx, ry) {
-        return isInHudForbiddenZone(rx, ry)
-    }
-
     // 全屏自由随机位置采样（不再局限于四条窄边！除右上角小地图、底部装备快捷栏与正中心准星极小圆外，全屏中区、次中心、四角与边缘均可随机生成）
     function randomFreeScreenPos(avoidCrosshair) {
         for (var attempt = 0; attempt < 12; attempt++) {
@@ -1858,10 +1543,6 @@
             return [Number(rx.toFixed(3)), Number(ry.toFixed(3))]
         }
         return [Number((0.12 + Math.random() * 0.52).toFixed(3)), Number((0.12 + Math.random() * 0.64).toFixed(3))]
-    }
-
-    function randomSafeEdgePos() {
-        return randomFreeScreenPos(true)
     }
 
     // 崩溃弹幕流全屏 4×3 广域网格 + 自由随机混合打散（彻底消除扎堆在屏幕中央的现象，铺满全屏每一个非 HUD 角落）
@@ -1891,161 +1572,31 @@
         return Number((sign * (8.0 + Math.random() * 26.0)).toFixed(1))
     }
 
-    var FALLBACK_DANMAKU_LIMITS = {
-        maxTitleLen:     160,
-        maxSubLen:       260,
-        maxCursorLen:    8,
-        maxScale:        2.5,
-        maxCharMs:       250,
-        maxStayTicks:    1200,
-        maxFadeOutTicks: 200
-    }
-
-    function truncateSafeText(s, maxLen) {
-        var str = (s == null) ? '' : String(s)
-        if (str.length <= maxLen) return str
-        var cut = str.substring(0, maxLen)
-        if (cut.length > 0) {
-            var lc = cut.charCodeAt(cut.length - 1)
-            if ((lc >= 0xD800 && lc <= 0xDBFF) || lc === 167) {
-                cut = cut.substring(0, cut.length - 1)
-            }
-        }
-        return cut
-    }
-
-    function clampFallbackNum(val, lo, hi, defVal) {
-        var n = Number(val)
-        if (!isFinite(n)) return defVal
-        return n < lo ? lo : (n > hi ? hi : n)
-    }
-
-    function resolveFallbackDanmakuProto() {
-        var ver = (typeof global !== 'undefined')
-            ? (global?.EpiphyProtocol?.DANMAKU_PROTO_VERSION || global?.EpiphySpec?.PROTOCOL?.DANMAKU_PROTO_VERSION)
-            : null
-        return (ver != null) ? Number(ver) : 5
-    }
-
     function sendDanmakuNear(level, x, y, z, radius, opts) {
         opts = opts || {}
         if (!opts.namespace) opts.namespace = DANMAKU_NAMESPACE
         if (!opts.group) opts.group = DANMAKU_GROUP
-        // 全局兜底防线：若显式传入的坐标意外落入右上角小地图区域，自动下移至安全区
-        if (Array.isArray(opts.pos) && opts.pos.length >= 2 && isInMinimapZone(opts.pos[0], opts.pos[1])) {
+        // 全局防线：若显式传入的坐标意外落入 HUD 禁区（小地图/底部快捷栏），自动移至安全区
+        if (Array.isArray(opts.pos) && opts.pos.length >= 2 && isInHudForbiddenZone(opts.pos[0], opts.pos[1])) {
             opts.pos = [opts.pos[0], 0.43 + Math.random() * 0.35]
         }
-        if (typeof global !== 'undefined' && global.ScreenDanmaku != null) {
-            global.ScreenDanmaku.inDimension(level, x, y, z, radius, opts)
-            return
-        }
-        // 兼容兜底：若 ScreenDanmaku 尚未加载，严格对齐服务端包契约（始终携带 namespace、tier='system'、proto 协商与 SYSTEM_PACKET_LIMITS 裁剪），
-        // 确保 clear/deactivate 绝对隔离在 uncrafting 命名空间内且不引发全局清屏或超长文本越界
-        var protoVer   = resolveFallbackDanmakuProto()
-        var channelId  = (typeof global !== 'undefined' && global?.EpiphyProtocol?.DANMAKU_CHANNEL)
-            ? String(global.EpiphyProtocol.DANMAKU_CHANNEL)
-            : 'epiphy:screen_danmaku'
-        var act        = String(opts.action || 'push')
-        var nsStr      = String(opts.namespace || DANMAKU_NAMESPACE)
-        var grpStr     = String(opts.group || DANMAKU_GROUP)
-        var fallbackPkt
-
-        if (act === 'clear' || act === 'deactivate' || act === 'stop') {
-            fallbackPkt = {
-                proto:       protoVer,
-                action:      act,
-                namespace:   nsStr,
-                tier:        'system',
-                group:       grpStr,
-                maxPriority: opts.maxPriority != null ? Number(opts.maxPriority) : 10
-            }
-            if (opts.id != null || opts.slotId != null) {
-                fallbackPkt.slotId = String(opts.slotId != null ? opts.slotId : opts.id)
-            }
-            if (opts.fadeOut != null) {
-                fallbackPkt.fadeOut = clampFallbackNum(opts.fadeOut, 1, FALLBACK_DANMAKU_LIMITS.maxFadeOutTicks, 16)
-            }
-        } else {
-            var lifeMode = (opts.lifeMode === 'active') ? 'active' : 'once'
-            var stayVal  = clampFallbackNum(opts.duration != null ? opts.duration : (opts.stay != null ? opts.stay : (lifeMode === 'active' ? 28 : 65)), 4, FALLBACK_DANMAKU_LIMITS.maxStayTicks, 65)
-            fallbackPkt = {
-                proto:     protoVer,
-                action:    act,
-                namespace: nsStr,
-                tier:      'system',
-                group:     grpStr,
-                lifeMode:  lifeMode,
-                title:     truncateSafeText(opts.text != null ? opts.text : (opts.title || ''), FALLBACK_DANMAKU_LIMITS.maxTitleLen),
-                sub:       truncateSafeText(opts.sub || '', FALLBACK_DANMAKU_LIMITS.maxSubLen),
-                rx:        clampFallbackNum(Array.isArray(opts.pos) ? opts.pos[0] : 0.5, 0.0, 1.0, 0.5),
-                ry:        clampFallbackNum(Array.isArray(opts.pos) ? opts.pos[1] : 0.35, 0.0, 1.0, 0.35),
-                stay:      stayVal,
-                fadeOut:   clampFallbackNum(opts.fadeOut != null ? opts.fadeOut : 10, 1, FALLBACK_DANMAKU_LIMITS.maxFadeOutTicks, 10)
-            }
-            if (opts.id != null || opts.slotId != null) {
-                fallbackPkt.slotId = String(opts.slotId != null ? opts.slotId : opts.id)
-            }
-            if (lifeMode === 'active') {
-                fallbackPkt.activeHold = clampFallbackNum(opts.activeHold != null ? opts.activeHold : stayVal, 4, FALLBACK_DANMAKU_LIMITS.maxStayTicks, stayVal)
-            }
-            if (typeof opts.priority === 'number' && isFinite(opts.priority)) {
-                fallbackPkt.priority = opts.priority
-            }
-            if (typeof opts.color === 'number' && isFinite(opts.color)) fallbackPkt.color = opts.color
-            if (typeof opts.subColor === 'number' && isFinite(opts.subColor)) fallbackPkt.subColor = opts.subColor
-            if (opts.scale != null || opts.size != null) {
-                var rawSc = opts.scale != null ? opts.scale : opts.size
-                if (typeof rawSc === 'number' && isFinite(rawSc)) {
-                    fallbackPkt.scale = clampFallbackNum(rawSc, 0.2, FALLBACK_DANMAKU_LIMITS.maxScale, 1.0)
-                }
-            }
-            if (opts.typewriter != null) fallbackPkt.typewriter = Boolean(opts.typewriter)
-            if (opts.charMs != null) fallbackPkt.charMs = clampFallbackNum(opts.charMs, 8, FALLBACK_DANMAKU_LIMITS.maxCharMs, 30)
-            if (opts.cursor != null) fallbackPkt.cursor = truncateSafeText(String(opts.cursor).replace(/[\r\n]/g, ''), FALLBACK_DANMAKU_LIMITS.maxCursorLen)
-            if (typeof opts.shakeMode === 'string') fallbackPkt.shakeMode = opts.shakeMode
-            if (typeof opts.fadeStyle === 'string') fallbackPkt.fadeStyle = opts.fadeStyle
-        }
-        forEachPlayerNear(level, x, y, z, radius, function (p) {
-            try {
-                p.sendData(channelId, fallbackPkt)
-            } catch (e) { }
-        })
+        DANMAKU.inDimension(level, x, y, z, radius, opts)
     }
 
     function deactivateTelemetryNear(level, x, y, z, radius, slotId, fadeOutTicks) {
-        if (typeof global !== 'undefined' && global.ScreenDanmaku != null) {
-            global.ScreenDanmaku.deactivateNear(level, x, y, z, radius, {
-                namespace: DANMAKU_NAMESPACE,
-                group:     TELEMETRY_GROUP,
-                id:        slotId || '',
-                fadeOut:   fadeOutTicks || 16
-            })
-            return
-        }
-        sendDanmakuNear(level, x, y, z, radius, {
-            action:    'deactivate',
+        DANMAKU.deactivateNear(level, x, y, z, radius, {
             namespace: DANMAKU_NAMESPACE,
             group:     TELEMETRY_GROUP,
-            slotId:    slotId || '',
+            id:        slotId || '',
             fadeOut:   fadeOutTicks || 16
         })
     }
 
     function clearDanmakuNear(level, x, y, z, radius, maxPriority) {
-        var maxPri = maxPriority != null ? maxPriority : 10
-        if (typeof global !== 'undefined' && global.ScreenDanmaku != null) {
-            global.ScreenDanmaku.clearNear(level, x, y, z, radius, {
-                namespace:   DANMAKU_NAMESPACE,
-                group:       '*',
-                maxPriority: maxPri
-            })
-            return
-        }
-        sendDanmakuNear(level, x, y, z, radius, {
-            action:      'clear',
+        DANMAKU.clearNear(level, x, y, z, radius, {
             namespace:   DANMAKU_NAMESPACE,
             group:       '*',
-            maxPriority: maxPri
+            maxPriority: maxPriority != null ? maxPriority : 10
         })
     }
 
@@ -2919,22 +2470,16 @@
                     return
                 }
 
-                // 持有终末之环 → 允许拆除，并掉落一台新的终极拆解台
-                if (player != null && findPlayerRelic(player, [RELIC_HALO_OF_END]) != null) {
-                    try { event.cancel() } catch (e) { }
-                    removeUnstableJob(dim, bx, by, bz)
-                    setStageBlockSafely(event.level, dim, bx, by, bz, 'minecraft:air')
-                    triggerRelicBreach(job, player, dim, bx, by, bz, true, stageIndex)
-                    return
-                }
-
-                // 持有七咒之戒 → 允许拆除，但诅咒吞没全部残渣（无掉落）
-                if (player != null && findPlayerRelic(player, [RELIC_CURSED_RING]) != null) {
-                    try { event.cancel() } catch (e) { }
-                    removeUnstableJob(dim, bx, by, bz)
-                    setStageBlockSafely(event.level, dim, bx, by, bz, 'minecraft:air')
-                    triggerRelicBreach(job, player, dim, bx, by, bz, false, stageIndex)
-                    return
+                // 持有终末之环 → 允许拆除并掉落新的终极拆解台；持有七咒之戒 → 允许拆除但无掉落
+                if (player != null) {
+                    var breachRelic = findPlayerRelic(player, [RELIC_HALO_OF_END, RELIC_CURSED_RING])
+                    if (breachRelic != null) {
+                        try { event.cancel() } catch (e) { }
+                        removeUnstableJob(dim, bx, by, bz)
+                        setStageBlockSafely(event.level, dim, bx, by, bz, 'minecraft:air')
+                        triggerRelicBreach(job, player, dim, bx, by, bz, breachRelic === RELIC_HALO_OF_END, stageIndex)
+                        return
+                    }
                 }
 
                 // 生存模式或非创造破坏：拒绝破坏，立刻触发致命错误警报并在 10 秒后爆炸
@@ -2987,15 +2532,9 @@
     // 接入 EpiphyBlockTracker 自动发现与追踪存量拆解台及 5 阶段失稳方块
     // ------------------------------------------------------------------------
     function ensureUncraftingTrackerAttached() {
-        if (uncraftingTracker != null && !uncraftingTracker.isFallback) return
-        var b = resolveBase()
-        var w = resolveWorldOps()
-        var createFn = (w != null && typeof w.createTracker === 'function')
-            ? w.createTracker
-            : ((b != null && typeof b.acquireBlockTracker === 'function') ? b.acquireBlockTracker : null)
-        if (typeof createFn !== 'function') return
+        if (uncraftingTracker != null) return
         try {
-            uncraftingTracker = createFn({
+            uncraftingTracker = WORLD_OPS.createTracker({
                 name:             'uncrafting_chaos',
                 maintainInterval: 10,
                 onFound: function (rec) {
@@ -3053,14 +2592,12 @@
             })
         }
         if (typeof ServerEvents.unloaded === 'function') {
-            ServerEvents.unloaded(function () {
+            ServerEvents.unloaded(() => {
                 try { saveUnstableJobs(true) } catch (eS) { }
                 watched              = {}
                 firedAt              = {}
                 unstableJobs.length  = 0
                 layerJobs.length     = 0
-                magmaJobs.length     = 0
-                liquidJobs.length    = 0
                 internalReplace      = {}
                 unstableStoreLoaded  = false
                 unstableStoreDirty   = false
@@ -3075,7 +2612,6 @@
     ServerEvents.tick(function (event) {
         SERVER = event.server
         tickCounter++
-        ensureUncraftingTrackerAttached()
         ensureUnstableJobsLoaded()
 
         // 每 200 tick（10 秒）清理一次已过期的 internalReplace 与 firedAt 临时坐标键
@@ -3289,30 +2825,28 @@
             var pz = job.z + 0.5 + Math.sin(a) * r
             var ix = Math.floor(px), iz = Math.floor(pz)
             if (!isBlockChunkLoaded(job.level, ix, iz)) continue
-            var sy = surfaceY(job.level, ix, iz, job.y)
+            var sy = WORLD_OPS.findLoadedSurfaceY(job.level, ix, iz, job.y, 96, 16)
+            if (sy == null) sy = job.y
             particleAt(job.level, P_SMOKE, px, sy + 1, pz, 1.0, 0.8, 1.0, 4, 0.04)
         }
 
         // 全高度混沌内爆伤害波前（弥补 DE 原生 ChaosImplosionTrace 仅在 y >= 0 结算伤害、导致 y < 0 深板岩层无伤害的缺陷）：
         // 对处于当前冲击波半径 (r + 18) 内的所有非创造玩家与生物持续施加原版 DEDamage.chaosImplosion(level) 混沌湮灭伤害！
         var waveRadius = Math.min(maxR + 16, r + 18)
-        forEachPlayerNear(job.level, job.x, job.y, job.z, waveRadius, function (p, distSq) {
+        forEachPlayerNear(job.level, job.x, job.y, job.z, waveRadius, (p, distSq) => {
             var dist = Math.sqrt(distSq)
             var wavePower = Math.max(80.0, (DE_POWER - (dist / 10.0)) * 120.0)
             inflictChaosCrystalDamage(job.level, p, 'chaos_implosion', wavePower)
         })
         if (job.t % 5 === 0) {
-            var b = resolveBase()
-            if (b != null && typeof b.forEachEntityNear === 'function') {
-                b.forEachEntityNear(job.level, job.x, job.y, job.z, waveRadius, function (ent) {
-                    var tid = String(ent.type || '')
-                    return tid !== 'minecraft:item' && tid !== 'minecraft:experience_orb' && tid !== GAPING_VOID_ENTITY
-                }, function (ent, distSq) {
-                    var dist = Math.sqrt(distSq)
-                    var wavePower = Math.max(80.0, (DE_POWER - (dist / 10.0)) * 120.0)
-                    inflictChaosCrystalDamage(job.level, ent, 'chaos_implosion', wavePower)
-                })
-            }
+            BASE.forEachEntityNear(job.level, job.x, job.y, job.z, waveRadius, (ent) => {
+                var tid = String(ent.type || '')
+                return tid !== 'minecraft:item' && tid !== 'minecraft:experience_orb' && tid !== GAPING_VOID_ENTITY
+            }, (ent, distSq) => {
+                var dist = Math.sqrt(distSq)
+                var wavePower = Math.max(80.0, (DE_POWER - (dist / 10.0)) * 120.0)
+                inflictChaosCrystalDamage(job.level, ent, 'chaos_implosion', wavePower)
+            })
         }
 
         // 在波前推进到 25%、50%、75%、92% 以及结束瞬间，持续唤醒流体任务的增量热点与外圈防回流环带（跟紧 DE 冲击波炸开海床的节奏；最外圈岩浆环统一在 DE_LIFETIME + 7 收尾复扫启动后浇筑）
@@ -3330,104 +2864,78 @@
     // ------------------------------------------------------------------------
     function triggerIncrementalLiquidSweep(level, dim, cx, cy, cz, radius) {
         if (!LIQUID_PURGE_ENABLED || level == null) return
-        var w = resolveWorldOps()
-        if (w != null && typeof w.triggerIncrementalFluidSweep === 'function') {
-            w.triggerIncrementalFluidSweep(level, dim, cx, cy, cz, radius, {
-                padding:        LIQUID_PURGE_PADDING,
-                loops:          LIQUID_PURGE_LOOPS,
-                unloadedTtl:    LIQUID_UNLOADED_TTL,
-                syncInitRadius: 0,
-                syncMaxMs:      LIQUID_SYNC_MAX_MS,
-                excludeLava:    true
-            })
-            return
-        }
+        WORLD_OPS.triggerIncrementalFluidSweep(level, dim, cx, cy, cz, radius, {
+            padding:        LIQUID_PURGE_PADDING,
+            loops:          LIQUID_PURGE_LOOPS,
+            unloadedTtl:    LIQUID_UNLOADED_TTL,
+            syncInitRadius: 0,
+            syncMaxMs:      LIQUID_SYNC_MAX_MS,
+            excludeLava:    true
+        })
     }
 
     function startLiquidPurge(level, dim, cx, cy, cz, radius, isRimOnlySweep) {
         if (!LIQUID_PURGE_ENABLED || level == null) return
-        var w = resolveWorldOps()
-        if (w != null && typeof w.startSphereFluidPurge === 'function') {
-            // 引爆当 tick 仅做极短同步核心预扫（syncInitRadius=32, syncMaxMs=4ms），将主开销平摊至 EpiphyWorldOps 分帧预算（8ms/tick）
-            w.startSphereFluidPurge(level, dim, cx, cy, cz, radius, {
-                isRimOnlySweep: Boolean(isRimOnlySweep),
-                padding:        LIQUID_PURGE_PADDING,
-                loops:          LIQUID_PURGE_LOOPS,
-                unloadedTtl:    LIQUID_UNLOADED_TTL,
-                syncInitRadius: LIQUID_SYNC_INIT_RADIUS,
-                syncMaxMs:      LIQUID_SYNC_MAX_MS,
-                onDone: function () {
-                    sendChatNear(
-                        level, dim, cx, cy, cz, FX_PACKET_RANGE + 120,
-                        '{"text":"[LIQUID_PURGE] 湮灭流体剥离完成 —— 湮灭柱域内的水源、流动水、气泡柱、水生植物、含水方块与岩浆已全部归零。","color":"gold"}'
-                    )
-                }
-            })
-            return
-        }
+        // 引爆当 tick 仅做极短同步核心预扫（syncInitRadius=32, syncMaxMs=4ms），将主开销平摊至 EpiphyWorldOps 分帧预算（8ms/tick）
+        WORLD_OPS.startSphereFluidPurge(level, dim, cx, cy, cz, radius, {
+            isRimOnlySweep: Boolean(isRimOnlySweep),
+            padding:        LIQUID_PURGE_PADDING,
+            loops:          LIQUID_PURGE_LOOPS,
+            unloadedTtl:    LIQUID_UNLOADED_TTL,
+            syncInitRadius: LIQUID_SYNC_INIT_RADIUS,
+            syncMaxMs:      LIQUID_SYNC_MAX_MS,
+            onDone: () => {
+                sendChatNear(
+                    level, dim, cx, cy, cz, FX_PACKET_RANGE + 120,
+                    '{"text":"[LIQUID_PURGE] 湮灭流体剥离完成 —— 湮灭柱域内的水源、流动水、气泡柱、水生植物、含水方块与岩浆已全部归零。","color":"gold"}'
+                )
+            }
+        })
     }
 
     function startMagmaRing(job, maxR) {
-        var w = resolveWorldOps()
-        if (w != null && typeof w.startRingBlockJob === 'function') {
-            w.startRingBlockJob(job.level, job.dim, job.x, job.y, job.z, maxR, {
-                blockId:   'minecraft:lava',
-                width:     MAGMA_RING_WIDTH,
-                thickness: MAGMA_RING_THICKNESS,
-                onDone: (rJob) => {
-                    var placed = rJob?.placedCols != null ? rJob.placedCols : 0
-                    var total  = rJob?.totalCols  != null ? rJob.totalCols  : 0
-                    if (placed <= 0) return
-                    var covText = (total > 0 && placed < total)
-                        ? `（已浇筑当前加载视距内 ${placed}/${total} 列）`
-                        : ''
-                    sendChatNear(
-                        job.level, job.dim, job.x, job.y, job.z, FX_PACKET_RANGE + 80,
-                        `{"text":"[MAGMA_RING] 最外壳层冷却完成 —— 半径 300 格处已形成岩浆圈层${covText}。","color":"gold"}`
-                    )
-                }
-            })
-            return
-        }
-    }
-
-    function hasPlayerNear(level, x, y, z, dist) {
-        var b = resolveBase()
-        if (b != null && typeof b.hasPlayerNear === 'function') {
-            return b.hasPlayerNear(level, x, y, z, dist)
-        }
-        var found = false
-        forEachPlayerNear(level, x, y, z, dist, () => {
-            found = true
-        })
-        return found
-    }
-
-    if (BASE_INIT != null && typeof BASE_INIT.registerDebugProvider === 'function') {
-        BASE_INIT.registerDebugProvider({
-            name:    'uncrafting',
-            label:   '拆解台混沌殉爆',
-            order:   60,
-            summary: () => `watched=${Object.keys(watched).length} | unstableJobs=${unstableJobs.length} | layerJobs=${layerJobs.length}`,
-            detail: () => {
-                var lines = [
-                    `watchedTables: ${Object.keys(watched).length}`,
-                    `unstableJobs: ${unstableJobs.length}`,
-                    `layerJobs: ${layerJobs.length}`,
-                    `traceGuardReady: ${TRACE_READY}`
-                ]
-                for (var i = 0; i < unstableJobs.length; i++) {
-                    var j = unstableJobs[i]
-                    lines.push(`  job[${i}]: ${j.dim} (${j.x},${j.y},${j.z}) stage=${j.stageIndex + 1} t=${j.t}/${j.totalTicks} fatal=${j.fatalTriggered}`)
-                }
-                return lines
-            },
-            metrics: () => ({
-                watchedCount:      Object.keys(watched).length,
-                unstableJobsCount: unstableJobs.length,
-                layerJobsCount:    layerJobs.length,
-                traceReady:        TRACE_READY
-            })
+        WORLD_OPS.startRingBlockJob(job.level, job.dim, job.x, job.y, job.z, maxR, {
+            blockId:   'minecraft:lava',
+            width:     MAGMA_RING_WIDTH,
+            thickness: MAGMA_RING_THICKNESS,
+            onDone: (rJob) => {
+                var placed = rJob?.placedCols != null ? rJob.placedCols : 0
+                var total  = rJob?.totalCols  != null ? rJob.totalCols  : 0
+                if (placed <= 0) return
+                var covText = (total > 0 && placed < total)
+                    ? `（已浇筑当前加载视距内 ${placed}/${total} 列）`
+                    : ''
+                sendChatNear(
+                    job.level, job.dim, job.x, job.y, job.z, FX_PACKET_RANGE + 80,
+                    `{"text":"[MAGMA_RING] 最外壳层冷却完成 —— 半径 300 格处已形成岩浆圈层${covText}。","color":"gold"}`
+                )
+            }
         })
     }
+
+    BASE.registerDebugProvider({
+        name:    'uncrafting',
+        label:   '拆解台混沌殉爆',
+        order:   60,
+        summary: () => `watched=${Object.keys(watched).length} | unstableJobs=${unstableJobs.length} | layerJobs=${layerJobs.length}`,
+        detail: () => {
+            var lines = [
+                `watchedTables: ${Object.keys(watched).length}`,
+                `unstableJobs: ${unstableJobs.length}`,
+                `layerJobs: ${layerJobs.length}`,
+                `traceGuardReady: ${TRACE_READY}`
+            ]
+            for (var i = 0; i < unstableJobs.length; i++) {
+                var j = unstableJobs[i]
+                lines.push(`  job[${i}]: ${j.dim} (${j.x},${j.y},${j.z}) stage=${j.stageIndex + 1} t=${j.t}/${j.totalTicks} fatal=${j.fatalTriggered}`)
+            }
+            return lines
+        },
+        metrics: () => ({
+            watchedCount:      Object.keys(watched).length,
+            unstableJobsCount: unstableJobs.length,
+            layerJobsCount:    layerJobs.length,
+            traceReady:        TRACE_READY
+        })
+    })
 })()

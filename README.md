@@ -73,9 +73,9 @@
 | **L2 安全控制** | `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v5.3`（`/epiphy`、三态分层权限域、命令方块修改锁、墓碑、按名备用模式） |
 | **L2 诊断维护** | `Epiphy的-调试组件.js` | `server` / `950` | `EpiphyDebug v1`（`/epiphy debug`） |
 | **L2 独立修复** | `Epiphy的-基础bug修复.js` | `server` / `900` | `EpiphyBugfix v1`（退出 HP 服务端恢复） |
-| **L3 业务调度** | `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `ScreenDanmaku v5.6` |
-| **L3 业务调度** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.6` |
-| **L3 玩法脚本** | `拆解台-混沌殉爆.v18.js` & `合成表-*` | `server` | 混沌殉爆事件链（含跨重启持久化、防伪造遗物与主手钻石镐校验）与配方调整 |
+| **L3 业务调度** | `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `ScreenDanmaku v5.6`（独立调度模块，禁止跨模块直接复用内部实现） |
+| **L3 业务调度** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.6`（独立调度模块，禁止跨模块直接复用内部实现） |
+| **L3 玩法脚本** | `拆解台-混沌殉爆.v18.js` & `合成表-*` | `server` | 混沌殉爆事件链（强前置核心/世界/弹幕组件，含持久化、防伪造遗物与主手钻石镐校验）与配方调整 |
 | **L4 客户端表现** | `屏幕弹幕渲染器` / `音频播放器` / `拆解台描述` | `client` | `ScreenDanmakuClient v5.7`、`EpiphyAudioClient v5.6` |
 
 ### 3. 模块依赖与降级语义规范（YAML）
@@ -147,11 +147,13 @@ Epiphy的-音频组件.js:
   on_missing:
     no_client: 服务端句柄可正常调度，客户端无声音输出
     optional:  各可选组件均按单层明确降级，不阻断常规播放 API
+  note:     L3 业务调度组件（含 ScreenDanmaku / EpiphyAudio），仅通过全局公开 API 调用，禁止直接复用内部实现
 
 拆解台-混沌殉爆.v18.js:
   requires:
-    hard:     [Epiphy的小玩意-终极拆解台_不稳定.js, ScreenDanmaku]
-    optional: [kubejs/assets/epiphy/ 语言与资源]
+    hard:     [Epiphy的小玩意-终极拆解台_不稳定.js, EpiphyServerCore, EpiphyWorldOps, ScreenDanmaku]
+    optional: [EpiphyAudio, kubejs/assets/epiphy/ 语言与资源]
+  on_missing: 任一硬前置缺失时立即抛出异常 Fail-Fast 拒载（玩法层不保留冗余兜底）
 
 # ==================== Layer 4 · Client ====================
 Epiphy的-屏幕弹幕渲染器.js:

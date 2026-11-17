@@ -19,6 +19,8 @@
 //    - 可选依赖：kubejs/server_scripts/通用组件/Epiphy的-权限阀.js (EpiphyPermissionValve, priority: 1000)
 //      缺失时 /epiphy danmaku 指令不生效（OP 登录时提示），JS 调用接口正常；后续 /reload 补全权限阀后会自动从队列补注册并复位提示标志
 //
+//  [组件边界 / 禁止直接复用] 本组件属于 L3 业务调度层（非 L1/L2 通用基础设施），内部逻辑不得被其他模块
+//    或兄弟 L3 组件（如音频组件）直接复制或跨模块复用；外部玩法脚本仅应通过 global.ScreenDanmaku 公开 API 调用。
 //  [语法规范] 遵循 README-LLM.md §1 强制语法基准（与 docs/kube-mods-rhino-es5-es6-compatibility.md）：
 //    以 ES5 + `var` 为主，可按需谨慎使用经实测无语义偏移的 ES6/ES2020 扩展语法；
 //    严禁使用 `??`、`let`/`const`、对象属性简写/计算属性、展开与默认参数等已确认高危/失效特性。
@@ -230,7 +232,7 @@
     function pick(obj, keys, defVal) {
         if (!BASE.isObjectLike(obj)) return defVal
         for (var i = 0; i < keys.length; i++) {
-            var v = safeReadPropLocal(obj, keys[i])
+            var v = BASE.safeReadProp(obj, keys[i])
             if (v !== undefined && v !== null) return v
         }
         return defVal
@@ -239,23 +241,13 @@
     function pickNonEmpty(obj, keys, defVal) {
         if (!BASE.isObjectLike(obj)) return defVal
         for (var i = 0; i < keys.length; i++) {
-            var v = safeReadPropLocal(obj, keys[i])
+            var v = BASE.safeReadProp(obj, keys[i])
             if (v !== undefined && v !== null && String(v).trim() !== '') return v
         }
         return defVal
     }
 
-    function safeReadPropLocal(obj, key) {
-        if (obj == null) return undefined
-        try {
-            return obj[key]
-        } catch (e) {
-            return undefined
-        }
-    }
-
-    var readVec3 = BASE.readPos
-    var nowNano  = BASE.nowNano
+    var nowNano = BASE.nowNano
 
     function reportConfigWarning(msg, notifyPlayer) {
         return LOGGER.warn('参数警告', msg, notifyPlayer, CONFIG.errorLogIntervalMs)
@@ -1906,7 +1898,7 @@
                     if (tpPos == null) return 0
                     var tpDim = null
                     try {
-                        var tpLv = safeReadPropLocal(targetPlayer, 'level')
+                        var tpLv = BASE.safeReadProp(targetPlayer, 'level')
                         if (tpLv == null && typeof targetPlayer.getLevel === 'function') tpLv = targetPlayer.getLevel()
                         if (tpLv != null) tpDim = BASE.dimOfLevel(resolveLevel(tpLv, SERVER_REF) || tpLv)
                     } catch (eDim) { }

@@ -6138,8 +6138,21 @@ test('P2 fixes: grapheme ZWJ/flags/Extend, FIFO glyph eviction, rotated batched 
     assert.strictEqual(AudUp.scanBlocksNow(), 7, 'EpiphyAudio must upgrade fallback tracker when EpiphyBlockTracker appears')
     assert.ok(realBinds.indexOf('danmaku:test:late_dm') >= 0 && realBinds.indexOf('audio:test:late_au') >= 0, 'existing bindings replay onto upgraded real trackers')
 
-    // 6. v18 meltdown fallbackPkt (without ScreenDanmaku loaded) includes proto:5 and passes client dataReceived fail-closed check
+    // 6. v18 gameplay layer fail-fast when hard prerequisites are missing, and emits scoped ScreenDanmaku packets once prerequisites are loaded
     var V18_PATH = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '合成表-暮色森林', '拆解台-混沌殉爆.v18.js')
+    var v18MissingSb = createKubeSandbox(function (cls) {
+        if (cls === 'net.minecraft.world.level.Level') return { OVERWORLD: 'minecraft:overworld', NETHER: 'minecraft:the_nether', END: 'minecraft:the_end' }
+        if (cls === 'net.minecraft.world.level.Level$ExplosionInteraction') return { NONE: 'NONE', TNT: 'TNT' }
+        return function () {}
+    })
+    v18MissingSb.ServerEvents.recipes = function () {}
+    loadStartupBase(v18MissingSb)
+    assert.throws(
+        function () { runScriptIn(v18MissingSb, V18_PATH) },
+        function (err) { return err != null && /缺少必需前置组件/.test(String(err)) },
+        'v18 gameplay script must fail-fast when hard prerequisites are missing'
+    )
+
     var v18Pkts = []
     var v18Placed = {}
     var v18Ticks = []
@@ -6180,7 +6193,14 @@ test('P2 fixes: grapheme ZWJ/flags/Extend, FIFO glyph eviction, rotated batched 
                 return function () {}
             }
         },
-        ServerEvents: { loaded: function (fn) { fn({ server: v18Srv }) }, unloaded: function () {}, tick: function (fn) { v18Ticks.push(fn) }, recipes: function () {} },
+        ServerEvents: {
+            loaded: function (fn) { fn({ server: v18Srv }) },
+            unloaded: function () {},
+            tick: function (fn) { v18Ticks.push(fn) },
+            recipes: function () {},
+            commandRegistry: function () {},
+            command: function () {}
+        },
         LevelEvents: { loaded: function () {}, unloaded: function () {} },
         PlayerEvents: { loggedIn: function () {}, loggedOut: function () {} },
         BlockEvents: {
@@ -6189,13 +6209,16 @@ test('P2 fixes: grapheme ZWJ/flags/Extend, FIFO glyph eviction, rotated batched 
             rightClicked: function () {}
         },
         ItemEvents: { rightClicked: function () {} },
+        Text: { of: function (s) { return String(s) } },
         Utils: { server: v18Srv },
         server: v18Srv,
         global: {}
     }
     v18Sb.globalThis = v18Sb
     vm.createContext(v18Sb)
-    loadStartupBase(v18Sb)
+    loadServerBase(v18Sb)
+    runScriptIn(v18Sb, TRACKER_PATH)
+    runScriptIn(v18Sb, DANMAKU_PATH)
     runScriptIn(v18Sb, V18_PATH)
     assert.ok(typeof v18Placed['epiphy:ultra_uncrafting_instability_1'] === 'function')
     v18Placed['epiphy:ultra_uncrafting_instability_1']({
@@ -6207,17 +6230,17 @@ test('P2 fixes: grapheme ZWJ/flags/Extend, FIFO glyph eviction, rotated batched 
     for (var vt = 0; vt < 10 && v18Pkts.length === 0; vt++) {
         for (var ti = 0; ti < v18Ticks.length; ti++) v18Ticks[ti]({ server: v18Srv })
     }
-    assert.ok(v18Pkts.length >= 1, 'v18 sends fallback danmaku packet when ScreenDanmaku absent')
-    assert.strictEqual(v18Pkts[0].proto, 5, 'v18 fallbackPkt must include proto:5')
-    assert.strictEqual(v18Pkts[0].namespace, 'uncrafting_chaos', 'v18 fallbackPkt must include uncrafting_chaos namespace')
-    assert.strictEqual(v18Pkts[0].tier, 'system', 'v18 fallbackPkt must carry tier:system')
+    assert.ok(v18Pkts.length >= 1, 'v18 sends danmaku packet via ScreenDanmaku')
+    assert.strictEqual(v18Pkts[0].proto, 5, 'v18 packet must include proto:5')
+    assert.strictEqual(v18Pkts[0].namespace, 'uncrafting_chaos', 'v18 packet must include uncrafting_chaos namespace')
+    assert.strictEqual(v18Pkts[0].tier, 'system', 'v18 packet must carry tier:system')
     Cli.clear('*')
     paints[0](ev)
     Cli.push({ id: 'keep_other_ns', namespace: 'other_mod', group: 'banner', title: 'PROTECTED_BANNER', stay: 500 })
     var beforeCnt = Cli.count()
     netHandlers['epiphy:screen_danmaku']({ data: v18Pkts[0] })
-    assert.strictEqual(Cli.count(), beforeCnt + 1, 'ScreenDanmakuClient accepts v18 fallbackPkt through fail-closed dataReceived')
-    // Place stage 5 near v18Player (10,64,0) and advance to climax -> clearDanmakuNear fallback must only clear uncrafting_chaos namespace, NEVER other_mod!
+    assert.strictEqual(Cli.count(), beforeCnt + 1, 'ScreenDanmakuClient accepts v18 packet through fail-closed dataReceived')
+    // Place stage 5 near v18Player (10,64,0) and advance to climax -> clearDanmakuNear must only clear uncrafting_chaos namespace, NEVER other_mod!
     v18Placed['epiphy:ultra_uncrafting_instability_5']({
         level: v18Lv,
         block: { id: 'epiphy:ultra_uncrafting_instability_5', x: 10, y: 64, z: 0 },
@@ -6230,10 +6253,10 @@ test('P2 fixes: grapheme ZWJ/flags/Extend, FIFO glyph eviction, rotated batched 
     }
     var clearPkts = v18Pkts.filter(function (pk) { return pk && pk.action === 'clear' })
     assert.ok(clearPkts.length >= 1, 'v18 emits clear packet on meltdown climax')
-    assert.strictEqual(clearPkts[0].namespace, 'uncrafting_chaos', 'v18 fallback clear packet MUST carry namespace:uncrafting_chaos')
+    assert.strictEqual(clearPkts[0].namespace, 'uncrafting_chaos', 'v18 clear packet MUST carry namespace:uncrafting_chaos')
     netHandlers['epiphy:screen_danmaku']({ data: clearPkts[0] })
     paints[0](ev)
-    assert.ok(Cli.list().some(function (ov) { return ov.namespace === 'other_mod' }), 'v18 fallback clear packet must NOT globally wipe other_mod danmaku')
+    assert.ok(Cli.list().some(function (ov) { return ov.namespace === 'other_mod' }), 'v18 clear packet must NOT globally wipe other_mod danmaku')
 })
 
 test('hidden items: epiphy:chaos_crystal avoids createCompositeState(boolean) EnumTypeWrapper trap across Mojmap, no-AT, and SRG modes', function () {

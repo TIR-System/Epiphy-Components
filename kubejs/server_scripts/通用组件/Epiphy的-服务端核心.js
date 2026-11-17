@@ -64,7 +64,7 @@
     function safeHasMethod(obj, prop) {
         if (obj == null) return false;
         try {
-            return typeof obj[prop] === 'function';
+            return safeTypeOf(obj[prop]) === 'function';
         } catch (e) {
             return false;
         }
@@ -533,8 +533,8 @@
         var cz = bz >> 4;
         if (typeof lv.getChunkSource === 'function') {
             var cs = lv.getChunkSource();
-            if (cs != null && typeof cs.getChunkNow === 'function') {
-                return cs.getChunkNow(cx, cz) != null;
+            if (cs != null && typeof cs.getChunkNow === 'function' && cs.getChunkNow(cx, cz) != null) {
+                return true;
             }
         }
         if (typeof lv.hasChunk === 'function') {
@@ -2731,6 +2731,8 @@
             isObjectLike:                 isObjectLike,
             isJavaMapLike:                isJavaMapLike,
             isArrayLike:                  isArrayLike,
+            safeReadProp:                 safeReadProp,
+            safeHasMethod:                safeHasMethod,
             normalizeDim:                 normalizeDim,
             toJsArray:                    toJsArray,
             toSeqArray:                   toSeqArray,
