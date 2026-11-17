@@ -35,9 +35,9 @@
 //      会自动从 `global.EpiphyCommandRegistryQueue` 补齐待注册子命令。
 //    - 注：调用 `registerSubcommand` 时若未声明 `permission`，将告警并按最小权限默认设为 `admin`（仅 OP）。
 //
-//  [Rhino 语法兼容性约定] KubeJS 2001.6.x 内置 Rhino 对 ES6 支持不完整且存在语义偏差（如 `let`/`const`
-//    TDZ/循环闭包偏差与部分语法糖在 Java 类包装下报错）。故本系列变量统一用 `var`，权限阀等核心基础模块维持
-//    ES5 + 稳定容器语法；音频模块则采用经实测稳定的 ES6 子集（`=>` / 模板字符串 / `for..of`）。请勿引入 `let`/`const`。
+//  [语法规范] 遵循 README-LLM.md §1 强制语法基准（与 docs/kube-mods-rhino-es5-es6-compatibility.md）：
+//    以 ES5 + `var` 为主，可按需谨慎使用经实测无语义偏移的 ES6/ES2020 扩展语法；
+//    严禁使用 `??`、`let`/`const`、对象属性简写/计算属性、展开与默认参数等已确认高危/失效特性。
 // ============================================================================
 
 ;(function () {

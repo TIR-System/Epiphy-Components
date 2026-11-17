@@ -13,7 +13,7 @@
 //            KubeJS ClassFilter 兼容路径（`KubeJSPaths.dir` + `JsonIO.readString` + `worlds_index.json` + Rhino `NativeJavaMap` 防护）、
 //            `lastWorldPath` 复制档自动分叉与世界专属 `logs/` 运行日志目录切换、权限阀子命令队列与统一 OP 提醒、Debug 注册与命令树 DSL
 //   向下兼容：同时挂载 `global.EpiphyServerCore` 与 `global.EpiphyServerBase`
-//   约束    ：严格 Rhino ES5（禁止 let/const、箭头函数、模板字符串、展开运算符）
+//   语法规范：遵循 README-LLM.md §1 强制语法基准（与 docs/kube-mods-rhino-es5-es6-compatibility.md）
 // ============================================================================
 
 ;(function () {

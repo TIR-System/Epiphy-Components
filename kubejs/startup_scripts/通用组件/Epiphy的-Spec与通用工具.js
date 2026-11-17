@@ -7,7 +7,7 @@
 //     1. 定义并导出 global.EpiphyProtocol（频道名、版本号、PRIORITY_MAP、HUD_FORBIDDEN_PRESETS）；
 //     2. 收拢跨组件复用的数值/布尔/时长/颜色/字号/倾角/命令解析器与球簇合并几何算法，导出 global.EpiphySpec；
 //     3. 服务端业务组件以本文件 + EpiphyServerBase 为底座；客户端渲染器/播放器在缺失本文件时仍可降级运行内置 v5 协议常量。
-//   约束    ：严格 Rhino ES5（禁止 let/const、箭头函数、模板字符串、展开运算符）
+//   语法规范：遵循 README-LLM.md §1 强制语法基准（与 docs/kube-mods-rhino-es5-es6-compatibility.md）
 // ============================================================================
 
 ;(function () {

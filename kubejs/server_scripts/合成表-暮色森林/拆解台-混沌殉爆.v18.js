@@ -1921,15 +1921,10 @@
     }
 
     function resolveFallbackDanmakuProto() {
-        if (typeof global !== 'undefined' && global != null) {
-            if (global.EpiphyProtocol != null && global.EpiphyProtocol.DANMAKU_PROTO_VERSION != null) {
-                return Number(global.EpiphyProtocol.DANMAKU_PROTO_VERSION)
-            }
-            if (global.EpiphySpec != null && global.EpiphySpec.PROTOCOL != null && global.EpiphySpec.PROTOCOL.DANMAKU_PROTO_VERSION != null) {
-                return Number(global.EpiphySpec.PROTOCOL.DANMAKU_PROTO_VERSION)
-            }
-        }
-        return 5
+        var ver = (typeof global !== 'undefined')
+            ? (global?.EpiphyProtocol?.DANMAKU_PROTO_VERSION || global?.EpiphySpec?.PROTOCOL?.DANMAKU_PROTO_VERSION)
+            : null
+        return (ver != null) ? Number(ver) : 5
     }
 
     function sendDanmakuNear(level, x, y, z, radius, opts) {
@@ -1947,7 +1942,7 @@
         // 兼容兜底：若 ScreenDanmaku 尚未加载，严格对齐服务端包契约（始终携带 namespace、tier='system'、proto 协商与 SYSTEM_PACKET_LIMITS 裁剪），
         // 确保 clear/deactivate 绝对隔离在 uncrafting 命名空间内且不引发全局清屏或超长文本越界
         var protoVer   = resolveFallbackDanmakuProto()
-        var channelId  = (typeof global !== 'undefined' && global.EpiphyProtocol != null && global.EpiphyProtocol.DANMAKU_CHANNEL)
+        var channelId  = (typeof global !== 'undefined' && global?.EpiphyProtocol?.DANMAKU_CHANNEL)
             ? String(global.EpiphyProtocol.DANMAKU_CHANNEL)
             : 'epiphy:screen_danmaku'
         var act        = String(opts.action || 'push')
@@ -3379,16 +3374,16 @@
                 blockId:   'minecraft:lava',
                 width:     MAGMA_RING_WIDTH,
                 thickness: MAGMA_RING_THICKNESS,
-                onDone: function (rJob) {
-                    var placed = (rJob != null && rJob.placedCols != null) ? rJob.placedCols : 0
-                    var total  = (rJob != null && rJob.totalCols != null) ? rJob.totalCols : 0
+                onDone: (rJob) => {
+                    var placed = rJob?.placedCols != null ? rJob.placedCols : 0
+                    var total  = rJob?.totalCols  != null ? rJob.totalCols  : 0
                     if (placed <= 0) return
                     var covText = (total > 0 && placed < total)
-                        ? '（已浇筑当前加载视距内 ' + placed + '/' + total + ' 列）'
+                        ? `（已浇筑当前加载视距内 ${placed}/${total} 列）`
                         : ''
                     sendChatNear(
                         job.level, job.dim, job.x, job.y, job.z, FX_PACKET_RANGE + 80,
-                        '{"text":"[MAGMA_RING] 最外壳层冷却完成 —— 半径 300 格处已形成岩浆圈层' + covText + '。","color":"gold"}'
+                        `{"text":"[MAGMA_RING] 最外壳层冷却完成 —— 半径 300 格处已形成岩浆圈层${covText}。","color":"gold"}`
                     )
                 }
             })
@@ -3402,7 +3397,7 @@
             return b.hasPlayerNear(level, x, y, z, dist)
         }
         var found = false
-        forEachPlayerNear(level, x, y, z, dist, function () {
+        forEachPlayerNear(level, x, y, z, dist, () => {
             found = true
         })
         return found
@@ -3410,35 +3405,29 @@
 
     if (BASE_INIT != null && typeof BASE_INIT.registerDebugProvider === 'function') {
         BASE_INIT.registerDebugProvider({
-            name:  'uncrafting',
-            label: '拆解台混沌殉爆',
-            order: 60,
-            summary: function () {
-                return 'watched=' + Object.keys(watched).length +
-                    ' | unstableJobs=' + unstableJobs.length +
-                    ' | layerJobs=' + layerJobs.length
-            },
-            detail: function () {
+            name:    'uncrafting',
+            label:   '拆解台混沌殉爆',
+            order:   60,
+            summary: () => `watched=${Object.keys(watched).length} | unstableJobs=${unstableJobs.length} | layerJobs=${layerJobs.length}`,
+            detail: () => {
                 var lines = [
-                    'watchedTables: ' + Object.keys(watched).length,
-                    'unstableJobs: ' + unstableJobs.length,
-                    'layerJobs: ' + layerJobs.length,
-                    'traceGuardReady: ' + TRACE_READY
+                    `watchedTables: ${Object.keys(watched).length}`,
+                    `unstableJobs: ${unstableJobs.length}`,
+                    `layerJobs: ${layerJobs.length}`,
+                    `traceGuardReady: ${TRACE_READY}`
                 ]
                 for (var i = 0; i < unstableJobs.length; i++) {
                     var j = unstableJobs[i]
-                    lines.push('  job[' + i + ']: ' + j.dim + ' (' + j.x + ',' + j.y + ',' + j.z + ') stage=' + (j.stageIndex + 1) + ' t=' + j.t + '/' + j.totalTicks + ' fatal=' + j.fatalTriggered)
+                    lines.push(`  job[${i}]: ${j.dim} (${j.x},${j.y},${j.z}) stage=${j.stageIndex + 1} t=${j.t}/${j.totalTicks} fatal=${j.fatalTriggered}`)
                 }
                 return lines
             },
-            metrics: function () {
-                return {
-                    watchedCount:      Object.keys(watched).length,
-                    unstableJobsCount: unstableJobs.length,
-                    layerJobsCount:    layerJobs.length,
-                    traceReady:        TRACE_READY
-                }
-            }
+            metrics: () => ({
+                watchedCount:      Object.keys(watched).length,
+                unstableJobsCount: unstableJobs.length,
+                layerJobsCount:    layerJobs.length,
+                traceReady:        TRACE_READY
+            })
         })
     }
 })()

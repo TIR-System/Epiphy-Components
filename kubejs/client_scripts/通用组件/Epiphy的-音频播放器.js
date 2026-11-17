@@ -1,5 +1,5 @@
 // ============================================================================
-//  通用空间音频与流式声场组件 —— 客户端播放引擎 (EpiphyAudioClient v5.6, ES6)
+//  通用空间音频与流式声场组件 —— 客户端播放引擎 (EpiphyAudioClient v5.6)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 <repo-root> 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
@@ -13,11 +13,11 @@
 //      缺失时启动输出 console.warn 并降级至内置 v5 协议常量与基础数值工具；收包仍严格执行 fail-closed 版本校验。
 //    - 必需配套：kubejs/server_scripts/通用组件/Epiphy的-音频组件.js（缺失时客户端处于待命状态，无音频数据包驱动）
 
-//  适用环境：Minecraft 1.20.1 / Forge 47.x / KubeJS 2001.6.x (ES6)
-
-//  [Rhino 语法兼容性约定] KubeJS 2001.6.x 内置 Rhino 对 ES6 支持不完整且存在语义偏差（如 `let`/`const`
-//    的 TDZ 与循环闭包语义偏差）。故本播放器仅使用经本服实测稳定的 ES6 子集（`=>` / 模板字符串 /
-//    `for..of` / `Map` / `Set`），所有变量声明统一使用 `var`；同系列弹幕客户端与服务端底座维持 ES5。请勿引入 `let`/`const`。
+//  适用环境：Minecraft 1.20.1 / Forge 47.x / KubeJS 2001.6.x
+//
+//  [语法规范] 遵循 README-LLM.md §1 强制语法基准（与 docs/kube-mods-rhino-es5-es6-compatibility.md）：
+//    以 ES5 + `var` 为主，可按需谨慎使用经实测无语义偏移的 ES6/ES2020 扩展语法；
+//    严禁使用 `??`、`let`/`const`、对象属性简写/计算属性、展开与默认参数等已确认高危/失效特性。
 // ============================================================================
 
 ;(() => {

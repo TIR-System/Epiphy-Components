@@ -23,9 +23,9 @@
 //    - 可选依赖：kubejs/server_scripts/通用组件/Epiphy的-权限阀.js (EpiphyPermissionValve, priority: 1000)
 //    - 若缺失权限阀：`/epiphy debug` 游戏内指令不会挂载，但各模块上报的数据仍可通过 `global.EpiphyDebug.collectSnapshot()` 在 JS 侧读取。
 //
-//  [Rhino 语法兼容性约定] KubeJS 2001.6.x 内置 Rhino 对 ES6 支持不完整且存在语义偏差（如 `let`/`const`
-//    语义不完备，部分扩展语法会在 Java/Brigadier 回调包装中退化）。故全系列变量统一使用 `var`，本模块维持 ES5 +
-//    `Map`/`Set` 写法；同系列音频模块采用经实测稳定的 ES6 子集（`=>` / 模板字符串 / `for..of`）。请勿引入 `let`/`const`。
+//  [语法规范] 遵循 README-LLM.md §1 强制语法基准（与 docs/kube-mods-rhino-es5-es6-compatibility.md）：
+//    以 ES5 + `var` 为主，可按需谨慎使用经实测无语义偏移的 ES6/ES2020 扩展语法；
+//    严禁使用 `??`、`let`/`const`、对象属性简写/计算属性、展开与默认参数等已确认高危/失效特性。
 // ============================================================================
 
 ;(function () {

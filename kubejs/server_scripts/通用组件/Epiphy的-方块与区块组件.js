@@ -1335,8 +1335,8 @@
             }
         }
 
-        columns.sort(function (a, b) { return a.distSq - b.distSq })
-        rimColumns.sort(function (a, b) { return a.distSq - b.distSq })
+        columns.sort((a, b) => a.distSq - b.distSq)
+        rimColumns.sort((a, b) => a.distSq - b.distSq)
 
         fluidPurgeJobs.push({
             dim:             normDim,
@@ -1873,33 +1873,28 @@
         name:    'tracker',
         label:   '方块与区块组件',
         order:   20,
-        summary: function () {
+        summary: () => {
             var s = getStats()
-            return 'scanQueue.length=' + s.scanQueueArrayLength +
-                ' (pending=' + s.pendingScanCount + ')' +
-                ' | trackedBlocks.size=' + s.trackedBlocksSize +
-                ' | tickAll=' + s.lastTickAllMs.toFixed(3) + 'ms' +
-                ' (active=' + s.lastActiveTickAllMs.toFixed(3) + 'ms, max=' + s.maxTickAllMs.toFixed(3) + 'ms)' +
-                ' | getTrackedRecords=' + s.getTrackedRecordsCalls
+            return `scanQueue.length=${s.scanQueueArrayLength} (pending=${s.pendingScanCount}) | trackedBlocks.size=${s.trackedBlocksSize} | tickAll=${s.lastTickAllMs.toFixed(3)}ms (active=${s.lastActiveTickAllMs.toFixed(3)}ms, max=${s.maxTickAllMs.toFixed(3)}ms) | getTrackedRecords=${s.getTrackedRecordsCalls}`
         },
-        detail: function () {
+        detail: () => {
             var s = getStats()
             return [
-                'bindingsCount: ' + s.bindingsCount + ' (version=' + s.bindingsVersion + ')',
-                'subscribersCount: ' + s.subscribersCount,
-                'trackedBlocks.size: ' + s.trackedBlocksSize,
-                'tickAllMs: last=' + s.lastTickAllMs.toFixed(3) + 'ms, lastActive=' + s.lastActiveTickAllMs.toFixed(3) + 'ms, max=' + s.maxTickAllMs.toFixed(3) + 'ms (count=' + s.tickAllCount + ', lastTick=' + s.lastTickAllTick + ')',
-                'scanSliceMs: last=' + s.lastScanSliceMs.toFixed(3) + 'ms, max=' + s.maxScanSliceMs.toFixed(3) + 'ms (count=' + s.scanSliceCount + ')',
-                'scannedSections.size: ' + s.scannedSectionsSize + ' / max=' + CONFIG.maxScannedSections,
-                'scanQueue.length: ' + s.scanQueueArrayLength + ' (head=' + s.scanQueueHead + ', pending=' + s.pendingScanCount + ', max=' + CONFIG.maxScanQueue + ')',
-                'CONFIG: enqInterval=' + CONFIG.scanEnqInterval + ', perTick=' + CONFIG.scanSectionsPerTick + ', verifyWin=' + CONFIG.verifyWindowTicks + ', debounce=' + CONFIG.saveDebounceTicks,
-                'stateIdCache.size: ' + s.stateIdCacheSize,
-                'getTrackedRecordsCalls: ' + s.getTrackedRecordsCalls + ' (perSub=' + JSON.stringify(s.subscriberCalls) + ')',
-                'persistDirty: ' + persistDirty + ', storagePath: ' + (loadedStoragePath || '（未加载世界）')
+                `bindingsCount: ${s.bindingsCount} (version=${s.bindingsVersion})`,
+                `subscribersCount: ${s.subscribersCount}`,
+                `trackedBlocks.size: ${s.trackedBlocksSize}`,
+                `tickAllMs: last=${s.lastTickAllMs.toFixed(3)}ms, lastActive=${s.lastActiveTickAllMs.toFixed(3)}ms, max=${s.maxTickAllMs.toFixed(3)}ms (count=${s.tickAllCount}, lastTick=${s.lastTickAllTick})`,
+                `scanSliceMs: last=${s.lastScanSliceMs.toFixed(3)}ms, max=${s.maxScanSliceMs.toFixed(3)}ms (count=${s.scanSliceCount})`,
+                `scannedSections.size: ${s.scannedSectionsSize} / max=${CONFIG.maxScannedSections}`,
+                `scanQueue.length: ${s.scanQueueArrayLength} (head=${s.scanQueueHead}, pending=${s.pendingScanCount}, max=${CONFIG.maxScanQueue})`,
+                `CONFIG: enqInterval=${CONFIG.scanEnqInterval}, perTick=${CONFIG.scanSectionsPerTick}, verifyWin=${CONFIG.verifyWindowTicks}, debounce=${CONFIG.saveDebounceTicks}`,
+                `stateIdCache.size: ${s.stateIdCacheSize}`,
+                `getTrackedRecordsCalls: ${s.getTrackedRecordsCalls} (perSub=${JSON.stringify(s.subscriberCalls)})`,
+                `persistDirty: ${persistDirty}, storagePath: ${loadedStoragePath || '（未加载世界）'}`
             ]
         },
         metrics: getStats,
-        check: function () {
+        check: () => {
             var s = getStats()
             var qOk = s.pendingScanCount < Math.floor(CONFIG.maxScanQueue * 0.85)
             var pOk = (SERVER_REF == null || loadedStoragePath != null)
@@ -1907,12 +1902,12 @@
                 {
                     name:   'scan_queue_headroom',
                     ok:     qOk,
-                    detail: 'pending=' + s.pendingScanCount + '/' + CONFIG.maxScanQueue + ' (arrayLen=' + s.scanQueueArrayLength + ')'
+                    detail: `pending=${s.pendingScanCount}/${CONFIG.maxScanQueue} (arrayLen=${s.scanQueueArrayLength})`
                 },
                 {
                     name:   'storage_initialized',
                     ok:     pOk,
-                    detail: 'loadedStoragePath=' + String(loadedStoragePath)
+                    detail: `loadedStoragePath=${String(loadedStoragePath)}`
                 }
             ]
         },
