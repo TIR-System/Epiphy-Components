@@ -168,7 +168,7 @@ Epiphy的-音频播放器.js:
 ## 核心功能说明
 
 1. **通用基础设施与外部存储（`epiphy-data/`）**：
-   - 统一收拢跨端协议常量与解析规范（`EpiphySpec`）、限频去重日志与外部可读文本日志接收器（`EpiphyLog v1.2`，支持 `KubeJSPaths.dir + JsonIO` 写盘降级，入档自动切至对应世界 `logs/` 子文件夹）、服务端对象/原子文件读写/DSL（`EpiphyServerCore / EpiphyServerBase v2.4`，含 `worlds_index.json` 世界索引、`resolveLevel` 无效维度 fail-closed 且安全封装 Rhino Java POJO 访问）与渐进式区块段方块扫描（`EpiphyBlockTracker / EpiphyWorldOps v2.3`）。
+   - 统一收拢跨端协议常量与解析规范（`EpiphySpec`）、限频去重日志与外部可读文本日志接收器（`EpiphyLog v1.2`，支持 `KubeJSPaths.dir + JsonIO` 写盘降级，入档自动切至对应世界 `logs/` 子文件夹）、服务端核心/原子文件读写/DSL（`EpiphyServerCore / EpiphyServerBase v2.4`，含 `corrupt` 专属 `.bak` 自愈、`worlds_index.json` 世界索引、`resolveLevel` 无效维度 fail-closed、`findPlayerItem` 无 NBT 伪造校验与零分配范围遍历）与渐进式区块段追踪及三级门控地形批处理（`EpiphyBlockTracker / EpiphyWorldOps v2.3`，支持 `cylinder2D` 上柱下球流体剥离、`excludeLava` 岩浆环保护与基岩/容器安全跳过）。
    - 运行期在游戏根目录建立 `epiphy-data/`（`config` / `worlds` / `players` / `events` / `logs` / `presets` / `backups`），配合 `.tmp` + `.bak` 原子写入；世界目录采用 `<slug>__<shortId>` 命名并与存档内 `epiphy_world_id.json` 双向绑定，当 `lastWorldPath` 变化（如复制存档）时自动分叉并提示 OP 清理旧目录。
    - **权限与防回滚安全（`EpiphyPermissionValve v5.3`）**：基于 `Class.isInstance` 的源类型鉴权与分级 scope 模型（支持将如 `danmaku.self`、`audio.play` 等单个子命令独立授予非 OP，子级明确撤销优先于父模块授权，`danmaku.broadcast`/`audio.broadcast` 等 `exactScopeOnly` 广域权限须显式单授）；默认严格按 UUID 授权（并显式提示无 TrueUUID 与密码登录插件的纯离线服风险）；撤销写入外部 `revocations.json` 墓碑防止存档回滚复活；按名授权备用模式默认 Fail-Closed，须真 OP/控制台在 2 分钟内凭 8 位随机口令二次确认开启，支持 `/epiphy auth scopes|namegrant|grantname|revokename|where|reload`；已加固原型保留键过滤、`getContext()` 为空回退源拦截及墓碑重授权时间戳文本同步。
    - **独立修复与诊断**：动态性能监控与健康自检（`EpiphyDebug v1`），以及零硬依赖的纯服务端退出 HP 保留与延迟恢复修复（`EpiphyBugfix v1`）。

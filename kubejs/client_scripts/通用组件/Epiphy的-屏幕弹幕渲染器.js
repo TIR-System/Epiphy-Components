@@ -1263,6 +1263,17 @@
             entry = SHARED_TEXT_SEQ_CACHE[key]
         } else if (Object.prototype.hasOwnProperty.call(TRANSIENT_TEXT_SEQ_CACHE, key)) {
             entry = TRANSIENT_TEXT_SEQ_CACHE[key]
+            // 当曾作为过渡态前缀缓存的条目被正式静态行请求时，将其晋升至持久共享缓存池，防止被后续打字机前缀淘汰
+            if (isTransient !== true) {
+                delete TRANSIENT_TEXT_SEQ_CACHE[key]
+                entry._isTransient = false
+                if (SHARED_TEXT_SEQ_KEYS.length >= MAX_TEXT_SEQ_CACHE) {
+                    var oldestPromote = SHARED_TEXT_SEQ_KEYS.shift()
+                    if (oldestPromote !== undefined) delete SHARED_TEXT_SEQ_CACHE[oldestPromote]
+                }
+                SHARED_TEXT_SEQ_CACHE[key] = entry
+                SHARED_TEXT_SEQ_KEYS.push(key)
+            }
         } else if (isTransient === true) {
             if (TRANSIENT_TEXT_SEQ_KEYS.length >= MAX_TRANSIENT_SEQ_CACHE) {
                 var oldTrans = TRANSIENT_TEXT_SEQ_KEYS.shift()
@@ -3206,11 +3217,20 @@
     function ensureLineVisTable(ln, fontObj, letterSpacingPx, spacingMode) {
         var spacing = (letterSpacingPx != null && isFinite(letterSpacingPx)) ? Number(letterSpacingPx) : 0
         var spMode  = spacingMode || 'relative'
-        if (ln._visEndIdx != null && ln._visTableSp === spacing && ln._visTableMode === spMode) {
+        if (ln._visEndIdx != null &&
+            ln._visTableSp === spacing &&
+            ln._visTableMode === spMode &&
+            ln._visTableEpoch === MUI_EPOCH &&
+            ln._visTableFont === fontObj) {
             return ln
         }
         var str       = ln.text || ''
-        var checkTags = Boolean(ln.hasTags) || hasRichSpanTags(str)
+        if (str.indexOf('\n') >= 0 || str.indexOf('\r') >= 0) {
+            ln._visEndIdx = null
+            ln._visHasNewline = true
+            return ln
+        }
+        var checkTags  = Boolean(ln.hasTags) || hasRichSpanTags(str)
         var endIndices = [0]
         var cumWidths  = [0]
         var isBold     = false
@@ -3219,10 +3239,6 @@
 
         for (var i = 0; i < str.length;) {
             var code = str.charCodeAt(i)
-            if (code === 10 || code === 13) {
-                i++
-                continue
-            }
             if (code === 167 && (i + 1) < str.length) {
                 var fc = str.charAt(i + 1).toLowerCase()
                 if (fc === 'l') isBold = true
@@ -3244,14 +3260,36 @@
             var cw      = baseCw + computeClusterSpacing(baseCw, spacing, spMode)
             curW += cw
             i = g.nextIndex
+            // 与 sliceVisibleChars 严格保持逐字符一致：吸收紧跟在当前可见字素之后的 § 格式码与闭合/内联标签
+            while (i < str.length) {
+                var nextCode = str.charCodeAt(i)
+                if (nextCode === 167 && (i + 1) < str.length) {
+                    var nfc = str.charAt(i + 1).toLowerCase()
+                    if (nfc === 'l') isBold = true
+                    else if ((nfc >= '0' && nfc <= '9') || (nfc >= 'a' && nfc <= 'f') || nfc === 'r') isBold = false
+                    i += 2
+                    continue
+                }
+                if (checkTags) {
+                    var trailTag = matchInlineTagAt(str, i)
+                    if (trailTag != null) {
+                        applyInlineTagToState(trailTag, tagState)
+                        i += trailTag.rawLen
+                        continue
+                    }
+                }
+                break
+            }
             endIndices.push(i)
             cumWidths.push(curW)
         }
-        ln._visEndIdx    = endIndices
-        ln._visCumW      = cumWidths
-        ln._visTableSafe = !checkTags
-        ln._visTableSp   = spacing
-        ln._visTableMode = spMode
+        ln._visEndIdx     = endIndices
+        ln._visCumW       = cumWidths
+        ln._visTableSafe  = !checkTags
+        ln._visTableSp    = spacing
+        ln._visTableMode  = spMode
+        ln._visTableEpoch = MUI_EPOCH
+        ln._visTableFont  = fontObj
         return ln
     }
 
@@ -3982,6 +4020,7 @@
     })
 
     global.ScreenDanmakuClient = {
+        VERSION:    '5.7.0',
         CONFIG:     CONFIG,
         setDebug:   function (enabled) { CONFIG.debug = Boolean(enabled); return CONFIG.debug },
         push:       enqueueDanmaku,
@@ -4049,6 +4088,20 @@
             findVisibleUnitRange:         findVisibleUnitRange,
             isUnitOutOfViewport:          isUnitOutOfViewport,
             getOrBuildCharShakeCache:     getOrBuildCharShakeCache,
+            isPotentialSpanTagHead:       isPotentialSpanTagHead,
+            hasRichSpanTags:              hasRichSpanTags,
+            ensureLineVisTable:           ensureLineVisTable,
+            sliceVisibleChars:            sliceVisibleChars,
+            dropFirstVisibleChars:        dropFirstVisibleChars,
+            buildRenderedLines:           buildRenderedLines,
+            getSeqCacheStats:             function () {
+                return {
+                    sharedCount:    SHARED_TEXT_SEQ_KEYS.length,
+                    transientCount: TRANSIENT_TEXT_SEQ_KEYS.length,
+                    hasShared:      function (k) { return Object.prototype.hasOwnProperty.call(SHARED_TEXT_SEQ_CACHE, k) },
+                    hasTransient:   function (k) { return Object.prototype.hasOwnProperty.call(TRANSIENT_TEXT_SEQ_CACHE, k) }
+                }
+            },
             inspectOverlays:              function () { return activeOverlays }
         }
     }

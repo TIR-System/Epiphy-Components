@@ -466,8 +466,6 @@
     var firedAt            = {}
     var unstableJobs       = []
     var layerJobs          = []
-    var magmaJobs          = []  // 降级兜底队列（当 EpiphyWorldOps 存在时委托给通用组件）
-    var liquidJobs         = []  // 降级兜底队列（当 EpiphyWorldOps 存在时委托给通用组件）
     var internalReplace    = {}  // 标记脚本自身正在替换阶段方块，避免误判为外部破坏
     var tickCounter        = 0
     var SERVER             = null
@@ -532,12 +530,16 @@
         unstableStoreLoaded = true
         try {
             var info = b.resolveWorldStorageInfo(SERVER, UNSTABLE_STORE_FILE, UNSTABLE_STORE_DIR)
-            var data = (typeof b.readJsonSafe === 'function') ? b.readJsonSafe(info.filePath, LOGGER) : null
-            if (data == null && SERVER.persistentData != null && typeof SERVER.persistentData.getString === 'function') {
+            // 优先读取随 level.dat 同步保存的 persistentData，确保崩溃/回档后与区块存档时间戳一致；外部 JSON 仅作跨存储兜底
+            var data = null
+            if (SERVER.persistentData != null && typeof SERVER.persistentData.getString === 'function') {
                 var rawP = SERVER.persistentData.getString(UNSTABLE_PDATA_KEY)
                 if (rawP) {
-                    try { data = JSON.parse(String(rawP)) } catch (eP) { }
+                    try { data = JSON.parse(String(rawP)) } catch (eP) { data = null }
                 }
+            }
+            if (data == null && typeof b.readJsonSafe === 'function') {
+                data = b.readJsonSafe(info.filePath, LOGGER)
             }
             var list = (data != null && Array.isArray(data.jobs)) ? data.jobs : []
             for (var i = 0; i < list.length; i++) {
@@ -547,16 +549,17 @@
                 if (!isFinite(bx) || !isFinite(by) || !isFinite(bz)) continue
                 if (findUnstableJob(String(item.dim), bx, by, bz) != null) continue
                 unstableJobs.push({
-                    level:          resolveLevelByDim(String(item.dim), null),
-                    dim:            String(item.dim),
-                    x:              bx,
-                    y:              by,
-                    z:              bz,
-                    t:              Math.max(0, Math.floor(Number(item.t) || 0)),
-                    spawnTick:      tickCounter,
-                    totalTicks:     Math.max(20, Math.floor(Number(item.totalTicks) || UNSTABLE_TICKS)),
-                    stageIndex:     Math.max(0, Math.min(STAGE_BLOCKS.length - 1, Math.floor(Number(item.stageIndex) || 0))),
-                    fatalTriggered: Boolean(item.fatalTriggered)
+                    level:            resolveLevelByDim(String(item.dim), null),
+                    dim:              String(item.dim),
+                    x:                bx,
+                    y:                by,
+                    z:                bz,
+                    t:                Math.max(0, Math.floor(Number(item.t) || 0)),
+                    spawnTick:        tickCounter,
+                    restoredFromSave: true,
+                    totalTicks:       Math.max(20, Math.floor(Number(item.totalTicks) || UNSTABLE_TICKS)),
+                    stageIndex:       Math.max(0, Math.min(STAGE_BLOCKS.length - 1, Math.floor(Number(item.stageIndex) || 0))),
+                    fatalTriggered:   Boolean(item.fatalTriggered)
                 })
             }
         } catch (eLoad) {
@@ -816,7 +819,7 @@
 
     function forEachPlayerNear(level, x, y, z, radius, callback) {
         if (level == null || typeof callback !== 'function') return
-        var core = typeof global !== 'undefined' && global ? (global.EpiphyServerCore || global.EpiphyServerBase || null) : null
+        var core = resolveBase()
         if (core && typeof core.forEachPlayerNear === 'function') {
             core.forEachPlayerNear(level, x, y, z, radius, callback)
             return
@@ -2162,6 +2165,7 @@
         //    因此在下一 tick 额外补一次方块写入，并给予 5 tick 的生成保护窗口，彻底防止刚进入阶段 1 就被巡检误判为“遭外力破坏”而直接跳到阶段 5！
         setStageBlockSafely(level, dim, x, y, z, STAGE_BLOCKS[startStage])
         var srv = SERVER || (level != null ? level.server : null)
+        if (SERVER == null && srv != null) SERVER = srv
         if (srv != null) {
             try {
                 srv.scheduleInTicks(1, function () {
@@ -2446,6 +2450,39 @@
                 unstableJobs.splice(n, 1)
                 saveUnstableJobs(true)
                 continue
+            }
+
+            // 1b. 存档恢复任务首次对账（防止崩溃/回档导致 JSON 阶段与世界区块方块不同步而误触发防篡改致命引爆）
+            if (job.restoredFromSave) {
+                if (!isBlockChunkLoaded(job.level, job.x, job.z)) {
+                    continue
+                }
+                var restoredBlkId = job.level.getBlock(job.x, job.y, job.z).id
+                if (isStageBlockId(restoredBlkId)) {
+                    var worldStage = STAGE_MAP[restoredBlkId]
+                    var stageDiff = (job.stageIndex !== worldStage)
+                    job.stageIndex = worldStage
+                    var minTickForStage = worldStage * STAGE_DURATION_TICKS
+                    var maxTickForStage = (worldStage + 1) * STAGE_DURATION_TICKS - 1
+                    if (!job.fatalTriggered && (job.t < minTickForStage || job.t > maxTickForStage)) {
+                        job.t = minTickForStage
+                        stageDiff = true
+                    }
+                    internalReplace[keyOf(job.dim, job.x, job.y, job.z)] = tickCounter
+                    job.spawnTick = tickCounter
+                    job.restoredFromSave = false
+                    if (stageDiff) saveUnstableJobs(true)
+                } else if (restoredBlkId === 'twilightforest:uncrafting_table') {
+                    setStageBlockSafely(job.level, job.dim, job.x, job.y, job.z, STAGE_BLOCKS[job.stageIndex])
+                    job.spawnTick = tickCounter
+                    job.restoredFromSave = false
+                    saveUnstableJobs(true)
+                } else {
+                    // 世界区块已回档至放置前或被离线清理，安全丢弃孤儿任务而非误爆
+                    unstableJobs.splice(n, 1)
+                    saveUnstableJobs(true)
+                    continue
+                }
             }
 
             job.t++
@@ -3011,15 +3048,15 @@
 
         tickUnstable()
 
-        // 爆炸收尾：液体预清除与最外圈岩浆圈层（均分帧执行）
-        if (liquidJobs.length > 0) tickLiquidPurge()
-        if (magmaJobs.length > 0) tickMagmaRing()
-
         for (var n = layerJobs.length - 1; n >= 0; n--) {
             var job = layerJobs[n]
             job.t++
             if (job.t === DE_LIFETIME + 6) {
                 triggerIncrementalLiquidSweep(job.level, job.dim, job.x, job.y, job.z, DE_POWER * 10)
+            }
+            if (job.t === DE_LIFETIME + 7 && MAGMA_RING_ENABLED && !job.magmaStarted) {
+                job.magmaStarted = true
+                startMagmaRing(job, DE_POWER * 10)
             }
             if (job.t > DE_LIFETIME + 8) {
                 layerJobs.splice(n, 1)
@@ -3187,17 +3224,9 @@
             }
         }
 
-        // 在波前推进到 25%、50%、75%、92% 以及结束瞬间，持续唤醒流体任务的增量热点与外圈防回流环带（跟紧 DE 冲击波炸开海床的节奏）
+        // 在波前推进到 25%、50%、75%、92% 以及结束瞬间，持续唤醒流体任务的增量热点与外圈防回流环带（跟紧 DE 冲击波炸开海床的节奏；最外圈岩浆环统一在 DE_LIFETIME + 7 收尾复扫启动后浇筑）
         if (r === Math.floor(maxR * 0.25) || r === Math.floor(maxR * 0.50) || r === Math.floor(maxR * 0.75) || r === Math.floor(maxR * 0.92) || r === maxR) {
             triggerIncrementalLiquidSweep(job.level, job.dim, job.x, job.y, job.z, maxR)
-        }
-
-        // 到达最大半径：启动最外圈岩浆浇筑
-        if (r >= maxR) {
-            if (MAGMA_RING_ENABLED && !job.magmaStarted) {
-                job.magmaStarted = true
-                startMagmaRing(job, maxR)
-            }
         }
 
         if (job.t % FX_BOOM_EVERY === 0) {
@@ -3206,8 +3235,7 @@
     }
 
     // ------------------------------------------------------------------------
-    // 液体清除与外圈岩浆环：优先委托给通用组件 EpiphyWorldOps (Epiphy的-方块与区块组件.js)
-    //   若独立加载未挂载 EpiphyWorldOps，则使用内置安全分帧回退
+    // 液体清除与外圈岩浆环：委托给通用组件 EpiphyWorldOps (Epiphy的-方块与区块组件.js)
     // ------------------------------------------------------------------------
     function triggerIncrementalLiquidSweep(level, dim, cx, cy, cz, radius) {
         if (!LIQUID_PURGE_ENABLED || level == null) return
@@ -3217,8 +3245,9 @@
                 padding:        LIQUID_PURGE_PADDING,
                 loops:          LIQUID_PURGE_LOOPS,
                 unloadedTtl:    LIQUID_UNLOADED_TTL,
-                syncInitRadius: LIQUID_SYNC_INIT_RADIUS,
-                syncMaxMs:      LIQUID_SYNC_MAX_MS
+                syncInitRadius: 0,
+                syncMaxMs:      4,
+                excludeLava:    true
             })
             return
         }
@@ -3228,26 +3257,23 @@
         if (!LIQUID_PURGE_ENABLED || level == null) return
         var w = resolveWorldOps()
         if (w != null && typeof w.startSphereFluidPurge === 'function') {
+            // 引爆当 tick 仅做极短同步核心预扫（syncMaxMs=4ms），将主开销平摊至后续分帧预算，避免与 ProcessChaosImplosion 初始化叠加产生尖峰
             w.startSphereFluidPurge(level, dim, cx, cy, cz, radius, {
                 isRimOnlySweep: Boolean(isRimOnlySweep),
                 padding:        LIQUID_PURGE_PADDING,
                 loops:          LIQUID_PURGE_LOOPS,
                 unloadedTtl:    LIQUID_UNLOADED_TTL,
-                syncInitRadius: LIQUID_SYNC_INIT_RADIUS,
-                syncMaxMs:      LIQUID_SYNC_MAX_MS,
+                syncInitRadius: Math.min(32, LIQUID_SYNC_INIT_RADIUS),
+                syncMaxMs:      4,
                 onDone: function () {
                     sendChatNear(
                         level, dim, cx, cy, cz, FX_PACKET_RANGE + 120,
-                        '{"text":"[LIQUID_PURGE] 湮灭流体剥离完成 —— 球体范围内的水源、流动水、气泡柱、水生植物、含水方块与岩浆已全部归零。","color":"gold"}'
+                        '{"text":"[LIQUID_PURGE] 湮灭流体剥离完成 —— 湮灭柱域内的水源、流动水、气泡柱、水生植物、含水方块与岩浆已全部归零。","color":"gold"}'
                     )
                 }
             })
             return
         }
-    }
-
-    function tickLiquidPurge() {
-        // 已交由 EpiphyWorldOps 全局统一帧时间预算驱动
     }
 
     function startMagmaRing(job, maxR) {
@@ -3257,35 +3283,21 @@
                 blockId:   'minecraft:lava',
                 width:     MAGMA_RING_WIDTH,
                 thickness: MAGMA_RING_THICKNESS,
-                onDone: function () {
+                onDone: function (rJob) {
+                    var placed = (rJob != null && rJob.placedCols != null) ? rJob.placedCols : 0
+                    var total  = (rJob != null && rJob.totalCols != null) ? rJob.totalCols : 0
+                    if (placed <= 0) return
+                    var covText = (total > 0 && placed < total)
+                        ? '（已浇筑当前加载视距内 ' + placed + '/' + total + ' 列）'
+                        : ''
                     sendChatNear(
                         job.level, job.dim, job.x, job.y, job.z, FX_PACKET_RANGE + 80,
-                        '{"text":"[MAGMA_RING] 最外壳层冷却完成 —— 半径 300 格处已形成闭合岩浆圈层。","color":"gold"}'
+                        '{"text":"[MAGMA_RING] 最外壳层冷却完成 —— 半径 300 格处已形成岩浆圈层' + covText + '。","color":"gold"}'
                     )
                 }
             })
             return
         }
-    }
-
-    function tickMagmaRing() {
-        // 已交由 EpiphyWorldOps 全局统一帧时间预算驱动
-    }
-
-    function surfaceY(level, x, z, fromY) {
-        var w = resolveWorldOps()
-        if (w != null && typeof w.findLoadedSurfaceY === 'function') {
-            var wy = w.findLoadedSurfaceY(level, x, z, fromY, 96, 16)
-            if (wy != null) return wy
-        }
-        if (!isBlockChunkLoaded(level, x, z)) return fromY
-        var top = fromY + 96
-        for (var y = top; y > fromY - 16; y--) {
-            try {
-                if (level.getBlock(x, y, z).id !== 'minecraft:air') return y
-            } catch (e) { break }
-        }
-        return fromY
     }
 
     function hasPlayerNear(level, x, y, z, dist) {

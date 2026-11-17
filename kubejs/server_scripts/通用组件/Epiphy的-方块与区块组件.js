@@ -1007,8 +1007,35 @@
     var PALETTE_FLUID_STATE  = 0 // 0=未探测, 1=支持 maybeHas, -1=不支持
     var fluidPurgeJobs       = []
     var ringBlockJobs        = []
+    var protectedRingCols    = {} // key: dim|chunkX|chunkZ -> expireTick（保护已浇筑的岩浆环不被流体复扫清除）
     var lastWorldOpsTickMs   = 0
     var maxWorldOpsTickMs    = 0
+
+    var RING_PROTECTED_BLOCK_IDS = {
+        'minecraft:bedrock':               true,
+        'minecraft:barrier':               true,
+        'minecraft:end_portal_frame':      true,
+        'minecraft:end_portal':            true,
+        'minecraft:end_gateway':           true,
+        'minecraft:command_block':         true,
+        'minecraft:chain_command_block':   true,
+        'minecraft:repeating_command_block': true,
+        'minecraft:structure_block':       true,
+        'minecraft:jigsaw':                true
+    }
+
+    function isLavaBlockOrState(level, wx, wy, wz, state) {
+        try {
+            var sid = extractStateIdCached(state)
+            if (sid === 'minecraft:lava') return true
+            if (sid != null && sid !== '') return false
+        } catch (eSid) { }
+        try {
+            var b = level.getBlock(wx, wy, wz)
+            if (b != null && String(b.id) === 'minecraft:lava') return true
+        } catch (eBlk) { }
+        return false
+    }
 
     var FLUID_PREDICATE = function (state) {
         try {
@@ -1050,7 +1077,7 @@
         }
     }
 
-    function purgeChunkColumnFluids(level, chunkX, chunkZ, cx, cy, cz, rSq, minWorldY, maxWorldY, useCylinder2D) {
+    function purgeChunkColumnFluids(level, chunkX, chunkZ, cx, cy, cz, rSq, minWorldY, maxWorldY, useCylinder2D, purgeOpts) {
         ensureWorldOpsInit()
         var col = null
         try {
@@ -1062,6 +1089,13 @@
         var sections = col.sections
         if (sections == null) return 0
 
+        var pOpts       = (purgeOpts != null && typeof purgeOpts === 'object') ? purgeOpts : {}
+        var normDim     = pOpts.dim || 'minecraft:overworld'
+        var ringProtExp = protectedRingCols[normDim + '|' + chunkX + '|' + chunkZ] || 0
+        var skipLava    = Boolean(pOpts.excludeLava) || (ringProtExp > tickCounter)
+        var cylFloorY   = (pOpts.cylFloorY != null && isFinite(pOpts.cylFloorY)) ? pOpts.cylFloorY : Math.min(cy, 16)
+        var rimShellRSq = (pOpts.rimShellRSq != null && pOpts.rimShellRSq > 0) ? pOpts.rimShellRSq : rSq
+
         var minBuildY = col.minBuildY
         var baseX     = chunkX << 4
         var baseZ     = chunkZ << 4
@@ -1069,7 +1103,7 @@
         var hadFluid  = false
         var isCyl     = (useCylinder2D !== false)
 
-        // 水平 2D AABB 最近点与最远点预计算（柱体模式下整列共用，无需在每个 Section 内重算 Y 球面内缩）
+        // 水平 2D AABB 最近点与最远点预计算（上层海平面/水柱使用 2D 圆柱距离，消除球面内缩遗留水墙；深层地下使用半球距离保护深部地下水/岩浆湖）
         var nearX = (cx < baseX) ? (baseX - cx) : (cx > baseX + 15 ? (cx - (baseX + 15)) : 0)
         var nearZ = (cz < baseZ) ? (baseZ - cz) : (cz > baseZ + 15 ? (cz - (baseZ + 15)) : 0)
         var near2DSq = nearX * nearX + nearZ * nearZ
@@ -1093,6 +1127,9 @@
             if (!isCyl) {
                 var nearY = (cy < secBottomY) ? (secBottomY - cy) : (cy > secTopY ? (cy - secTopY) : 0)
                 if (near2DSq + nearY * nearY > rSq) continue
+            } else if (secTopY < cylFloorY) {
+                var nearFloorY = cylFloorY - secTopY
+                if (near2DSq + nearFloorY * nearFloorY > rSq) continue
             }
 
             if (PALETTE_FLUID_STATE >= 0 && typeof section.maybeHas === 'function') {
@@ -1108,38 +1145,50 @@
             }
 
             var fullyInside
-            if (isCyl) {
+            if (isCyl && secBottomY >= cylFloorY) {
                 fullyInside = (far2DSq <= rSq)
             } else {
-                var farY = Math.max(Math.abs(secBottomY - cy), Math.abs(secTopY - cy))
+                var refCenterY = isCyl ? cylFloorY : cy
+                var farY = Math.max(Math.abs(secBottomY - refCenterY), Math.abs(secTopY - refCenterY))
                 fullyInside = (far2DSq + farY * farY <= rSq)
             }
 
             for (var ly = 0; ly < 16; ly++) {
                 var wy   = secBottomY + ly
                 if (wy < minWorldY || wy > maxWorldY) continue
-                var dySq = isCyl ? 0 : ((wy - cy) * (wy - cy))
+                var dySq = 0
+                if (!isCyl) {
+                    dySq = (wy - cy) * (wy - cy)
+                } else if (wy < cylFloorY) {
+                    dySq = (wy - cylFloorY) * (wy - cylFloorY)
+                }
                 for (var lx = 0; lx < 16; lx++) {
                     var wx    = baseX + lx
                     var dx    = wx - cx
-                    var dxySq = dx * dx + dySq
+                    var dxSq  = dx * dx
+                    var dxySq = dxSq + dySq
                     for (var lz = 0; lz < 16; lz++) {
                         var wz = baseZ + lz
+                        var dz = wz - cz
+                        var horizSq = dxSq + dz * dz
                         if (!fullyInside) {
-                            var dz = wz - cz
                             if (dxySq + dz * dz > rSq) continue
                         }
                         try {
                             var state = section.getBlockState(lx, ly, lz)
                             if (state == null || state.getFluidState().isEmpty()) continue
+                            if (skipLava && isLavaBlockOrState(level, wx, wy, wz, state)) continue
                             hadFluid = true
+                            // 最外侧 1~1.5 格边界壳层使用 flag=3 通知邻居流体更新，使边界海水自然回流坍塌而非冻结为悬空垂直水墙；
+                            // 内部核心区域继续使用 flag=2 批量静默剥离以避免巨量连锁流体 tick
+                            var setFlags = (horizSq > rimShellRSq) ? 3 : 2
                             var tpos = (mpos != null)
                                 ? mpos.set(wx, wy, wz)
                                 : (BLOCK_POS_CLASS != null ? new BLOCK_POS_CLASS(wx, wy, wz) : null)
                             if (WATERLOGGED_PROP != null && typeof state.hasProperty === 'function' && state.hasProperty(WATERLOGGED_PROP) && tpos != null) {
-                                level.setBlock(tpos, state.setValue(WATERLOGGED_PROP, JAVA_BOOL_FALSE), 2)
+                                level.setBlock(tpos, state.setValue(WATERLOGGED_PROP, JAVA_BOOL_FALSE), setFlags)
                             } else if (AIR_STATE != null && tpos != null && typeof level.setBlock === 'function') {
-                                level.setBlock(tpos, AIR_STATE, 2)
+                                level.setBlock(tpos, AIR_STATE, setFlags)
                             } else {
                                 level.getBlock(wx, wy, wz).set('minecraft:air')
                             }
@@ -1171,7 +1220,9 @@
         var options       = BASE.isObjectLike(opts) ? opts : {}
         var normDim       = normalizeDim(dim || dimOfLevel(level)) || 'minecraft:overworld'
         var isRimOnly     = Boolean(options.isRimOnlySweep)
-        var useCylinder2D = (options.cylinder2D !== false)
+        // 同时支持 options.cylinder2D 与 options.useCylinder2D 两种命名（默认开启上柱下球模式）
+        var useCylinder2D = (options.cylinder2D !== false && options.useCylinder2D !== false)
+        var excludeLava   = Boolean(options.excludeLava || options.waterOnly)
         var sweepCooldown = (options.sweepIntervalTicks != null && isFinite(Number(options.sweepIntervalTicks)))
             ? Math.max(0, Math.floor(Number(options.sweepIntervalTicks)))
             : 15
@@ -1187,6 +1238,7 @@
             existingJob.loopsLeft     = Math.max(existingJob.loopsLeft, isRimOnly ? 2 : loops)
             existingJob.expireTick    = Math.max(existingJob.expireTick, tickCounter + unloadedTtl)
             existingJob.nextSweepTick = tickCounter
+            if (excludeLava) existingJob.excludeLava = true
             if (existingJob.index >= existingJob.columns.length && existingJob.rimColumns && existingJob.rimColumns.length > 0) {
                 existingJob.columns    = existingJob.rimColumns.slice()
                 existingJob.hotColumns = []
@@ -1195,9 +1247,10 @@
             return true
         }
 
-        var r   = radius + padding
-        var rSq = r * r
-        var minWorldY = -64, maxWorldY = 319
+        var r           = radius + padding
+        var rSq         = r * r
+        var rimShellRSq = (r > 2) ? ((r - 1.5) * (r - 1.5)) : rSq
+        var minWorldY   = -64, maxWorldY = 319
         if (normDim === 'minecraft:the_nether' || normDim === 'minecraft:the_end') {
             minWorldY = 0
             maxWorldY = 255
@@ -1208,9 +1261,21 @@
         if (typeof level.getMaxBuildHeight === 'function') {
             try { maxWorldY = Number(level.getMaxBuildHeight()) - 1 } catch (eMaxY) { }
         }
-        // 柱状包裹模式下直接覆盖完整世界高度 [minWorldY, maxWorldY]，彻底杜绝海平面/深海因 3D 球面内缩留下垂直水幕
-        var y0 = useCylinder2D ? minWorldY : Math.max(minWorldY, cy - r)
+        // 上部柱体 + 下部半球：cylFloorY（默认 min(cy, 16)，涵盖全部海平面与深海海床）以上采用完整圆柱截断水墙，
+        // cylFloorY 以下按球体半径收敛 y0，避免无故抽干爆心外围直到 -64 层的深部地下水与岩浆湖
+        var cylFloorY = (options.cylinderFloorY != null && isFinite(Number(options.cylinderFloorY)))
+            ? Math.floor(Number(options.cylinderFloorY))
+            : Math.min(cy, 16)
+        var y0 = (options.fullHeightCylinder === true)
+            ? minWorldY
+            : Math.max(minWorldY, cy - r)
         var y1 = useCylinder2D ? maxWorldY : Math.min(maxWorldY, cy + r)
+        var purgeOpts = {
+            dim:         normDim,
+            excludeLava: excludeLava,
+            cylFloorY:   cylFloorY,
+            rimShellRSq: rimShellRSq
+        }
 
         var minChunkX = (cx - r) >> 4
         var maxChunkX = (cx + r) >> 4
@@ -1221,7 +1286,7 @@
         if (r <= CONFIG.smallSphereDirectRadius) {
             for (var scX = minChunkX; scX <= maxChunkX; scX++) {
                 for (var scZ = minChunkZ; scZ <= maxChunkZ; scZ++) {
-                    purgeChunkColumnFluids(level, scX, scZ, cx, cy, cz, rSq, y0, y1, useCylinder2D)
+                    purgeChunkColumnFluids(level, scX, scZ, cx, cy, cz, rSq, y0, y1, useCylinder2D, purgeOpts)
                 }
             }
             if (onDone != null) {
@@ -1255,7 +1320,7 @@
                 if (isRimOnly && !isRimCol) continue
 
                 if (syncInitR > 0 && nearDist2D <= syncRSq && (Date.now() - syncStartMs) < syncMaxMs) {
-                    var syncStatus = purgeChunkColumnFluids(level, chX, chZ, cx, cy, cz, rSq, y0, y1, useCylinder2D)
+                    var syncStatus = purgeChunkColumnFluids(level, chX, chZ, cx, cy, cz, rSq, y0, y1, useCylinder2D, purgeOpts)
                     if (syncStatus === 0 && !isRimCol) continue
                 }
 
@@ -1279,17 +1344,21 @@
             rimColumns:      rimColumns,
             hotColumns:      [],
             unloadedColumns: [],
+            unloadedKeys:    {},
             index:           0,
             x:               cx,
             y:               cy,
             z:               cz,
             rSq:             rSq,
+            rimShellRSq:     rimShellRSq,
+            cylFloorY:       cylFloorY,
             y0:              y0,
             y1:              y1,
             useCylinder2D:   useCylinder2D,
+            excludeLava:     excludeLava,
             sweepCooldown:   sweepCooldown,
             nextSweepTick:   0,
-            loopsLeft:       isRimOnly ? 1 : loops,
+            loopsLeft:       isRimOnly ? 0 : Math.max(0, loops - 1),
             expireTick:      tickCounter + unloadedTtl,
             notifiedDone:    Boolean(isRimOnly),
             onDone:          onDone
@@ -1303,6 +1372,9 @@
         if (exist != null) {
             exist.loopsLeft  = Math.max(exist.loopsLeft, 2)
             exist.expireTick = Math.max(exist.expireTick, tickCounter + 240)
+            if (opts != null && (opts.excludeLava || opts.waterOnly)) {
+                exist.excludeLava = true
+            }
             return true
         }
         var mergedOpts = {}
@@ -1385,20 +1457,24 @@
                 if (!seenCols[colKey]) {
                     seenCols[colKey] = true
                     columns.push([px, pz])
+                    protectedRingCols[normDim + '|' + (px >> 4) + '|' + (pz >> 4)] = tickCounter + 1200
                 }
             }
         }
 
         ringBlockJobs.push({
-            dim:       normDim,
-            x:         cx,
-            y:         cy,
-            z:         cz,
-            blockId:   blockId,
-            thickness: thickness,
-            columns:   columns,
-            done:      0,
-            onDone:    onDone
+            dim:                 normDim,
+            x:                   cx,
+            y:                   cy,
+            z:                   cz,
+            blockId:             blockId,
+            thickness:           thickness,
+            columns:             columns,
+            done:                0,
+            placedCols:          0,
+            skippedUnloadedCols: 0,
+            totalCols:           columns.length,
+            onDone:              onDone
         })
         return true
     }
@@ -1407,22 +1483,66 @@
         return fluidPurgeJobs.length > 0 || ringBlockJobs.length > 0
     }
 
+    function pollUnloadedFluidColumns(lv, job, pOpts, startMs, maxMs, totalRef) {
+        if (job.unloadedColumns.length === 0 || tickCounter > job.expireTick || (tickCounter % 10) !== 0) return
+        var remainingUnloaded = []
+        var nextKeys = {}
+        for (var uIdx = 0; uIdx < job.unloadedColumns.length; uIdx++) {
+            var uCol = job.unloadedColumns[uIdx]
+            var uKey = uCol.chX + '|' + uCol.chZ
+            if (totalRef.count > 0 && (Date.now() - startMs) >= maxMs) {
+                for (var rIdx = uIdx; rIdx < job.unloadedColumns.length; rIdx++) {
+                    var rem = job.unloadedColumns[rIdx]
+                    var rKey = rem.chX + '|' + rem.chZ
+                    if (!nextKeys[rKey]) {
+                        nextKeys[rKey] = true
+                        remainingUnloaded.push(rem)
+                    }
+                }
+                break
+            }
+            if (!isChunkLoaded(lv, uCol.chX << 4, uCol.chZ << 4)) {
+                if (!nextKeys[uKey]) {
+                    nextKeys[uKey] = true
+                    remainingUnloaded.push(uCol)
+                }
+                continue
+            }
+            totalRef.count++
+            var uStatus = purgeChunkColumnFluids(lv, uCol.chX, uCol.chZ, job.x, job.y, job.z, job.rSq, job.y0, job.y1, job.useCylinder2D, pOpts)
+            if (uStatus === 1) {
+                job.hotColumns.push(uCol)
+                job.loopsLeft = Math.max(job.loopsLeft, 1)
+            }
+        }
+        job.unloadedColumns = remainingUnloaded
+        job.unloadedKeys    = nextKeys
+    }
+
     function tickWorldOps(budgetMs) {
         if (!hasActiveWorldOps()) return 0
         var t0Ns           = nowNano()
         var startMs        = Date.now()
         var maxMs          = (budgetMs != null && budgetMs > 0) ? budgetMs : CONFIG.worldOpsTickBudgetMs
-        var totalProcessed = 0
+        var totalRef       = { count: 0 }
 
-        // 1. 优先推进球体流体剥离队列
+        // 1. 优先推进球体/柱体流体剥离队列
         for (var n = fluidPurgeJobs.length - 1; n >= 0; n--) {
             var job = fluidPurgeJobs[n]
             if (job == null) { fluidPurgeJobs.splice(n, 1); continue }
             var lv = resolveLevel(job.dim, null)
             if (lv == null) { fluidPurgeJobs.splice(n, 1); continue }
 
+            var pOpts = {
+                dim:         job.dim,
+                excludeLava: job.excludeLava,
+                cylFloorY:   job.cylFloorY,
+                rimShellRSq: job.rimShellRSq
+            }
+            if (job.unloadedKeys == null) job.unloadedKeys = {}
+
             while (job.index < job.columns.length) {
-                if (totalProcessed > 0 && ((Date.now() - startMs) >= maxMs || totalProcessed >= CONFIG.worldOpsMaxColsPerTick)) {
+                if (totalRef.count > 0 && ((Date.now() - startMs) >= maxMs || totalRef.count >= CONFIG.worldOpsMaxColsPerTick)) {
                     var dtEarly = (nowNano() - t0Ns) / 1000000.0
                     lastWorldOpsTickMs = dtEarly
                     if (dtEarly > maxWorldOpsTickMs) maxWorldOpsTickMs = dtEarly
@@ -1430,14 +1550,21 @@
                 }
                 var col = job.columns[job.index]
                 job.index++
-                totalProcessed++
-                var status = purgeChunkColumnFluids(lv, col.chX, col.chZ, job.x, job.y, job.z, job.rSq, job.y0, job.y1, job.useCylinder2D)
+                totalRef.count++
+                var status = purgeChunkColumnFluids(lv, col.chX, col.chZ, job.x, job.y, job.z, job.rSq, job.y0, job.y1, job.useCylinder2D, pOpts)
                 if (status === 2) {
-                    job.unloadedColumns.push(col)
+                    var uKey = col.chX + '|' + col.chZ
+                    if (!job.unloadedKeys[uKey]) {
+                        job.unloadedKeys[uKey] = true
+                        job.unloadedColumns.push(col)
+                    }
                 } else if (status === 1 || col.isRim) {
                     job.hotColumns.push(col)
                 }
             }
+
+            // 即使在复扫冷却等待期间，也定期轮询刚进入玩家视距的新加载区块，防止玩家飞向坑边时看见未剥离区块水墙
+            pollUnloadedFluidColumns(lv, job, pOpts, startMs, maxMs, totalRef)
 
             if (job.loopsLeft > 0 && (job.hotColumns.length > 0 || (job.rimColumns && job.rimColumns.length > 0))) {
                 // 相位锁定复扫冷却：等待 sweepCooldown tick（如 15 tick）后再启动下一轮热点/边界复扫，
@@ -1461,29 +1588,6 @@
             }
 
             if (job.unloadedColumns.length > 0 && tickCounter <= job.expireTick) {
-                if (tickCounter % 10 === 0) {
-                    var remainingUnloaded = []
-                    for (var uIdx = 0; uIdx < job.unloadedColumns.length; uIdx++) {
-                        var uCol = job.unloadedColumns[uIdx]
-                        if (totalProcessed > 0 && (Date.now() - startMs) >= maxMs) {
-                            for (var rIdx = uIdx; rIdx < job.unloadedColumns.length; rIdx++) {
-                                remainingUnloaded.push(job.unloadedColumns[rIdx])
-                            }
-                            break
-                        }
-                        if (!isChunkLoaded(lv, uCol.chX << 4, uCol.chZ << 4)) {
-                            remainingUnloaded.push(uCol)
-                            continue
-                        }
-                        totalProcessed++
-                        var uStatus = purgeChunkColumnFluids(lv, uCol.chX, uCol.chZ, job.x, job.y, job.z, job.rSq, job.y0, job.y1, job.useCylinder2D)
-                        if (uStatus === 1) {
-                            job.hotColumns.push(uCol)
-                            job.loopsLeft = Math.max(job.loopsLeft, 1)
-                        }
-                    }
-                    job.unloadedColumns = remainingUnloaded
-                }
                 if (job.unloadedColumns.length > 0 || job.hotColumns.length > 0) {
                     continue
                 }
@@ -1501,25 +1605,33 @@
 
             var colBudget = CONFIG.ringBlocksPerTick
             while (colBudget > 0 && rJob.done < rJob.columns.length) {
-                if (totalProcessed > 0 && (Date.now() - startMs) >= maxMs) {
+                if (totalRef.count > 0 && (Date.now() - startMs) >= maxMs) {
                     break
                 }
                 var cPair = rJob.columns[rJob.done]
                 rJob.done++
                 colBudget--
-                totalProcessed++
+                totalRef.count++
                 var px = cPair[0]
                 var pz = cPair[1]
                 // 严格跳过未加载区块，绝不触发磁盘同步加载卡死主线程
-                if (!isChunkLoaded(rLv, px, pz)) continue
+                if (!isChunkLoaded(rLv, px, pz)) {
+                    rJob.skippedUnloadedCols = (rJob.skippedUnloadedCols || 0) + 1
+                    continue
+                }
                 var sy = findLoadedSurfaceY(rLv, px, pz, rJob.y, 96, 16)
                 if (sy == null) continue
-                // 从表面上方 1 格 (sy + 1) 及表层向下浇筑：若 sy+1 为空气则放于地表之上，同时填充向下孔洞
+                rJob.placedCols = (rJob.placedCols || 0) + 1
+                protectedRingCols[rJob.dim + '|' + (px >> 4) + '|' + (pz >> 4)] = tickCounter + 1200
+                // 从表面上方 1 格 (sy + 1) 及表层向下浇筑：保护基岩、门框、命令方块及带 BlockEntity 的容器不被覆盖
                 for (var d = -1; d < rJob.thickness - 1; d++) {
                     try {
                         var ty = sy - d
                         var b  = rLv.getBlock(px, ty, pz)
-                        if (b != null && (b.id === 'minecraft:air' || b.id === 'minecraft:cave_air' || d === 0)) {
+                        if (b == null) continue
+                        var bid = String(b.id || '')
+                        if (RING_PROTECTED_BLOCK_IDS[bid] || b.entity != null) continue
+                        if (bid === 'minecraft:air' || bid === 'minecraft:cave_air' || d === 0) {
                             b.set(rJob.blockId)
                         }
                     } catch (eSetR) { }
@@ -1632,6 +1744,7 @@
                 migratedKeys.clear()
                 fluidPurgeJobs.length = 0
                 ringBlockJobs.length  = 0
+                protectedRingCols     = {}
             } catch (eUnl) {
                 logCatch('ServerEvents.unloaded', eUnl)
             }

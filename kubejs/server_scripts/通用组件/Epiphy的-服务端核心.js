@@ -597,15 +597,19 @@
         if (player == null || !itemId) return false;
         var target = String(itemId).trim();
         if (!target) return false;
+        var hasMainHandAccessor = false;
         try {
             var mh = safeReadProp(player, 'mainHandItem');
             if (mh == null && safeHasMethod(player, 'getMainHandItem')) mh = player.getMainHandItem();
             if (mh != null) {
+                hasMainHandAccessor = true;
                 var mhId = extractItemStackId(mh);
-                if (mhId) return mhId === target;
+                return mhId === target;
             }
         } catch (eMh) { }
-        // 兼容仅实现 player.isHolding(id) 的轻量测试桩（同时排除副手明确为该物品而主手为空的情形）
+        // 实机环境若已成功读取主手槽位（即使主手为空），直接返回 false，绝不回退到可能包含副手的 player.isHolding
+        if (hasMainHandAccessor) return false;
+        // 仅针对未提供 mainHandItem / getMainHandItem 的极简单元测试桩回退
         try {
             var oh = safeReadProp(player, 'offHandItem');
             if (oh == null && safeHasMethod(player, 'getOffHandItem')) oh = player.getOffHandItem();
@@ -736,10 +740,13 @@
         if (rawPlayers == null && safeHasMethod(level, 'getPlayers')) {
             try { rawPlayers = level.getPlayers(); } catch (eP) { }
         }
-        var players = toSeqArray(rawPlayers);
+        if (rawPlayers == null) return 0;
+        var isJavaList = !Array.isArray(rawPlayers) && safeHasMethod(rawPlayers, 'size') && safeHasMethod(rawPlayers, 'get');
+        var list = (Array.isArray(rawPlayers) || isJavaList) ? rawPlayers : toSeqArray(rawPlayers);
+        var len = isJavaList ? Number(list.size()) : (list.length || 0);
         var hitCount = 0;
-        for (var i = 0; i < players.length; i++) {
-            var p = players[i];
+        for (var i = 0; i < len; i++) {
+            var p = isJavaList ? list.get(i) : list[i];
             var pos = readPos(p);
             if (pos == null) continue;
             var dx = pos.x - cx;
@@ -763,9 +770,12 @@
         if (rawPlayers == null && safeHasMethod(level, 'getPlayers')) {
             try { rawPlayers = level.getPlayers(); } catch (eP) { }
         }
-        var players = toSeqArray(rawPlayers);
-        for (var i = 0; i < players.length; i++) {
-            var pos = readPos(players[i]);
+        if (rawPlayers == null) return false;
+        var isJavaList = !Array.isArray(rawPlayers) && safeHasMethod(rawPlayers, 'size') && safeHasMethod(rawPlayers, 'get');
+        var list = (Array.isArray(rawPlayers) || isJavaList) ? rawPlayers : toSeqArray(rawPlayers);
+        var len = isJavaList ? Number(list.size()) : (list.length || 0);
+        for (var i = 0; i < len; i++) {
+            var pos = readPos(isJavaList ? list.get(i) : list[i]);
             if (pos == null) continue;
             var dx = pos.x - cx;
             var dy = pos.y - cy;
@@ -1474,25 +1484,46 @@
         return { status: 'missing', data: null, error: null };
     }
 
+    var LAST_WRITTEN_JSON_CACHE = {};
+    var LAST_WRITTEN_JSON_KEYS  = [];
+
+    function cacheLastWrittenJson(normPath, obj) {
+        if (!normPath || !isObjectLike(obj)) return;
+        if (!Object.prototype.hasOwnProperty.call(LAST_WRITTEN_JSON_CACHE, normPath)) {
+            if (LAST_WRITTEN_JSON_KEYS.length >= 64) {
+                var evicted = LAST_WRITTEN_JSON_KEYS.shift();
+                if (evicted !== undefined) delete LAST_WRITTEN_JSON_CACHE[evicted];
+            }
+            LAST_WRITTEN_JSON_KEYS.push(normPath);
+        }
+        LAST_WRITTEN_JSON_CACHE[normPath] = obj;
+    }
+
     function readJsonDetailed(filePath, logger, allowBackupRecovery) {
         if (!filePath) return { status: 'missing', data: null, fromBackup: false, error: null };
         var normPath = normalizeSlashPath(filePath);
         var primary = readJsonSingleTarget(normPath, logger);
         if (primary.status === 'ok' && primary.data != null) {
+            cacheLastWrittenJson(normPath, primary.data);
             return { status: 'ok', data: primary.data, fromBackup: false, error: null };
         }
-        var useBak = (allowBackupRecovery !== false) && normPath.slice(-4) !== '.bak';
+        // 仅当主文件确系损坏（status === 'corrupt'，如崩溃截断）或显式指定 'allow_missing' 时才自动从 .bak 自愈，
+        // 避免管理员手动删除主文件重置状态（status === 'missing'）后被 .bak 静默复活
+        var useBak = (allowBackupRecovery !== false) &&
+            (primary.status === 'corrupt' || allowBackupRecovery === 'allow_missing') &&
+            normPath.slice(-4) !== '.bak';
         if (useBak) {
             var bakPath = normPath + '.bak';
             var bakRes = readJsonSingleTarget(bakPath, logger);
             if (bakRes.status === 'ok' && bakRes.data != null) {
                 (logger || baseLogger).warn(
                     'readJsonSafe:backupRecovered',
-                    '主文件读取异常或缺失 (' + normPath + ', status=' + primary.status + ')，已自动从备份恢复: ' + bakPath
+                    '主文件读取损坏 (' + normPath + ', status=' + primary.status + ')，已自动从备份恢复: ' + bakPath
                 );
                 try {
                     writeJsonAtomic(normPath, bakRes.data, false, logger);
                 } catch (eHeal) { }
+                cacheLastWrittenJson(normPath, bakRes.data);
                 return { status: 'ok', data: bakRes.data, fromBackup: true, error: null };
             }
         }
@@ -1523,6 +1554,7 @@
         try {
             var jsonStr = JSON.stringify(obj, null, 2);
             if (writeTextAtomic(normPath, jsonStr + '\n', keepBackup, logger)) {
+                cacheLastWrittenJson(normPath, obj);
                 return true;
             }
         } catch (eStr) {
@@ -1531,15 +1563,24 @@
         if (typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.write === 'function') {
             try {
                 ensureParentDir(normPath, logger);
-                if (keepBackup !== false && normPath.slice(-4) !== '.bak' && normPath.indexOf('worlds_index.json') < 0) {
+                if (keepBackup !== false && normPath.slice(-4) !== '.bak') {
                     try {
-                        var prevRes = readJsonSingleTarget(normPath, null);
-                        if (prevRes.status === 'ok' && prevRes.data != null && isObjectLike(prevRes.data)) {
-                            JsonIO.write(normPath + '.bak', prevRes.data);
+                        var prevObj = Object.prototype.hasOwnProperty.call(LAST_WRITTEN_JSON_CACHE, normPath)
+                            ? LAST_WRITTEN_JSON_CACHE[normPath]
+                            : null;
+                        if (prevObj == null) {
+                            var prevRes = readJsonSingleTarget(normPath, null);
+                            if (prevRes.status === 'ok' && prevRes.data != null && isObjectLike(prevRes.data)) {
+                                prevObj = prevRes.data;
+                            }
+                        }
+                        if (prevObj != null && isObjectLike(prevObj)) {
+                            JsonIO.write(normPath + '.bak', prevObj);
                         }
                     } catch (eBakJio) { }
                 }
                 JsonIO.write(normPath, obj);
+                cacheLastWrittenJson(normPath, obj);
                 return true;
             } catch (eJioW) {
                 (logger || baseLogger).catchWarn('writeJsonAtomic:JsonIO', eJioW);

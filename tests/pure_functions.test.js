@@ -6548,7 +6548,7 @@ test('audit fixes: persistence .bak recovery & corruption guard, 3-state scope h
         var Tracker = sb.global.EpiphyBlockTracker
         var Valve = sb.global.EpiphyPermissionValve
 
-        // 1. readJsonDetailed automatically recovers from .bak and heals primary file
+        // 1. readJsonDetailed automatically recovers from .bak when primary is CORRUPT, but NOT when primary is intentionally deleted (missing)
         var testJsonPath = path.join(gameDir, 'epiphy_recover_test.json')
         fs.writeFileSync(testJsonPath, '{broken_json', 'utf8')
         fs.writeFileSync(testJsonPath + '.bak', JSON.stringify({ version: 2, ok: true }), 'utf8')
@@ -6557,6 +6557,11 @@ test('audit fixes: persistence .bak recovery & corruption guard, 3-state scope h
         assert.strictEqual(det.fromBackup, true, 'must flag fromBackup')
         assert.strictEqual(det.data.ok, true)
         assert.strictEqual(JSON.parse(fs.readFileSync(testJsonPath, 'utf8')).ok, true, 'primary file must be healed from .bak')
+
+        fs.unlinkSync(testJsonPath)
+        var detMissing = Base.readJsonDetailed(testJsonPath)
+        assert.strictEqual(detMissing.status, 'missing', 'intentionally deleted primary file must return missing instead of resurrecting from .bak')
+        assert.strictEqual(fs.existsSync(testJsonPath), false, 'deleted primary file must remain deleted')
 
         // 2. World anchor persistence & fallback when anchor file is missing/unwritable
         var pDataStore = {}
@@ -6686,7 +6691,10 @@ test('Uncrafting Chaos & EpiphyServerCore/EpiphyWorldOps: anti-rename relic spoo
             getDimension: function () { return 'minecraft:overworld' },
             players: [],
             getPlayers: function () { return this.players },
-            hasChunk: function (cx, cz) { return cx >= -10 && cx <= 10 && cz >= -10 && cz <= 10 },
+            hasChunk: function (cx, cz) {
+                return (cx >= -10 && cx <= 10 && cz >= -10 && cz <= 10) ||
+                       (cx >= 180 && cx <= 200 && cz >= 180 && cz <= 200)
+            },
             getChunkSource: function () {
                 return {
                     getChunkNow: function (cx, cz) {
@@ -6830,6 +6838,56 @@ test('Uncrafting Chaos & EpiphyServerCore/EpiphyWorldOps: anti-rename relic spoo
         })
         assert.strictEqual(canceledBreak2, false, 'holding diamond pickaxe in mainhand must allow normal break')
 
+        // 3b. Crash/rollback reconciliation (P0-1): if saved unstable job has stageIndex=2 (t=1600),
+        // but world chunk rolled back to stage 0 ('epiphy:ultra_uncrafting_instability_1'),
+        // reloading and ticking must reconcile stageIndex to 0 without triggering false EXTERNAL_BLOCK_DISRUPTION explosion!
+        var savedRaw = pDataStore['epiphy_uncrafting_unstable_v2']
+        assert.ok(savedRaw, 'unstable job should be persisted to persistentData')
+        var savedParsed = JSON.parse(savedRaw)
+        assert.strictEqual(savedParsed.jobs.length, 1)
+        // Advance persisted job at (3000,64,3000) to stageIndex=2, t=1600 while world block is still stage 0 ('epiphy:ultra_uncrafting_instability_1'),
+        // and add a second job at (3020,64,3000) where the world rolled back to 'minecraft:air' (orphan job)
+        savedParsed.jobs[0].stageIndex = 2
+        savedParsed.jobs[0].t = 1600
+        savedParsed.jobs.push({
+            dim: 'minecraft:overworld',
+            x: 3020, y: 64, z: 3000,
+            t: 900, totalTicks: 3600, stageIndex: 1, fatalTriggered: false
+        })
+        pDataStore['epiphy_uncrafting_unstable_v2'] = JSON.stringify(savedParsed)
+
+        // Load a fresh V18 instance against the rolled-back world state
+        var restartTicks = []
+        var restartSb = Object.assign({}, sb, {
+            ServerEvents: {
+                tick: function (fn) { restartTicks.push(fn) },
+                unloaded: function () {},
+                recipes: function () {}
+            },
+            BlockEvents: {
+                placed: function () {},
+                broken: function () {},
+                rightClicked: function () {}
+            }
+        })
+        vm.createContext(restartSb)
+        runScriptIn(restartSb, V18_PATH)
+
+        var fatalChatTriggered = false
+        overworldLv.players = [Object.assign({}, invPickPlayer, {
+            tell: function (msg) {
+                if (String(msg).indexOf('EXTERNAL_BLOCK_DISRUPTION') >= 0) fatalChatTriggered = true
+            }
+        })]
+        for (var tk = 0; tk < 12; tk++) {
+            for (var th = 0; th < restartTicks.length; th++) restartTicks[th]({ server: srv })
+        }
+        assert.strictEqual(fatalChatTriggered, false, 'rolled-back chunk stage block must reconcile cleanly without triggering EXTERNAL_BLOCK_DISRUPTION')
+        var reconciledJobs = JSON.parse(pDataStore['epiphy_uncrafting_unstable_v2']).jobs
+        assert.strictEqual(reconciledJobs.length, 1, 'orphan job at air block (3020,64,3000) must be discarded cleanly')
+        assert.strictEqual(reconciledJobs[0].stageIndex, 0, 'rolled-back job at (3000,64,3000) must reconcile stageIndex from 2 back to world block stage 0')
+        assert.ok(reconciledJobs[0].t <= 730, 'reconciled job tick t must be clamped to stage 0 range')
+
         // 4. WorldOps cost gating: small sphere (r=2, total r=4 <= 16) runs synchronously in 1 frame without queuing background job
         var doneSmall = false
         WorldOps.startSphereFluidPurge(overworldLv, 'minecraft:overworld', 0, 64, 0, 2, {
@@ -6839,22 +6897,43 @@ test('Uncrafting Chaos & EpiphyServerCore/EpiphyWorldOps: anti-rename relic spoo
         assert.strictEqual(doneSmall, true, 'small sphere fluid purge must complete immediately in single frame')
         assert.strictEqual(WorldOps.getStats().fluidPurgeJobsCount, 0, 'small sphere must not allocate background fluidPurgeJobs')
 
-        // 5. Ring block job places lava on loaded chunks and skips unloaded chunks (r=300 is outside loaded -10..10 chunks)
+        // 5. Ring block job places lava on loaded chunks, protects bedrock/containers, and skips unloaded chunks
+        worldBlocks['16,64,0'] = 'minecraft:bedrock'
+        var ringStats = null
         var ringDone = false
         WorldOps.startRingBlockJob(overworldLv, 'minecraft:overworld', 0, 64, 0, 16, {
             blockId: 'minecraft:lava',
             width: 1,
             thickness: 2,
-            onDone: function () { ringDone = true }
+            onDone: function (rj) { ringDone = true; ringStats = rj }
         })
         for (var rt = 0; rt < 5 && !ringDone; rt++) {
             for (var ti = 0; ti < tickHandlers.length; ti++) tickHandlers[ti]({ server: srv })
         }
         assert.strictEqual(ringDone, true, 'ring block job completes across ticks within budget')
+        assert.ok(ringStats && ringStats.placedCols > 0, 'ring job reports placedCols count')
+        assert.strictEqual(worldBlocks['16,64,0'], 'minecraft:bedrock', 'ring block job must NEVER overwrite bedrock')
+        assert.strictEqual(worldBlocks['16,65,0'], 'minecraft:lava', 'ring block job places lava above surface at sy+1')
 
-        // 6. Full-height 2D cylindrical fluid purge (default cylinder2D=true) clears high-Y sea-level water at outer rim
-        // where a 3D sphere centered at y=-20 with r=18 would clip out (dx=17, dy=82 -> dx^2+dy^2 >> 18^2)
+        // 5b. Subsequent fluid sweep with excludeLava=true (or protectedRingCols) must NOT erase the newly placed lava ring!
+        worldBlocks['16,66,0'] = 'minecraft:water'
+        var sweepDone = false
+        WorldOps.startSphereFluidPurge(overworldLv, 'minecraft:overworld', 0, 64, 0, 16, {
+            padding: 2,
+            loops: 1,
+            excludeLava: true,
+            onDone: function () { sweepDone = true }
+        })
+        for (var st = 0; st < 10 && !sweepDone; st++) {
+            for (var tis = 0; tis < tickHandlers.length; tis++) tickHandlers[tis]({ server: srv })
+        }
+        assert.strictEqual(worldBlocks['16,66,0'], 'minecraft:air', 'fluid sweep must clear water at the rim')
+        assert.strictEqual(worldBlocks['16,65,0'], 'minecraft:lava', 'fluid sweep with excludeLava / protectedRingCols must preserve the magma ring')
+
+        // 6. Upper-cylinder + lower-hemisphere fluid purge (default cylinder2D=true) clears high-Y sea-level water at outer rim
+        // while preserving deep underground fluids below cylFloorY outside the lower hemisphere
         worldBlocks['17,62,0'] = 'minecraft:water'
+        worldBlocks['17,-60,0'] = 'minecraft:water'
         WorldOps.startSphereFluidPurge(overworldLv, 'minecraft:overworld', 0, -20, 0, 16, {
             padding: 2,
             loops: 1,
@@ -6874,9 +6953,10 @@ test('Uncrafting Chaos & EpiphyServerCore/EpiphyWorldOps: anti-rename relic spoo
         for (var ct = 0; ct < 15 && !cylDone; ct++) {
             for (var ti2 = 0; ti2 < tickHandlers.length; ti2++) tickHandlers[ti2]({ server: srv })
         }
-        assert.strictEqual(worldBlocks['17,62,0'], 'minecraft:air', 'default cylinder2D=true full-height purge must clear high-Y sea-level water at outer rim without leaving vertical water walls')
+        assert.strictEqual(worldBlocks['17,62,0'], 'minecraft:air', 'default cylinder2D=true purge must clear high-Y sea-level water at outer rim without leaving vertical water walls')
+        assert.strictEqual(worldBlocks['17,-60,0'], 'minecraft:water', 'deep underground fluid below cylFloorY outside lower hemisphere (dx=16, dy=-40 -> 256+1600 > 324) must NOT be cleared')
 
-        // 7. ScreenDanmakuClient v5.7: fast-rejects <AVARITIA_BIOS> non-tag brackets and renders typewriter prefixes via O(1) vis tables
+        // 7. ScreenDanmakuClient v5.7: verify VERSION, isPotentialSpanTagHead fast-rejection, exact fast/slow slice & endPx parity, and TRANSIENT vs SHARED cache isolation/promotion
         var cliPaints = []
         var cliNowMs = 1000
         var cliSb = {
@@ -6901,11 +6981,38 @@ test('Uncrafting Chaos & EpiphyServerCore/EpiphyWorldOps: anti-rename relic spoo
         loadStartupBase(cliSb)
         runScriptIn(cliSb, RENDERER_PATH)
         var CliV57 = cliSb.global.ScreenDanmakuClient
-        assert.ok(CliV57 && typeof CliV57.push === 'function' && typeof CliV57.list === 'function', 'ScreenDanmakuClient v5.7 should be initialized')
+        assert.strictEqual(CliV57.VERSION, '5.7.0', 'ScreenDanmakuClient must expose VERSION 5.7.0')
+        assert.strictEqual(CliV57._pure.isPotentialSpanTagHead('<AVARITIA_BIOS>', 0), false, '<AVARITIA_BIOS> must be fast-rejected in O(1)')
+        assert.strictEqual(CliV57._pure.hasRichSpanTags('<AVARITIA_BIOS> :: [0x00F8_DEADC0DE] >>'), false, 'non-tag brackets must not trigger regex or span tag mode')
+        assert.strictEqual(CliV57._pure.hasRichSpanTags('<b>WARN</b> <shake>CORE</shake>'), true, 'real inline tags must be detected')
+
+        // Verify 100% character-for-character and pixel-for-pixel equivalence between O(1) ensureLineVisTable fast path and legacy sliceVisibleChars + dropFirstVisibleChars slow path
+        var mockFont = { width: function (s) { return String(s).length * 6 } }
+        var sampleRichText = '§e<b>WARN</b> <shake>核心\uD83D\uDD25坍缩</shake> §lOK§r!'
+        var testLn = { text: sampleRichText, widthPx: 120, vis: 14, hasTags: true }
+        CliV57._pure.ensureLineVisTable(testLn, mockFont, 1.5, 'relative')
+        assert.ok(Array.isArray(testLn._visEndIdx) && testLn._visEndIdx.length === 15, 'ensureLineVisTable builds 15 boundary entries for 14 visible graphemes')
+        for (var kv = 1; kv < testLn.vis; kv++) {
+            var fastRes = CliV57._pure.buildRenderedLines([testLn], 0, kv, '', mockFont, 1.5, 'relative', true)
+            var slowSlice = CliV57._pure.sliceVisibleChars(sampleRichText, kv)
+            var slowEndPx = CliV57._pure.dropFirstVisibleChars(slowSlice, 999999, mockFont, 1.5, 'relative').offsetPx
+            assert.strictEqual(fastRes.length, 1)
+            assert.strictEqual(fastRes[0].text, slowSlice, 'fast path slice at k=' + kv + ' must match sliceVisibleChars character-for-character (including trailing closing tags)')
+            assert.strictEqual(fastRes[0].endPx, slowEndPx, 'fast path endPx at k=' + kv + ' must match dropFirstVisibleChars offsetPx exactly')
+            assert.strictEqual(fastRes[0].isTransient, true, 'partial typewriter prefix must be marked isTransient=true')
+        }
+
+        // Verify TRANSIENT_TEXT_SEQ_CACHE isolation and static promotion
+        CliV57.push({
+            id: 'v57_static_item',
+            title: 'STATIC_FULL_LINE_KEEP',
+            stay: 100,
+            typewriter: false
+        })
         CliV57.push({
             id: 'v57_perf_danmaku',
             title: '<AVARITIA_BIOS> :: [0x00F8_DEADC0DE] >> REALITY_INTEGRITY = 0.00%',
-            sub: '<b>WARN</b> <shake>CORE MELTDOWN</shake>',
+            sub: '<< SYSTEM_CHECK_FAILED >>',
             stay: 100,
             rx: 0.5,
             ry: 0.3,
@@ -6928,8 +7035,11 @@ test('Uncrafting Chaos & EpiphyServerCore/EpiphyWorldOps: anti-rename relic spoo
             cliNowMs += 60
             cliPaints[0](cliEv)
         }
+        var cacheStats = CliV57._pure.getSeqCacheStats()
+        assert.strictEqual(cacheStats.hasShared('STATIC_FULL_LINE_KEEP'), true, 'static full line must reside in SHARED_TEXT_SEQ_CACHE')
+        assert.ok(cacheStats.transientCount > 0, 'typewriter prefixes must route into TRANSIENT_TEXT_SEQ_CACHE')
         var dList = CliV57.list()
-        assert.strictEqual(dList.length, 1, 'ScreenDanmakuClient v5.7 should keep typewriter item active and render cleanly across frames')
+        assert.strictEqual(dList.length, 2, 'ScreenDanmakuClient v5.7 should keep both static and typewriter items active')
     } finally {
         fs.rmSync(tmpRoot, { recursive: true, force: true })
     }
