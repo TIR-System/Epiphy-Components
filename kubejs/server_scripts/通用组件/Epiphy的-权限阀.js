@@ -412,57 +412,31 @@
     }
 
     function resolveWorldStorageInfo(server) {
-        var srv = server || SERVER_REF
-        if (typeof BASE.resolveEpiphyWorldContext === 'function') {
-            var ctx = BASE.resolveEpiphyWorldContext(srv)
-            return {
-                worldKey:        ctx.worldKey,
-                worldId:         ctx.worldId,
-                worldName:       ctx.worldName,
-                slug:            ctx.slug,
-                folderName:      ctx.folderName,
-                worldPath:       ctx.worldPath,
-                worldDataDir:    ctx.worldDataDir,
-                filePath:        ctx.permissionsFile,
-                permissionsFile: ctx.permissionsFile,
-                revocationsFile: ctx.revocationsFile,
-                authModeFile:    ctx.authModeFile,
-                metaFile:        ctx.metaFile,
-                legacyFiles:     ctx.legacyFiles || [],
-                forkNotice:      ctx.forkNotice || null,
-                isWorldRoot:     Boolean(ctx.isWorldBound)
-            }
+        var ctx = BASE.resolveEpiphyWorldContext(server || SERVER_REF)
+        return {
+            worldKey:        ctx.worldKey,
+            worldId:         ctx.worldId,
+            worldName:       ctx.worldName,
+            slug:            ctx.slug,
+            folderName:      ctx.folderName,
+            worldPath:       ctx.worldPath,
+            worldDataDir:    ctx.worldDataDir,
+            filePath:        ctx.permissionsFile,
+            permissionsFile: ctx.permissionsFile,
+            revocationsFile: ctx.revocationsFile,
+            authModeFile:    ctx.authModeFile,
+            metaFile:        ctx.metaFile,
+            legacyFiles:     ctx.legacyFiles || [],
+            forkNotice:      ctx.forkNotice || null,
+            isWorldRoot:     Boolean(ctx.isWorldBound)
         }
-        return BASE.resolveWorldStorageInfo(srv, 'kubejs_epiphy_permissions.json', 'kubejs/config/epiphy_permissions')
     }
 
-    function ensureParentDir(filePathStr) {
-        return BASE.ensureParentDir(filePathStr, LOGGER)
-    }
-
-    function readMapField(obj, key) {
-        return BASE.readMapField(obj, key)
-    }
+    var readMapField = BASE.readMapField
 
     function readJsonFileDetailed(filePath) {
         if (!filePath) return { status: 'missing', data: null }
-        if (typeof BASE.readJsonDetailed === 'function') {
-            return BASE.readJsonDetailed(filePath, LOGGER, true)
-        }
-        if (typeof BASE.readJsonSafe === 'function') {
-            var d = BASE.readJsonSafe(filePath, LOGGER)
-            return { status: d != null ? 'ok' : 'missing', data: d }
-        }
-        try {
-            if (typeof JsonIO !== 'undefined' && JsonIO != null) {
-                var raw = JsonIO.read(filePath)
-                return { status: raw != null ? 'ok' : 'missing', data: raw }
-            }
-        } catch (eRead) {
-            logCatch('readJsonFile', eRead)
-            return { status: 'corrupt', data: null }
-        }
-        return { status: 'missing', data: null }
+        return BASE.readJsonDetailed(filePath, LOGGER, true)
     }
 
     function readJsonFile(filePath) {
@@ -472,27 +446,12 @@
 
     function canPersistValveFiles(entry) {
         if (!entry || !entry.filePath) return false
-        if (typeof BASE.canWritePersistentFiles === 'function') {
-            return Boolean(BASE.canWritePersistentFiles())
-        }
-        return typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.write === 'function'
+        return Boolean(BASE.canWritePersistentFiles() || (typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.write === 'function'))
     }
 
     function writeJsonFile(filePath, payload) {
         if (!filePath) return false
-        if (typeof BASE.writeJsonAtomic === 'function') {
-            return BASE.writeJsonAtomic(filePath, payload, true, LOGGER)
-        }
-        try {
-            if (typeof JsonIO !== 'undefined' && JsonIO != null) {
-                ensureParentDir(filePath)
-                JsonIO.write(filePath, payload)
-                return true
-            }
-        } catch (eWrite) {
-            logCatch('writeJsonFile', eWrite)
-        }
-        return false
+        return BASE.writeJsonAtomic(filePath, payload, true, LOGGER)
     }
 
     function isUuidKeyFormat(keyStr) {
@@ -964,13 +923,8 @@
         return 'CONSOLE'
     }
 
-    function extractPlayerName(player) {
-        return BASE.nameOf(player) || ''
-    }
-
-    function extractPlayerUuid(player) {
-        return BASE.uuidOf(player) || ''
-    }
+    var extractPlayerName = (player) => BASE.nameOf(player) || ''
+    var extractPlayerUuid = (player) => BASE.uuidOf(player) || ''
 
     function playerHasPermLevel(player, level) {
         return Boolean(player != null && typeof player.hasPermissions === 'function' && player.hasPermissions(level))

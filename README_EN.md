@@ -122,7 +122,7 @@ Epiphy的-权限阀.js:
   on_missing: /epiphy subcommands do not mount (OP notified on login); JS APIs remain usable
 
 Epiphy的-调试组件.js:
-  requires: { hard: [KubeJS server global lifecycle], optional: [EpiphyLog, EpiphyPermissionValve] }
+  requires: { hard: [EpiphyServerBase], optional: [EpiphyLog, EpiphyPermissionValve] }
   on_missing: /epiphy debug command is unmounted while snapshots stay accessible via global.EpiphyDebug
 
 Epiphy的-基础bug修复.js:

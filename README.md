@@ -122,7 +122,7 @@ Epiphy的-权限阀.js:
   on_missing: 下游 /epiphy 子命令不挂载（OP 登录提示），但业务组件 JS API 仍可调用
 
 Epiphy的-调试组件.js:
-  requires: { hard: [KubeJS server global 生命周期], optional: [EpiphyLog, EpiphyPermissionValve] }
+  requires: { hard: [EpiphyServerBase], optional: [EpiphyLog, EpiphyPermissionValve] }
   on_missing: 缺权限阀时不注册 /epiphy debug 指令，指标快照仍可通过 global.EpiphyDebug 读取
 
 Epiphy的-基础bug修复.js:

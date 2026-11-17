@@ -2770,6 +2770,7 @@
             writeTextAtomic:              writeTextAtomic,
             readJsonDetailed:             readJsonDetailed,
             readJsonSafe:                 readJsonSafe,
+            canWritePersistentFiles:      canWritePersistentFiles,
             writeJsonAtomic:              writeJsonAtomic,
             resolveEpiphyWorldContext:    resolveEpiphyWorldContext,
             clearEpiphyWorldContextCache: clearEpiphyWorldContextCache,

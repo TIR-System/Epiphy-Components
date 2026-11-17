@@ -1203,32 +1203,9 @@
 
     // 【catch 约定】以下 try/catch 均为 Java API 能力探测：先 typeof 判函数再调，
     // 失败表示该 API 在本次加载的 MC/Rhino 版本中不存在，属于预期分支，故留空。
-    var readPlayerPos = BASE.readPos
-
-    function forEachPlayerInRadius(level, x, y, z, radius, fn) {
-        if (level == null) return 0
-        var cx = Number(x), cy = Number(y), cz = Number(z), r = Number(radius)
-        if (!isFinite(cx) || !isFinite(cy) || !isFinite(cz) || !isFinite(r) || r < 0) return 0
-        var d2 = r * r
-        var players = BASE.toJsArray(level.players)
-        var hitCount = 0
-        for (var i = 0; i < players.length; i++) {
-            var p = players[i]
-            var pPos = readPlayerPos(p)
-            if (pPos == null) continue
-            var dx = pPos.x - cx, dy = pPos.y - cy, dz = pPos.z - cz
-            var distSq = dx * dx + dy * dy + dz * dz
-            if (isFinite(distSq) && distSq <= d2) {
-                hitCount++
-                fn(p, distSq)
-            }
-        }
-        return hitCount
-    }
-
-    function resolveLevel(levelOrDim, serverFallback) {
-        return BASE.resolveLevel(levelOrDim, serverFallback || SERVER_REF)
-    }
+    var readPlayerPos         = BASE.readPos
+    var forEachPlayerInRadius = BASE.forEachPlayerNear
+    var resolveLevel          = (levelOrDim, serverFallback) => BASE.resolveLevel(levelOrDim, serverFallback || SERVER_REF)
 
     function sendSinglePlayerPacket(target, pkt) {
         if (target == null || pkt == null) return 0
@@ -1498,25 +1475,29 @@
         return opts
     }
 
-    function deactivatePlayer(player, keyOrGroup, fadeOutOrOpts, maybeMaxPriority) {
-        if (player == null) return 0
-        return toPlayer(player, buildDeactivateOptions(keyOrGroup, fadeOutOrOpts, maybeMaxPriority))
-    }
-
-    function deactivateNear(levelOrDim, x, y, z, radius, keyOrGroup, fadeOutOrOpts, maybeMaxPriority) {
+    function sendActionNear(actionLabel, levelOrDim, x, y, z, radius, actionOpts) {
         if (levelOrDim == null || levelOrDim === '') {
-            reportConfigWarning('调用 deactivateNear 时未指定有效维度')
+            reportConfigWarning('调用 ' + actionLabel + ' 时未指定有效维度')
             return 0
         }
         var lv = resolveLevel(levelOrDim, null)
         if (lv == null) return 0
         var r = (radius !== undefined && radius !== null && radius !== '') ? parseNonNegNum(radius, -1, 0) : DEFAULTS.radius
         if (r < 0) return 0
-        var pkt = buildValidatedPacket(buildDeactivateOptions(keyOrGroup, fadeOutOrOpts, maybeMaxPriority), null)
+        var pkt = buildValidatedPacket(actionOpts, null)
         if (pkt == null) return 0
-        return forEachPlayerInRadius(lv, x, y, z, r, function (p) {
-            try { p.sendData(CHANNEL, pkt) } catch (e) { reportCatch('deactivateNearSend', e) }
+        return forEachPlayerInRadius(lv, x, y, z, r, (p) => {
+            try { p.sendData(CHANNEL, pkt) } catch (e) { reportCatch(actionLabel + 'Send', e) }
         })
+    }
+
+    function deactivatePlayer(player, keyOrGroup, fadeOutOrOpts, maybeMaxPriority) {
+        if (player == null) return 0
+        return toPlayer(player, buildDeactivateOptions(keyOrGroup, fadeOutOrOpts, maybeMaxPriority))
+    }
+
+    function deactivateNear(levelOrDim, x, y, z, radius, keyOrGroup, fadeOutOrOpts, maybeMaxPriority) {
+        return sendActionNear('deactivateNear', levelOrDim, x, y, z, radius, buildDeactivateOptions(keyOrGroup, fadeOutOrOpts, maybeMaxPriority))
     }
 
     function buildClearOptions(groupOrOpts, maxPriority) {
@@ -1539,19 +1520,7 @@
     }
 
     function clearNear(levelOrDim, x, y, z, radius, groupOrOpts, maxPriority) {
-        if (levelOrDim == null || levelOrDim === '') {
-            reportConfigWarning('调用 clearNear 时未指定有效维度')
-            return 0
-        }
-        var lv = resolveLevel(levelOrDim, null)
-        if (lv == null) return 0
-        var r = (radius !== undefined && radius !== null && radius !== '') ? parseNonNegNum(radius, -1, 0) : DEFAULTS.radius
-        if (r < 0) return 0
-        var pkt = buildValidatedPacket(buildClearOptions(groupOrOpts, maxPriority), null)
-        if (pkt == null) return 0
-        return forEachPlayerInRadius(lv, x, y, z, r, function (p) {
-            try { p.sendData(CHANNEL, pkt) } catch (e) { reportCatch('clearNearSend', e) }
-        })
+        return sendActionNear('clearNear', levelOrDim, x, y, z, radius, buildClearOptions(groupOrOpts, maxPriority))
     }
 
 

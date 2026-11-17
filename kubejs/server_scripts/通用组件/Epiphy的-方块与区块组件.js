@@ -90,18 +90,14 @@
         forceNearby:      false
     }
 
-    function logCatch(tag, err) {
-        LOGGER.catchWarn(tag, err)
-    }
-
-    var normalizeDim = BASE.normalizeDim
-
-    function dimOfLevel(lv) { return BASE.dimOfLevel(lv) }
-    function resolveLevel(levelOrDim, server) { return BASE.resolveLevel(levelOrDim, server || SERVER_REF) }
-    function makePosKey(dim, x, y, z) { return BASE.makePosKey(dim, x, y, z) }
-    function extractBlockId(blockOrState) { return BASE.extractBlockId(blockOrState) }
-    function isChunkLoaded(lv, bx, bz) { return BASE.isChunkLoaded(lv, bx, bz) }
-    function readPlayerPos(player) { return BASE.readPos(player) }
+    var logCatch       = (tag, err) => LOGGER.catchWarn(tag, err)
+    var normalizeDim   = BASE.normalizeDim
+    var dimOfLevel     = BASE.dimOfLevel
+    var resolveLevel   = (levelOrDim, server) => BASE.resolveLevel(levelOrDim, server || SERVER_REF)
+    var makePosKey     = BASE.makePosKey
+    var extractBlockId = BASE.extractBlockId
+    var isChunkLoaded  = BASE.isChunkLoaded
+    var readPlayerPos  = BASE.readPos
 
     // 为订阅者按需生成该方块的私有扩展字段并缓存视图到 rec.views[subId]，消除每 tick 重复分配对象与 for-in 拷贝
     function ensureSubscriberView(rec, sub) {
@@ -146,10 +142,9 @@
         }
     }
 
-    function readJsonField(obj, key) { return BASE.readMapField(obj, key) }
-    function toSeqArray(val) { return BASE.toSeqArray(val) }
-    function resolveWorldStorageInfo(server) { return BASE.resolveWorldStorageInfo(server || SERVER_REF, WORLD_FILE_NAME, FALLBACK_DIR) }
-    function ensureParentDir(filePathStr) { return BASE.ensureParentDir(filePathStr, LOGGER) }
+    var readJsonField           = BASE.readMapField
+    var toSeqArray              = BASE.toSeqArray
+    var resolveWorldStorageInfo = (server) => BASE.resolveWorldStorageInfo(server || SERVER_REF, WORLD_FILE_NAME, FALLBACK_DIR)
 
     var storageReadFailed = false
 
@@ -171,14 +166,7 @@
                 migratedLegacy: migratedLegacyFlag,
                 blocks:         arr
             }
-            var wroteDisk = false
-            if (typeof BASE.writeJsonAtomic === 'function') {
-                wroteDisk = Boolean(BASE.writeJsonAtomic(targetPath, payload, true, LOGGER))
-            } else if (typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.write === 'function') {
-                ensureParentDir(targetPath)
-                JsonIO.write(targetPath, payload)
-                wroteDisk = true
-            }
+            var wroteDisk = Boolean(BASE.writeJsonAtomic(targetPath, payload, true, LOGGER))
             try {
                 if (SERVER_REF.persistentData != null && typeof SERVER_REF.persistentData.putString === 'function') {
                     SERVER_REF.persistentData.putString(PERSIST_KEY, JSON.stringify(arr))
@@ -342,21 +330,9 @@
         var storageInfo    = resolveWorldStorageInfo(SERVER_REF)
         loadedStoragePath  = storageInfo.filePath
 
-        var diskStatus = 'missing'
-        var rawObj     = null
-        if (typeof BASE.readJsonDetailed === 'function') {
-            var detailRes = BASE.readJsonDetailed(loadedStoragePath, LOGGER, true)
-            diskStatus    = detailRes.status
-            rawObj        = detailRes.data
-        } else if (typeof JsonIO !== 'undefined' && JsonIO != null) {
-            try {
-                rawObj = JsonIO.read(loadedStoragePath)
-                diskStatus = (rawObj != null) ? 'ok' : 'missing'
-            } catch (eJsonLoad) {
-                diskStatus = 'corrupt'
-                logCatch('ensureLoaded:JsonIO', eJsonLoad)
-            }
-        }
+        var detailRes  = BASE.readJsonDetailed(loadedStoragePath, LOGGER, true)
+        var diskStatus = detailRes.status
+        var rawObj     = detailRes.data
 
         if (diskStatus === 'ok' && rawObj != null) {
             var directSeq = toSeqArray(rawObj)
