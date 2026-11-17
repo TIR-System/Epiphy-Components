@@ -5,8 +5,8 @@
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-屏幕弹幕渲染器.js
 //  配套服务端组件：
-//    - kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js（服务端调度器 ScreenDanmaku v5.6）
-//    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀 EpiphyPermissionValve v5.3）
+//    - kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js（服务端调度器 ScreenDanmaku v5.7）
+//    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀 EpiphyPermissionValve v5.4）
 //
 //  依赖与缺失降级：
 //    - 可选前置：kubejs/startup_scripts/通用组件/Epiphy的-Spec与通用工具.js (EpiphySpec / EpiphyProtocol, priority: 1200)

@@ -2845,7 +2845,11 @@
         if (job.t % 5 === 0) {
             BASE.forEachEntityNear(job.level, job.x, job.y, job.z, waveRadius, (ent) => {
                 var tid = String(ent.type || '')
-                return tid !== 'minecraft:item' && tid !== 'minecraft:experience_orb' && tid !== GAPING_VOID_ENTITY
+                return tid !== 'minecraft:player'
+                    && tid !== 'minecraft:item'
+                    && tid !== 'minecraft:experience_orb'
+                    && tid !== GAPING_VOID_ENTITY
+                    && !(typeof ent.isPlayer === 'function' && ent.isPlayer())
             }, (ent, distSq) => {
                 var dist = Math.sqrt(distSq)
                 var wavePower = Math.max(80.0, (DE_POWER - (dist / 10.0)) * 120.0)
