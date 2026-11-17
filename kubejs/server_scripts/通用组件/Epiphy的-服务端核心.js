@@ -1,15 +1,18 @@
 // priority: 1080
 // ============================================================================
-// Epiphy 服务端通用基础设施 (EpiphyServerBase v2.3)
+// Epiphy 服务端核心与世界工具 (EpiphyServerCore / EpiphyServerBase v2.4)
 //   许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
+//   放置位置：kubejs/server_scripts/通用组件/Epiphy的-服务端核心.js
 //   所属阶段：server_scripts
 //   可选依赖：
 //     - global.EpiphySpec (Epiphy的-Spec与通用工具.js)：缺失时维度/数组工具自动使用内置精简降级实现
 //     - global.EpiphyLog (Epiphy的-日志.js)：缺失时自动降级为基础 console 限频日志，不阻断服务端模块加载
 //   定位    ：收拢服务端日志包装与降级、Java 类缓存、MC 对象访问器（`resolveLevel` 无效维度 fail-closed 拒绝回落主世界）、
+//            世界/实体/玩家高频工具（范围玩家与实体遍历、主副手/背包/Curios 安全物品与遗物检索、免指令消息/状态栏/粒子/音效工具）、
 //            外部统一数据根 `epiphy-data/`（config/worlds/players/events/logs/presets/backups）、`.tmp`+`.bak` 原子读写、
 //            KubeJS ClassFilter 兼容路径（`KubeJSPaths.dir` + `JsonIO.readString` + `worlds_index.json` + Rhino `NativeJavaMap` 防护）、
 //            `lastWorldPath` 复制档自动分叉与世界专属 `logs/` 运行日志目录切换、权限阀子命令队列与统一 OP 提醒、Debug 注册与命令树 DSL
+//   向下兼容：同时挂载 `global.EpiphyServerCore` 与 `global.EpiphyServerBase`
 //   约束    ：严格 Rhino ES5（禁止 let/const、箭头函数、模板字符串、展开运算符）
 // ============================================================================
 
@@ -537,6 +540,369 @@
         if (typeof lv.hasChunk === 'function') {
             return Boolean(lv.hasChunk(cx, cz));
         }
+        return false;
+    }
+
+    // ========================================================================
+    // 实体 / 玩家 / 背包与 Curios 安全物品检索 / 免指令世界广播工具
+    // ========================================================================
+    var AABB_CLASS       = loadJavaClass('net.minecraft.world.phys.AABB', true);
+    var CURIOS_API_CLASS = loadJavaClass('top.theillusivec4.curios.api.CuriosApi', true);
+
+    function isCreativePlayer(player) {
+        if (player == null) return false;
+        try {
+            if (typeof player.isCreative === 'function') return Boolean(player.isCreative());
+            var cr = safeReadProp(player, 'creative');
+            if (cr != null && typeof cr !== 'function') return Boolean(cr);
+        } catch (e0) { }
+        try {
+            var ab = safeReadProp(player, 'abilities');
+            if (ab != null) {
+                var ib = safeReadProp(ab, 'instabuild');
+                if (ib != null) return Boolean(ib);
+            }
+        } catch (e1) { }
+        return false;
+    }
+
+    function isSpectatorPlayer(player) {
+        if (player == null) return false;
+        try {
+            if (typeof player.isSpectator === 'function') return Boolean(player.isSpectator());
+            var sp = safeReadProp(player, 'spectator');
+            if (sp != null && typeof sp !== 'function') return Boolean(sp);
+        } catch (e0) { }
+        return false;
+    }
+
+    function extractItemStackId(stack) {
+        if (stack == null) return '';
+        try {
+            if (typeof stack.isEmpty === 'function' && Boolean(stack.isEmpty())) return '';
+            if (safeReadProp(stack, 'empty') === true) return '';
+        } catch (eEmpty) { }
+        var idProp = safeReadProp(stack, 'id');
+        if (idProp != null && String(idProp) !== '') return String(idProp);
+        if (safeHasMethod(stack, 'getId')) {
+            try {
+                var gid = stack.getId();
+                if (gid != null) return String(gid);
+            } catch (eGid) { }
+        }
+        return '';
+    }
+
+    function isHoldingMainHand(player, itemId) {
+        if (player == null || !itemId) return false;
+        var target = String(itemId).trim();
+        if (!target) return false;
+        try {
+            var mh = safeReadProp(player, 'mainHandItem');
+            if (mh == null && safeHasMethod(player, 'getMainHandItem')) mh = player.getMainHandItem();
+            if (mh != null) {
+                var mhId = extractItemStackId(mh);
+                if (mhId) return mhId === target;
+            }
+        } catch (eMh) { }
+        // 兼容仅实现 player.isHolding(id) 的轻量测试桩（同时排除副手明确为该物品而主手为空的情形）
+        try {
+            var oh = safeReadProp(player, 'offHandItem');
+            if (oh == null && safeHasMethod(player, 'getOffHandItem')) oh = player.getOffHandItem();
+            if (oh != null && extractItemStackId(oh) === target) {
+                return false;
+            }
+            if (typeof player.isHolding === 'function') return Boolean(player.isHolding(target));
+        } catch (eHold) { }
+        return false;
+    }
+
+    // 严格按候选列表优先级检索玩家携带的物品 ID（绝不回退到 String(player.nbt) 全量字符串匹配，彻底杜绝铁砧改名/书与笔伪造漏洞）：
+    //   opts.mainHandOnly : true 时仅检查主手
+    //   opts.checkHands   : 默认 true（检查主副手）
+    //   opts.checkInventory: 默认 true（检查原版背包槽位）
+    //   opts.checkCurios  : 默认 true（通过 CuriosApi 检查饰品槽真实 ItemStack.id）
+    //   opts.skipCreative : true 时创造模式玩家直接返回 null
+    function findPlayerItem(player, candidateIds, opts) {
+        if (player == null || candidateIds == null) return null;
+        var options = isObjectLike(opts) ? opts : {};
+        if (options.skipCreative && isCreativePlayer(player)) return null;
+
+        var ids = Array.isArray(candidateIds) ? candidateIds : [String(candidateIds)];
+        if (ids.length === 0) return null;
+
+        if (options.mainHandOnly) {
+            for (var m = 0; m < ids.length; m++) {
+                if (isHoldingMainHand(player, ids[m])) return ids[m];
+            }
+            return null;
+        }
+
+        var foundSet = {};
+        var targetSet = {};
+        for (var ti = 0; ti < ids.length; ti++) {
+            var tid = String(ids[ti] || '').trim();
+            if (tid) targetSet[tid] = true;
+        }
+
+        // 1. 检查主手与副手
+        if (options.checkHands !== false) {
+            try {
+                var mainStack = safeReadProp(player, 'mainHandItem');
+                if (mainStack == null && safeHasMethod(player, 'getMainHandItem')) mainStack = player.getMainHandItem();
+                var mainId = extractItemStackId(mainStack);
+                if (mainId && targetSet[mainId]) foundSet[mainId] = true;
+
+                var offStack = safeReadProp(player, 'offHandItem');
+                if (offStack == null && safeHasMethod(player, 'getOffHandItem')) offStack = player.getOffHandItem();
+                var offId = extractItemStackId(offStack);
+                if (offId && targetSet[offId]) foundSet[offId] = true;
+            } catch (eH) { }
+            if (typeof player.isHolding === 'function') {
+                for (var h = 0; h < ids.length; h++) {
+                    var hid = ids[h];
+                    if (!foundSet[hid]) {
+                        try {
+                            if (Boolean(player.isHolding(hid))) foundSet[hid] = true;
+                        } catch (eHold2) { }
+                    }
+                }
+            }
+        }
+
+        if (foundSet[ids[0]]) return ids[0];
+
+        // 2. 检查原版背包槽位（仅检查真实槽位物品 ID，不序列化物品 NBT 文本）
+        if (options.checkInventory !== false) {
+            try {
+                var inv = safeReadProp(player, 'inventory');
+                if (inv == null && safeHasMethod(player, 'getInventory')) inv = player.getInventory();
+                if (inv != null) {
+                    if (typeof inv.find === 'function') {
+                        for (var k = 0; k < ids.length; k++) {
+                            var kid = ids[k];
+                            if (!foundSet[kid] && Number(inv.find(kid)) >= 0) {
+                                foundSet[kid] = true;
+                            }
+                        }
+                    } else if (safeHasMethod(inv, 'getContainerSize') && safeHasMethod(inv, 'getItem')) {
+                        var invSize = Number(inv.getContainerSize());
+                        for (var si = 0; si < invSize; si++) {
+                            var st = inv.getItem(si);
+                            var stId = extractItemStackId(st);
+                            if (stId && targetSet[stId]) foundSet[stId] = true;
+                        }
+                    }
+                }
+            } catch (eInv) { }
+        }
+
+        if (foundSet[ids[0]]) return ids[0];
+
+        // 3. 检查 Curios 饰品栏（仅读取槽位 ItemStack.id）
+        if (options.checkCurios !== false && CURIOS_API_CLASS != null && safeHasMethod(CURIOS_API_CLASS, 'getCuriosInventory')) {
+            try {
+                var opt = CURIOS_API_CLASS.getCuriosInventory(player);
+                if (opt != null && typeof opt.isPresent === 'function' && Boolean(opt.isPresent())) {
+                    var handler = opt.resolve().get();
+                    var stacksMap = handler.getCurios();
+                    var iter = stacksMap.values().iterator();
+                    while (iter.hasNext()) {
+                        var stacksHandler = iter.next();
+                        var dynStacks = stacksHandler.getStacks();
+                        var slots = Number(dynStacks.getSlots());
+                        for (var s = 0; s < slots; s++) {
+                            var cStack = dynStacks.getStackInSlot(s);
+                            var cId = extractItemStackId(cStack);
+                            if (cId && targetSet[cId]) foundSet[cId] = true;
+                        }
+                    }
+                }
+            } catch (eCur) { }
+        }
+
+        for (var pIdx = 0; pIdx < ids.length; pIdx++) {
+            if (foundSet[ids[pIdx]]) return ids[pIdx];
+        }
+        return null;
+    }
+
+    function forEachPlayerNear(level, x, y, z, radius, callback) {
+        if (level == null || typeof callback !== 'function') return 0;
+        var cx = Number(x), cy = Number(y), cz = Number(z), r = Number(radius);
+        if (!isFinite(cx) || !isFinite(cy) || !isFinite(cz) || !isFinite(r) || r < 0) return 0;
+        var d2 = r * r;
+        var rawPlayers = safeReadProp(level, 'players');
+        if (rawPlayers == null && safeHasMethod(level, 'getPlayers')) {
+            try { rawPlayers = level.getPlayers(); } catch (eP) { }
+        }
+        var players = toSeqArray(rawPlayers);
+        var hitCount = 0;
+        for (var i = 0; i < players.length; i++) {
+            var p = players[i];
+            var pos = readPos(p);
+            if (pos == null) continue;
+            var dx = pos.x - cx;
+            var dy = pos.y - cy;
+            var dz = pos.z - cz;
+            var distSq = dx * dx + dy * dy + dz * dz;
+            if (isFinite(distSq) && distSq <= d2) {
+                hitCount++;
+                callback(p, distSq, pos);
+            }
+        }
+        return hitCount;
+    }
+
+    function hasPlayerNear(level, x, y, z, radius) {
+        if (level == null) return false;
+        var cx = Number(x), cy = Number(y), cz = Number(z), r = Number(radius);
+        if (!isFinite(cx) || !isFinite(cy) || !isFinite(cz) || !isFinite(r) || r < 0) return false;
+        var d2 = r * r;
+        var rawPlayers = safeReadProp(level, 'players');
+        if (rawPlayers == null && safeHasMethod(level, 'getPlayers')) {
+            try { rawPlayers = level.getPlayers(); } catch (eP) { }
+        }
+        var players = toSeqArray(rawPlayers);
+        for (var i = 0; i < players.length; i++) {
+            var pos = readPos(players[i]);
+            if (pos == null) continue;
+            var dx = pos.x - cx;
+            var dy = pos.y - cy;
+            var dz = pos.z - cz;
+            var distSq = dx * dx + dy * dy + dz * dz;
+            if (isFinite(distSq) && distSq <= d2) return true;
+        }
+        return false;
+    }
+
+    function forEachEntityNear(level, x, y, z, radius, filterFn, callback) {
+        if (level == null || typeof callback !== 'function') return 0;
+        var cx = Number(x), cy = Number(y), cz = Number(z), r = Number(radius);
+        if (!isFinite(cx) || !isFinite(cy) || !isFinite(cz) || !isFinite(r) || r < 0) return 0;
+        var d2 = r * r;
+        var count = 0;
+        if (AABB_CLASS != null && safeHasMethod(level, 'getEntitiesWithin')) {
+            try {
+                var box = new AABB_CLASS(cx - r, cy - r, cz - r, cx + r, cy + r, cz + r);
+                var ents = toSeqArray(level.getEntitiesWithin(box));
+                for (var i = 0; i < ents.length; i++) {
+                    var ent = ents[i];
+                    if (ent == null) continue;
+                    if (typeof filterFn === 'function' && !filterFn(ent)) continue;
+                    var pos = readPos(ent);
+                    var distSq = 0;
+                    if (pos != null) {
+                        var dx = pos.x - cx, dy = pos.y - cy, dz = pos.z - cz;
+                        distSq = dx * dx + dy * dy + dz * dz;
+                        if (distSq > d2) continue;
+                    } else if (safeHasMethod(ent, 'getDistance')) {
+                        var dist = Number(ent.getDistance(cx, cy, cz));
+                        if (isFinite(dist) && dist > r) continue;
+                        distSq = dist * dist;
+                    }
+                    count++;
+                    callback(ent, distSq, pos);
+                }
+                return count;
+            } catch (eBox) { }
+        }
+        return forEachPlayerNear(level, cx, cy, cz, r, function (p, distSq, pos) {
+            if (typeof filterFn === 'function' && !filterFn(p)) return;
+            count++;
+            callback(p, distSq, pos);
+        });
+    }
+
+    var JSON_LEGACY_COLOR_MAP = {
+        dark_red: '§4', red: '§c', gold: '§6', yellow: '§e',
+        green: '§a', dark_green: '§2', aqua: '§b', dark_aqua: '§3',
+        blue: '§9', light_purple: '§d', dark_purple: '§5',
+        white: '§f', gray: '§7', dark_gray: '§8', black: '§0'
+    };
+
+    function formatChatPayloadToString(msgOrJson) {
+        if (msgOrJson == null) return '';
+        if (typeof msgOrJson === 'string') {
+            var trimmed = msgOrJson.trim();
+            if (trimmed.charAt(0) === '{' && trimmed.charAt(trimmed.length - 1) === '}') {
+                try {
+                    var parsed = JSON.parse(trimmed);
+                    if (parsed != null && typeof parsed === 'object') {
+                        var prefix = '';
+                        if (parsed.color && JSON_LEGACY_COLOR_MAP[parsed.color]) prefix += JSON_LEGACY_COLOR_MAP[parsed.color];
+                        if (parsed.bold) prefix += '§l';
+                        if (parsed.italic) prefix += '§o';
+                        if (parsed.underlined) prefix += '§n';
+                        return prefix + String(parsed.text != null ? parsed.text : '');
+                    }
+                } catch (eJson) { }
+            }
+            return msgOrJson;
+        }
+        if (isObjectLike(msgOrJson) && msgOrJson.text != null) {
+            var pfx = '';
+            if (msgOrJson.color && JSON_LEGACY_COLOR_MAP[msgOrJson.color]) pfx += JSON_LEGACY_COLOR_MAP[msgOrJson.color];
+            if (msgOrJson.bold) pfx += '§l';
+            if (msgOrJson.italic) pfx += '§o';
+            return pfx + String(msgOrJson.text);
+        }
+        return String(msgOrJson);
+    }
+
+    function tellPlayerSafe(player, msgOrJson) {
+        if (player == null || msgOrJson == null) return false;
+        var formatted = formatChatPayloadToString(msgOrJson);
+        if (!formatted) return false;
+        try {
+            if (typeof player.tell === 'function') {
+                var payload = (typeof Text !== 'undefined' && Text != null && typeof Text.of === 'function')
+                    ? Text.of(formatted)
+                    : formatted;
+                player.tell(payload);
+                return true;
+            }
+        } catch (eTell) { }
+        try {
+            if (typeof player.sendSystemMessage === 'function') {
+                var comp = (typeof Text !== 'undefined' && Text != null && typeof Text.of === 'function')
+                    ? Text.of(formatted)
+                    : formatted;
+                player.sendSystemMessage(comp);
+                return true;
+            }
+        } catch (eSys) { }
+        return false;
+    }
+
+    function tellNear(level, x, y, z, radius, msgOrLines) {
+        if (level == null || msgOrLines == null) return 0;
+        var lines = Array.isArray(msgOrLines) ? msgOrLines : [msgOrLines];
+        return forEachPlayerNear(level, x, y, z, radius, function (p) {
+            for (var i = 0; i < lines.length; i++) {
+                if (lines[i] != null) tellPlayerSafe(p, lines[i]);
+            }
+        });
+    }
+
+    function actionBarNear(level, x, y, z, radius, text) {
+        if (level == null || text == null) return 0;
+        var formatted = formatChatPayloadToString(text);
+        return forEachPlayerNear(level, x, y, z, radius, function (p) {
+            try {
+                p.statusMessage = formatted;
+            } catch (eAb) { }
+        });
+    }
+
+    function spawnParticlesSafe(level, particleTypeOrId, x, y, z, dx, dy, dz, count, speed) {
+        if (level == null || particleTypeOrId == null) return false;
+        try {
+            if (typeof level.spawnParticles === 'function') {
+                level.spawnParticles(particleTypeOrId, true, x, y, z, dx, dy, dz, count, speed);
+                return true;
+            }
+        } catch (ePart) { }
         return false;
     }
 
@@ -2315,7 +2681,7 @@
     }
 
     if (typeof global !== 'undefined') {
-        global.EpiphyServerBase = {
+        var coreApi = {
             createLogger:                 createLogger,
             loadJavaClass:                loadJavaClass,
             nowNano:                      nowNano,
@@ -2338,6 +2704,19 @@
             makePosKey:                   makePosKey,
             extractBlockId:               extractBlockId,
             isChunkLoaded:                isChunkLoaded,
+            isCreativePlayer:             isCreativePlayer,
+            isSpectatorPlayer:            isSpectatorPlayer,
+            extractItemStackId:           extractItemStackId,
+            isHoldingMainHand:            isHoldingMainHand,
+            findPlayerItem:               findPlayerItem,
+            forEachPlayerNear:            forEachPlayerNear,
+            hasPlayerNear:                hasPlayerNear,
+            forEachEntityNear:            forEachEntityNear,
+            formatChatPayloadToString:    formatChatPayloadToString,
+            tellPlayerSafe:               tellPlayerSafe,
+            tellNear:                     tellNear,
+            actionBarNear:                actionBarNear,
+            spawnParticlesSafe:           spawnParticlesSafe,
             resolveWorldStorageInfo:      resolveWorldStorageInfo,
             ensureParentDir:              ensureParentDir,
             EPIPHY_DATA_SUBDIRS:          EPIPHY_DATA_SUBDIRS.slice(),
@@ -2361,6 +2740,8 @@
             acquireBlockTracker:          acquireBlockTracker,
             createCommandBuilder:         createCommandBuilder
         };
+        global.EpiphyServerCore = coreApi;
+        global.EpiphyServerBase = coreApi;
     }
 
     if (typeof ServerEvents !== 'undefined' && ServerEvents != null) {

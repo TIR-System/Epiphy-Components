@@ -1,6 +1,6 @@
 // priority: 1000
 // ============================================================================
-//  通用指令权限阀与 /epiphy 根命令注册中心 (EpiphyPermissionValve v5.2)
+//  通用指令权限阀与 /epiphy 根命令注册中心 (EpiphyPermissionValve v5.3)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 <repo-root> 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
@@ -41,9 +41,9 @@
 // ============================================================================
 
 ;(function () {
-    var BASE = (typeof global !== 'undefined') ? global.EpiphyServerBase : null
+    var BASE = (typeof global !== 'undefined') ? (global.EpiphyServerCore || global.EpiphyServerBase) : null
     if (!BASE) {
-        throw new Error('[EpiphyPermissionValve] 缺少硬依赖 global.EpiphyServerBase，请确认 server_scripts/通用组件/Epiphy的-服务端基础.js 已加载')
+        throw new Error('[EpiphyPermissionValve] 缺少硬依赖 global.EpiphyServerBase，请确认 server_scripts/通用组件/Epiphy的-服务端核心.js 已加载')
     }
 
     var LOGGER                  = BASE.createLogger('EpiphyPermissionValve', 5000)

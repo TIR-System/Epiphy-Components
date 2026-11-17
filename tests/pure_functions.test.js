@@ -9,8 +9,8 @@ var vm     = require('vm')
 var ROOT_DIR         = path.resolve(__dirname, '..')
 var SPEC_PATH        = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的-Spec与通用工具.js')
 var LOG_PATH         = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-日志.js')
-var SERVER_BASE_PATH = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-服务端基础.js')
-var TRACKER_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-方块追踪组件.js')
+var SERVER_BASE_PATH = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-服务端核心.js')
+var TRACKER_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-方块与区块组件.js')
 var VALVE_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-权限阀.js')
 var DEBUG_PATH        = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-调试组件.js')
 var BUGFIX_PATH       = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-基础bug修复.js')
@@ -1406,7 +1406,7 @@ test('renderer: batched glow (4-diag) and stroke (8+4) emit circular passes with
     }
     var baseMat = new MockMatrix4f()
     var cliSandbox = {
-        console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+        console: { info: function () {}, warn: function () {}, error: function (m, e) { console.log('CLI_ERR:', m, e && e.stack ? e.stack : e) }, debug: function () {}, log: function () {} },
         ClientEvents: {
             loggedOut: function () {},
             loggedIn: function () {},
@@ -6646,6 +6646,290 @@ test('audit fixes: persistence .bak recovery & corruption guard, 3-state scope h
         assert.strictEqual(sb.global.EpiphyAudio.CONFIG.playerMaxRange, 64)
         for (var ui = 0; ui < unloadCbs.length; ui++) unloadCbs[ui]({ server: srv })
         assert.strictEqual(Tracker.getStats().trackedBlocksSize, 0, 'unload clears BlockTracker in-memory records')
+    } finally {
+        fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
+})
+
+// ----------------------------------------------------------------------------
+// 59. EpiphyServerCore + EpiphyWorldOps + Uncrafting Chaos refactoring verification
+// ----------------------------------------------------------------------------
+test('Uncrafting Chaos & EpiphyServerCore/EpiphyWorldOps: anti-rename relic spoofing, mainhand diamond pickaxe, WorldOps cost gating & persistence', function () {
+    var V18_PATH = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '合成表-暮色森林', '拆解台-混沌殉爆.v18.js')
+    var os = require('os')
+    var tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'epiphy_uncraft59_'))
+    try {
+        var gameDir = path.join(tmpRoot, 'game')
+        var saveDir = path.join(gameDir, 'saves', 'UncraftWorld')
+        fs.mkdirSync(saveDir, { recursive: true })
+
+        var sb = makeNodeBackedJavaSandbox(gameDir)
+        var brokenHandlers = {}
+        var placedHandlers = {}
+        var tickHandlers = []
+        var unloadHandlers = []
+        sb.BlockEvents.placed = function (idOrFn, maybeFn) {
+            if (typeof idOrFn === 'string' && typeof maybeFn === 'function') placedHandlers[idOrFn] = maybeFn
+        }
+        sb.BlockEvents.broken = function (idOrFn, maybeFn) {
+            if (typeof idOrFn === 'string' && typeof maybeFn === 'function') brokenHandlers[idOrFn] = maybeFn
+        }
+        sb.BlockEvents.rightClicked = function () {}
+        sb.ServerEvents.tick = function (fn) { tickHandlers.push(fn) }
+        sb.ServerEvents.unloaded = function (fn) { unloadHandlers.push(fn) }
+        sb.ServerEvents.recipes = function () {}
+
+        var worldBlocks = {}
+        var pDataStore = {}
+        var overworldLv = {
+            dimension: 'minecraft:overworld',
+            getDimension: function () { return 'minecraft:overworld' },
+            players: [],
+            getPlayers: function () { return this.players },
+            hasChunk: function (cx, cz) { return cx >= -10 && cx <= 10 && cz >= -10 && cz <= 10 },
+            getChunkSource: function () {
+                return {
+                    getChunkNow: function (cx, cz) {
+                        if (cx < -10 || cx > 10 || cz < -10 || cz > 10) return null
+                        var secs = []
+                        for (var si = 0; si < 24; si++) {
+                            ;(function (sIdx) {
+                                var secBaseY = -64 + (sIdx << 4)
+                                secs.push({
+                                    hasOnlyAir: function () { return false },
+                                    getBlockState: function (lx, ly, lz) {
+                                        var k = ((cx << 4) + lx) + ',' + (secBaseY + ly) + ',' + ((cz << 4) + lz)
+                                        var bid = worldBlocks[k] || 'minecraft:air'
+                                        return {
+                                            getFluidState: function () {
+                                                return { isEmpty: function () { return bid !== 'minecraft:water' && bid !== 'minecraft:lava' } }
+                                            }
+                                        }
+                                    }
+                                })
+                            })(si)
+                        }
+                        return {
+                            getMinBuildHeight: function () { return -64 },
+                            getSections: function () { return secs }
+                        }
+                    }
+                }
+            },
+            getBlock: function (x, y, z) {
+                var k = Math.floor(x) + ',' + Math.floor(y) + ',' + Math.floor(z)
+                return {
+                    id: worldBlocks[k] || 'minecraft:air',
+                    x: Math.floor(x), y: Math.floor(y), z: Math.floor(z),
+                    set: function (newId) { worldBlocks[k] = String(newId) },
+                    popItem: function () {}
+                }
+            },
+            createExplosion: function () {
+                return {
+                    strength: function () { return this },
+                    causesFire: function () { return this },
+                    explosionMode: function () { return this },
+                    explode: function () {}
+                }
+            },
+            spawnParticles: function () {},
+            spawnLightning: function () {}
+        }
+        var srv = {
+            persistentData: {
+                contains: function (k) { return Object.prototype.hasOwnProperty.call(pDataStore, k) },
+                getString: function (k) { return pDataStore[k] || '' },
+                putString: function (k, v) { pDataStore[k] = String(v) }
+            },
+            getWorldData: function () { return { getLevelName: function () { return 'UncraftWorld' } } },
+            getWorldPath: function () { return saveDir },
+            getLevel: function (d) { return String(d) === 'minecraft:overworld' ? overworldLv : null },
+            getAllLevels: function () { return [overworldLv] },
+            getPlayerList: function () { return { getPlayers: function () { return overworldLv.players } } },
+            scheduleInTicks: function (_t, fn) { if (typeof fn === 'function') fn() }
+        }
+        overworldLv.server = srv
+        sb.server = srv
+
+        loadServerBase(sb)
+        runScriptIn(sb, TRACKER_PATH)
+        runScriptIn(sb, DANMAKU_PATH)
+        runScriptIn(sb, AUDIO_PATH)
+        runScriptIn(sb, V18_PATH)
+
+        var Core = sb.global.EpiphyServerCore
+        var WorldOps = sb.global.EpiphyWorldOps
+        assert.ok(Core && Core === sb.global.EpiphyServerBase, 'EpiphyServerCore and EpiphyServerBase alias match')
+        assert.ok(WorldOps && WorldOps === sb.global.EpiphyBlockTracker, 'EpiphyWorldOps and EpiphyBlockTracker alias match')
+
+        // 1. Anvil rename spoofing MUST NOT count as holding a divine relic
+        var spoofPlayer = {
+            username: 'Spoofer',
+            stringUuid: '00000000-0000-4000-8000-000000000077',
+            getX: function () { return 3000 }, getY: function () { return 64 }, getZ: function () { return 3000 },
+            isCreative: function () { return false },
+            mainHandItem: { id: 'minecraft:dirt', isEmpty: function () { return false } },
+            offHandItem: { id: 'minecraft:air', isEmpty: function () { return true } },
+            inventory: { find: function () { return -1 } },
+            // Player renamed dirt to "goety_revelation:halo_of_the_end" in NBT!
+            nbt: '{Inventory:[{id:"minecraft:dirt",tag:{display:{Name:\'{"text":"goety_revelation:halo_of_the_end"}\'}}}]}'
+        }
+        assert.strictEqual(
+            Core.findPlayerItem(spoofPlayer, ['goety_revelation:halo_of_the_end', 'enigmaticlegacy:cursed_ring']),
+            null,
+            'renamed item in player.nbt must NEVER spoof divine relic check'
+        )
+
+        // 2. Diamond pickaxe in inventory (or offhand) but NOT in mainhand MUST NOT allow safe break
+        var invPickPlayer = {
+            username: 'BagPick',
+            stringUuid: '00000000-0000-4000-8000-000000000078',
+            getX: function () { return 3000 }, getY: function () { return 64 }, getZ: function () { return 3000 },
+            isCreative: function () { return false },
+            mainHandItem: { id: 'minecraft:iron_pickaxe', isEmpty: function () { return false } },
+            offHandItem: { id: 'minecraft:diamond_pickaxe', isEmpty: function () { return false } },
+            // diamond_pickaxe is in inventory slot 5, and isHolding returns true because of offhand
+            isHolding: function (id) { return id === 'minecraft:diamond_pickaxe' },
+            inventory: { find: function (id) { return id === 'minecraft:diamond_pickaxe' ? 5 : -1 } }
+        }
+        assert.strictEqual(
+            Core.isHoldingMainHand(invPickPlayer, 'minecraft:diamond_pickaxe'),
+            false,
+            'diamond pickaxe in inventory/offhand must NOT pass mainhand-only check'
+        )
+
+        var canceledBreak1 = false
+        worldBlocks['3000,64,3000'] = 'twilightforest:uncrafting_table'
+        brokenHandlers['twilightforest:uncrafting_table']({
+            level: overworldLv,
+            block: { id: 'twilightforest:uncrafting_table', x: 3000, y: 64, z: 3000, dimension: 'minecraft:overworld' },
+            player: invPickPlayer,
+            cancel: function () { canceledBreak1 = true }
+        })
+        assert.strictEqual(canceledBreak1, true, 'breaking with diamond pickaxe only in inventory/offhand must cancel break and trigger instability')
+        assert.strictEqual(worldBlocks['3000,64,3000'], 'epiphy:ultra_uncrafting_instability_1', 'must transition to instability stage 1 block')
+
+        // 3. Holding diamond pickaxe in mainhand allows safe break without cancelling
+        var mainHandPickPlayer = {
+            username: 'MainPick',
+            stringUuid: '00000000-0000-4000-8000-000000000079',
+            getX: function () { return 3100 }, getY: function () { return 64 }, getZ: function () { return 3100 },
+            isCreative: function () { return false },
+            mainHandItem: { id: 'minecraft:diamond_pickaxe', isEmpty: function () { return false } },
+            offHandItem: { id: 'minecraft:air', isEmpty: function () { return true } },
+            inventory: { find: function () { return 0 } }
+        }
+        var canceledBreak2 = false
+        worldBlocks['3100,64,3100'] = 'twilightforest:uncrafting_table'
+        brokenHandlers['twilightforest:uncrafting_table']({
+            level: overworldLv,
+            block: { id: 'twilightforest:uncrafting_table', x: 3100, y: 64, z: 3100, dimension: 'minecraft:overworld' },
+            player: mainHandPickPlayer,
+            cancel: function () { canceledBreak2 = true }
+        })
+        assert.strictEqual(canceledBreak2, false, 'holding diamond pickaxe in mainhand must allow normal break')
+
+        // 4. WorldOps cost gating: small sphere (r=2, total r=4 <= 16) runs synchronously in 1 frame without queuing background job
+        var doneSmall = false
+        WorldOps.startSphereFluidPurge(overworldLv, 'minecraft:overworld', 0, 64, 0, 2, {
+            padding: 2,
+            onDone: function () { doneSmall = true }
+        })
+        assert.strictEqual(doneSmall, true, 'small sphere fluid purge must complete immediately in single frame')
+        assert.strictEqual(WorldOps.getStats().fluidPurgeJobsCount, 0, 'small sphere must not allocate background fluidPurgeJobs')
+
+        // 5. Ring block job places lava on loaded chunks and skips unloaded chunks (r=300 is outside loaded -10..10 chunks)
+        var ringDone = false
+        WorldOps.startRingBlockJob(overworldLv, 'minecraft:overworld', 0, 64, 0, 16, {
+            blockId: 'minecraft:lava',
+            width: 1,
+            thickness: 2,
+            onDone: function () { ringDone = true }
+        })
+        for (var rt = 0; rt < 5 && !ringDone; rt++) {
+            for (var ti = 0; ti < tickHandlers.length; ti++) tickHandlers[ti]({ server: srv })
+        }
+        assert.strictEqual(ringDone, true, 'ring block job completes across ticks within budget')
+
+        // 6. Full-height 2D cylindrical fluid purge (default cylinder2D=true) clears high-Y sea-level water at outer rim
+        // where a 3D sphere centered at y=-20 with r=18 would clip out (dx=17, dy=82 -> dx^2+dy^2 >> 18^2)
+        worldBlocks['17,62,0'] = 'minecraft:water'
+        WorldOps.startSphereFluidPurge(overworldLv, 'minecraft:overworld', 0, -20, 0, 16, {
+            padding: 2,
+            loops: 1,
+            cylinder2D: false
+        })
+        for (var ct0 = 0; ct0 < 15; ct0++) {
+            for (var ti0 = 0; ti0 < tickHandlers.length; ti0++) tickHandlers[ti0]({ server: srv })
+        }
+        assert.strictEqual(worldBlocks['17,62,0'], 'minecraft:water', '3D sphere mode (cylinder2D=false) clips out high-Y sea-level water at outer rim')
+
+        var cylDone = false
+        WorldOps.startSphereFluidPurge(overworldLv, 'minecraft:overworld', 1, -20, 0, 16, {
+            padding: 2,
+            loops: 1,
+            onDone: function () { cylDone = true }
+        })
+        for (var ct = 0; ct < 15 && !cylDone; ct++) {
+            for (var ti2 = 0; ti2 < tickHandlers.length; ti2++) tickHandlers[ti2]({ server: srv })
+        }
+        assert.strictEqual(worldBlocks['17,62,0'], 'minecraft:air', 'default cylinder2D=true full-height purge must clear high-Y sea-level water at outer rim without leaving vertical water walls')
+
+        // 7. ScreenDanmakuClient v5.7: fast-rejects <AVARITIA_BIOS> non-tag brackets and renders typewriter prefixes via O(1) vis tables
+        var cliPaints = []
+        var cliNowMs = 1000
+        var cliSb = {
+            console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+            ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function (fn) { cliPaints.push(fn) } },
+            NetworkEvents: { dataReceived: function () {} },
+            Java: {
+                loadClass: function (cls) {
+                    if (cls === 'java.lang.System') return { nanoTime: function () { return cliNowMs * 1000000 } }
+                    return null
+                }
+            },
+            Text: {
+                of: function (s) {
+                    return { string: String(s), getVisualOrderText: function () { return String(s) } }
+                }
+            },
+            global: {}
+        }
+        cliSb.globalThis = cliSb
+        vm.createContext(cliSb)
+        loadStartupBase(cliSb)
+        runScriptIn(cliSb, RENDERER_PATH)
+        var CliV57 = cliSb.global.ScreenDanmakuClient
+        assert.ok(CliV57 && typeof CliV57.push === 'function' && typeof CliV57.list === 'function', 'ScreenDanmakuClient v5.7 should be initialized')
+        CliV57.push({
+            id: 'v57_perf_danmaku',
+            title: '<AVARITIA_BIOS> :: [0x00F8_DEADC0DE] >> REALITY_INTEGRITY = 0.00%',
+            sub: '<b>WARN</b> <shake>CORE MELTDOWN</shake>',
+            stay: 100,
+            rx: 0.5,
+            ry: 0.3,
+            typewriter: true,
+            charDelay: 1
+        })
+        var cliVboDraws = 0
+        var cliEv = {
+            width: 854, height: 480, level: 'minecraft:overworld',
+            font: {
+                width: function (s) { return String(s).length * 6 },
+                m_272191_: function () { cliVboDraws++ }
+            },
+            graphics: { bufferSource: function () { return { flush: function () {}, endBatch: function () {} } }, flush: function () {} },
+            push: function () {}, pop: function () {}, translate: function () {}, scale: function () {}, mulPose: function () {},
+            text: function () { cliVboDraws++ },
+            drawString: function () { cliVboDraws++ }
+        }
+        for (var pf = 0; pf < 6; pf++) {
+            cliNowMs += 60
+            cliPaints[0](cliEv)
+        }
+        var dList = CliV57.list()
+        assert.strictEqual(dList.length, 1, 'ScreenDanmakuClient v5.7 should keep typewriter item active and render cleanly across frames')
     } finally {
         fs.rmSync(tmpRoot, { recursive: true, force: true })
     }

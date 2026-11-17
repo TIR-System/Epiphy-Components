@@ -288,55 +288,57 @@
     })
 
     // ------------------------------------------------------------------------
-    // 第二部分：Java 类绑定 & 拆解台硬度改造（硬度=50.0，不改防爆与活塞属性）
+    // 第二部分：通用组件绑定 & Java 类软降级加载
     // ------------------------------------------------------------------------
-    var ProcessChaosImplosion = Java.loadClass('com.brandon3055.draconicevolution.entity.ProcessChaosImplosion')
-    var ProcessHandler        = Java.loadClass('com.brandon3055.brandonscore.handlers.ProcessHandler')
-    var ChaosImplosionTrace   = Java.loadClass('com.brandon3055.draconicevolution.entity.ProcessChaosImplosion$ChaosImplosionTrace')
-    var DraconicNetwork       = Java.loadClass('com.brandon3055.draconicevolution.network.DraconicNetwork')
-    var DEDamage              = null
-    try {
-        DEDamage = Java.loadClass('com.brandon3055.draconicevolution.init.DEDamage')
-    } catch (eDeDmg) { }
-    var ForgeRegistries       = Java.loadClass('net.minecraftforge.registries.ForgeRegistries')
-    var ResourceLocation      = Java.loadClass('net.minecraft.resources.ResourceLocation')
-    var BlockPos              = Java.loadClass('net.minecraft.core.BlockPos')
-    var MutableBlockPos       = Java.loadClass('net.minecraft.core.BlockPos$MutableBlockPos')
-    var AABB                  = Java.loadClass('net.minecraft.world.phys.AABB')
-    var Level                 = Java.loadClass('net.minecraft.world.level.Level')
-    var ExplosionInteraction  = Java.loadClass('net.minecraft.world.level.Level$ExplosionInteraction')
-
-    // 注意：KubeJS 的 Rhino 只识别 Mojang 官方成员名（defaultBlockState / getFluidState / setBlock …），
-    //       SRG 名（m_49966_ / f_50016_ 等）在脚本里一律拿不到，会直接抛 TypeError。
-    //       因此本文件所有 Java 成员访问一律使用官方名，由 KubeJS 的 remapper 自动映射到生产环境的 SRG。
-    var AIR_STATE = null
-    try {
-        AIR_STATE = Java.loadClass('net.minecraft.world.level.block.Blocks').AIR.defaultBlockState()
-    } catch (eAir) {
-        try {
-            var airBlock = ForgeRegistries.BLOCKS.getValue(new ResourceLocation('minecraft:air'))
-            if (airBlock != null) AIR_STATE = airBlock.defaultBlockState()
-        } catch (eAir2) { }
+    function resolveBase() {
+        return (typeof global !== 'undefined' && global != null)
+            ? (global.EpiphyServerCore || global.EpiphyServerBase || null)
+            : null
+    }
+    function resolveWorldOps() {
+        return (typeof global !== 'undefined' && global != null)
+            ? (global.EpiphyWorldOps || global.EpiphyChunkEngine || global.EpiphyBlockTracker || null)
+            : null
+    }
+    function resolveAudio() {
+        return (typeof global !== 'undefined' && global != null) ? (global.EpiphyAudio || null) : null
     }
 
-    var WATERLOGGED_PROP = null
-    try {
-        WATERLOGGED_PROP = Java.loadClass('net.minecraft.world.level.block.state.properties.BlockStateProperties').WATERLOGGED
-    } catch (eWl) { }
-
-    // Section 调色板预筛：只要该 16×16×16 区段内存在任何非空流体状态，就返回 true
-    var FLUID_PREDICATE = function (state) {
-        try {
-            return !state.getFluidState().isEmpty()
-        } catch (e) {
-            return true
+    var BASE_INIT = resolveBase()
+    var LOGGER    = (BASE_INIT != null && typeof BASE_INIT.createLogger === 'function')
+        ? BASE_INIT.createLogger('UncraftingChaos', 5000)
+        : {
+            info:      function (_t, m) { try { console.info('[拆解台] ' + m) } catch (e) { } },
+            warn:      function (_t, m) { try { console.warn('[拆解台] ' + m) } catch (e) { } },
+            error:     function (_t, m) { try { console.error('[拆解台] ' + m) } catch (e) { } },
+            catchWarn: function (t, err) { try { console.warn('[拆解台:' + t + '] ' + err) } catch (e) { } }
         }
+
+    function safeLoadClass(className) {
+        var b = resolveBase()
+        if (b != null && typeof b.loadJavaClass === 'function') {
+            return b.loadJavaClass(className, true)
+        }
+        try {
+            if (typeof Java !== 'undefined' && Java != null && typeof Java.loadClass === 'function') {
+                return Java.loadClass(className)
+            }
+        } catch (e) { }
+        return null
     }
 
-    var CuriosApi             = null
-    try {
-        CuriosApi = Java.loadClass('top.theillusivec4.curios.api.CuriosApi')
-    } catch (e) { }
+    var ProcessChaosImplosion = safeLoadClass('com.brandon3055.draconicevolution.entity.ProcessChaosImplosion')
+    var ProcessHandler        = safeLoadClass('com.brandon3055.brandonscore.handlers.ProcessHandler')
+    var ChaosImplosionTrace   = safeLoadClass('com.brandon3055.draconicevolution.entity.ProcessChaosImplosion$ChaosImplosionTrace')
+    var DraconicNetwork       = safeLoadClass('com.brandon3055.draconicevolution.network.DraconicNetwork')
+    var DEDamage              = safeLoadClass('com.brandon3055.draconicevolution.init.DEDamage')
+    var ForgeRegistries       = safeLoadClass('net.minecraftforge.registries.ForgeRegistries')
+    var ResourceLocation      = safeLoadClass('net.minecraft.resources.ResourceLocation')
+    var BlockPos              = safeLoadClass('net.minecraft.core.BlockPos')
+    var AABB                  = safeLoadClass('net.minecraft.world.phys.AABB')
+    var Level                 = safeLoadClass('net.minecraft.world.level.Level')
+    var ExplosionInteraction  = safeLoadClass('net.minecraft.world.level.Level$ExplosionInteraction')
+    var CuriosApi             = safeLoadClass('top.theillusivec4.curios.api.CuriosApi')
 
     function rawClassOf(wrapper) {
         if (wrapper == null) return null
@@ -349,35 +351,8 @@
         return null
     }
 
-    // 服务端双保险：用 Mojang 官方方法名 defaultBlockState / getStateDefinition / getPossibleStates 同步拆解台硬度
-    ;(function applyObsidianHardnessOnly() {
-        try {
-            var block = ForgeRegistries.BLOCKS.getValue(new ResourceLocation(TARGET_ID))
-            var BlockStateBase = Java.loadClass('net.minecraft.world.level.block.state.BlockBehaviour$BlockStateBase')
-            var bsbClass = rawClassOf(BlockStateBase)
-            if (block == null || bsbClass == null) return
-
-            var fDestroySpeed = null
-            try {
-                fDestroySpeed = bsbClass.getDeclaredField('f_60599_')
-            } catch (e1) {
-                fDestroySpeed = bsbClass.getDeclaredField('destroySpeed')
-            }
-            fDestroySpeed.setAccessible(true)
-
-            var defState = block.defaultBlockState()
-            fDestroySpeed.setFloat(defState, TARGET_DESTROY_SPEED)
-
-            try {
-                var allStates = block.getStateDefinition().getPossibleStates()
-                for (var i = 0; i < allStates.size(); i++) {
-                    fDestroySpeed.setFloat(allStates.get(i), TARGET_DESTROY_SPEED)
-                }
-            } catch (e2) { }
-        } catch (e) { }
-    })()
-
     function reg(registry, id) {
+        if (registry == null || ResourceLocation == null) return null
         try {
             return registry.getValue(new ResourceLocation(id))
         } catch (e) {
@@ -385,46 +360,41 @@
         }
     }
 
-    // 音效
-    var SND_DESTABILIZE = reg(ForgeRegistries.SOUND_EVENTS, 'draconicevolution:crystal_destabilize')
-    var SND_UNSTABLE    = reg(ForgeRegistries.SOUND_EVENTS, 'draconicevolution:crystal_unstable')
-    var SND_AMBIENT     = reg(ForgeRegistries.SOUND_EVENTS, 'draconicevolution:chaos_chamber_ambient')
-    var SND_FUSION_BOOM = reg(ForgeRegistries.SOUND_EVENTS, 'draconicevolution:fusion_explosion')
-    var SND_CHARGE      = reg(ForgeRegistries.SOUND_EVENTS, 'draconicevolution:charge')
-    var SND_BOOM        = reg(ForgeRegistries.SOUND_EVENTS, 'minecraft:entity.generic.explode')
-    var SND_BEACON_DEACT = reg(ForgeRegistries.SOUND_EVENTS, 'minecraft:block.beacon.deactivate')
-    var SND_RESPAWN_DEP  = reg(ForgeRegistries.SOUND_EVENTS, 'minecraft:block.respawn_anchor.deplete')
-    var SND_GUARDIAN_CUR = reg(ForgeRegistries.SOUND_EVENTS, 'minecraft:entity.elder_guardian.curse')
-    var SND_WITHER_SPAWN = reg(ForgeRegistries.SOUND_EVENTS, 'minecraft:entity.wither.spawn')
-    var SND_TOTEM_USE    = reg(ForgeRegistries.SOUND_EVENTS, 'minecraft:item.totem.use')
+    var SOUND_REG    = ForgeRegistries != null ? ForgeRegistries.SOUND_EVENTS : null
+    var PARTICLE_REG = ForgeRegistries != null ? ForgeRegistries.PARTICLE_TYPES : null
 
-    // 自定义音效 ID（存放在 kubejs/assets/epiphy/sounds/ 并注册在 kubejs/assets/epiphy/sounds.json）
-    //   1. epiphy:hardware_error        (原 hardware-error-sound-while-displaying-content.mp3) —— 硬件故障 / 弹幕报错短促告警
-    //   2. epiphy:air_raid_siren        (原 air-raid-siren.mp3)                                —— 失稳中后期（阶段3~5）与防破坏锁死时的凄厉防空警报
-    //   3. epiphy:atomic_bomb_explosion (原 atomic-bomb-explosion.mp3)                         —— 倒计时归零核聚变引爆巨响
+    // 音效
+    var SND_DESTABILIZE = reg(SOUND_REG, 'draconicevolution:crystal_destabilize')
+    var SND_UNSTABLE    = reg(SOUND_REG, 'draconicevolution:crystal_unstable')
+    var SND_AMBIENT     = reg(SOUND_REG, 'draconicevolution:chaos_chamber_ambient')
+    var SND_FUSION_BOOM = reg(SOUND_REG, 'draconicevolution:fusion_explosion')
+    var SND_CHARGE      = reg(SOUND_REG, 'draconicevolution:charge')
+    var SND_BOOM        = reg(SOUND_REG, 'minecraft:entity.generic.explode')
+    var SND_BEACON_DEACT = reg(SOUND_REG, 'minecraft:block.beacon.deactivate')
+    var SND_RESPAWN_DEP  = reg(SOUND_REG, 'minecraft:block.respawn_anchor.deplete')
+    var SND_GUARDIAN_CUR = reg(SOUND_REG, 'minecraft:entity.elder_guardian.curse')
+    var SND_WITHER_SPAWN = reg(SOUND_REG, 'minecraft:entity.wither.spawn')
+    var SND_TOTEM_USE    = reg(SOUND_REG, 'minecraft:item.totem.use')
+
     var CUSTOM_SND_HW_ERROR   = 'epiphy:hardware_error'
     var CUSTOM_SND_SIREN      = 'epiphy:air_raid_siren'
     var CUSTOM_SND_ATOMIC_EXP = 'epiphy:atomic_bomb_explosion'
 
-    // 预先解析成 SoundEvent（注册由 startup_scripts 的 sound_event 完成），避免每次播放都查注册表
     var CUSTOM_SND_OBJECTS = {}
-    CUSTOM_SND_OBJECTS[CUSTOM_SND_HW_ERROR]   = reg(ForgeRegistries.SOUND_EVENTS, CUSTOM_SND_HW_ERROR)
-    CUSTOM_SND_OBJECTS[CUSTOM_SND_SIREN]      = reg(ForgeRegistries.SOUND_EVENTS, CUSTOM_SND_SIREN)
-    CUSTOM_SND_OBJECTS[CUSTOM_SND_ATOMIC_EXP] = reg(ForgeRegistries.SOUND_EVENTS, CUSTOM_SND_ATOMIC_EXP)
-    if (CUSTOM_SND_OBJECTS[CUSTOM_SND_HW_ERROR] == null || CUSTOM_SND_OBJECTS[CUSTOM_SND_SIREN] == null || CUSTOM_SND_OBJECTS[CUSTOM_SND_ATOMIC_EXP] == null) {
-        console.warn('[拆解台] 自定义音效未注册成功（将退化为 /playsound 驱动），请确认 startup_scripts 的 sound_event 注册与 assets/epiphy/sounds.json 均存在')
-    }
+    CUSTOM_SND_OBJECTS[CUSTOM_SND_HW_ERROR]   = reg(SOUND_REG, CUSTOM_SND_HW_ERROR)
+    CUSTOM_SND_OBJECTS[CUSTOM_SND_SIREN]      = reg(SOUND_REG, CUSTOM_SND_SIREN)
+    CUSTOM_SND_OBJECTS[CUSTOM_SND_ATOMIC_EXP] = reg(SOUND_REG, CUSTOM_SND_ATOMIC_EXP)
 
     // 粒子类型
-    var P_SMOKE     = reg(ForgeRegistries.PARTICLE_TYPES, 'minecraft:large_smoke')
-    var P_PORTAL    = reg(ForgeRegistries.PARTICLE_TYPES, 'minecraft:portal')
-    var P_SPARK     = reg(ForgeRegistries.PARTICLE_TYPES, 'minecraft:electric_spark')
-    var P_END_ROD   = reg(ForgeRegistries.PARTICLE_TYPES, 'minecraft:end_rod')
-    var P_EXPLOSION = reg(ForgeRegistries.PARTICLE_TYPES, 'minecraft:explosion')
-    var P_WITCH     = reg(ForgeRegistries.PARTICLE_TYPES, 'minecraft:witch')
-    var P_DRAGON    = reg(ForgeRegistries.PARTICLE_TYPES, 'minecraft:dragon_breath')
-    var P_FLASH     = reg(ForgeRegistries.PARTICLE_TYPES, 'minecraft:flash')
-    var P_SOUL_FIRE = reg(ForgeRegistries.PARTICLE_TYPES, 'minecraft:soul_fire_flame')
+    var P_SMOKE     = reg(PARTICLE_REG, 'minecraft:large_smoke')
+    var P_PORTAL    = reg(PARTICLE_REG, 'minecraft:portal')
+    var P_SPARK     = reg(PARTICLE_REG, 'minecraft:electric_spark')
+    var P_END_ROD   = reg(PARTICLE_REG, 'minecraft:end_rod')
+    var P_EXPLOSION = reg(PARTICLE_REG, 'minecraft:explosion')
+    var P_WITCH     = reg(PARTICLE_REG, 'minecraft:witch')
+    var P_DRAGON    = reg(PARTICLE_REG, 'minecraft:dragon_breath')
+    var P_FLASH     = reg(PARTICLE_REG, 'minecraft:flash')
+    var P_SOUL_FIRE = reg(PARTICLE_REG, 'minecraft:soul_fire_flame')
 
     function getDimensionKey(dim, level) {
         if (level != null) {
@@ -453,10 +423,12 @@
     }
 
     // ------------------------------------------------------------------------
-    // 保层钳制反射句柄
+    // 保层钳制反射句柄（包含 xCoord / zCoord 距离过滤，防止多维度/多爆心互相截断）
     // ------------------------------------------------------------------------
     var F_PROCESSES = null
+    var F_TRACE_X   = null
     var F_TRACE_Y   = null
+    var F_TRACE_Z   = null
     var F_TRACE_PWR = null
     var TRACE_READY = false
 
@@ -470,25 +442,127 @@
             F_TRACE_Y.setAccessible(true)
             F_TRACE_PWR = trClass.getDeclaredField('power')
             F_TRACE_PWR.setAccessible(true)
+            try {
+                F_TRACE_X = trClass.getDeclaredField('xCoord')
+                F_TRACE_X.setAccessible(true)
+                F_TRACE_Z = trClass.getDeclaredField('zCoord')
+                F_TRACE_Z.setAccessible(true)
+            } catch (eXZ) { }
             TRACE_READY = true
-            console.info('[拆解台] 保层钳制反射初始化成功')
+            LOGGER.info('init', '保层钳制反射初始化成功')
         }
     } catch (e) {
-        console.warn('[拆解台] 保层钳制反射不可用：' + e)
+        LOGGER.warn('init', '保层钳制反射不可用：' + e)
     }
 
     // ------------------------------------------------------------------------
-    // 内部状态表
+    // 内部状态表与跨重启原子持久化 (kubejs_epiphy_uncrafting_unstable.json)
     // ------------------------------------------------------------------------
-    var watched         = {}
-    var firedAt         = {}
-    var unstableJobs    = []
-    var layerJobs       = []
-    var magmaJobs       = []  // 最外圈岩浆圈层浇筑队列（分帧执行）
-    var liquidJobs      = []  // 液体预清除队列（分帧执行 /fill）
-    var internalReplace = {} // 标记脚本自身正在替换阶段方块，避免误判为外部破坏
-    var tickCounter     = 0
-    var SERVER          = null
+    var UNSTABLE_STORE_FILE = 'kubejs_epiphy_uncrafting_unstable.json'
+    var UNSTABLE_STORE_DIR  = 'kubejs/config/epiphy_uncrafting'
+    var UNSTABLE_PDATA_KEY  = 'epiphy_uncrafting_unstable_v2'
+
+    var watched            = {}
+    var firedAt            = {}
+    var unstableJobs       = []
+    var layerJobs          = []
+    var magmaJobs          = []  // 降级兜底队列（当 EpiphyWorldOps 存在时委托给通用组件）
+    var liquidJobs         = []  // 降级兜底队列（当 EpiphyWorldOps 存在时委托给通用组件）
+    var internalReplace    = {}  // 标记脚本自身正在替换阶段方块，避免误判为外部破坏
+    var tickCounter        = 0
+    var SERVER             = null
+    var unstableStoreLoaded = false
+    var unstableStoreDirty  = false
+    var lastUnstableSaveTick = -9999
+    var uncraftingTracker   = null
+
+    function resolveLevelByDim(dim, fallbackLevel) {
+        if (fallbackLevel != null) return fallbackLevel
+        var b = resolveBase()
+        if (b != null && typeof b.resolveLevel === 'function') {
+            var lv = b.resolveLevel(dim, SERVER)
+            if (lv != null) return lv
+        }
+        if (SERVER != null && typeof SERVER.getLevel === 'function') {
+            try { return SERVER.getLevel(dim) } catch (eLv) { }
+        }
+        return null
+    }
+
+    function saveUnstableJobs(forceNow) {
+        unstableStoreDirty = true
+        if (!forceNow && (tickCounter - lastUnstableSaveTick) < 40) return
+        var b = resolveBase()
+        if (b == null || SERVER == null || typeof b.resolveWorldStorageInfo !== 'function') return
+        lastUnstableSaveTick = tickCounter
+        unstableStoreDirty   = false
+        try {
+            var info = b.resolveWorldStorageInfo(SERVER, UNSTABLE_STORE_FILE, UNSTABLE_STORE_DIR)
+            var records = []
+            for (var i = 0; i < unstableJobs.length; i++) {
+                var j = unstableJobs[i]
+                if (j == null) continue
+                records.push({
+                    dim:            j.dim,
+                    x:              j.x,
+                    y:              j.y,
+                    z:              j.z,
+                    t:              j.t,
+                    totalTicks:     j.totalTicks,
+                    stageIndex:     j.stageIndex,
+                    fatalTriggered: Boolean(j.fatalTriggered)
+                })
+            }
+            var payload = { version: 2, jobs: records }
+            if (typeof b.writeJsonAtomic === 'function') {
+                b.writeJsonAtomic(info.filePath, payload, true, LOGGER)
+            }
+            if (SERVER.persistentData != null && typeof SERVER.persistentData.putString === 'function') {
+                SERVER.persistentData.putString(UNSTABLE_PDATA_KEY, JSON.stringify(payload))
+            }
+        } catch (eSave) {
+            LOGGER.catchWarn('saveUnstableJobs', eSave)
+        }
+    }
+
+    function ensureUnstableJobsLoaded() {
+        if (unstableStoreLoaded || SERVER == null) return
+        var b = resolveBase()
+        if (b == null || typeof b.resolveWorldStorageInfo !== 'function') return
+        unstableStoreLoaded = true
+        try {
+            var info = b.resolveWorldStorageInfo(SERVER, UNSTABLE_STORE_FILE, UNSTABLE_STORE_DIR)
+            var data = (typeof b.readJsonSafe === 'function') ? b.readJsonSafe(info.filePath, LOGGER) : null
+            if (data == null && SERVER.persistentData != null && typeof SERVER.persistentData.getString === 'function') {
+                var rawP = SERVER.persistentData.getString(UNSTABLE_PDATA_KEY)
+                if (rawP) {
+                    try { data = JSON.parse(String(rawP)) } catch (eP) { }
+                }
+            }
+            var list = (data != null && Array.isArray(data.jobs)) ? data.jobs : []
+            for (var i = 0; i < list.length; i++) {
+                var item = list[i]
+                if (item == null || !isAllowedDim(String(item.dim))) continue
+                var bx = Math.floor(Number(item.x)), by = Math.floor(Number(item.y)), bz = Math.floor(Number(item.z))
+                if (!isFinite(bx) || !isFinite(by) || !isFinite(bz)) continue
+                if (findUnstableJob(String(item.dim), bx, by, bz) != null) continue
+                unstableJobs.push({
+                    level:          resolveLevelByDim(String(item.dim), null),
+                    dim:            String(item.dim),
+                    x:              bx,
+                    y:              by,
+                    z:              bz,
+                    t:              Math.max(0, Math.floor(Number(item.t) || 0)),
+                    spawnTick:      tickCounter,
+                    totalTicks:     Math.max(20, Math.floor(Number(item.totalTicks) || UNSTABLE_TICKS)),
+                    stageIndex:     Math.max(0, Math.min(STAGE_BLOCKS.length - 1, Math.floor(Number(item.stageIndex) || 0))),
+                    fatalTriggered: Boolean(item.fatalTriggered)
+                })
+            }
+        } catch (eLoad) {
+            LOGGER.catchWarn('ensureUnstableJobsLoaded', eLoad)
+        }
+    }
 
     function dimOf(event) {
         try {
@@ -590,23 +664,26 @@
     }
 
     // ------------------------------------------------------------------------
-    // 遗物持有检测（严格按 ids 传入顺序判定优先级；创造模式下遗物检测不生效）
+    // 遗物持有检测与主手钻石镐校验（委托 EpiphyServerCore.findPlayerItem，彻底移除 String(player.nbt) 改名伪造漏洞）
     // ------------------------------------------------------------------------
     function findPlayerRelic(player, ids) {
         if (player == null || ids == null || ids.length === 0) return null
         if (isCreativePlayer(player)) return null
+        var b = resolveBase()
+        if (b != null && typeof b.findPlayerItem === 'function') {
+            return b.findPlayerItem(player, ids, { skipCreative: true })
+        }
 
+        // 独立运行降级（仅检查主副手、inventory 槽位与 CuriosApi，绝不序列化玩家 NBT 字符串）
         var foundSet = {}
-
-        // 1. 收集主副手与背包槽位中命中的遗物（零 NBT 序列化开销）
         for (var h = 0; h < ids.length; h++) {
             try {
-                if (player.isHolding(ids[h])) foundSet[ids[h]] = true
+                if (typeof player.isHolding === 'function' && player.isHolding(ids[h])) foundSet[ids[h]] = true
             } catch (e) { }
         }
         try {
             var inv = player.inventory
-            if (inv != null) {
+            if (inv != null && typeof inv.find === 'function') {
                 for (var k = 0; k < ids.length; k++) {
                     if (!foundSet[ids[k]] && inv.find(ids[k]) >= 0) {
                         foundSet[ids[k]] = true
@@ -615,14 +692,10 @@
             }
         } catch (e) { }
 
-        // 若最高优先级已命中，无需继续扫描 Curios 或 NBT
         if (foundSet[ids[0]]) return ids[0]
 
-        // 2. 收集 Curios 饰品栏中命中的遗物（避免背包低优遗物抢占饰品栏高优遗物）
         var targetSet = {}
-        for (var i = 0; i < ids.length; i++) {
-            targetSet[ids[i]] = true
-        }
+        for (var i = 0; i < ids.length; i++) targetSet[ids[i]] = true
         if (CuriosApi != null) {
             try {
                 var opt = CuriosApi.getCuriosInventory(player)
@@ -646,33 +719,31 @@
             } catch (e) { }
         }
 
-        // 按 ids 严格优先级顺序返回已命中的最高优先级遗物
         for (var pIdx = 0; pIdx < ids.length; pIdx++) {
             if (foundSet[ids[pIdx]]) return ids[pIdx]
         }
-
-        // 3. 兜底：若前两步均未找到，再做一次玩家 NBT 精确串匹配（同样按 ids 顺序）
-        try {
-            var tag = player.nbt
-            if (tag != null) {
-                var nbt = String(tag)
-                for (var m = 0; m < ids.length; m++) {
-                    if (nbt.indexOf('"' + ids[m] + '"') >= 0) return ids[m]
-                }
-            }
-        } catch (e) { }
-
         return null
     }
 
-    // 检查玩家是否持有（主副手或背包内）指定工具/物品
+    // 要求主手拿着钻石镐挖掘才算安全拆除（不再允许仅放在背包角落即豁免）
     function playerHasDiamondPickaxe(player) {
         if (player == null) return false
+        var b = resolveBase()
+        if (b != null && typeof b.isHoldingMainHand === 'function') {
+            return b.isHoldingMainHand(player, SAFE_TOOL)
+        }
         try {
-            if (player.isHolding(SAFE_TOOL)) return true
-        } catch (e) { }
+            var mh = player.mainHandItem
+            if (mh == null && typeof player.getMainHandItem === 'function') mh = player.getMainHandItem()
+            if (mh != null && mh.id != null) {
+                if (typeof mh.isEmpty === 'function' && mh.isEmpty()) return false
+                return String(mh.id) === SAFE_TOOL
+            }
+        } catch (eMh) { }
         try {
-            if (player.inventory != null && player.inventory.find(SAFE_TOOL) >= 0) return true
+            var oh = player.offHandItem
+            if (oh != null && String(oh.id) === SAFE_TOOL) return false
+            if (typeof player.isHolding === 'function' && player.isHolding(SAFE_TOOL)) return true
         } catch (e) { }
         return false
     }
@@ -744,7 +815,12 @@
     }
 
     function forEachPlayerNear(level, x, y, z, radius, callback) {
-        if (level == null) return
+        if (level == null || typeof callback !== 'function') return
+        var core = typeof global !== 'undefined' && global ? (global.EpiphyServerCore || global.EpiphyServerBase || null) : null
+        if (core && typeof core.forEachPlayerNear === 'function') {
+            core.forEachPlayerNear(level, x, y, z, radius, callback)
+            return
+        }
         var cx = Number(x)
         var cy = Number(y)
         var cz = Number(z)
@@ -753,8 +829,10 @@
         var d2 = r * r
         var list = level.players
         if (list == null) return
-        for (var i = 0, len = list.size(); i < len; i++) {
-            var p = list.get(i)
+        var isJavaList = typeof list.size === 'function' && typeof list.get === 'function'
+        var len = isJavaList ? list.size() : (list.length || 0)
+        for (var i = 0; i < len; i++) {
+            var p = isJavaList ? list.get(i) : list[i]
             var pos = readEntityPos(p)
             if (pos == null) continue
             var dx = pos.x - cx
@@ -797,54 +875,69 @@
     function playAt(level, x, y, z, sound, volume, pitch, maxDist) {
         if (sound == null || level == null) return
         var limit  = maxDist != null ? maxDist : SOUND_RANGE
-        var server = SERVER || level.server
         var sndId  = resolveSoundIdStr(sound)
         var dimStr = 'minecraft:overworld'
         try {
             if (level.dimension != null) dimStr = String(level.dimension)
         } catch (eDim) { }
 
+        var aud = resolveAudio()
+        if (aud != null && typeof aud.play === 'function' && sndId) {
+            try {
+                aud.play({
+                    sound:    sndId,
+                    dim:      dimStr,
+                    at:       [x + 0.5, y + 0.5, z + 0.5],
+                    range:    limit,
+                    volume:   volume,
+                    pitch:    pitch,
+                    category: 'MASTER',
+                    priority: 'high'
+                })
+                return
+            } catch (eAud) { }
+        }
+
         forEachPlayerNear(level, x, y, z, limit, function (p, distSq) {
             var factor = Math.max(0.20, 1.0 - Math.sqrt(distSq) / (limit * 1.25))
             var vol = Math.max(0.15, Number((volume * factor).toFixed(2)))
             var pit = Math.max(0.5, Math.min(2.0, Number(pitch.toFixed(2))))
-            // 优先通过服务端 /playsound master 在玩家自身位置驱动音频（绕过 ServerPlayer.playSound 在服务端只向周边发包而不发给自身的问题）
-            if (server != null && sndId) {
-                try {
-                    var b = p.block
-                    var uname = String(p.username || p.name.string || '@p')
-                    server.runCommandSilent(
-                        'execute in ' + dimStr + ' run playsound ' + sndId + ' master ' + uname + ' ' + b.x + ' ' + b.y + ' ' + b.z + ' ' + vol + ' ' + pit + ' 0.25'
-                    )
-                    return
-                } catch (eCmd) { }
-            }
             try {
                 p.playSound(sound, vol, pit)
             } catch (e) { }
         })
     }
 
-    // 播放 kubejs/assets/epiphy/sounds.json 中定义的自定义音效（始终优先通过 /playsound master 驱动客户端资源包音频，确保单人/多人服务端玩家 100% 听见）
+    // 播放 kubejs/assets/epiphy/sounds.json 中定义的自定义音效（优先挂载到 EpiphyAudio 句柄，支持随时精准切断）
     function playCustomSoundAt(level, dim, x, y, z, soundId, volume, pitch, maxDist) {
         if (!soundId || level == null) return
         var limit = maxDist != null ? maxDist : SOUND_RANGE
-        var server = SERVER || level.server
-        var regSound = CUSTOM_SND_OBJECTS[soundId] != null ? CUSTOM_SND_OBJECTS[soundId] : reg(ForgeRegistries.SOUND_EVENTS, soundId)
+        var aud   = resolveAudio()
+        if (aud != null && typeof aud.play === 'function') {
+            try {
+                var keyTag = (soundId === CUSTOM_SND_SIREN)
+                    ? ('uncrafting_siren_' + x + '_' + y + '_' + z)
+                    : ((soundId === CUSTOM_SND_HW_ERROR) ? ('uncrafting_hw_' + x + '_' + y + '_' + z + '_' + (tickCounter % 8)) : '')
+                var playOpts = {
+                    sound:    soundId,
+                    dim:      dim,
+                    at:       [x + 0.5, y + 0.5, z + 0.5],
+                    range:    limit,
+                    volume:   volume,
+                    pitch:    pitch,
+                    category: 'MASTER',
+                    priority: soundId === CUSTOM_SND_ATOMIC_EXP ? 'critical' : 'high'
+                }
+                if (keyTag) playOpts.key = keyTag
+                aud.play(playOpts)
+                return
+            } catch (eAud2) { }
+        }
+        var regSound = CUSTOM_SND_OBJECTS[soundId] != null ? CUSTOM_SND_OBJECTS[soundId] : reg(SOUND_REG, soundId)
         forEachPlayerNear(level, x, y, z, limit, function (p, distSq) {
             var factor = Math.max(0.25, 1.0 - Math.sqrt(distSq) / (limit * 1.3))
             var vol = Math.max(0.15, Number((volume * factor).toFixed(2)))
             var pit = Math.max(0.5, Math.min(2.0, Number(pitch.toFixed(2))))
-            if (server != null) {
-                try {
-                    var b = p.block
-                    var uname = String(p.username || p.name.string || '@p')
-                    server.runCommandSilent(
-                        'execute in ' + dim + ' run playsound ' + soundId + ' master ' + uname + ' ' + b.x + ' ' + b.y + ' ' + b.z + ' ' + vol + ' ' + pit + ' 0.25'
-                    )
-                    return
-                } catch (e2) { }
-            }
             if (regSound != null) {
                 try {
                     p.playSound(regSound, vol, pit)
@@ -853,8 +946,17 @@
         })
     }
 
-    // 当终望珍珠吞噬或创造模式强行终止时，立即停止周围玩家的自定义长音频（使用 * 覆盖所有音频通道）
+    // 当终望珍珠吞噬或创造模式强行终止时，立即停止周围玩家的自定义长音频
     function stopCustomSoundsNear(level, dim, x, y, z, maxDist) {
+        var aud = resolveAudio()
+        if (aud != null && typeof aud.stop === 'function') {
+            try {
+                aud.stop('uncrafting_siren_' + x + '_' + y + '_' + z)
+                for (var hi = 0; hi < 8; hi++) {
+                    aud.stop('uncrafting_hw_' + x + '_' + y + '_' + z + '_' + hi)
+                }
+            } catch (eStop) { }
+        }
         var server = SERVER || (level != null ? level.server : null)
         if (server == null || !isAllowedDim(dim)) return
         var limit = maxDist != null ? maxDist : SOUND_RANGE
@@ -866,6 +968,11 @@
     }
 
     function particleAt(level, type, x, y, z, dx, dy, dz, count, speed) {
+        var b = resolveBase()
+        if (b != null && typeof b.spawnParticlesSafe === 'function') {
+            b.spawnParticlesSafe(level, type, x, y, z, dx, dy, dz, count, speed)
+            return
+        }
         if (type == null || level == null) return
         try {
             level.spawnParticles(type, true, x, y, z, dx, dy, dz, count, speed)
@@ -945,6 +1052,11 @@
     }
 
     function sendActionBarNear(level, x, y, z, radius, text) {
+        var b = resolveBase()
+        if (b != null && typeof b.actionBarNear === 'function') {
+            b.actionBarNear(level, x, y, z, radius, text)
+            return
+        }
         forEachPlayerNear(level, x, y, z, radius, function (p) {
             try {
                 p.statusMessage = text
@@ -953,12 +1065,28 @@
     }
 
     function sendChatNear(level, dim, x, y, z, radius, rawJson) {
-        var server = SERVER || (level != null ? level.server : null)
-        if (server == null || !isAllowedDim(dim)) return
-        server.runCommandSilent('execute in ' + dim + ' positioned ' + x + ' ' + y + ' ' + z + ' run tellraw @a[distance=..' + radius + '] ' + rawJson)
+        if (level == null || !isAllowedDim(dim) || rawJson == null) return
+        var b = resolveBase()
+        if (b != null && typeof b.tellNear === 'function') {
+            b.tellNear(level, x, y, z, radius, rawJson)
+            return
+        }
+        var parsed = parseJsonTextToLegacy(rawJson)
+        var textOut = parsed.text || String(rawJson)
+        forEachPlayerNear(level, x, y, z, radius, function (p) {
+            try {
+                if (typeof p.tell === 'function') p.tell(textOut)
+            } catch (e) { }
+        })
     }
 
     function sendChatLinesNear(level, dim, x, y, z, radius, lines) {
+        if (level == null || !isAllowedDim(dim) || !Array.isArray(lines)) return
+        var b = resolveBase()
+        if (b != null && typeof b.tellNear === 'function') {
+            b.tellNear(level, x, y, z, radius, lines)
+            return
+        }
         for (var i = 0; i < lines.length; i++) {
             sendChatNear(level, dim, x, y, z, radius, lines[i])
         }
@@ -1023,14 +1151,11 @@
     // T+0 告警与原版混沌水晶反噬伤害逻辑（使用 draconicevolution:crystal_move / chaos_implosion）
     // ------------------------------------------------------------------------
     function executeKillAndAlarm(level, dim, x, y, z, breaker, isSafe) {
-        var server = SERVER || (level != null ? level.server : null)
-        if (server != null && isAllowedDim(dim)) {
-            var prefix = 'execute in ' + dim + ' positioned ' + x + ' ' + y + ' ' + z + ' run '
-            var sel = 'distance=..' + MSG_RADIUS + ',x=' + x + ',y=' + y + ',z=' + z
-
-            // 原版经典乱码报错文本
-            server.runCommandSilent(
-                prefix + 'execute as @a[' + sel + '] run tellraw @s {"text":"ERROR：启动序列锟斤拷异常终止，核心锟斤拷熔断机制激活。锟斤拷日志锟斤拷溢出出出出出出锟斤拷烫烫烫烫烫烫烫烫烫烫烫烫烫烫烫烫烫","color":"gold"}'
+        if (level != null && isAllowedDim(dim)) {
+            // 原版经典乱码报错文本（直接走 sendChatNear，无需拼接 runCommandSilent tellraw）
+            sendChatNear(
+                level, dim, x, y, z, MSG_RADIUS,
+                '{"text":"ERROR：启动序列锟斤拷异常终止，核心锟斤拷熔断机制激活。锟斤拷日志锟斤拷溢出出出出出出锟斤拷烫烫烫烫烫烫烫烫烫烫烫烫烫烫烫烫烫","color":"gold"}'
             )
 
             if (isSafe) {
@@ -1050,16 +1175,24 @@
             }
 
             if (LEGACY_KILL) {
-                // 对爆心周围 MSG_RADIUS 内的所有玩家与生物施加原版混沌水晶反噬伤害（DEDamage.crystalMove = 3.4028235E38f）
-                try {
-                    var killBox = new AABB(x - MSG_RADIUS, y - MSG_RADIUS, z - MSG_RADIUS, x + MSG_RADIUS + 1, y + MSG_RADIUS + 1, z + MSG_RADIUS + 1)
-                    var nearEnts = level.getEntitiesWithin(killBox)
-                    for (var ei = 0, elen = nearEnts.size(); ei < elen; ei++) {
-                        var ne = nearEnts.get(ei)
-                        if (ne == null || String(ne.type) === 'minecraft:item') continue
+                var b = resolveBase()
+                if (b != null && typeof b.forEachEntityNear === 'function') {
+                    b.forEachEntityNear(level, x + 0.5, y + 0.5, z + 0.5, MSG_RADIUS, function (ne) {
+                        return ne != null && String(ne.type) !== 'minecraft:item'
+                    }, function (ne) {
                         inflictChaosCrystalDamage(level, ne, 'crystal_move', 3.4028235e38)
-                    }
-                } catch (eBox) { }
+                    })
+                } else if (AABB != null && typeof level.getEntitiesWithin === 'function') {
+                    try {
+                        var killBox = new AABB(x - MSG_RADIUS, y - MSG_RADIUS, z - MSG_RADIUS, x + MSG_RADIUS + 1, y + MSG_RADIUS + 1, z + MSG_RADIUS + 1)
+                        var nearEnts = level.getEntitiesWithin(killBox)
+                        for (var ei = 0, elen = nearEnts.size(); ei < elen; ei++) {
+                            var ne = nearEnts.get(ei)
+                            if (ne == null || String(ne.type) === 'minecraft:item') continue
+                            inflictChaosCrystalDamage(level, ne, 'crystal_move', 3.4028235e38)
+                        }
+                    } catch (eBox) { }
+                }
             }
         }
 
@@ -1414,11 +1547,13 @@
             { shakeMode: 'constant', shakeAmp: 4.2, fadeStyle: 'shatter', size: [1.42, 1.62] }
         )
 
-        // 新增第二条（0.8 秒后紧接着弹出）：堆芯保护锁熔断、强制跳转最后 10 秒死刑倒计时
+        // 新增第二条（0.8 秒后紧接着弹出）：堆芯保护锁熔断、强制跳转最后 10 秒死刑倒计时（仅当该失稳任务尚未被终望珍珠或越权终止时触发）
+        saveUnstableJobs(true)
         var server = SERVER || (level != null ? level.server : null)
         if (server != null) {
             try {
                 server.scheduleInTicks(16, function () {
+                    if (findUnstableJob(dim, x, y, z) == null) return
                     sendScreenAlert(
                         level, dim, x, y, z, SCREEN_ALERT_RADIUS,
                         '{"text":"[ 堆 芯 熔 毁 锁 死 // CORE LOCKDOWN ]","color":"red","bold":true}',
@@ -1949,6 +2084,7 @@
             return
         }
         if (list == null) return
+        var maxRangeSq = (DE_POWER * 10 + 32) * (DE_POWER * 10 + 32)
         var size = list.size()
         for (var i = 0; i < size; i++) {
             var o
@@ -1958,6 +2094,15 @@
                 continue
             }
             if (o == null || !(o instanceof ChaosImplosionTrace)) continue
+
+            // 仅钳制当前爆心半径范围内的 Trace，防止多爆心或不同维度同时爆炸时互相截断
+            if (F_TRACE_X != null && F_TRACE_Z != null) {
+                try {
+                    var tx = F_TRACE_X.getInt(o) - job.x
+                    var tz = F_TRACE_Z.getInt(o) - job.z
+                    if (tx * tx + tz * tz > maxRangeSq) continue
+                } catch (eCoord) { }
+            }
 
             var y0, f
             try {
@@ -2054,10 +2199,12 @@
             stageIndex: startStage,
             fatalTriggered: false
         })
+        saveUnstableJobs(true)
     }
 
     function onStageTransition(job, newStageIdx) {
         job.stageIndex = newStageIdx
+        saveUnstableJobs(true)
         var meta = STAGE_META[newStageIdx]
         var remainSec = Math.round((job.totalTicks - job.t) / 20)
 
@@ -2285,18 +2432,24 @@
     function tickUnstable() {
         for (var n = unstableJobs.length - 1; n >= 0; n--) {
             var job = unstableJobs[n]
-            if (job == null || job.level == null) {
+            if (job == null) {
                 unstableJobs.splice(n, 1)
                 continue
+            }
+            if (job.level == null) {
+                job.level = resolveLevelByDim(job.dim, null)
+                if (job.level == null) continue
             }
 
             // 1. 优先检测是否被【终望珍珠 / 黑洞奇点】吞噬：若触发则立即生成【异常停机】报告并终止爆炸
             if (checkEndestPearlSwallow(job)) {
                 unstableJobs.splice(n, 1)
+                saveUnstableJobs(true)
                 continue
             }
 
             job.t++
+            unstableStoreDirty = true
             var p = Math.min(1.0, job.t / job.totalTicks)
 
             // 2. 在 3 分钟正常失稳流程中，按时间推进阶段（0~36s, 36~72s, 72~108s, 108~144s, 144~180s）并替换方块
@@ -2307,9 +2460,10 @@
                 }
             }
 
-            // 3. 防外力破坏巡检：若方块在未被终望珍珠吞噬的情况下被活塞/爆炸/指令破坏，立刻恢复方块并触发 10 秒致命错误警报
-            //    （跳过刚生成前 5 tick 的方块落地期，防止原版 broken 事件后置清空气覆盖阶段 1 方块时被误判为外力二次破坏）
-            if ((job.spawnTick == null || (tickCounter - job.spawnTick) > 5) && hasPlayerNear(job.level, job.x, job.y, job.z, NEAR_DISTANCE)) {
+            // 3. 防外力破坏巡检：仅在区块已加载且周围有玩家时复核方块状态（防止视距边界区块卸载误判为外力破坏）
+            if ((job.spawnTick == null || (tickCounter - job.spawnTick) > 5)
+                && isBlockChunkLoaded(job.level, job.x, job.z)
+                && hasPlayerNear(job.level, job.x, job.y, job.z, NEAR_DISTANCE)) {
                 var currentId = job.level.getBlock(job.x, job.y, job.z).id
                 var expectedId = STAGE_BLOCKS[job.stageIndex]
                 if (currentId !== expectedId) {
@@ -2400,6 +2554,7 @@
             // 10. 倒计时归零：移除阶段方块并启动 DE 300 格混沌大爆炸
             if (job.t >= job.totalTicks) {
                 unstableJobs.splice(n, 1)
+                saveUnstableJobs(true)
                 setStageBlockSafely(job.level, job.dim, job.x, job.y, job.z, 'minecraft:air')
                 launchImplosion(job.level, job.dim, job.x, job.y, job.z)
             }
@@ -2554,6 +2709,10 @@
 
         // 取消原版后续的 removeBlock（防止原版在事件返回后把刚生成的阶段 1 方块重新抹成空气而触发阶段 5 防破坏锁死）
         try { event.cancel() } catch (eCancel) { }
+        // 若位于 (0,0) 安全区内，方块被保留在原地（仅执行秒杀不替换为失稳阶段方块），必须恢复 watched 监控记录以防后续被活塞/爆炸无视
+        if (isSafeZone(dim, bx, bz)) {
+            watched[keyOf(dim, bx, by, bz)] = { x: bx, y: by, z: bz, dim: dim, level: event.level }
+        }
         handleIllegalBreak(event.level, dim, bx, by, bz, player)
     })
 
@@ -2677,6 +2836,10 @@
                 var by = event.block.y
                 var bz = event.block.z
                 var job = findUnstableJob(dim, bx, by, bz)
+                if (job == null) {
+                    beginUnstable(event.level, dim, bx, by, bz, stageIndex, '检测到存量失稳核心唤醒')
+                    job = findUnstableJob(dim, bx, by, bz)
+                }
                 if (job == null) return
 
                 if (player.crouching) {
@@ -2684,6 +2847,7 @@
                         item.count--
                     }
                     removeUnstableJob(dim, bx, by, bz)
+                    saveUnstableJobs(true)
                     triggerAbnormalShutdown(job, 'ENDEST_PEARL_CONTACT_DEVOUR', player)
                     event.cancel()
                 }
@@ -2692,33 +2856,131 @@
     }
 
     // ------------------------------------------------------------------------
+    // 接入 EpiphyBlockTracker 自动发现与追踪存量拆解台及 5 阶段失稳方块
+    // ------------------------------------------------------------------------
+    function ensureUncraftingTrackerAttached() {
+        if (uncraftingTracker != null && !uncraftingTracker.isFallback) return
+        var b = resolveBase()
+        var w = resolveWorldOps()
+        var createFn = (w != null && typeof w.createTracker === 'function')
+            ? w.createTracker
+            : ((b != null && typeof b.acquireBlockTracker === 'function') ? b.acquireBlockTracker : null)
+        if (typeof createFn !== 'function') return
+        try {
+            uncraftingTracker = createFn({
+                name:             'uncrafting_chaos',
+                maintainInterval: 10,
+                onFound: function (rec) {
+                    if (rec == null || !isAllowedDim(rec.dim)) return
+                    var lv = resolveLevelByDim(rec.dim, null)
+                    if (rec.blockId === TARGET_ID) {
+                        watched[keyOf(rec.dim, rec.x, rec.y, rec.z)] = {
+                            x: rec.x, y: rec.y, z: rec.z, dim: rec.dim, level: lv
+                        }
+                    } else if (isStageBlockId(rec.blockId)) {
+                        if (findUnstableJob(rec.dim, rec.x, rec.y, rec.z) == null) {
+                            var sIdx = STAGE_MAP[rec.blockId] || 0
+                            unstableJobs.push({
+                                level:          lv,
+                                dim:            rec.dim,
+                                x:              rec.x,
+                                y:              rec.y,
+                                z:              rec.z,
+                                t:              sIdx * STAGE_DURATION_TICKS,
+                                spawnTick:      tickCounter,
+                                totalTicks:     UNSTABLE_TICKS,
+                                stageIndex:     sIdx,
+                                fatalTriggered: false
+                            })
+                            saveUnstableJobs(false)
+                        }
+                    }
+                },
+                onRemoved: function (rec) {
+                    if (rec == null) return
+                    if (rec.blockId === TARGET_ID) {
+                        delete watched[keyOf(rec.dim, rec.x, rec.y, rec.z)]
+                    }
+                }
+            })
+            if (uncraftingTracker != null && typeof uncraftingTracker.bind === 'function') {
+                uncraftingTracker.bind(TARGET_ID, { scanRadius: 64 })
+                for (var bi = 0; bi < STAGE_BLOCKS.length; bi++) {
+                    uncraftingTracker.bind(STAGE_BLOCKS[bi], { scanRadius: 64 })
+                }
+            }
+        } catch (eTrk) {
+            LOGGER.catchWarn('attachTracker', eTrk)
+        }
+    }
+
+    ensureUncraftingTrackerAttached()
+
+    if (typeof ServerEvents !== 'undefined' && ServerEvents != null) {
+        if (typeof ServerEvents.loaded === 'function') {
+            ServerEvents.loaded(function (event) {
+                if (event != null && event.server != null) SERVER = event.server
+                ensureUncraftingTrackerAttached()
+                ensureUnstableJobsLoaded()
+            })
+        }
+        if (typeof ServerEvents.unloaded === 'function') {
+            ServerEvents.unloaded(function () {
+                try { saveUnstableJobs(true) } catch (eS) { }
+                watched              = {}
+                firedAt              = {}
+                unstableJobs.length  = 0
+                layerJobs.length     = 0
+                magmaJobs.length     = 0
+                liquidJobs.length    = 0
+                internalReplace      = {}
+                unstableStoreLoaded  = false
+                unstableStoreDirty   = false
+                SERVER               = null
+            })
+        }
+    }
+
+    // ------------------------------------------------------------------------
     // 主循环：非玩家破坏轮询 + 3 分钟失稳阶段演进 + 300 格湮灭保层钳制
     // ------------------------------------------------------------------------
     ServerEvents.tick(function (event) {
         SERVER = event.server
         tickCounter++
+        ensureUncraftingTrackerAttached()
+        ensureUnstableJobsLoaded()
 
         // 每 200 tick（10 秒）清理一次已过期的 internalReplace 与 firedAt 临时坐标键
         if (tickCounter % 200 === 0) {
             pruneExpiredStateMaps()
         }
+        if (unstableStoreDirty && (tickCounter - lastUnstableSaveTick) >= 40) {
+            saveUnstableJobs(false)
+        }
 
         if (ENABLE_NON_PLAYER) {
+            var checkSwallowThisTick = (tickCounter % 5 === 0)
             for (var key in watched) {
                 var w = watched[key]
                 if (w == null || !isAllowedDim(w.dim)) {
                     delete watched[key]
                     continue
                 }
+                if (w.level == null) {
+                    w.level = resolveLevelByDim(w.dim, null)
+                    if (w.level == null) continue
+                }
 
                 // 仅当拆解台所在区块已在内存中加载时才读取方块状态（避免强制加载未加载区块）
                 if (!isBlockChunkLoaded(w.level, w.x, w.z)) continue
 
-                // 若常态终极拆解台周围已有终望珍珠或黑洞奇点进入吞噬范围，直接将其安全吞噬拆除，不进入失稳状态
-                var preSwallow = findEndestSwallowSourceAt(w.level, w.x, w.y, w.z)
-                if (preSwallow != null) {
-                    triggerNormalTableVoidSwallow(w.level, w.dim, w.x, w.y, w.z, preSwallow.source)
-                    continue
+                // 若常态终极拆解台周围有玩家且已有终望珍珠或黑洞奇点进入吞噬范围，直接将其安全吞噬拆除
+                if (checkSwallowThisTick && hasPlayerNear(w.level, w.x, w.y, w.z, NEAR_DISTANCE)) {
+                    var preSwallow = findEndestSwallowSourceAt(w.level, w.x, w.y, w.z)
+                    if (preSwallow != null) {
+                        triggerNormalTableVoidSwallow(w.level, w.dim, w.x, w.y, w.z, preSwallow.source)
+                        continue
+                    }
                 }
 
                 var block = w.level.getBlock(w.x, w.y, w.z)
@@ -2756,6 +3018,9 @@
         for (var n = layerJobs.length - 1; n >= 0; n--) {
             var job = layerJobs[n]
             job.t++
+            if (job.t === DE_LIFETIME + 6) {
+                triggerIncrementalLiquidSweep(job.level, job.dim, job.x, job.y, job.z, DE_POWER * 10)
+            }
             if (job.t > DE_LIFETIME + 8) {
                 layerJobs.splice(n, 1)
                 continue
@@ -2894,7 +3159,9 @@
             var a = Math.random() * Math.PI * 2
             var px = job.x + 0.5 + Math.cos(a) * r
             var pz = job.z + 0.5 + Math.sin(a) * r
-            var sy = surfaceY(job.level, Math.floor(px), Math.floor(pz), job.y)
+            var ix = Math.floor(px), iz = Math.floor(pz)
+            if (!isBlockChunkLoaded(job.level, ix, iz)) continue
+            var sy = surfaceY(job.level, ix, iz, job.y)
             particleAt(job.level, P_SMOKE, px, sy + 1, pz, 1.0, 0.8, 1.0, 4, 0.04)
         }
 
@@ -2903,13 +3170,25 @@
         var waveRadius = Math.min(maxR + 16, r + 18)
         forEachPlayerNear(job.level, job.x, job.y, job.z, waveRadius, function (p, distSq) {
             var dist = Math.sqrt(distSq)
-            // 核心圈与冲击波锋面均造成毁灭性混沌内爆伤害（穿透护甲、护盾、抗性提升与无敌帧）
             var wavePower = Math.max(80.0, (DE_POWER - (dist / 10.0)) * 120.0)
             inflictChaosCrystalDamage(job.level, p, 'chaos_implosion', wavePower)
         })
+        if (job.t % 5 === 0) {
+            var b = resolveBase()
+            if (b != null && typeof b.forEachEntityNear === 'function') {
+                b.forEachEntityNear(job.level, job.x, job.y, job.z, waveRadius, function (ent) {
+                    var tid = String(ent.type || '')
+                    return tid !== 'minecraft:item' && tid !== 'minecraft:experience_orb' && tid !== GAPING_VOID_ENTITY
+                }, function (ent, distSq) {
+                    var dist = Math.sqrt(distSq)
+                    var wavePower = Math.max(80.0, (DE_POWER - (dist / 10.0)) * 120.0)
+                    inflictChaosCrystalDamage(job.level, ent, 'chaos_implosion', wavePower)
+                })
+            }
+        }
 
-        // 在波前推进到 35%、70% 以及结束瞬间，仅唤醒已存在流体任务的增量热点与未加载区块队列（绝不重复启动全半径 1200 列扫描）
-        if (r === Math.floor(maxR * 0.35) || r === Math.floor(maxR * 0.70) || r === maxR) {
+        // 在波前推进到 25%、50%、75%、92% 以及结束瞬间，持续唤醒流体任务的增量热点与外圈防回流环带（跟紧 DE 冲击波炸开海床的节奏）
+        if (r === Math.floor(maxR * 0.25) || r === Math.floor(maxR * 0.50) || r === Math.floor(maxR * 0.75) || r === Math.floor(maxR * 0.92) || r === maxR) {
             triggerIncrementalLiquidSweep(job.level, job.dim, job.x, job.y, job.z, maxR)
         }
 
@@ -2927,447 +3206,131 @@
     }
 
     // ------------------------------------------------------------------------
-    // 液体彻底清除（ChunkSection 调色板极速剥离引擎）：
-    //   为什么原本的 /fill 永远清不干净？
-    //   1. 原版 `/fill ... replace minecraft:water` 在无状态参数时只匹配部分状态，或速度过慢（每块要跑 7 条指令），
-    //      而 DE 混沌爆炸在 T+0 就立刻放出上千条射线，遇到水会将其炸成 `level=1~7` 的流动水并在空中疯狂扩散；
-    //   2. 含水方块（waterlogged=true 的半砖/楼梯/栅栏/珊瑚/沉船/海底遗迹）以及任意模组流体完全不被 /fill 清除；
-    //   3. 逐格 getBlock 在半径 314 球体内有 1.3 亿格，直接遍历必卡死服务器。
-    //
-    //   【终极高性能方案】：直接操作 Minecraft 底层的 16×16×16 LevelChunkSection！
-    //   - 第一步（O(1) 调色板秒跳）：`section.hasOnlyAir()` 跳过空区段，再用 `section.maybeHas(FLUID_PREDICATE)`
-    //     询问该 16³ 区段的调色板（Palette）里是否存在任何 `FluidState != Empty` 的方块类型。
-    //     若没有（占比 90%+ 的空气/岩石区段），0 次坐标遍历直接跳过整整 4096 格！
-    //   - 第二步（精准全流体抹除）：对极少数真正含流体的 Section，在内部 0..15 局部坐标读取 `section.getBlockState(lx,ly,lz)`：
-    //     * 若 `!state.getFluidState().isEmpty()` 为真（涵盖水源、level=1~15 流动水、流动岩浆、气泡柱、海带、海草、含水方块、任意模组液体）：
-    //       - 若该方块带 `WATERLOGGED=true`，原地保留方块并将 `WATERLOGGED` 置为 `false`；
-    //       - 否则直接替换为 `AIR_STATE`（`setBlock(pos, state, 2)` 仅同步客户端、不触发周围流体回流）。
-    //   - 第三步（T+0 核心同步抽干）：在 `ProcessChaosImplosion` 启动前，把爆心 `LIQUID_SYNC_INIT_RADIUS` 格内的
-    //     区块列同步抽干（时间预算 LIQUID_SYNC_MAX_MS），确保爆炸第一帧就在无水真空中展开。
+    // 液体清除与外圈岩浆环：优先委托给通用组件 EpiphyWorldOps (Epiphy的-方块与区块组件.js)
+    //   若独立加载未挂载 EpiphyWorldOps，则使用内置安全分帧回退
     // ------------------------------------------------------------------------
-    // 可复用的 MutableBlockPos（构造失败时退化为每次 new BlockPos，绝不因反射/构造问题中断脚本加载）
-    var SHARED_MUTABLE_POS = null
-    try {
-        SHARED_MUTABLE_POS = new MutableBlockPos()
-    } catch (ePos) { }
-    var JAVA_BOOL_FALSE    = null
-    try {
-        JAVA_BOOL_FALSE = Java.loadClass('java.lang.Boolean').FALSE
-    } catch (eBool) { }
-    if (JAVA_BOOL_FALSE == null) JAVA_BOOL_FALSE = false
-    // 调色板预筛能力标记：0=未探测, 1=可用, -1=该环境下 JS 函数无法转 Predicate（退化为逐格扫描）
-    var PALETTE_FILTER_STATE = 0
-
-    // 对单个 (chunkX, chunkZ) 区块列在球体 [cx,cy,cz, rSq] 范围内执行调色板级流体剥离
-    //   返回值状态码：
-    //     0 = 已加载且本列无任何流体（纯陆地/空气干区块，后续可安全剔除）
-    //     1 = 已加载且本列发现并清理了流体（纳入 hotColumns 热点复扫）
-    //     2 = 该区块当前尚未加载（纳入 unloadedColumns 持久挂起队列，待玩家靠近加载后再精准清理）
-    function purgeChunkColumnFluids(level, chunkX, chunkZ, cx, cy, cz, rSq, minWorldY, maxWorldY) {
-        var chunk = null
-        try {
-            // getChunkSource().getChunkNow(chunkX, chunkZ) —— 仅取已在内存中的区块，绝不触发磁盘同步加载卡服
-            var chunkSource = level.getChunkSource()
-            if (chunkSource != null) {
-                chunk = chunkSource.getChunkNow(chunkX, chunkZ)
-            }
-            if (chunk == null) {
-                if (!level.hasChunk(chunkX, chunkZ)) return 2 // 未加载区块返回状态码 2，进入挂起等待列表
-                chunk = level.getChunk(chunkX, chunkZ)
-            }
-        } catch (e) {
-            return 0
-        }
-        if (chunk == null) return 2
-
-        var sections = null
-        try {
-            sections = chunk.getSections() // LevelChunkSection[]
-        } catch (e) {
-            return 0
-        }
-        if (sections == null) return 0
-
-        var minBuildY = minWorldY
-        try {
-            minBuildY = chunk.getMinBuildHeight()
-        } catch (e) { }
-
-        var baseX = chunkX << 4
-        var baseZ = chunkZ << 4
-        var mpos  = SHARED_MUTABLE_POS
-        var columnHadFluid = false
-
-        for (var sIdx = 0, sLen = sections.length; sIdx < sLen; sIdx++) {
-            var section = sections[sIdx]
-            if (section == null) continue
-
-            // 若整块 16×16×16 区段全空，直接跳过
-            try {
-                if (section.hasOnlyAir()) continue
-            } catch (e) { }
-
-            var secBottomY = minBuildY + (sIdx << 4)
-            var secTopY    = secBottomY + 15
-            if (secTopY < minWorldY || secBottomY > maxWorldY) continue
-
-            // 16×16×16 Section 与球体的 3D AABB 最近点距离测试
-            var nearX = (cx < baseX) ? (baseX - cx) : (cx > baseX + 15 ? (cx - (baseX + 15)) : 0)
-            var nearY = (cy < secBottomY) ? (secBottomY - cy) : (cy > secTopY ? (cy - secTopY) : 0)
-            var nearZ = (cz < baseZ) ? (baseZ - cz) : (cz > baseZ + 15 ? (cz - (baseZ + 15)) : 0)
-            if (nearX * nearX + nearY * nearY + nearZ * nearZ > rSq) continue
-
-            // 核心加速：直接查询 Section 调色板（Palette）是否包含任何非空 FluidState。
-            // 若该 16×16×16 区段内没有任何水/岩浆/含水方块/模组流体，O(1) 直接跳过 4096 格！
-            if (PALETTE_FILTER_STATE >= 0) {
-                var hasFluidInPalette = true
-                try {
-                    hasFluidInPalette = section.maybeHas(FLUID_PREDICATE)
-                    PALETTE_FILTER_STATE = 1
-                } catch (ePalette) {
-                    PALETTE_FILTER_STATE = -1
-                    hasFluidInPalette = true
-                }
-                if (!hasFluidInPalette) continue
-            }
-
-            columnHadFluid = true
-
-            // 判断整个 16×16×16 区段是否完全被球体包含（若是则省去内层逐格球体距离判断）
-            var farX = Math.max(Math.abs(baseX - cx), Math.abs(baseX + 15 - cx))
-            var farY = Math.max(Math.abs(secBottomY - cy), Math.abs(secTopY - cy))
-            var farZ = Math.max(Math.abs(baseZ - cz), Math.abs(baseZ + 15 - cz))
-            var fullyInside = (farX * farX + farY * farY + farZ * farZ <= rSq)
-
-            for (var ly = 0; ly < 16; ly++) {
-                var wy = secBottomY + ly
-                var dy = wy - cy
-                var dySq = dy * dy
-                for (var lx = 0; lx < 16; lx++) {
-                    var wx = baseX + lx
-                    var dx = wx - cx
-                    var dxySq = dx * dx + dySq
-                    for (var lz = 0; lz < 16; lz++) {
-                        var wz = baseZ + lz
-                        if (!fullyInside) {
-                            var dz = wz - cz
-                            if (dxySq + dz * dz > rSq) continue
-                        }
-
-                        try {
-                            var state = section.getBlockState(lx, ly, lz)
-                            if (state == null || state.getFluidState().isEmpty()) continue
-
-                            var tpos = (mpos != null) ? mpos.set(wx, wy, wz) : new BlockPos(wx, wy, wz)
-                            // 带 WATERLOGGED 属性的方块（楼梯/半砖/栅栏/珊瑚/机器等）只剥离含水状态、保留方块本体；
-                            // 其余流体方块（水源/流动水/岩浆/气泡柱/海带/海草/模组流体）直接替换为空气。
-                            // flags=2 仅同步客户端，不触发邻格流体更新，避免水被“推”到相邻格子再生。
-                            if (WATERLOGGED_PROP != null && state.hasProperty(WATERLOGGED_PROP)) {
-                                level.setBlock(tpos, state.setValue(WATERLOGGED_PROP, JAVA_BOOL_FALSE), 2)
-                            } else if (AIR_STATE != null) {
-                                level.setBlock(tpos, AIR_STATE, 2)
-                            } else {
-                                level.getBlock(wx, wy, wz).set('minecraft:air')
-                            }
-                        } catch (eInner) { }
-                    }
-                }
-            }
-        }
-        return columnHadFluid ? 1 : 0
-    }
-
-    function findLiquidJob(dim, cx, cy, cz) {
-        for (var i = 0; i < liquidJobs.length; i++) {
-            var j = liquidJobs[i]
-            if (j != null && j.dim === dim && j.x === cx && j.y === cy && j.z === cz) {
-                return j
-            }
-        }
-        return null
-    }
-
-    // 增量唤醒同一爆心的流体扫尾任务（用于 35%、70%、100% 节点）：
-    //   若该爆心的液体任务仍在运行，直接补充一次热点与未加载区块复扫轮数，绝不重复构建 1200 个全量区块列；
-    //   若主轮已完成但外圈仍有回流风险，仅将已记录的边界防回流列（rimColumns）与未加载列重新唤醒扫尾。
     function triggerIncrementalLiquidSweep(level, dim, cx, cy, cz, radius) {
         if (!LIQUID_PURGE_ENABLED || level == null) return
-        var exist = findLiquidJob(dim, cx, cy, cz)
-        if (exist != null) {
-            exist.loopsLeft = Math.max(exist.loopsLeft, 2)
-            exist.expireTick = Math.max(exist.expireTick, tickCounter + 240)
+        var w = resolveWorldOps()
+        if (w != null && typeof w.triggerIncrementalFluidSweep === 'function') {
+            w.triggerIncrementalFluidSweep(level, dim, cx, cy, cz, radius, {
+                padding:        LIQUID_PURGE_PADDING,
+                loops:          LIQUID_PURGE_LOOPS,
+                unloadedTtl:    LIQUID_UNLOADED_TTL,
+                syncInitRadius: LIQUID_SYNC_INIT_RADIUS,
+                syncMaxMs:      LIQUID_SYNC_MAX_MS
+            })
             return
         }
-        startLiquidPurge(level, dim, cx, cy, cz, radius, true)
     }
 
     function startLiquidPurge(level, dim, cx, cy, cz, radius, isRimOnlySweep) {
         if (!LIQUID_PURGE_ENABLED || level == null) return
-
-        var existingJob = findLiquidJob(dim, cx, cy, cz)
-        if (existingJob != null) {
-            existingJob.loopsLeft = Math.max(existingJob.loopsLeft, isRimOnlySweep ? 2 : LIQUID_PURGE_LOOPS)
-            existingJob.expireTick = Math.max(existingJob.expireTick, tickCounter + LIQUID_UNLOADED_TTL)
-            return
-        }
-
-        var r = radius + LIQUID_PURGE_PADDING
-        var rSq = r * r
-        var minWorldY = -64
-        var maxWorldY = 319
-        if (dim === 'minecraft:the_nether' || dim === 'minecraft:the_end') {
-            minWorldY = 0
-            maxWorldY = 255
-        }
-        var y0 = Math.max(minWorldY, cy - r)
-        var y1 = Math.min(maxWorldY, cy + r)
-
-        var minChunkX = (cx - r) >> 4
-        var maxChunkX = (cx + r) >> 4
-        var minChunkZ = (cz - r) >> 4
-        var maxChunkZ = (cz + r) >> 4
-
-        var syncR = isRimOnlySweep ? 0 : LIQUID_SYNC_INIT_RADIUS
-        var syncRSq = syncR * syncR
-        // 边界环带阈值（半径 radius - 32 以外的区块列纳入防回流保护带）
-        var rimR = Math.max(0, radius - 32)
-        var rimRSq = rimR * rimR
-
-        var columns = []
-        var syncCount = 0
-        var syncStartMs = Date.now()
-
-        for (var chX = minChunkX; chX <= maxChunkX; chX++) {
-            var bx0 = chX << 4
-            var bx1 = bx0 + 15
-            var nearX = (cx < bx0) ? (bx0 - cx) : (cx > bx1 ? (cx - bx1) : 0)
-            for (var chZ = minChunkZ; chZ <= maxChunkZ; chZ++) {
-                var bz0 = chZ << 4
-                var bz1 = bz0 + 15
-                var nearZ = (cz < bz0) ? (bz0 - cz) : (cz > bz1 ? (cz - bz1) : 0)
-
-                // 2D 圆形裁剪：剔除球体投影外的四角区块列
-                var nearDist2D = nearX * nearX + nearZ * nearZ
-                if (nearDist2D > rSq) continue
-
-                var midX = (bx0 + 7.5) - cx
-                var midZ = (bz0 + 7.5) - cz
-                var centerDistSq = midX * midX + midZ * midZ
-                var isRimCol = (centerDistSq >= rimRSq)
-
-                // 若为阶段性增量扫尾模式，仅收集外圈防回流环带列，跳过中心已抽干区域
-                if (isRimOnlySweep && !isRimCol) continue
-
-                // T+0 爆炸启动瞬间：对中心 96 格内的区块列在 25ms 时间预算内立即同步抽干
-                if (syncR > 0 && nearDist2D <= syncRSq && (Date.now() - syncStartMs) < LIQUID_SYNC_MAX_MS) {
-                    var syncStatus = purgeChunkColumnFluids(level, chX, chZ, cx, cy, cz, rSq, y0, y1)
-                    syncCount++
-                    // 若同步抽干时该中心列已加载且无任何流体，首轮异步队列无需重复扫描该干列
-                    if (syncStatus === 0 && !isRimCol) continue
+        var w = resolveWorldOps()
+        if (w != null && typeof w.startSphereFluidPurge === 'function') {
+            w.startSphereFluidPurge(level, dim, cx, cy, cz, radius, {
+                isRimOnlySweep: Boolean(isRimOnlySweep),
+                padding:        LIQUID_PURGE_PADDING,
+                loops:          LIQUID_PURGE_LOOPS,
+                unloadedTtl:    LIQUID_UNLOADED_TTL,
+                syncInitRadius: LIQUID_SYNC_INIT_RADIUS,
+                syncMaxMs:      LIQUID_SYNC_MAX_MS,
+                onDone: function () {
+                    sendChatNear(
+                        level, dim, cx, cy, cz, FX_PACKET_RANGE + 120,
+                        '{"text":"[LIQUID_PURGE] 湮灭流体剥离完成 —— 球体范围内的水源、流动水、气泡柱、水生植物、含水方块与岩浆已全部归零。","color":"gold"}'
+                    )
                 }
-
-                columns.push({
-                    chX: chX,
-                    chZ: chZ,
-                    distSq: centerDistSq,
-                    isRim: isRimCol
-                })
-            }
-        }
-
-        // 按距离爆心由近到远排序，紧随冲击波从中心向外围高速推进
-        columns.sort(function (a, b) { return a.distSq - b.distSq })
-
-        liquidJobs.push({
-            level: level,
-            dim: dim,
-            columns: columns,
-            hotColumns: [],
-            unloadedColumns: [],
-            index: 0,
-            x: cx,
-            y: cy,
-            z: cz,
-            rSq: rSq,
-            y0: y0,
-            y1: y1,
-            loopsLeft: isRimOnlySweep ? 1 : LIQUID_PURGE_LOOPS,
-            expireTick: tickCounter + LIQUID_UNLOADED_TTL,
-            notifiedDone: Boolean(isRimOnlySweep)
-        })
-
-        if (!isRimOnlySweep) {
-            console.info('[拆解台] Section调色板级流体清除已启动 dim=' + dim + ' 半径=' + r + ' 同步核心列=' + syncCount + ' 待扫区块列=' + columns.length + ' 热点复扫轮数=' + LIQUID_PURGE_LOOPS)
+            })
+            return
         }
     }
 
     function tickLiquidPurge() {
-        // 全局共享单 tick 8ms 时间预算：所有液体任务合用同一个 startMs，且一旦耗时达到 LIQUID_TICK_MAX_MS 立即让出主线程，彻底消除海洋地形下强制保底 56 列造成的 MSPT 尖峰
-        var globalStartMs = Date.now()
-        var totalProcessed = 0
-
-        for (var n = liquidJobs.length - 1; n >= 0; n--) {
-            var job = liquidJobs[n]
-            if (job == null || job.level == null) { liquidJobs.splice(n, 1); continue }
-
-            // 阶段 1：推进当前轮次的待扫区块列（每 tick 至少推进 1 列防止死锁，随后严格遵守 8ms 时间预算与单 tick 最大列数上限）
-            while (job.index < job.columns.length) {
-                if (totalProcessed > 0 && ((Date.now() - globalStartMs) >= LIQUID_TICK_MAX_MS || totalProcessed >= LIQUID_MAX_COLS_TICK)) {
-                    return
-                }
-                var col = job.columns[job.index]
-                job.index++
-                totalProcessed++
-                var status = purgeChunkColumnFluids(job.level, col.chX, col.chZ, job.x, job.y, job.z, job.rSq, job.y0, job.y1)
-                if (status === 2) {
-                    // 未加载区块放入专门的挂起队列，不因热点复扫轮数耗尽而丢失
-                    job.unloadedColumns.push(col)
-                } else if (status === 1 || col.isRim) {
-                    // 已加载且含流体（或处于外圈边界防回流带）的列进入下一轮热点复扫
-                    job.hotColumns.push(col)
-                }
-            }
-
-            // 阶段 2：当前轮次全部列扫描完毕后，若仍有热点复扫轮数，切换至 hotColumns 继续下一轮
-            if (job.loopsLeft > 0 && job.hotColumns.length > 0) {
-                job.loopsLeft--
-                job.columns = job.hotColumns
-                job.hotColumns = []
-                job.index = 0
-                continue
-            }
-
-            // 主轮与热点复扫均已完成时，首次播报流体剥离完成提示
-            if (!job.notifiedDone) {
-                job.notifiedDone = true
-                sendChatNear(
-                    job.level, job.dim, job.x, job.y, job.z, FX_PACKET_RANGE + 120,
-                    '{"text":"[LIQUID_PURGE] 湮灭流体剥离完成 —— 球体范围内的水源、流动水、气泡柱、水生植物、含水方块与岩浆已全部归零。","color":"gold"}'
-                )
-            }
-
-            // 阶段 3：若存在当时未加载的边缘区块列（unloadedColumns），在 TTL 有效期内每隔 10 tick 轻量轮询一次，一旦玩家走近使区块加载即刻抽干
-            if (job.unloadedColumns.length > 0 && tickCounter <= job.expireTick) {
-                if (tickCounter % 10 === 0) {
-                    var remainingUnloaded = []
-                    for (var uIdx = 0; uIdx < job.unloadedColumns.length; uIdx++) {
-                        var uCol = job.unloadedColumns[uIdx]
-                        if (totalProcessed > 0 && (Date.now() - globalStartMs) >= LIQUID_TICK_MAX_MS) {
-                            // 预算用尽时保留剩余未检查的挂起列到下次轮询
-                            for (var rIdx = uIdx; rIdx < job.unloadedColumns.length; rIdx++) {
-                                remainingUnloaded.push(job.unloadedColumns[rIdx])
-                            }
-                            break
-                        }
-                        if (!isBlockChunkLoaded(job.level, uCol.chX << 4, uCol.chZ << 4)) {
-                            remainingUnloaded.push(uCol)
-                            continue
-                        }
-                        totalProcessed++
-                        var uStatus = purgeChunkColumnFluids(job.level, uCol.chX, uCol.chZ, job.x, job.y, job.z, job.rSq, job.y0, job.y1)
-                        if (uStatus === 1) {
-                            // 刚加载的区块若含有水体，再放入热点队列补扫一次确保边界干净
-                            job.hotColumns.push(uCol)
-                            job.loopsLeft = Math.max(job.loopsLeft, 1)
-                        }
-                    }
-                    job.unloadedColumns = remainingUnloaded
-                }
-                if (job.unloadedColumns.length > 0 || job.hotColumns.length > 0) {
-                    continue
-                }
-            }
-
-            liquidJobs.splice(n, 1)
-        }
+        // 已交由 EpiphyWorldOps 全局统一帧时间预算驱动
     }
 
-    // ------------------------------------------------------------------------
-    // 最外圈岩浆圈层：在最大半径处沿圆周浇筑一圈岩浆（分帧执行，对(x,z)列去重避免重复寻高）
-    // ------------------------------------------------------------------------
     function startMagmaRing(job, maxR) {
-        var circumference = Math.max(1, Math.floor(2 * Math.PI * maxR))
-        var seenCols = {}
-        var columns = []
-        for (var step = 0; step < circumference; step++) {
-            var angle = (step / circumference) * Math.PI * 2
-            var cosA = Math.cos(angle)
-            var sinA = Math.sin(angle)
-            for (var w = 0; w < MAGMA_RING_WIDTH; w++) {
-                var rr = maxR + w
-                var px = Math.floor(job.x + cosA * rr)
-                var pz = Math.floor(job.z + sinA * rr)
-                var colKey = px + '|' + pz
-                if (!seenCols[colKey]) {
-                    seenCols[colKey] = true
-                    columns.push([px, pz])
+        var w = resolveWorldOps()
+        if (w != null && typeof w.startRingBlockJob === 'function') {
+            w.startRingBlockJob(job.level, job.dim, job.x, job.y, job.z, maxR, {
+                blockId:   'minecraft:lava',
+                width:     MAGMA_RING_WIDTH,
+                thickness: MAGMA_RING_THICKNESS,
+                onDone: function () {
+                    sendChatNear(
+                        job.level, job.dim, job.x, job.y, job.z, FX_PACKET_RANGE + 80,
+                        '{"text":"[MAGMA_RING] 最外壳层冷却完成 —— 半径 300 格处已形成闭合岩浆圈层。","color":"gold"}'
+                    )
                 }
-            }
+            })
+            return
         }
-
-        magmaJobs.push({
-            level: job.level,
-            dim: job.dim,
-            x: job.x,
-            y: job.y,
-            z: job.z,
-            columns: columns,
-            done: 0
-        })
-        console.info('[拆解台] 岩浆圈层浇筑已排队 radius=' + maxR + ' 去重后列数=' + columns.length)
     }
 
     function tickMagmaRing() {
-        for (var n = magmaJobs.length - 1; n >= 0; n--) {
-            var job = magmaJobs[n]
-            if (job == null || job.level == null) { magmaJobs.splice(n, 1); continue }
-
-            var budget = MAGMA_RING_BATCH
-            while (budget > 0 && job.done < job.columns.length) {
-                var col = job.columns[job.done]
-                var px = col[0]
-                var pz = col[1]
-                var sy = surfaceY(job.level, px, pz, job.y)
-                for (var d = 0; d < MAGMA_RING_THICKNESS; d++) {
-                    try {
-                        var b = job.level.getBlock(px, sy - d, pz)
-                        if (b.id === 'minecraft:air') {
-                            b.set('minecraft:lava')
-                        }
-                    } catch (e) { }
-                }
-                budget--
-                job.done++
-            }
-
-            if (job.done >= job.columns.length) {
-                magmaJobs.splice(n, 1)
-                sendChatNear(
-                    job.level, job.dim, job.x, job.y, job.z, FX_PACKET_RANGE + 80,
-                    '{"text":"[MAGMA_RING] 最外壳层冷却完成 —— 半径 300 格处已形成闭合岩浆圈层。","color":"gold"}'
-                )
-            }
-        }
+        // 已交由 EpiphyWorldOps 全局统一帧时间预算驱动
     }
 
-    // ------------------------------------------------------------------------
-    // 非底层 / 非顶层基岩剥离：已按需求还原，不再改动基岩层
-    //   （各维度底层基岩、下界 y=127 顶层基岩均由原有 clampTraces 保持完整）
-    // ------------------------------------------------------------------------
-
     function surfaceY(level, x, z, fromY) {
+        var w = resolveWorldOps()
+        if (w != null && typeof w.findLoadedSurfaceY === 'function') {
+            var wy = w.findLoadedSurfaceY(level, x, z, fromY, 96, 16)
+            if (wy != null) return wy
+        }
+        if (!isBlockChunkLoaded(level, x, z)) return fromY
         var top = fromY + 96
         for (var y = top; y > fromY - 16; y--) {
-            if (level.getBlock(x, y, z).id !== 'minecraft:air') return y
+            try {
+                if (level.getBlock(x, y, z).id !== 'minecraft:air') return y
+            } catch (e) { break }
         }
         return fromY
     }
 
     function hasPlayerNear(level, x, y, z, dist) {
+        var b = resolveBase()
+        if (b != null && typeof b.hasPlayerNear === 'function') {
+            return b.hasPlayerNear(level, x, y, z, dist)
+        }
         var found = false
         forEachPlayerNear(level, x, y, z, dist, function () {
             found = true
         })
         return found
+    }
+
+    if (BASE_INIT != null && typeof BASE_INIT.registerDebugProvider === 'function') {
+        BASE_INIT.registerDebugProvider({
+            name:  'uncrafting',
+            label: '拆解台混沌殉爆',
+            order: 60,
+            summary: function () {
+                return 'watched=' + Object.keys(watched).length +
+                    ' | unstableJobs=' + unstableJobs.length +
+                    ' | layerJobs=' + layerJobs.length
+            },
+            detail: function () {
+                var lines = [
+                    'watchedTables: ' + Object.keys(watched).length,
+                    'unstableJobs: ' + unstableJobs.length,
+                    'layerJobs: ' + layerJobs.length,
+                    'traceGuardReady: ' + TRACE_READY
+                ]
+                for (var i = 0; i < unstableJobs.length; i++) {
+                    var j = unstableJobs[i]
+                    lines.push('  job[' + i + ']: ' + j.dim + ' (' + j.x + ',' + j.y + ',' + j.z + ') stage=' + (j.stageIndex + 1) + ' t=' + j.t + '/' + j.totalTicks + ' fatal=' + j.fatalTriggered)
+                }
+                return lines
+            },
+            metrics: function () {
+                return {
+                    watchedCount:      Object.keys(watched).length,
+                    unstableJobsCount: unstableJobs.length,
+                    layerJobsCount:    layerJobs.length,
+                    traceReady:        TRACE_READY
+                }
+            }
+        })
     }
 })()

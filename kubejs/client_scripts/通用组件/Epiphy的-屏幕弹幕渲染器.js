@@ -1,12 +1,12 @@
 // ============================================================================
-//  通用屏幕弹幕与泛用文本显示组件 —— 客户端渲染引擎 (ScreenDanmakuClient v5.6)
+//  通用屏幕弹幕与泛用文本显示组件 —— 客户端渲染引擎 (ScreenDanmakuClient v5.7)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 <repo-root> 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-屏幕弹幕渲染器.js
 //  配套服务端组件：
-//    - kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js（服务端调度器 ScreenDanmaku v5.5）
-//    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀 EpiphyPermissionValve v5.2）
+//    - kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js（服务端调度器 ScreenDanmaku v5.6）
+//    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀 EpiphyPermissionValve v5.3）
 //
 //  依赖与缺失降级：
 //    - 可选前置：kubejs/startup_scripts/通用组件/Epiphy的-Spec与通用工具.js (EpiphySpec / EpiphyProtocol, priority: 1200)
@@ -655,15 +655,43 @@
 
     var INLINE_TAG_RE = /^(?:<|\{)(\/?)(b|bold|big|scale|shake|noshake|outline|glow)(?:=([^>\}]+))?(?:>|\})/i
 
+    function isPotentialSpanTagHead(str, idx) {
+        if ((idx + 2) >= str.length) return false
+        var c1 = str.charCodeAt(idx + 1)
+        if (c1 === 47) { // '/'
+            if ((idx + 3) >= str.length) return false
+            c1 = str.charCodeAt(idx + 2)
+        }
+        // 仅当标签首字母为 b, s, n, o, g (大小写) 时才可能是合法内联标签，快速短路 <AVARITIA_BIOS> 等普通尖括号文本
+        var lower = c1 | 32
+        return lower === 98 || lower === 115 || lower === 110 || lower === 111 || lower === 103
+    }
+
     function hasRichSpanTags(str) {
         if (!str || str.length < 3) return false
-        if (str.indexOf('<') < 0 && str.indexOf('{') < 0) return false
+        var hasCandidate = false
+        for (var i = 0, len = str.length - 2; i < len; i++) {
+            var ch = str.charCodeAt(i)
+            if ((ch === 60 || ch === 123) && isPotentialSpanTagHead(str, i)) {
+                hasCandidate = true
+                break
+            }
+        }
+        if (!hasCandidate) return false
         return /(?:<|\{)\/?(?:b|bold|big|scale|shake|noshake|outline|glow)\b/i.test(str)
     }
 
     function hasSdfSpanTags(str) {
         if (!str || str.length < 4) return false
-        if (str.indexOf('<') < 0 && str.indexOf('{') < 0) return false
+        var hasCandidate = false
+        for (var i = 0, len = str.length - 3; i < len; i++) {
+            var ch = str.charCodeAt(i)
+            if ((ch === 60 || ch === 123) && isPotentialSpanTagHead(str, i)) {
+                hasCandidate = true
+                break
+            }
+        }
+        if (!hasCandidate) return false
         return /(?:<|\{)\/?(?:big|scale|outline|glow)\b/i.test(str)
     }
 
@@ -679,6 +707,7 @@
     function matchInlineTagAt(str, idx) {
         var ch = str.charCodeAt(idx)
         if (ch !== 60 && ch !== 123) return null // '<' or '{'
+        if (!isPotentialSpanTagHead(str, idx)) return null
         var sub = str.substring(idx, min2(str.length, idx + 32))
         var m = INLINE_TAG_RE.exec(sub)
         if (m == null) return null
@@ -1220,15 +1249,36 @@
         return frags
     }
 
-    var SHARED_TEXT_SEQ_CACHE = {}
-    var SHARED_TEXT_SEQ_KEYS  = []
-    var MAX_TEXT_SEQ_CACHE    = 512
+    var SHARED_TEXT_SEQ_CACHE    = {}
+    var SHARED_TEXT_SEQ_KEYS     = []
+    var MAX_TEXT_SEQ_CACHE       = 512
+    var TRANSIENT_TEXT_SEQ_CACHE = {}
+    var TRANSIENT_TEXT_SEQ_KEYS  = []
+    var MAX_TRANSIENT_SEQ_CACHE  = 256
 
-    function getCachedTextCompSeq(rawStr, eagerCompSeq) {
+    function getCachedTextCompSeq(rawStr, eagerCompSeq, isTransient) {
         var key = String(rawStr || '')
         var entry
         if (Object.prototype.hasOwnProperty.call(SHARED_TEXT_SEQ_CACHE, key)) {
             entry = SHARED_TEXT_SEQ_CACHE[key]
+        } else if (Object.prototype.hasOwnProperty.call(TRANSIENT_TEXT_SEQ_CACHE, key)) {
+            entry = TRANSIENT_TEXT_SEQ_CACHE[key]
+        } else if (isTransient === true) {
+            if (TRANSIENT_TEXT_SEQ_KEYS.length >= MAX_TRANSIENT_SEQ_CACHE) {
+                var oldTrans = TRANSIENT_TEXT_SEQ_KEYS.shift()
+                if (oldTrans !== undefined) delete TRANSIENT_TEXT_SEQ_CACHE[oldTrans]
+            }
+            entry = {
+                rawText:      key,
+                comp:         null,
+                seq:          null,
+                _isTransient: true,
+                _muiLayout:   null,
+                _muiEpoch:    -1,
+                _muiHasEmoji: false
+            }
+            TRANSIENT_TEXT_SEQ_CACHE[key] = entry
+            TRANSIENT_TEXT_SEQ_KEYS.push(key)
         } else {
             if (SHARED_TEXT_SEQ_KEYS.length >= MAX_TEXT_SEQ_CACHE) {
                 var oldest = SHARED_TEXT_SEQ_KEYS.shift()
@@ -1238,6 +1288,7 @@
                 rawText:      key,
                 comp:         null,
                 seq:          null,
+                _isTransient: false,
                 _muiLayout:   null,
                 _muiEpoch:    -1,
                 _muiHasEmoji: false
@@ -1602,9 +1653,11 @@
             return ownerObj._muiLayout
         }
         var raw = (ownerObj != null && ownerObj.rawText != null) ? String(ownerObj.rawText) : ''
+        var isTransOwner = Boolean(ownerObj != null && ownerObj._isTransient)
         var hasSharedKey = (raw.length > 0 && Object.prototype.hasOwnProperty.call(SHARED_TEXT_SEQ_CACHE, raw))
-        if (hasSharedKey) {
-            var sharedEntry = SHARED_TEXT_SEQ_CACHE[raw]
+        var hasTransKey  = (!hasSharedKey && raw.length > 0 && Object.prototype.hasOwnProperty.call(TRANSIENT_TEXT_SEQ_CACHE, raw))
+        if (hasSharedKey || hasTransKey) {
+            var sharedEntry = hasSharedKey ? SHARED_TEXT_SEQ_CACHE[raw] : TRANSIENT_TEXT_SEQ_CACHE[raw]
             if (sharedEntry._muiLayout != null && sharedEntry._muiEpoch === MUI_EPOCH) {
                 if (ownerObj != null) {
                     ownerObj._muiLayout   = sharedEntry._muiLayout
@@ -1635,7 +1688,9 @@
                     ownerObj._muiHasEmoji = hasEm
                 }
                 if (raw.length > 0) {
-                    var targetCache = hasSharedKey ? SHARED_TEXT_SEQ_CACHE[raw] : getCachedTextCompSeq(raw, false)
+                    var targetCache = hasSharedKey
+                        ? SHARED_TEXT_SEQ_CACHE[raw]
+                        : (hasTransKey ? TRANSIENT_TEXT_SEQ_CACHE[raw] : getCachedTextCompSeq(raw, false, isTransOwner))
                     targetCache._muiLayout   = layout
                     targetCache._muiEpoch    = MUI_EPOCH
                     targetCache._muiHasEmoji = hasEm
@@ -3147,6 +3202,59 @@
         return dst
     }
 
+    // 为折行后的单行对象按需构建 O(1) 可见字素切分边界与累计像素宽度表（仅在打字机或 char_first/char_last 首次访问该行时构建 1 次）
+    function ensureLineVisTable(ln, fontObj, letterSpacingPx, spacingMode) {
+        var spacing = (letterSpacingPx != null && isFinite(letterSpacingPx)) ? Number(letterSpacingPx) : 0
+        var spMode  = spacingMode || 'relative'
+        if (ln._visEndIdx != null && ln._visTableSp === spacing && ln._visTableMode === spMode) {
+            return ln
+        }
+        var str       = ln.text || ''
+        var checkTags = Boolean(ln.hasTags) || hasRichSpanTags(str)
+        var endIndices = [0]
+        var cumWidths  = [0]
+        var isBold     = false
+        var tagState   = { tagBold: false, charScale: 1.0, shakeFlag: 0, outlineMode: '', outlineColor: -1 }
+        var curW       = 0
+
+        for (var i = 0; i < str.length;) {
+            var code = str.charCodeAt(i)
+            if (code === 10 || code === 13) {
+                i++
+                continue
+            }
+            if (code === 167 && (i + 1) < str.length) {
+                var fc = str.charAt(i + 1).toLowerCase()
+                if (fc === 'l') isBold = true
+                else if ((fc >= '0' && fc <= '9') || (fc >= 'a' && fc <= 'f') || fc === 'r') isBold = false
+                i += 2
+                continue
+            }
+            if (checkTags) {
+                var tag = matchInlineTagAt(str, i)
+                if (tag != null) {
+                    applyInlineTagToState(tag, tagState)
+                    i += tag.rawLen
+                    continue
+                }
+            }
+            var g = readGraphemeCluster(str, i)
+            var effBold = isBold || tagState.tagBold
+            var baseCw  = measureClusterWidthPx(g.cluster, effBold, fontObj) * tagState.charScale
+            var cw      = baseCw + computeClusterSpacing(baseCw, spacing, spMode)
+            curW += cw
+            i = g.nextIndex
+            endIndices.push(i)
+            cumWidths.push(curW)
+        }
+        ln._visEndIdx    = endIndices
+        ln._visCumW      = cumWidths
+        ln._visTableSafe = !checkTags
+        ln._visTableSp   = spacing
+        ln._visTableMode = spMode
+        return ln
+    }
+
     function buildRenderedLines(wrappedLines, startSkipVis, keepEndVis, appendCursor, fontObj, letterSpacingPx, spacingMode, needEndPx) {
         if (!wrappedLines || wrappedLines.length === 0) return []
         var out = []
@@ -3168,6 +3276,45 @@
             var localKeep = min2(ln.vis, keepEndVis - lineStart)
             if (localKeep <= localSkip) continue
 
+            // O(1) 查表快速路径：当 localSkip === 0（打字机正向推进或整行显示）且已构建（或按需构建）行级字素表时，
+            // 直接用 substring(0, _visEndIdx[localKeep]) 与 _visCumW[localKeep] 完成切片与光标定位，0 循环、0 重复测宽！
+            if (localSkip === 0 && localKeep === ln.vis) {
+                var fullEndPx = 0
+                if (calcEndPx) {
+                    fullEndPx = (ln.widthPx || 0) + (letterSpacingPx > 0 ? computeClusterSpacing(9, letterSpacingPx, spacingMode) : 0)
+                }
+                out.push({
+                    text:        ln.text,
+                    fullW:       ln.widthPx,
+                    offsetPx:    0,
+                    endPx:       fullEndPx,
+                    lineIndex:   i,
+                    isTransient: false
+                })
+                lastActiveIdx = out.length - 1
+                continue
+            }
+
+            if (localSkip === 0) {
+                ensureLineVisTable(ln, fontObj, letterSpacingPx, spacingMode)
+                if (ln._visEndIdx != null && localKeep < ln._visEndIdx.length) {
+                    var fastSlice = ln.text.substring(0, ln._visEndIdx[localKeep])
+                    if (fastSlice.length > 0) {
+                        var fastEndPx = calcEndPx ? (ln._visCumW[localKeep] || 0) : 0
+                        out.push({
+                            text:        fastSlice,
+                            fullW:       ln.widthPx,
+                            offsetPx:    0,
+                            endPx:       fastEndPx,
+                            lineIndex:   i,
+                            isTransient: true
+                        })
+                        lastActiveIdx = out.length - 1
+                        continue
+                    }
+                }
+            }
+
             var sliced  = (localKeep < ln.vis) ? sliceVisibleChars(ln.text, localKeep) : ln.text
             var dropped = (localSkip > 0) ? dropFirstVisibleChars(sliced, localSkip, fontObj, letterSpacingPx, spacingMode) : { text: sliced, offsetPx: 0 }
             if (dropped.text && dropped.text.length > 0) {
@@ -3178,11 +3325,12 @@
                         : dropFirstVisibleChars(sliced, 999999, fontObj, letterSpacingPx, spacingMode).offsetPx
                 }
                 out.push({
-                    text:      dropped.text,
-                    fullW:     ln.widthPx,
-                    offsetPx:  dropped.offsetPx,
-                    endPx:     endPx,
-                    lineIndex: i
+                    text:        dropped.text,
+                    fullW:       ln.widthPx,
+                    offsetPx:    dropped.offsetPx,
+                    endPx:       endPx,
+                    lineIndex:   i,
+                    isTransient: (localSkip > 0 || localKeep < ln.vis)
                 })
                 lastActiveIdx = out.length - 1
             }
@@ -3908,11 +4056,15 @@
     ClientEvents.loggedOut(function () {
         activeOverlays.length = 0
         pendingActions.length = 0
+        TRANSIENT_TEXT_SEQ_CACHE = {}
+        TRANSIENT_TEXT_SEQ_KEYS.length = 0
         LAST_LEVEL_KEY = ''
     })
     ClientEvents.loggedIn(function () {
         activeOverlays.length = 0
         pendingActions.length = 0
+        TRANSIENT_TEXT_SEQ_CACHE = {}
+        TRANSIENT_TEXT_SEQ_KEYS.length = 0
         LAST_LEVEL_KEY = ''
     })
 
@@ -4163,9 +4315,9 @@
                 continue
             }
 
-            // 单帧硬防卡死熔断（至少完成 1 条后累计超过 45ms 才跳出）：常规/高特效帧通常远低于此值；
+            // 单帧硬防卡死熔断（每绘制 8 条采样一次 monotonicNowMs，大幅削减 System.nanoTime JNI 跨界开销）：
             // 若极重洪泛触及该上限，将截断本帧尾部低优先级条目以保护客户端不卡死（不降级单条特效本身）。
-            if (drawnCount >= 1 && (monotonicNowMs() - frameStartMs) >= CONFIG.frameBudgetMs) {
+            if (drawnCount >= 1 && (drawnCount & 7) === 1 && (monotonicNowMs() - frameStartMs) >= CONFIG.frameBudgetMs) {
                 break
             }
             drawnCount++
@@ -4608,10 +4760,14 @@
                             )
                         }
                     } else {
-                        var lineCacheKey = curWrapKey + '|s:' + startSkipVis + '|k:' + keepEndVis + '|y:' + startY
-                        var lCache       = item._lineRenderCache
+                        var lCache            = item._lineRenderCache
                         var needCursorMeasure = (item.typewriter && !inFade && shownVis < item.totalVis && item.totalVis > 0)
-                        if (lCache == null || lCache.key !== lineCacheKey || (needCursorMeasure && lCache.cursorAnchor == null)) {
+                        if (lCache == null ||
+                            lCache.wrapKey !== curWrapKey ||
+                            lCache.skipVis !== startSkipVis ||
+                            lCache.keepVis !== keepEndVis ||
+                            lCache.startY !== startY ||
+                            (needCursorMeasure && lCache.cursorAnchor == null)) {
                             var titleSkip = min2(item.titleVis, startSkipVis)
                             var titleKeep = min2(item.titleVis, keepEndVis)
                             var subSkip   = max2(0, startSkipVis - item.titleVis)
@@ -4623,13 +4779,15 @@
                             var tItems = []
                             for (var tIdx = 0; tIdx < renderTitleLines.length; tIdx++) {
                                 var rLine1 = renderTitleLines[tIdx]
-                                var tEntryShared = getCachedTextCompSeq(rLine1.text, false)
+                                var isTrans1 = Boolean(rLine1.isTransient)
+                                var tEntryShared = getCachedTextCompSeq(rLine1.text, false, isTrans1)
                                 var tBaseX = -Math.floor((rLine1.fullW || 0) * 0.5)
                                 var tFullW = rLine1.fullW || 0
                                 tItems.push({
                                     rawText:      tEntryShared.rawText,
                                     comp:         tEntryShared.comp,
                                     seq:          tEntryShared.seq,
+                                    _isTransient: isTrans1,
                                     x:            tBaseX + (rLine1.offsetPx || 0),
                                     endX:         tBaseX + (rLine1.endPx || 0),
                                     y:            startY + (rLine1.lineIndex || 0) * lineStep,
@@ -4646,13 +4804,15 @@
                             var sItems = []
                             for (var sIdx = 0; sIdx < renderSubLines.length; sIdx++) {
                                 var rLine2 = renderSubLines[sIdx]
-                                var sEntryShared = getCachedTextCompSeq(rLine2.text, false)
+                                var isTrans2 = Boolean(rLine2.isTransient)
+                                var sEntryShared = getCachedTextCompSeq(rLine2.text, false, isTrans2)
                                 var sBaseX = -Math.floor((rLine2.fullW || 0) * 0.5)
                                 var sFullW = rLine2.fullW || 0
                                 sItems.push({
                                     rawText:      sEntryShared.rawText,
                                     comp:         sEntryShared.comp,
                                     seq:          sEntryShared.seq,
+                                    _isTransient: isTrans2,
                                     x:            sBaseX + (rLine2.offsetPx || 0),
                                     endX:         sBaseX + (rLine2.endPx || 0),
                                     y:            startY + (titleLineCount + (rLine2.lineIndex || 0)) * lineStep,
@@ -4678,7 +4838,17 @@
                                     cursorAnchor = { x: lastS.endX, y: lastS.y, isSub: true }
                                 }
                             }
-                            lCache = { key: lineCacheKey, tItems: tItems, sItems: sItems, cursorAnchor: cursorAnchor }
+                            var lineCacheKey = curWrapKey + '|s:' + startSkipVis + '|k:' + keepEndVis + '|y:' + startY
+                            lCache = {
+                                key:          lineCacheKey,
+                                wrapKey:      curWrapKey,
+                                skipVis:      startSkipVis,
+                                keepVis:      keepEndVis,
+                                startY:       startY,
+                                tItems:       tItems,
+                                sItems:       sItems,
+                                cursorAnchor: cursorAnchor
+                            }
                             item._lineRenderCache = lCache
                         }
 

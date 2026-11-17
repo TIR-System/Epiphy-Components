@@ -29,9 +29,9 @@
 // ============================================================================
 
 ;(function () {
-    var BASE = (typeof global !== 'undefined') ? global.EpiphyServerBase : null
+    var BASE = (typeof global !== 'undefined') ? (global.EpiphyServerCore || global.EpiphyServerBase) : null
     if (!BASE) {
-        throw new Error('[EpiphyDebug] 缺少硬依赖 global.EpiphyServerBase，请确认 server_scripts/通用组件/Epiphy的-服务端基础.js 已加载')
+        throw new Error('[EpiphyDebug] 缺少硬依赖 global.EpiphyServerBase，请确认 server_scripts/通用组件/Epiphy的-服务端核心.js 已加载')
     }
 
     var LOGGER        = BASE.createLogger('EpiphyDebug', 5000)
