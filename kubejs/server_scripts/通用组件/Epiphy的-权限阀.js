@@ -235,11 +235,31 @@
         return String(str).trim().toLowerCase()
     }
 
-    function normalizeScope(scope) {
-        var s = normalizeKey(scope)
-        if (!s || s === 'all' || s === '*') return '*'
+    function parseScopeSpec(rawScope) {
+        var s = normalizeKey(rawScope)
+        if (!s || s === 'all' || s === '*' || s === '*.*') {
+            return { base: '*', isTree: true, rawNorm: '*' }
+        }
         s = s.replace(/[\/:]+/g, '.').replace(/\.+/g, '.').replace(/^\.+|\.+$/g, '')
-        return (!s || s === 'all' || s === '*') ? '*' : s
+        if (!s || s === 'all' || s === '*' || s === '*.*') {
+            return { base: '*', isTree: true, rawNorm: '*' }
+        }
+        if (s.length > 2 && s.slice(-2) === '.*') {
+            var base = s.slice(0, -2).replace(/\.+$/g, '')
+            if (!base || base === 'all' || base === '*') {
+                return { base: '*', isTree: true, rawNorm: '*' }
+            }
+            return { base: base, isTree: true, rawNorm: base + '.*' }
+        }
+        return { base: s, isTree: false, rawNorm: s }
+    }
+
+    function normalizeScope(scope) {
+        return parseScopeSpec(scope).base
+    }
+
+    function normalizeRevocationScopeKey(scope) {
+        return parseScopeSpec(scope).rawNorm
     }
 
     function isReservedScope(scope) {
@@ -424,19 +444,38 @@
         return BASE.readMapField(obj, key)
     }
 
-    function readJsonFile(filePath) {
-        if (!filePath) return null
+    function readJsonFileDetailed(filePath) {
+        if (!filePath) return { status: 'missing', data: null }
+        if (typeof BASE.readJsonDetailed === 'function') {
+            return BASE.readJsonDetailed(filePath, LOGGER, true)
+        }
         if (typeof BASE.readJsonSafe === 'function') {
-            return BASE.readJsonSafe(filePath, LOGGER)
+            var d = BASE.readJsonSafe(filePath, LOGGER)
+            return { status: d != null ? 'ok' : 'missing', data: d }
         }
         try {
             if (typeof JsonIO !== 'undefined' && JsonIO != null) {
-                return JsonIO.read(filePath)
+                var raw = JsonIO.read(filePath)
+                return { status: raw != null ? 'ok' : 'missing', data: raw }
             }
         } catch (eRead) {
             logCatch('readJsonFile', eRead)
+            return { status: 'corrupt', data: null }
         }
-        return null
+        return { status: 'missing', data: null }
+    }
+
+    function readJsonFile(filePath) {
+        var res = readJsonFileDetailed(filePath)
+        return res.status === 'ok' ? res.data : null
+    }
+
+    function canPersistValveFiles(entry) {
+        if (!entry || !entry.filePath) return false
+        if (typeof BASE.canWritePersistentFiles === 'function') {
+            return Boolean(BASE.canWritePersistentFiles())
+        }
+        return typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.write === 'function'
     }
 
     function writeJsonFile(filePath, payload) {
@@ -576,7 +615,7 @@
             var hasAny = false
             for (var sc in rec) {
                 if (!Object.prototype.hasOwnProperty.call(rec, sc)) continue
-                var scopeKey = normalizeScope(sc)
+                var scopeKey = normalizeRevocationScopeKey(sc)
                 var rawItem = rec[sc]
                 var ts = (typeof rawItem === 'number')
                     ? rawItem
@@ -599,11 +638,47 @@
         if (!revocationsMap || !userKey) return 0
         var rec = revocationsMap[userKey]
         if (!rec) return 0
-        var starRec  = rec['*']
-        var scopeRec = (scope && scope !== '*') ? rec[scope] : null
-        var starTs   = starRec ? Number(starRec.revokedAtMs || 0) : 0
-        var scopeTs  = scopeRec ? Number(scopeRec.revokedAtMs || 0) : 0
-        return starTs > scopeTs ? starTs : scopeTs
+        var starRec = rec['*']
+        var maxTs   = starRec ? Number(starRec.revokedAtMs || 0) : 0
+        var normSc  = normalizeScope(scope)
+        if (normSc && normSc !== '*') {
+            var directRec = rec[normSc]
+            if (directRec) {
+                var dTs = Number(directRec.revokedAtMs || 0)
+                if (dTs > maxTs) maxTs = dTs
+            }
+            // 检查祖先子树级墓碑 (<parent>.*) —— 单节点墓碑 (<parent>) 仅作用于父节点自身，保留显式子作用域；
+            // 子树墓碑 (<parent>.*) 则通杀父节点及其下全部子作用域
+            var chain = buildScopeHierarchy(normSc)
+            for (var i = 0; i < chain.length; i++) {
+                var anc = chain[i]
+                if (anc === '*') continue
+                var treeRec = rec[anc + '.*']
+                if (treeRec) {
+                    var tTs = Number(treeRec.revokedAtMs || 0)
+                    if (tTs > maxTs) maxTs = tTs
+                }
+            }
+        }
+        return maxTs
+    }
+
+    function getMaxDescendantRevocationMs(revocationsMap, userKey, parentScope) {
+        if (!revocationsMap || !userKey) return 0
+        var rec = revocationsMap[userKey]
+        if (!rec) return 0
+        var normParent = normalizeScope(parentScope)
+        var maxTs = getRevocationMs(revocationsMap, userKey, normParent)
+        var prefix = (normParent === '*') ? '' : (normParent + '.')
+        for (var rk in rec) {
+            if (!Object.prototype.hasOwnProperty.call(rec, rk)) continue
+            if (normParent === '*' || rk === normParent || rk === (normParent + '.*') || rk.indexOf(prefix) === 0) {
+                var item = rec[rk]
+                var ts = item ? Number(item.revokedAtMs || 0) : 0
+                if (ts > maxTs) maxTs = ts
+            }
+        }
+        return maxTs
     }
 
     function isGrantSupersededByRevocation(revocationsMap, userKey, scope, grantAtMs) {
@@ -636,14 +711,23 @@
         return removedCount
     }
 
-    function recordRevocationTombstone(revocationsMap, userKey, scope, byLabel, nowMs) {
+    function recordRevocationTombstone(revocationsMap, userKey, rawScope, byLabel, nowMs) {
         if (!revocationsMap || !userKey) return
-        var sc = normalizeScope(scope)
+        var spec = parseScopeSpec(rawScope)
+        var base = spec.base
         if (!revocationsMap[userKey]) revocationsMap[userKey] = {}
-        revocationsMap[userKey][sc] = {
+        var entryVal = {
             revokedAtMs: nowMs,
             revokedAt:   formatTimestampNow(),
             by:          byLabel || 'SYSTEM'
+        }
+        revocationsMap[userKey][base] = entryVal
+        if (spec.isTree && base !== '*') {
+            revocationsMap[userKey][base + '.*'] = {
+                revokedAtMs: nowMs,
+                revokedAt:   entryVal.revokedAt,
+                by:          entryVal.by
+            }
         }
     }
 
@@ -732,28 +816,37 @@
         }
 
         // 1. 先加载外置撤销墓碑 (revocations.json) —— 绝不随 saves/ 回滚而消失
-        var revocations = {}
+        var revocations        = {}
+        var revocationsCorrupt = false
         if (info.revocationsFile) {
-            var rawRev = readJsonFile(info.revocationsFile)
-            if (rawRev != null) {
-                revocations = parseRevocationsMap(rawRev)
+            var revRes = readJsonFileDetailed(info.revocationsFile)
+            if (revRes.status === 'ok' && revRes.data != null) {
+                revocations = parseRevocationsMap(revRes.data)
+            } else if (revRes.status === 'corrupt') {
+                revocationsCorrupt = true
+                logError('getOrLoadWorldGrants', '撤销墓碑文件损坏且无可用备份 (' + info.revocationsFile + ')，已禁止旧档导入以防已撤销权限复活。')
             }
         }
 
-        // 2. 加载世界按名授权模式开关 (auth_mode.json, Fail-Closed 默认 false，首次缺失则落盘生成带风险说明的默认文件)
-        var rawMode = info.authModeFile ? readJsonFile(info.authModeFile) : null
-        var authMode = parseAuthModeFile(rawMode)
-        if (!authMode.exists && info.authModeFile) {
+        // 2. 加载世界按名授权模式开关 (auth_mode.json, Fail-Closed 默认 false；仅当文件确实缺失时初始化落盘，损坏时不盲目覆写)
+        var modeRes = info.authModeFile ? readJsonFileDetailed(info.authModeFile) : { status: 'missing', data: null }
+        var authMode = parseAuthModeFile(modeRes.status === 'ok' ? modeRes.data : null)
+        if (modeRes.status === 'missing' && !authMode.exists && info.authModeFile) {
             writeJsonFile(info.authModeFile, buildDefaultAuthModePayload(false, 'SYSTEM', authMode.updatedAt))
+        } else if (modeRes.status === 'corrupt') {
+            logWarn('getOrLoadWorldGrants', 'auth_mode.json 损坏 (' + info.authModeFile + ')，已按 Fail-Closed 维持严格 UUID 模式且不覆盖原损坏文件。')
         }
 
-        // 3. 加载主授权表 (permissions.json)；若尚未迁移过且存在旧版存档/fallback 文件，执行一次性迁移
-        var grants = {}
-        var mainRaw = info.filePath ? readJsonFile(info.filePath) : null
+        // 3. 加载主授权表 (permissions.json)；仅当主文件确属首次缺失 (missing) 且墓碑未损坏时才执行旧位置一次性迁移
+        var grants       = {}
+        var mainRes      = info.filePath ? readJsonFileDetailed(info.filePath) : { status: 'missing', data: null }
+        var mainCorrupt  = (mainRes.status === 'corrupt')
         var needSaveMain = false
-        if (mainRaw != null) {
-            parseUsersMapInto(readMapField(mainRaw, 'users'), grants)
-        } else if (Array.isArray(info.legacyFiles)) {
+        if (mainRes.status === 'ok' && mainRes.data != null) {
+            parseUsersMapInto(readMapField(mainRes.data, 'users'), grants)
+        } else if (mainCorrupt) {
+            logError('getOrLoadWorldGrants', '主授权表损坏且无可用备份 (' + info.filePath + ')，已挂起空表覆盖保护。')
+        } else if (!revocationsCorrupt && Array.isArray(info.legacyFiles)) {
             // 设计约束：info.legacyFiles 按“单存档精准路径 (<world>/kubejs_epiphy_permissions.json) -> 旧版共享世界名路径 (<slug>.json)”排序；
             // 一旦命中优先级更高、按世界精准隔离的旧文件，必须立即 break，绝不继续合并后续旧共享目录文件，防止跨同名存档权限污染或覆盖已变更状态。
             for (var lf = 0; lf < info.legacyFiles.length; lf++) {
@@ -774,25 +867,27 @@
         // 4. 用外部撤销墓碑裁剪任何因世界回滚或旧文件导入而复活的撤销授权
         var pruned = pruneGrantsByRevocations(grants, revocations)
         if (pruned > 0) {
-            needSaveMain = true
+            if (!mainCorrupt) needSaveMain = true
             logWarn('revocationTombstone', '检测到 ' + pruned + ' 条已撤销授权在存档回滚或旧档导入中尝试复活，已被外部墓碑拦截移除。')
         }
 
         entry = {
-            worldKey:        info.worldKey,
-            worldId:         info.worldId || info.worldKey,
-            filePath:        info.filePath,
-            revocationsFile: info.revocationsFile || '',
-            authModeFile:    info.authModeFile || '',
-            ctxInfo:         info,
-            loaded:          true,
-            grants:          grants,
-            revocations:     revocations,
-            authMode:        authMode
+            worldKey:           info.worldKey,
+            worldId:            info.worldId || info.worldKey,
+            filePath:           info.filePath,
+            revocationsFile:    info.revocationsFile || '',
+            authModeFile:       info.authModeFile || '',
+            ctxInfo:            info,
+            loaded:             true,
+            grantsCorrupt:      mainCorrupt,
+            revocationsCorrupt: revocationsCorrupt,
+            grants:             grants,
+            revocations:        revocations,
+            authMode:           authMode
         }
         worldAuthStore[info.worldKey] = entry
 
-        if (needSaveMain && info.filePath) {
+        if (needSaveMain && !mainCorrupt && info.filePath) {
             writeJsonFile(info.filePath, serializeGrantsPayload(entry.grants))
         }
         return entry
@@ -800,8 +895,13 @@
 
     function saveWorldGrantsToDisk(server) {
         var entry = getOrLoadWorldGrants(server)
+        if (entry.grantsCorrupt && Object.keys(entry.grants).length === 0) {
+            return false
+        }
         try {
-            return writeJsonFile(entry.filePath, serializeGrantsPayload(entry.grants))
+            var ok = writeJsonFile(entry.filePath, serializeGrantsPayload(entry.grants))
+            if (ok) entry.grantsCorrupt = false
+            return ok
         } catch (eWrite) {
             logError('saveWorldGrantsToDisk', '写入授权文件失败 (' + entry.filePath + '): ' + eWrite)
         }
@@ -811,13 +911,18 @@
     function saveWorldRevocationsToDisk(server) {
         var entry = getOrLoadWorldGrants(server)
         if (!entry.revocationsFile) return false
+        if (entry.revocationsCorrupt && Object.keys(entry.revocations).length === 0) {
+            return false
+        }
         try {
-            return writeJsonFile(entry.revocationsFile, {
+            var ok = writeJsonFile(entry.revocationsFile, {
                 _description: 'Epiphy 外置授权撤销墓碑（独立于 saves/ 存档目录，防止世界回滚复活已撤销授权）',
                 version:      1,
                 updatedAt:    formatTimestampNow(),
                 revoked:      entry.revocations
             })
+            if (ok) entry.revocationsCorrupt = false
+            return ok
         } catch (eWrite) {
             logError('saveWorldRevocationsToDisk', '写入撤销墓碑失败 (' + entry.revocationsFile + '): ' + eWrite)
         }
@@ -912,19 +1017,20 @@
         return false
     }
 
-    function isChildScopeRevokedSince(revocationsMap, userKey, chain, parentIdx, grantAtMs) {
-        if (!revocationsMap || !userKey) return false
-        var rec = revocationsMap[userKey]
-        if (!rec) return false
-        var gTs = (grantAtMs != null && isFinite(Number(grantAtMs))) ? Number(grantAtMs) : 0
-        for (var j = 0; j < parentIdx; j++) {
-            var childScope = chain[j]
-            var childRev = rec[childScope]
-            if (childRev && Number(childRev.revokedAtMs || 0) >= gTs) {
-                return true
+    function findActiveCoveringAncestor(rec, targetScope, revocationsMap, userKey) {
+        if (rec == null || rec.scopes == null) return null
+        var normTarget = normalizeScope(targetScope)
+        if (!normTarget || normTarget === '*') return null
+        var chain = buildScopeHierarchy(normTarget)
+        // 从最高层父作用域 ('*' -> 'module' -> ...) 向下检查是否存在生效中的父级作用域覆盖当前子作用域
+        for (var i = chain.length - 1; i >= 1; i--) {
+            var anc  = chain[i]
+            var meta = rec.scopes[anc]
+            if (meta && !isGrantSupersededByRevocation(revocationsMap, userKey, anc, meta.atMs)) {
+                return anc
             }
         }
-        return false
+        return null
     }
 
     function checkScopeInRecord(rec, targetScope, revocationsMap, userKey, opts) {
@@ -933,18 +1039,25 @@
         var exactOnly  = Boolean(opts && opts.exactScopeOnly)
         var allowSubs  = Boolean(opts && opts.allowSubScopes)
         var chain      = buildScopeHierarchy(normTarget)
+
+        // 语义 1：【父作用域生效时，被赋予的子作用域存储但被默认覆盖】
+        //   - 当非 exactScopeOnly 时，若任一父作用域（如 '*' 或 'danmaku'）生效，直接默认覆盖并放行；
+        //   - 当父作用域未授予或已通过 `revoke <p> <parent>` 单节点撤销后，继续检查子作用域自身 (`chain[0]`) 是否存储且未被子树墓碑 (`<parent>.*`) 或自身墓碑覆盖。
+        if (!exactOnly) {
+            if (findActiveCoveringAncestor(rec, normTarget, revocationsMap, userKey) != null) {
+                return true
+            }
+        }
+
         var checkOrder = exactOnly
             ? (chain[0] === '*' ? ['*'] : [chain[0], '*'])
-            : chain
+            : [chain[0]]
 
         for (var i = 0; i < checkOrder.length; i++) {
             var cand = checkOrder[i]
             var meta = rec.scopes[cand]
             if (meta && !isGrantSupersededByRevocation(revocationsMap, userKey, cand, meta.atMs)) {
-                var chainIdx = exactOnly ? (cand === '*' ? chain.length - 1 : 0) : i
-                if (!isChildScopeRevokedSince(revocationsMap, userKey, chain, chainIdx, meta.atMs)) {
-                    return true
-                }
+                return true
             }
         }
 
@@ -1063,7 +1176,7 @@
                 grantsMap[key].displayName = displayName
             }
         }
-        var revTs     = getRevocationMs(revocationsMap, key, scope)
+        var revTs     = getMaxDescendantRevocationMs(revocationsMap, key, scope)
         var finalAtMs = (auditMeta.atMs != null && isFinite(auditMeta.atMs)) ? auditMeta.atMs : Date.now()
         var finalAt   = auditMeta.at
         if (revTs > 0 && finalAtMs <= revTs) {
@@ -1077,15 +1190,30 @@
         }
     }
 
-    function removeGrantFromRecord(grantsMap, key, scope) {
+    function removeGrantFromRecord(grantsMap, key, rawScope) {
         if (!key || !grantsMap[key]) return false
-        if (scope === '*') {
+        var spec   = parseScopeSpec(rawScope)
+        var base   = spec.base
+        var isTree = spec.isTree
+        if (base === '*') {
             delete grantsMap[key]
             return true
         }
         if (grantsMap[key].scopes) {
-            var existed = Boolean(grantsMap[key].scopes[scope])
-            delete grantsMap[key].scopes[scope]
+            var existed = false
+            if (grantsMap[key].scopes[base]) {
+                delete grantsMap[key].scopes[base]
+                existed = true
+            }
+            if (isTree) {
+                var prefix = base + '.'
+                for (var sc in grantsMap[key].scopes) {
+                    if (Object.prototype.hasOwnProperty.call(grantsMap[key].scopes, sc) && sc.indexOf(prefix) === 0) {
+                        delete grantsMap[key].scopes[sc]
+                        existed = true
+                    }
+                }
+            }
             var remain = 0
             for (var s in grantsMap[key].scopes) {
                 if (grantsMap[key].scopes[s]) remain++
@@ -1094,6 +1222,52 @@
             return existed
         }
         return false
+    }
+
+    function countRetainedSubScopes(grantsMap, key, parentScope) {
+        if (!key || !grantsMap || !grantsMap[key] || !grantsMap[key].scopes) return []
+        var base = normalizeScope(parentScope)
+        if (!base || base === '*') return []
+        var prefix = base + '.'
+        var out = []
+        for (var sc in grantsMap[key].scopes) {
+            if (Object.prototype.hasOwnProperty.call(grantsMap[key].scopes, sc) && sc.indexOf(prefix) === 0) {
+                out.push(sc)
+            }
+        }
+        return out
+    }
+
+    function clonePlainMap(obj) {
+        try {
+            return JSON.parse(JSON.stringify(obj || {}))
+        } catch (e) {
+            return {}
+        }
+    }
+
+    function commitAuthDiskTransaction(srv, entry, prevGrants, prevRevocations, needSaveRevocations) {
+        if (!canPersistValveFiles(entry)) {
+            return true
+        }
+        if (needSaveRevocations && entry.revocationsFile) {
+            if (!saveWorldRevocationsToDisk(srv)) {
+                entry.grants      = prevGrants
+                entry.revocations = prevRevocations
+                logError('commitAuthDiskTransaction', '撤销墓碑写入失败，已原子回滚内存权限变更。')
+                return false
+            }
+        }
+        if (!saveWorldGrantsToDisk(srv)) {
+            entry.grants      = prevGrants
+            entry.revocations = prevRevocations
+            if (needSaveRevocations && entry.revocationsFile) {
+                try { saveWorldRevocationsToDisk(srv) } catch (eRollbackRev) { }
+            }
+            logError('commitAuthDiskTransaction', '授权表写入失败，已原子回滚内存与墓碑变更。')
+            return false
+        }
+        return true
     }
 
     function findOnlinePlayerByName(server, nameStr) {
@@ -1117,7 +1291,9 @@
 
     function mutatePlayerGrant(server, playerOrName, isGrant, subCommandScope, grantedBySourceOrName) {
         if (playerOrName == null) return false
-        var scope = normalizeScope(subCommandScope)
+        var spec  = parseScopeSpec(subCommandScope)
+        var scope = spec.base
+        var rawRevokeScope = spec.rawNorm
         if (isReservedScope(scope)) {
             logWarn('mutatePlayerGrant', '拒绝修改系统保留作用域 "' + scope + '" 的玩家授权记录。')
             return false
@@ -1131,6 +1307,9 @@
             at:   formatTimestampNow(),
             atMs: nowMs
         } : null
+
+        var prevGrants      = clonePlainMap(entry.grants)
+        var prevRevocations = clonePlainMap(entry.revocations)
 
         if (BASE.safeTypeOf(playerOrName) === 'string') {
             var rawStr = String(playerOrName).trim()
@@ -1149,37 +1328,35 @@
                     if (onlineUuid) {
                         var dispOn = extractPlayerName(onlineTarget) || rawStr
                         applyGrantToRecord(entry.grants, onlineUuid, 'uuid', dispOn, scope, auditMeta, entry.revocations)
-                        saveWorldGrantsToDisk(srv)
+                        if (!commitAuthDiskTransaction(srv, entry, prevGrants, prevRevocations, false)) return false
                         refreshPlayerCommandTree(srv, onlineTarget)
                         return true
                     }
                 }
                 applyGrantToRecord(entry.grants, k, strIsUuid ? 'uuid' : 'name', rawStr, scope, auditMeta, entry.revocations)
-                saveWorldGrantsToDisk(srv)
-                return true
+                return commitAuthDiskTransaction(srv, entry, prevGrants, prevRevocations, false)
             }
 
             // 撤销不受 allowNameGrant 开关限制（可随时清除已暂停的旧文本名或 UUID 授权）
-            recordRevocationTombstone(entry.revocations, k, scope, byLbl, nowMs)
-            removeGrantFromRecord(entry.grants, k, scope)
+            recordRevocationTombstone(entry.revocations, k, rawRevokeScope, byLbl, nowMs)
+            removeGrantFromRecord(entry.grants, k, rawRevokeScope)
             for (var gk in entry.grants) {
                 var greq = entry.grants[gk]
                 if (greq != null && greq.displayName && normalizeKey(greq.displayName) === k) {
-                    recordRevocationTombstone(entry.revocations, gk, scope, byLbl, nowMs)
-                    removeGrantFromRecord(entry.grants, gk, scope)
+                    recordRevocationTombstone(entry.revocations, gk, rawRevokeScope, byLbl, nowMs)
+                    removeGrantFromRecord(entry.grants, gk, rawRevokeScope)
                 }
             }
             var affectedOnline = findOnlinePlayerByName(srv, rawStr)
             if (affectedOnline != null) {
                 var affUuid = normalizeKey(extractPlayerUuid(affectedOnline))
                 if (affUuid) {
-                    recordRevocationTombstone(entry.revocations, affUuid, scope, byLbl, nowMs)
-                    removeGrantFromRecord(entry.grants, affUuid, scope)
+                    recordRevocationTombstone(entry.revocations, affUuid, rawRevokeScope, byLbl, nowMs)
+                    removeGrantFromRecord(entry.grants, affUuid, rawRevokeScope)
                 }
-                refreshPlayerCommandTree(srv, affectedOnline)
             }
-            saveWorldRevocationsToDisk(srv)
-            saveWorldGrantsToDisk(srv)
+            if (!commitAuthDiskTransaction(srv, entry, prevGrants, prevRevocations, true)) return false
+            if (affectedOnline != null) refreshPlayerCommandTree(srv, affectedOnline)
             return true
         }
 
@@ -1201,18 +1378,17 @@
             } else {
                 return false
             }
-            saveWorldGrantsToDisk(srv)
+            if (!commitAuthDiskTransaction(srv, entry, prevGrants, prevRevocations, false)) return false
         } else {
             if (pUuid) {
-                recordRevocationTombstone(entry.revocations, pUuid, scope, byLbl, nowMs)
-                removeGrantFromRecord(entry.grants, pUuid, scope)
+                recordRevocationTombstone(entry.revocations, pUuid, rawRevokeScope, byLbl, nowMs)
+                removeGrantFromRecord(entry.grants, pUuid, rawRevokeScope)
             }
             if (pName) {
-                recordRevocationTombstone(entry.revocations, pName, scope, byLbl, nowMs)
-                removeGrantFromRecord(entry.grants, pName, scope)
+                recordRevocationTombstone(entry.revocations, pName, rawRevokeScope, byLbl, nowMs)
+                removeGrantFromRecord(entry.grants, pName, rawRevokeScope)
             }
-            saveWorldRevocationsToDisk(srv)
-            saveWorldGrantsToDisk(srv)
+            if (!commitAuthDiskTransaction(srv, entry, prevGrants, prevRevocations, true)) return false
         }
         refreshPlayerCommandTree(srv, playerOrName)
         return true
@@ -1405,7 +1581,9 @@
             for (var sc in rec.scopes) {
                 var meta = rec.scopes[sc]
                 if (meta && !isGrantSupersededByRevocation(entry.revocations, k, sc, meta.atMs)) {
-                    items.push(sc + ' (by ' + (meta.by || 'unknown') + ' @ ' + (meta.at || 'unknown') + ')')
+                    var covParent = findActiveCoveringAncestor(rec, sc, entry.revocations, k)
+                    var covBadge  = covParent ? (' [由父级 ' + covParent + ' 默认覆盖]') : ''
+                    items.push(sc + covBadge + ' (by ' + (meta.by || 'unknown') + ' @ ' + (meta.at || 'unknown') + ')')
                 }
             }
             if (items.length > 0) {
@@ -1637,9 +1815,18 @@
             return { kind: 'untrusted_other', player: null, rawSource: null, className: 'null' }
         }
 
-        var rawSource = source.source !== undefined ? source.source : null
+        var rawSource = source.source !== undefined ? source.source : (source.f_81288_ !== undefined ? source.f_81288_ : null)
         var rawCls    = (rawSource != null && typeof rawSource.getClass === 'function')
             ? String(rawSource.getClass().getName()) : ''
+
+        // 0. 严格验证底层物理发令源是否为命令方块 (BaseCommandBlock)：
+        //    即使通过 `/execute as <在线OP>` 将 source.player 伪装为在线管理员，底层 rawSource 依然是 BaseCommandBlock，
+        //    必须优先归为 command_block，禁止命令方块借壳绕过 strict_op (allowCommandBlock=false) 更改权限。
+        if (rawSource != null && BaseCommandBlockClass != null) {
+            if (isJavaInstance(BaseCommandBlockClass, rawSource)) {
+                return { kind: 'command_block', player: null, rawSource: rawSource, className: rawCls || 'BaseCommandBlock' }
+            }
+        }
 
         // 1. 优先严格验证是否为真实玩家直接执行（最不可信物理源优先拦截，防提权伪装）：
         //    注意：CommandSourceStack.getPlayer() 返回的是 ServerPlayer，但 Rhino 可能会对其中一个包装一层 NativeJavaObject / KubeJS 代理，
@@ -1676,13 +1863,6 @@
             }
             if (isRealPlayerSource) {
                 return { kind: 'player', player: player, rawSource: rawSource || player, className: rawCls || 'ServerPlayer' }
-            }
-        }
-
-        // 2. 严格验证是否为命令方块 (BaseCommandBlock)
-        if (rawSource != null && BaseCommandBlockClass != null) {
-            if (isJavaInstance(BaseCommandBlockClass, rawSource)) {
-                return { kind: 'command_block', player: null, rawSource: rawSource, className: rawCls || 'BaseCommandBlock' }
             }
         }
 
@@ -2092,7 +2272,8 @@
 
         if (headWord === 'auth') {
             var subSub = tokens.length >= 3 ? normalizeKey(tokens[2]) : ''
-            var polUse = (subSub === 'namegrant') ? POLICY_PRESETS.strict_op : POLICY_PRESETS.admin
+            var isReadOnlyAuth = (!subSub || subSub === 'list' || subSub === 'scopes' || subSub === 'where' || subSub === 'help')
+            var polUse = isReadOnlyAuth ? POLICY_PRESETS.admin : POLICY_PRESETS.strict_op
             if (!canSeeSubcommand(source, 'auth', polUse)) {
                 checkSourceOrReject(source, 'auth', polUse)
                 return true
@@ -2181,6 +2362,9 @@
         revokePlayer:              revokePlayer,
         isPlayerAuthorized:        isPlayerAuthorized,
         hasPlayerScope:            hasPlayerScope,
+        hasPlayerGrant:            isPlayerAuthorized,
+        listGrantedEntries:        listGrantedEntries,
+        reloadWorldGrants:         reloadWorldAuthFromDisk,
         normalizeScope:            normalizeScope,
         isPlayerAdmin:             isPlayerAdmin,
         isWorldCheatsEnabled:      isWorldCheatsEnabled,
@@ -2246,23 +2430,40 @@
     global.PermissionValve       = valveApi
 
     function handleAuthScopeCommand(source, playersArr, isGrant, rawScope) {
-        var srv     = resolveServer(source, source.player)
-        var scope   = normalizeScope(rawScope)
+        var srv        = resolveServer(source, source.player)
+        var spec       = parseScopeSpec(rawScope)
+        var scope      = spec.base
+        var passScope  = isGrant ? scope : spec.rawNorm
         if (isReservedScope(scope)) {
             sendSourceMessage(source, '§c[Epiphy 权限阀] "' + scope + '" 为系统保留子命令，禁止通过 /epiphy auth 授权或撤销。')
             return 0
         }
-        var cnt     = 0
+        var cnt = 0
+        var retainedChildrenCount = 0
+        var entry = getOrLoadWorldGrants(srv)
         for (var i = 0; i < playersArr.length; i++) {
             var ok = isGrant
-                ? grantPlayer(srv, playersArr[i], scope, source)
-                : revokePlayer(srv, playersArr[i], scope, source)
-            if (ok) cnt++
+                ? grantPlayer(srv, playersArr[i], passScope, source)
+                : revokePlayer(srv, playersArr[i], passScope, source)
+            if (ok) {
+                cnt++
+                if (!isGrant && !spec.isTree && scope !== '*') {
+                    var uKey = normalizeKey(extractPlayerUuid(playersArr[i])) || normalizeKey(extractPlayerName(playersArr[i]))
+                    retainedChildrenCount += countRetainedSubScopes(entry.grants, uKey, scope).length
+                }
+            }
         }
-        var targetLabel = (scope === '*') ? '全部 /epiphy 子命令权限 (*)' : ('[/epiphy ' + scope + '] 权限')
+        var targetLabel = (scope === '*')
+            ? '全部 /epiphy 子命令权限 (*)'
+            : ( (!isGrant && spec.isTree)
+                ? ('[/epiphy ' + scope + '.*] 整棵子树权限')
+                : ('[/epiphy ' + scope + '] 权限') )
+        var extraHint = (!isGrant && !spec.isTree && retainedChildrenCount > 0)
+            ? (' §7(已保留 ' + retainedChildrenCount + ' 项显式子作用域；如需连同子作用域彻底清空请使用 §f' + scope + '.*§7)')
+            : ''
         var msg = isGrant
             ? ('§a[Epiphy 权限阀] 已按 UUID 授予 ' + cnt + ' 名在线玩家' + targetLabel + '并记录审计信息。')
-            : ('§e[Epiphy 权限阀] 已撤销 ' + cnt + ' 名玩家的' + targetLabel + '并写入外部撤销墓碑。')
+            : ('§e[Epiphy 权限阀] 已撤销 ' + cnt + ' 名玩家的' + targetLabel + '并写入外部撤销墓碑。' + extraHint)
         sendSourceMessage(source, msg)
         return cnt
     }
@@ -2298,12 +2499,13 @@
 
         function makeAuthScopeMutator(litName, isGrant) {
             return b.literal(litName, {
+                policy: POLICY_PRESETS.strict_op,
                 chain: [
                     [{ name: 'targets', type: 'players' }, { name: 'scope', type: 'word' }],
                     function (ctx, args) {
                         return handleAuthScopeCommand(ctx.source, args.targets, isGrant, args.scope || '*')
                     },
-                    { minArgs: 1, policy: POLICY_PRESETS.admin }
+                    { minArgs: 1, policy: POLICY_PRESETS.strict_op }
                 ]
             })
         }
@@ -2365,7 +2567,7 @@
                     }
                 }),
                 b.literal('reload', {
-                    policy: POLICY_PRESETS.admin,
+                    policy: POLICY_PRESETS.strict_op,
                     exec: function (ctx) {
                         var srv   = resolveServer(ctx.source, ctx.source.player)
                         var entry = reloadWorldAuthFromDisk(srv)
@@ -2378,6 +2580,7 @@
                 makeAuthScopeMutator('grant', true),
                 makeAuthScopeMutator('revoke', false),
                 b.literal('grantname', {
+                    policy: POLICY_PRESETS.strict_op,
                     chain: [
                         [{ name: 'targetName', type: 'word' }, { name: 'scope', type: 'word' }],
                         function (ctx, args) {
@@ -2399,26 +2602,28 @@
                             sendSourceMessage(ctx.source, '§c[Epiphy 权限阀] 写入授权失败，请检查参数或权限模式。')
                             return 0
                         },
-                        { minArgs: 1, policy: POLICY_PRESETS.admin }
+                        { minArgs: 1, policy: POLICY_PRESETS.strict_op }
                     ]
                 }),
                 b.literal('revokename', {
+                    policy: POLICY_PRESETS.strict_op,
                     chain: [
                         [{ name: 'targetName', type: 'word' }, { name: 'scope', type: 'word' }],
                         function (ctx, args) {
                             var srv   = resolveServer(ctx.source, ctx.source.player)
-                            var scope = normalizeScope(args.scope || '*')
-                            if (RESERVED_SUBCOMMANDS[scope]) {
+                            var spec  = parseScopeSpec(args.scope || '*')
+                            var scope = spec.base
+                            if (isReservedScope(scope)) {
                                 sendSourceMessage(ctx.source, '§c[Epiphy 权限阀] "' + scope + '" 为系统保留子命令。')
                                 return 0
                             }
-                            if (revokePlayer(srv, args.targetName, scope, ctx.source)) {
-                                sendSourceMessage(ctx.source, '§e[Epiphy 权限阀] 已撤销 [' + args.targetName + '] 的 [' + scope + '] 授权并写入外部撤销墓碑。')
+                            if (revokePlayer(srv, args.targetName, spec.rawNorm, ctx.source)) {
+                                sendSourceMessage(ctx.source, '§e[Epiphy 权限阀] 已撤销 [' + args.targetName + '] 的 [' + spec.rawNorm + '] 授权并写入外部撤销墓碑。')
                                 return 1
                             }
                             return 0
                         },
-                        { minArgs: 1, policy: POLICY_PRESETS.admin }
+                        { minArgs: 1, policy: POLICY_PRESETS.strict_op }
                     ]
                 }),
                 b.literal('namegrant', {

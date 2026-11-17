@@ -58,6 +58,7 @@
         frameBudgetMs:                45.0,   // 单帧硬防卡死熔断上限 (ms，正常高特效帧不触及；仅当超重负载累计超过阈值时截断本帧尾部条目防客户端冻结，不降级单条特效本身)
         maxTitleChars:                2048,   // 客户端主标题安全截断长度
         maxSubChars:                  1024,   // 客户端副标题安全截断长度
+        maxCursorChars:               16,     // 打字机光标安全截断长度
         maxScale:                     8.0,    // 客户端缩放倍率先天上限
         lineStepPx:                   11,     // 单行步进高度 (px)
         minBlockHeightPx:      10,     // 最小文本块高度 (px)
@@ -3657,7 +3658,7 @@
             fadeStyle:         fadeStyle,
             typewriter:        typewriter,
             charMs:            charMs,
-            cursor:            readStr(raw, 'cursor', '▌'),
+            cursor:            truncateSafeText(readStr(raw, 'cursor', '▌'), CONFIG.maxCursorChars),
             debug:             debugEnabled,
             maxWidth:          maxWidth,
             wrap:              wrapEnabled,

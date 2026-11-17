@@ -977,45 +977,170 @@
         return out;
     }
 
-    function readJsonSafe(filePath, logger) {
-        if (!filePath) return null;
-        var text = readTextSafe(filePath, logger);
-        if (text != null) {
-            var trimmed = String(text).trim();
-            if (trimmed.length === 0) return null;
+    function readJsonSingleTarget(targetPath, logger) {
+        if (!targetPath) return { status: 'missing', data: null, error: null };
+        var normTarget = normalizeSlashPath(targetPath);
+        var hadReadError = false;
+        var lastErrorMsg = null;
+
+        if (JAVA_FILES_CLASS != null && JAVA_PATHS_CLASS != null && JAVA_CHARSET_UTF8 != null) {
             try {
-                return JSON.parse(trimmed);
-            } catch (eParse) {
-                (logger || baseLogger).warn('readJsonSafe', 'JSON 解析失败 (' + filePath + '): ' + eParse);
-                return null;
+                var p = JAVA_PATHS_CLASS.get(String(normTarget));
+                if (Boolean(JAVA_FILES_CLASS.exists(p))) {
+                    var nioStr = null;
+                    if (typeof JAVA_FILES_CLASS.readString === 'function') {
+                        nioStr = String(JAVA_FILES_CLASS.readString(p, JAVA_CHARSET_UTF8));
+                    } else if (typeof JAVA_FILES_CLASS.readAllBytes === 'function') {
+                        var bytes = JAVA_FILES_CLASS.readAllBytes(p);
+                        var jStrCls = loadJavaClass('java.lang.String');
+                        if (jStrCls != null) nioStr = String(new jStrCls(bytes, JAVA_CHARSET_UTF8));
+                    }
+                    if (nioStr != null) {
+                        var trimmedNio = nioStr.trim();
+                        if (trimmedNio.length === 0) {
+                            return { status: 'corrupt', data: null, error: 'empty file' };
+                        }
+                        try {
+                            return { status: 'ok', data: JSON.parse(trimmedNio), error: null };
+                        } catch (eNioParse) {
+                            (logger || baseLogger).warn('readJsonSafe', 'JSON 解析失败 (' + normTarget + '): ' + eNioParse);
+                            return { status: 'corrupt', data: null, error: String(eNioParse) };
+                        }
+                    }
+                }
+            } catch (eNioRead) {
+                if (!isExpectedMissingFileErr(eNioRead)) {
+                    hadReadError = true;
+                    lastErrorMsg = String(eNioRead);
+                    (logger || baseLogger).catchWarn('readJsonSafe:nio', eNioRead);
+                }
             }
         }
+
+        if (typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.readString === 'function') {
+            try {
+                var jsStr = JsonIO.readString(String(normTarget));
+                if (jsStr != null) {
+                    var rawStr = String(jsStr).trim();
+                    if (rawStr.length === 0) {
+                        return { status: 'corrupt', data: null, error: 'empty file' };
+                    }
+                    try {
+                        return { status: 'ok', data: JSON.parse(rawStr), error: null };
+                    } catch (eJioStrParse) {
+                        (logger || baseLogger).warn('readJsonSafe', 'JSON 解析失败 (' + normTarget + '): ' + eJioStrParse);
+                        return { status: 'corrupt', data: null, error: String(eJioStrParse) };
+                    }
+                }
+            } catch (eJioStr) {
+                if (!isExpectedMissingFileErr(eJioStr)) {
+                    hadReadError = true;
+                    lastErrorMsg = String(eJioStr);
+                    (logger || baseLogger).catchWarn('readJsonSafe:JsonIO.readString', eJioStr);
+                }
+            }
+        }
+
+        if (typeof FilesIO !== 'undefined' && FilesIO != null && typeof FilesIO.read === 'function') {
+            try {
+                var fioRaw = FilesIO.read(String(normTarget));
+                if (fioRaw != null) {
+                    var fioTrimmed = String(fioRaw).trim();
+                    if (fioTrimmed.length === 0) {
+                        return { status: 'corrupt', data: null, error: 'empty file' };
+                    }
+                    try {
+                        return { status: 'ok', data: JSON.parse(fioTrimmed), error: null };
+                    } catch (eFioParse) {
+                        (logger || baseLogger).warn('readJsonSafe', 'JSON 解析失败 (' + normTarget + '): ' + eFioParse);
+                        return { status: 'corrupt', data: null, error: String(eFioParse) };
+                    }
+                }
+            } catch (eFio) {
+                if (!isExpectedMissingFileErr(eFio)) {
+                    hadReadError = true;
+                    lastErrorMsg = String(eFio);
+                    (logger || baseLogger).catchWarn('readJsonSafe:FilesIO', eFio);
+                }
+            }
+        }
+
         if (typeof JsonIO !== 'undefined' && JsonIO != null) {
             if (typeof JsonIO.readJson === 'function' && typeof JsonIO.toString === 'function') {
                 try {
-                    var el = JsonIO.readJson(String(filePath));
+                    var el = JsonIO.readJson(String(normTarget));
                     if (el != null) {
                         var jsonStr = String(JsonIO.toString(el)).trim();
-                        if (jsonStr && jsonStr !== 'null') return JSON.parse(jsonStr);
+                        if (jsonStr && jsonStr !== 'null') {
+                            return { status: 'ok', data: JSON.parse(jsonStr), error: null };
+                        }
+                        if (jsonStr === '') {
+                            return { status: 'corrupt', data: null, error: 'empty json element' };
+                        }
                     }
                 } catch (eJioEl) {
                     if (!isExpectedMissingFileErr(eJioEl)) {
+                        hadReadError = true;
+                        lastErrorMsg = String(eJioEl);
                         (logger || baseLogger).catchWarn('readJsonSafe:JsonIO.readJson', eJioEl);
                     }
                 }
             }
             if (typeof JsonIO.read === 'function') {
                 try {
-                    var raw = JsonIO.read(String(filePath));
-                    return raw != null ? javaToJsPlain(raw, 0) : null;
+                    var raw = JsonIO.read(String(normTarget));
+                    if (raw != null) {
+                        return { status: 'ok', data: javaToJsPlain(raw, 0), error: null };
+                    }
                 } catch (eJio) {
                     if (!isExpectedMissingFileErr(eJio)) {
+                        hadReadError = true;
+                        lastErrorMsg = String(eJio);
                         (logger || baseLogger).catchWarn('readJsonSafe:JsonIO', eJio);
                     }
                 }
             }
         }
-        return null;
+
+        if (hadReadError) {
+            return { status: 'corrupt', data: null, error: lastErrorMsg || 'read error' };
+        }
+        return { status: 'missing', data: null, error: null };
+    }
+
+    function readJsonDetailed(filePath, logger, allowBackupRecovery) {
+        if (!filePath) return { status: 'missing', data: null, fromBackup: false, error: null };
+        var normPath = normalizeSlashPath(filePath);
+        var primary = readJsonSingleTarget(normPath, logger);
+        if (primary.status === 'ok' && primary.data != null) {
+            return { status: 'ok', data: primary.data, fromBackup: false, error: null };
+        }
+        var useBak = (allowBackupRecovery !== false) && normPath.slice(-4) !== '.bak';
+        if (useBak) {
+            var bakPath = normPath + '.bak';
+            var bakRes = readJsonSingleTarget(bakPath, logger);
+            if (bakRes.status === 'ok' && bakRes.data != null) {
+                (logger || baseLogger).warn(
+                    'readJsonSafe:backupRecovered',
+                    '主文件读取异常或缺失 (' + normPath + ', status=' + primary.status + ')，已自动从备份恢复: ' + bakPath
+                );
+                try {
+                    writeJsonAtomic(normPath, bakRes.data, false, logger);
+                } catch (eHeal) { }
+                return { status: 'ok', data: bakRes.data, fromBackup: true, error: null };
+            }
+        }
+        return {
+            status:     primary.status,
+            data:       null,
+            fromBackup: false,
+            error:      primary.error
+        };
+    }
+
+    function readJsonSafe(filePath, logger) {
+        var res = readJsonDetailed(filePath, logger, true);
+        return res.status === 'ok' ? res.data : null;
     }
 
     function canWritePersistentFiles() {
@@ -1042,9 +1167,9 @@
                 ensureParentDir(normPath, logger);
                 if (keepBackup !== false && normPath.slice(-4) !== '.bak' && normPath.indexOf('worlds_index.json') < 0) {
                     try {
-                        var prevObj = readJsonSafe(normPath, null);
-                        if (prevObj != null && isObjectLike(prevObj)) {
-                            JsonIO.write(normPath + '.bak', prevObj);
+                        var prevRes = readJsonSingleTarget(normPath, null);
+                        if (prevRes.status === 'ok' && prevRes.data != null && isObjectLike(prevRes.data)) {
+                            JsonIO.write(normPath + '.bak', prevRes.data);
                         }
                     } catch (eBakJio) { }
                 }
@@ -1243,6 +1368,46 @@
         }
     }
 
+    var SERVER_ANCHOR_PDATA_KEY = 'epiphy_world_anchor_v1';
+    var lastKnownAnchorByPath = {};
+
+    function readServerPersistentAnchor(srv) {
+        if (srv == null) return null;
+        try {
+            var pData = srv.persistentData;
+            if (pData == null) return null;
+            var raw = null;
+            if (typeof pData.getString === 'function') {
+                if (typeof pData.contains === 'function' && !pData.contains(SERVER_ANCHOR_PDATA_KEY)) return null;
+                raw = pData.getString(SERVER_ANCHOR_PDATA_KEY);
+            } else if (pData[SERVER_ANCHOR_PDATA_KEY] != null) {
+                raw = String(pData[SERVER_ANCHOR_PDATA_KEY]);
+            }
+            if (!raw || String(raw).trim() === '') return null;
+            var parsed = JSON.parse(String(raw));
+            return (parsed != null && isObjectLike(parsed) && parsed.worldId) ? parsed : null;
+        } catch (eReadP) {
+            return null;
+        }
+    }
+
+    function writeServerPersistentAnchor(srv, anchorPayload) {
+        if (srv == null || !anchorPayload || !anchorPayload.worldId) return false;
+        try {
+            var pData = srv.persistentData;
+            if (pData == null) return false;
+            var raw = JSON.stringify(anchorPayload);
+            if (typeof pData.putString === 'function') {
+                pData.putString(SERVER_ANCHOR_PDATA_KEY, raw);
+                return true;
+            }
+            pData[SERVER_ANCHOR_PDATA_KEY] = raw;
+            return true;
+        } catch (eWriteP) {
+            return false;
+        }
+    }
+
     function resolveEpiphyWorldContext(server, options) {
         var srv = resolveServer(server);
         var dataDirs = ensureEpiphyDataDirs(baseLogger);
@@ -1273,12 +1438,23 @@
 
         var anchorPath = worldPath + '/data/epiphy_world_id.json';
         var anchor = readJsonSafe(anchorPath, baseLogger);
-        var anchorId = (anchor != null && anchor.worldId) ? String(anchor.worldId).trim() : '';
+        var pDataAnchor = readServerPersistentAnchor(srv);
+        var memAnchor = hasOwn(lastKnownAnchorByPath, pathCmp) ? lastKnownAnchorByPath[pathCmp] : null;
+        var effectiveAnchor = (anchor != null && anchor.worldId)
+            ? anchor
+            : ((pDataAnchor != null && pDataAnchor.worldId) ? pDataAnchor : memAnchor);
+        var anchorId = (effectiveAnchor != null && effectiveAnchor.worldId) ? String(effectiveAnchor.worldId).trim() : '';
         var hintFolders = [];
-        if (anchor != null && anchor.folderName) {
-            hintFolders.push(String(anchor.folderName).trim());
+        if (effectiveAnchor != null && effectiveAnchor.folderName) {
+            hintFolders.push(String(effectiveAnchor.folderName).trim());
         } else if (anchorId) {
             hintFolders.push(slug + '__' + anchorId.slice(0, 8));
+        }
+        if (pDataAnchor != null && pDataAnchor.folderName && hintFolders.indexOf(String(pDataAnchor.folderName).trim()) < 0) {
+            hintFolders.push(String(pDataAnchor.folderName).trim());
+        }
+        if (memAnchor != null && memAnchor.folderName && hintFolders.indexOf(String(memAnchor.folderName).trim()) < 0) {
+            hintFolders.push(String(memAnchor.folderName).trim());
         }
         var existingEntries = scanWorldsMetadata(dataDirs.subdirs.worlds, baseLogger, hintFolders);
 
@@ -1350,8 +1526,8 @@
             if (matchedByPath.meta.worldName !== worldName) needWriteMeta = true;
         } else {
             finalWorldId = anchorId || generateWorldId();
-            finalFolder = (anchor != null && anchor.folderName && !matchedById)
-                ? sanitizeSlug(anchor.folderName, slug + '__' + finalWorldId.slice(0, 8))
+            finalFolder = (effectiveAnchor != null && effectiveAnchor.folderName && !matchedById)
+                ? sanitizeSlug(effectiveAnchor.folderName, slug + '__' + finalWorldId.slice(0, 8))
                 : (slug + '__' + finalWorldId.slice(0, 8));
             // 防止极低概率文件夹名碰撞其他已占用的不同 path 世界
             for (var cIdx = 0; cIdx < existingEntries.length; cIdx++) {
@@ -1370,14 +1546,24 @@
             dataDirs, finalWorldId, worldName, slug, finalFolder, worldPath, anchorPath, forkedFrom, forkNotice, true
         );
 
+        var anchorPayload = {
+            version:    1,
+            worldId:    finalWorldId,
+            folderName: finalFolder,
+            worldName:  worldName,
+            boundAt:    nowStr
+        };
+        lastKnownAnchorByPath[pathCmp] = anchorPayload;
+        var pDataAnchorOk = writeServerPersistentAnchor(srv, anchorPayload);
+        var anchorFileOk = true;
         if (needWriteAnchor) {
-            writeJsonAtomic(anchorPath, {
-                version:    1,
-                worldId:    finalWorldId,
-                folderName: finalFolder,
-                worldName:  worldName,
-                boundAt:    nowStr
-            }, true, baseLogger);
+            anchorFileOk = writeJsonAtomic(anchorPath, anchorPayload, true, baseLogger);
+            if (!anchorFileOk && !pDataAnchorOk) {
+                baseLogger.warn(
+                    'worldAnchorWriteFailed',
+                    '世界锚点文件写入失败 (' + anchorPath + ') 且 persistentData 不可写，已启用内存锚点回退以防目录孤儿化'
+                );
+            }
         }
 
         var oldMeta = (matchedById != null && forkedFrom == null)
@@ -1395,13 +1581,23 @@
             updatedAt:     nowStr
         };
         if (forkedFrom != null) metaPayload.forkedFrom = forkedFrom;
+        var metaWriteOk = true;
         if (needWriteMeta) {
-            writeJsonAtomic(ctx.metaFile, metaPayload, true, baseLogger);
+            metaWriteOk = writeJsonAtomic(ctx.metaFile, metaPayload, true, baseLogger);
+            if (!metaWriteOk) {
+                baseLogger.warn('worldMetaWriteFailed', '写入世界元数据失败 (' + ctx.metaFile + ')');
+            }
         }
         var existingIdxMap = readWorldsIndexMap(dataDirs.subdirs.worlds, null);
+        var indexWriteOk = true;
         if (needWriteMeta || !hasOwn(existingIdxMap, finalWorldId) || existingIdxMap[finalWorldId].folderName !== finalFolder) {
-            upsertWorldsIndexEntry(dataDirs.subdirs.worlds, metaPayload, baseLogger);
+            indexWriteOk = upsertWorldsIndexEntry(dataDirs.subdirs.worlds, metaPayload, baseLogger);
+            if (!indexWriteOk) {
+                baseLogger.warn('worldsIndexWriteFailed', '更新 worlds_index.json 失败 (worldId=' + finalWorldId + ')');
+            }
         }
+        ctx.anchorPersisted = Boolean(anchorFileOk || pDataAnchorOk);
+        ctx.metaPersisted   = Boolean(metaWriteOk && indexWriteOk);
 
         worldContextCache[pathCmp] = ctx;
         if (allowLogSwitch) switchRuntimeLogDirToWorld(ctx);
@@ -2150,6 +2346,7 @@
             ensureEpiphyDataDirs:         ensureEpiphyDataDirs,
             readTextSafe:                 readTextSafe,
             writeTextAtomic:              writeTextAtomic,
+            readJsonDetailed:             readJsonDetailed,
             readJsonSafe:                 readJsonSafe,
             writeJsonAtomic:              writeJsonAtomic,
             resolveEpiphyWorldContext:    resolveEpiphyWorldContext,
@@ -2184,6 +2381,8 @@
             ServerEvents.unloaded(function () {
                 try {
                     clearEpiphyWorldContextCache();
+                    fallbackTracked.clear();
+                    fallbackTickCounter = 0;
                     var dirs = ensureEpiphyDataDirs(baseLogger);
                     var logApi = resolveEpiphyLog();
                     if (logApi != null && typeof logApi.configureFileSink === 'function') {

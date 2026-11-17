@@ -1029,6 +1029,7 @@
     var SYSTEM_PACKET_LIMITS = {
         maxTitleLen:     4096,
         maxSubLen:       2048,
+        maxCursorLen:    16,
         maxScale:        8.0,
         maxStayTicks:    72000,
         maxFadeOutTicks: 1200,
@@ -1174,7 +1175,7 @@
             fadeOut:             fadeOutVal,
             typewriter:          isChar,
             charMs:              charMsVal,
-            cursor:              String(pickNonEmpty(opts, ['cursor'], DEFAULTS.cursor)),
+            cursor:              truncateSafeProtoText(String(pickNonEmpty(opts, ['cursor'], DEFAULTS.cursor)).replace(/[\r\n]/g, ''), SYSTEM_PACKET_LIMITS.maxCursorLen),
             shadow:              shadowVal,
             letterSpacing:       Number(spacingVal.toFixed(2)),
             letterSpacingMode:   String(opts.letterSpacingMode || DEFAULTS.letterSpacingMode).toLowerCase() === 'fixed' ? 'fixed' : 'relative',
@@ -1969,7 +1970,7 @@
             }
 
             // 模式 2（独立模式 perPlayer === true）：对生效范围内每名玩家各自调用一次 specOrFn（传入 player: p）
-            sentOut = visitTargets(function (p) {
+            visitTargets(function (p) {
                 if (!shouldEmitForBoundBlockToPlayer(rec, binding, p)) return
                 try {
                     var rawSpec = typeof binding.specOrFn === 'function'
@@ -1985,7 +1986,8 @@
                         })
                         : binding.specOrFn
                     if (rawSpec != null) {
-                        toPlayer(p, normalizeBoundSpec(rawSpec))
+                        var normPerP = normalizeBoundSpec(rawSpec)
+                        sentOut += toPlayer(p, normPerP)
                     }
                 } catch (eEmit) {
                     reportCatch('emitForBoundBlock:per_player', eEmit)
@@ -2450,6 +2452,8 @@
         maxInlineScale:      1.5,
         maxTextLen:          120,
         maxSubLen:           80,
+        maxCursorLen:        8,
+        maxOutlineWidth:     1.5,
         maxLines:            3,
         maxStayTicks:        200,
         maxFadeOutTicks:     60,
@@ -2529,6 +2533,15 @@
         if (opts.title != null) opts.title = clampPlayerTextField(opts.title, PLAYER_DANMAKU_LIMITS.maxTextLen, PLAYER_DANMAKU_LIMITS.maxLines)
         if (opts.sub != null) opts.sub = clampPlayerTextField(opts.sub, PLAYER_DANMAKU_LIMITS.maxSubLen, PLAYER_DANMAKU_LIMITS.maxLines)
         if (opts.subtitle != null) opts.subtitle = clampPlayerTextField(opts.subtitle, PLAYER_DANMAKU_LIMITS.maxSubLen, PLAYER_DANMAKU_LIMITS.maxLines)
+        if (opts.cursor != null) {
+            opts.cursor = truncateSafeProtoText(String(opts.cursor).replace(/[\r\n]/g, ''), PLAYER_DANMAKU_LIMITS.maxCursorLen)
+        }
+        if (opts.outlineWidth != null) {
+            opts.outlineWidth = Math.min(PLAYER_DANMAKU_LIMITS.maxOutlineWidth, parseNonNegNum(opts.outlineWidth, DEFAULTS.outlineWidth, 0.25))
+        }
+        if (opts.glowWidth != null) {
+            opts.glowWidth = Math.min(PLAYER_DANMAKU_LIMITS.maxOutlineWidth, parseNonNegNum(opts.glowWidth, DEFAULTS.outlineWidth, 0.25))
+        }
 
         var szInfo = parseSize(opts.size, opts.scale)
         var clampedScale = Math.max(PLAYER_DANMAKU_LIMITS.minScale, Math.min(PLAYER_DANMAKU_LIMITS.maxScale, szInfo.scale))
@@ -2564,11 +2577,19 @@
 
     function checkPlayerDanmakuCmdRate(actor, bucket) {
         if (actor == null || actor.tier !== 'player' || !actor.uuid) return true
-        var key   = (bucket ? String(bucket) : 'send') + ':' + actor.uuid
+        var key   = (bucket ? String(bucket) : 'send') + ':' + String(actor.uuid).trim().toLowerCase()
         var nowMs = Date.now()
         var last  = playerCmdCooldownMap.get(key) || 0
         if ((nowMs - last) < PLAYER_DANMAKU_LIMITS.commandCooldownMs) {
             return false
+        }
+        if (playerCmdCooldownMap.size >= 2048) {
+            playerCmdCooldownMap.forEach(function (v, k) {
+                if ((nowMs - v) >= PLAYER_DANMAKU_LIMITS.commandCooldownMs) {
+                    playerCmdCooldownMap.delete(k)
+                }
+            })
+            if (playerCmdCooldownMap.size >= 2048) playerCmdCooldownMap.clear()
         }
         playerCmdCooldownMap.set(key, nowMs)
         return true
@@ -2940,7 +2961,15 @@
                 var uuid = getPlayerUuidSafe(p)
                 if (uuid && uuid !== 'unknown') {
                     pendingLoginFlushes.delete(uuid)
-                    playerCmdCooldownMap.delete(String(uuid).trim().toLowerCase())
+                    var normUuid = String(uuid).trim().toLowerCase()
+                    playerCmdCooldownMap.delete(normUuid)
+                    var cmdSuffix = ':' + normUuid
+                    playerCmdCooldownMap.forEach(function (_expCmd, kCmd) {
+                        var sCmd = String(kCmd)
+                        if (sCmd.length > cmdSuffix.length && sCmd.lastIndexOf(cmdSuffix) === (sCmd.length - cmdSuffix.length)) {
+                            playerCmdCooldownMap.delete(kCmd)
+                        }
+                    })
                     var prefix = uuid + '|'
                     playerSourceCooldown.forEach(function (_exp, k) {
                         if (String(k).indexOf(prefix) === 0) {
@@ -2951,6 +2980,16 @@
             } catch (eOut) {
                 reportCatch('PlayerEvents.loggedOut:cleanup', eOut)
             }
+        })
+    }
+
+    if (typeof ServerEvents !== 'undefined' && ServerEvents != null && typeof ServerEvents.unloaded === 'function') {
+        ServerEvents.unloaded(function () {
+            SERVER_REF = null
+            pendingLoginFlushes.clear()
+            playerSourceCooldown.clear()
+            playerCmdCooldownMap.clear()
+            invalidateScopeCache(null)
         })
     }
 

@@ -4170,11 +4170,13 @@ test('permission layering: individual danmaku.self grant, child revoke override 
     runScriptIn(sb, AUDIO_PATH)
 
     var Valve = sb.global.EpiphyPermissionValve
-    // Grant ONLY 'danmaku.self' and 'audio.play' to selfPl; grant parent 'danmaku' to modPl then revoke 'danmaku.pos'
+    // Grant ONLY 'danmaku.self' and 'audio.play' to selfPl; grant parent 'danmaku' + child 'danmaku.player' to modPl then revoke parent 'danmaku' (retaining 'danmaku.player')
     Valve.grantPlayer(srv, selfPl, 'danmaku.self', 'Admin')
     Valve.grantPlayer(srv, selfPl, 'audio.play', 'Admin')
+    Valve.grantPlayer(srv, modPl, 'danmaku.player', 'Admin')
+    Valve.grantPlayer(srv, modPl, 'danmaku.clear', 'Admin')
     Valve.grantPlayer(srv, modPl, 'danmaku', 'Admin')
-    Valve.revokePlayer(srv, modPl, 'danmaku.pos', 'Admin')
+    Valve.revokePlayer(srv, modPl, 'danmaku', 'Admin')
 
     function FakeNode(kind, name) {
         this._kind = kind; this._name = name; this._children = {}; this._exec = null; this._req = null
@@ -4234,9 +4236,9 @@ test('permission layering: individual danmaku.self grant, child revoke override 
     assert.strictEqual(selfPl._sent[0].pkt.namespace, 'u:00000000-0000-4000-8000-0000000000e2')
     assert.strictEqual(p3._sent.length, 0, 'danmaku self never leaks to other players')
 
-    // 2. Child revocation overrides parent module grant (modPl has 'danmaku' minus 'danmaku.pos')
-    assert.strictEqual(dmNode._children.player._req(modSrc), true, 'parent danmaku grant allows danmaku.player')
-    assert.strictEqual(dmNode._children.pos._req(modSrc), false, 'explicit child revoke danmaku.pos must beat parent danmaku grant')
+    // 2. Revoking parent 'danmaku' preserves stored child grants ('danmaku.player' & 'danmaku.clear') while revoking uncovered siblings ('danmaku.pos')
+    assert.strictEqual(dmNode._children.player._req(modSrc), true, 'stored child danmaku.player survives parent danmaku revoke')
+    assert.strictEqual(dmNode._children.pos._req(modSrc), false, 'uncovered sibling danmaku.pos is removed when parent danmaku is revoked')
 
     // 3. Parent grant does NOT imply exactScopeOnly *.broadcast -> >4 targets blocked until danmaku.broadcast granted
     var modOut = []
@@ -6509,6 +6511,146 @@ test('hidden items helpers: callMcMember supports arbitrary argc and readMcMembe
         h.readMcMember(guarded, 'NONE', 'NONE')
     }, /IllegalAccessException/)
 })
+
+// ----------------------------------------------------------------------------
+// 58. Persistence transactions, 3-state scope hierarchy, command block strict_op & unload cleanup
+// ----------------------------------------------------------------------------
+test('audit fixes: persistence .bak recovery & corruption guard, 3-state scope hierarchy, command block strict_op & unload cleanup', function () {
+    var os = require('os')
+    var tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'epiphy_audit58_'))
+    try {
+        var gameDir = path.join(tmpRoot, 'game')
+        var saveDir = path.join(gameDir, 'saves', 'AuditWorld')
+        fs.mkdirSync(saveDir, { recursive: true })
+
+        function FakeCommandBlock() {}
+        var sb = makeNodeBackedJavaSandbox(gameDir)
+        var origLoadClass = sb.Java.loadClass
+        sb.Java.loadClass = function (cls) {
+            if (cls === 'net.minecraft.world.level.BaseCommandBlock') return FakeCommandBlock
+            return origLoadClass(cls)
+        }
+        var unloadCbs = []
+        var logoutCbs = []
+        var cmdCbs = []
+        sb.ServerEvents.unloaded = function (fn) { unloadCbs.push(fn) }
+        sb.ServerEvents.commandRegistry = function (fn) { cmdCbs.push(fn) }
+        sb.PlayerEvents.loggedOut = function (fn) { logoutCbs.push(fn) }
+
+        loadServerBase(sb)
+        runScriptIn(sb, TRACKER_PATH)
+        runScriptIn(sb, BUGFIX_PATH)
+        runScriptIn(sb, VALVE_PATH)
+        runScriptIn(sb, DANMAKU_PATH)
+        runScriptIn(sb, AUDIO_PATH)
+
+        var Base = sb.global.EpiphyServerBase
+        var Tracker = sb.global.EpiphyBlockTracker
+        var Valve = sb.global.EpiphyPermissionValve
+
+        // 1. readJsonDetailed automatically recovers from .bak and heals primary file
+        var testJsonPath = path.join(gameDir, 'epiphy_recover_test.json')
+        fs.writeFileSync(testJsonPath, '{broken_json', 'utf8')
+        fs.writeFileSync(testJsonPath + '.bak', JSON.stringify({ version: 2, ok: true }), 'utf8')
+        var det = Base.readJsonDetailed(testJsonPath)
+        assert.strictEqual(det.status, 'ok', 'corrupt primary with valid .bak must recover to ok')
+        assert.strictEqual(det.fromBackup, true, 'must flag fromBackup')
+        assert.strictEqual(det.data.ok, true)
+        assert.strictEqual(JSON.parse(fs.readFileSync(testJsonPath, 'utf8')).ok, true, 'primary file must be healed from .bak')
+
+        // 2. World anchor persistence & fallback when anchor file is missing/unwritable
+        var pDataStore = {}
+        var srv = {
+            persistentData: {
+                contains: function (k) { return Object.prototype.hasOwnProperty.call(pDataStore, k) },
+                getString: function (k) { return pDataStore[k] || '' },
+                putString: function (k, v) { pDataStore[k] = String(v) }
+            },
+            getWorldData: function () { return { getLevelName: function () { return 'AuditWorld' } } },
+            getWorldPath: function () { return saveDir },
+            players: []
+        }
+        var ctx1 = Base.resolveEpiphyWorldContext(srv, { forceReload: true })
+        var firstWorldId = ctx1.worldId
+        assert.ok(firstWorldId && ctx1.folderName.indexOf('AuditWorld__') === 0)
+
+        // Delete anchor file + .bak on disk and force reload: persistentData / memory fallback must keep the exact same worldId!
+        if (fs.existsSync(ctx1.anchorPath)) fs.unlinkSync(ctx1.anchorPath)
+        if (fs.existsSync(ctx1.anchorPath + '.bak')) fs.unlinkSync(ctx1.anchorPath + '.bak')
+        var ctx2 = Base.resolveEpiphyWorldContext(srv, { forceReload: true })
+        assert.strictEqual(ctx2.worldId, firstWorldId, 'missing anchor with persistentData backup must NOT generate a new worldId or orphan world directory')
+
+        // 3. 3-state Scope Hierarchy in PermissionValve:
+        //    State A: Parent scope ('danmaku') active -> child scope ('danmaku.self') is stored AND covered by parent
+        var testPlayer = {
+            username: 'ScopeTester',
+            stringUuid: '00000000-0000-4000-8000-000000000099',
+            getUuid: function () { return '00000000-0000-4000-8000-000000000099' },
+            hasPermissions: function () { return false },
+            isOp: function () { return false }
+        }
+        assert.strictEqual(Valve.grantPlayer(srv, testPlayer, 'danmaku.self', 'OP'), true)
+        assert.strictEqual(Valve.grantPlayer(srv, testPlayer, 'danmaku', 'OP'), true)
+        assert.strictEqual(Valve.hasPlayerGrant(srv, testPlayer, 'danmaku.self'), true)
+        assert.strictEqual(Valve.hasPlayerGrant(srv, testPlayer, 'danmaku.pos'), true, 'parent danmaku covers danmaku.pos')
+        var entries1 = Valve.listGrantedEntries(srv)
+        assert.ok(entries1.some(function (s) {
+            return s.indexOf('00000000-0000-4000-8000-000000000099') >= 0 &&
+                   s.indexOf('danmaku.self [由父级 danmaku 默认覆盖]') >= 0
+        }), 'stored child scope must be retained and marked as covered by parent danmaku in listGrantedEntries')
+
+        //    State B: Revoke parent ('danmaku') -> parent removed, stored child ('danmaku.self') preserved!
+        assert.strictEqual(Valve.revokePlayer(srv, testPlayer, 'danmaku', 'OP'), true)
+        assert.strictEqual(Valve.hasPlayerGrant(srv, testPlayer, 'danmaku.pos'), false, 'uncovered child danmaku.pos is no longer active after parent revoke')
+        assert.strictEqual(Valve.hasPlayerGrant(srv, testPlayer, 'danmaku.self'), true, 'explicitly stored child danmaku.self survives parent-only revoke')
+
+        //    State C: Revoke subtree ('danmaku.*') -> entire tree removed & subtree tombstone blocks rollback resurrection
+        assert.strictEqual(Valve.grantPlayer(srv, testPlayer, 'danmaku', 'OP'), true)
+        var grantsFile = ctx1.permissionsFile
+        var snapshotBeforeTreeRevoke = fs.readFileSync(grantsFile, 'utf8')
+        assert.strictEqual(Valve.revokePlayer(srv, testPlayer, 'danmaku.*', 'OP'), true)
+        assert.strictEqual(Valve.hasPlayerGrant(srv, testPlayer, 'danmaku'), false)
+        assert.strictEqual(Valve.hasPlayerGrant(srv, testPlayer, 'danmaku.self'), false, 'danmaku.* subtree revoke removes stored child danmaku.self')
+
+        // Simulate world rollback of permissions.json: subtree tombstone ('danmaku.*') in revocations.json must prune both parent and child!
+        fs.writeFileSync(grantsFile, snapshotBeforeTreeRevoke, 'utf8')
+        fs.writeFileSync(grantsFile + '.bak', snapshotBeforeTreeRevoke, 'utf8')
+        Valve.reloadWorldGrants(srv)
+        assert.strictEqual(Valve.hasPlayerGrant(srv, testPlayer, 'danmaku'), false, 'danmaku.* tombstone blocks parent resurrection on rollback')
+        assert.strictEqual(Valve.hasPlayerGrant(srv, testPlayer, 'danmaku.self'), false, 'danmaku.* tombstone blocks child resurrection on rollback')
+
+        // 4. Command Block trust & strict_op mutation lock (including /execute as <OnlineOP> disguise)
+        var rawCmdBlock = new FakeCommandBlock()
+        var onlineOp = {
+            username: 'ServerAdmin',
+            stringUuid: '00000000-0000-4000-8000-000000000001',
+            hasPermissions: function () { return true },
+            isOp: function () { return true }
+        }
+        var disguisedCmdBlockSource = {
+            source: rawCmdBlock,
+            player: onlineOp,
+            getPlayer: function () { return onlineOp },
+            getServer: function () { return srv },
+            hasPermission: function () { return true },
+            getTextName: function () { return '@' }
+        }
+        var classified = Valve.classifyCommandSource(disguisedCmdBlockSource)
+        assert.strictEqual(classified.kind, 'command_block', 'BaseCommandBlock executing as OnlineOP must still be classified as command_block')
+        var defaultEval = Valve.evaluateSourceAccess(disguisedCmdBlockSource, 'danmaku', 'default')
+        assert.strictEqual(defaultEval.allowed, true, 'command_block is trusted by default for functional scopes')
+        var strictOpEval = Valve.evaluateSourceAccess(disguisedCmdBlockSource, 'auth', 'strict_op')
+        assert.strictEqual(strictOpEval.allowed, false, 'command_block is strictly forbidden from mutating permissions under strict_op')
+
+        // 5. Audio playerMaxRange requires audio.broadcast when range > 64, and unload cleans handles
+        assert.strictEqual(sb.global.EpiphyAudio.CONFIG.playerMaxRange, 64)
+        for (var ui = 0; ui < unloadCbs.length; ui++) unloadCbs[ui]({ server: srv })
+        assert.strictEqual(Tracker.getStats().trackedBlocksSize, 0, 'unload clears BlockTracker in-memory records')
+    } finally {
+        fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
+})
+
 
 var passed = 0
 for (var i = 0; i < tests.length; i++) {

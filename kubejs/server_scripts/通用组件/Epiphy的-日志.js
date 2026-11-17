@@ -25,10 +25,18 @@
 
 ;(function () {
     var DEFAULT_INTERVAL_MS = 5000
+    var MAX_BUCKET_ENTRIES  = 2048
     var buckets             = {} // '<module>|<level>|<tag>' -> { lastAt, suppressed }
     var playerBuckets       = {} // '<module>|<level>|<tag>|<playerKey>' -> { lastAt, suppressed }
     var onceKeys            = {} // '<key>' -> true
     var debugModules        = {} // '<module>' or '*' -> boolean
+
+    function evictFirstKeyIfFull(mapObj) {
+        var keys = Object.keys(mapObj)
+        if (keys.length >= MAX_BUCKET_ENTRIES) {
+            delete mapObj[keys[0]]
+        }
+    }
 
     var fileSink = {
         configured:       false,
@@ -354,6 +362,7 @@
         var bKey     = mod + '|' + level + '|' + tagStr
         var bucket   = buckets[bKey]
         if (bucket == null) {
+            evictFirstKeyIfFull(buckets)
             bucket = { lastAt: 0, suppressed: 0 }
             buckets[bKey] = bucket
         }
@@ -372,6 +381,7 @@
             var pKey    = bKey + '|' + getPlayerKey(notifyPlayer)
             var pBucket = playerBuckets[pKey]
             if (pBucket == null) {
+                evictFirstKeyIfFull(playerBuckets)
                 pBucket = { lastAt: 0, suppressed: 0 }
                 playerBuckets[pKey] = pBucket
             }
@@ -412,6 +422,7 @@
     function once(level, key, msg) {
         var k = normKey(key, 'default')
         if (onceKeys[k]) return false
+        evictFirstKeyIfFull(onceKeys)
         onceKeys[k] = true
         emitConsole(level || 'warn', String(msg))
         return true

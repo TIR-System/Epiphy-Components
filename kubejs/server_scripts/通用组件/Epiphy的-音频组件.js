@@ -70,6 +70,7 @@
         scanSectionsPerTick: 2,              // 每 tick 最多扫描的 16x16x16 区块段数（零卡顿发现存档已有方块）
         rangeHysteresis:     2.0,            // 已收听玩家的离开判定迟滞放宽距离 (格)，防边界闪烁
         defaultRange:        32,
+        playerMaxRange:      64,             // 非OP授权玩家未授予 audio.broadcast 时允许的最大收听半径 (格)
         minRange:            1,
         maxRange:            512,
         defaultOneShotTicks: 20 * 60 * 3,    // 非循环且未给 duration 时的句柄最大兜底保留时长 (3分钟)
@@ -2627,12 +2628,33 @@
     var clearListenerRecordForPlayer = (uuid) => {
         if (!uuid) return
         for (var h of handles.values()) {
-            if (h != null && h.listeners[uuid]) {
+            if (h == null) continue
+            releasePlayerListenCount(h, uuid)
+            if (h.listeners[uuid]) {
                 delete h.listeners[uuid]
                 h.listenerCount = max2(0, h.listenerCount - 1)
             }
+            if (h.mutedListeners) delete h.mutedListeners[uuid]
+            if (h.listenerEnteredSeq) delete h.listenerEnteredSeq[uuid]
+            if (h.listenerInRange) delete h.listenerInRange[uuid]
+            if (h.listenerInRangeSeq) delete h.listenerInRangeSeq[uuid]
+            if (h.listenerAnchorKey) delete h.listenerAnchorKey[uuid]
+            if (h.listenerSentPos) delete h.listenerSentPos[uuid]
         }
         listenCount.delete(uuid)
+    }
+
+    if (typeof ServerEvents !== 'undefined' && ServerEvents != null && typeof ServerEvents.unloaded === 'function') {
+        ServerEvents.unloaded(() => {
+            handles.clear()
+            keyIndex.clear()
+            listenCount.clear()
+            loginReadyTick.clear()
+            mergeBoundSources.clear()
+            dirtyMergeScopes.clear()
+            boundAudioSeqByKey.clear()
+            serverRef = null
+        })
     }
 
     ServerEvents.tick((event) => {
@@ -2712,6 +2734,7 @@
     var CONFIG_NUM_LIMITS = {
         rangeHysteresis: { min: 0, max: 256 },
         defaultRange:    { min: 1, max: 4096 },
+        playerMaxRange:  { min: 8, max: 4096 },
         minRange:        { min: 0.5, max: 2048 },
         maxRange:        { min: 1, max: 4096 }
     }
@@ -3025,8 +3048,11 @@
                     var posDim = resolveDimId(merged.dim)
                     if (srcDim && posDim && srcDim !== posDim) needBroadcast = true
                 }
+                if (merged.range != null && isFinite(Number(merged.range)) && Number(merged.range) > CONFIG.playerMaxRange) {
+                    needBroadcast = true
+                }
                 if (needBroadcast && !hasAudioBroadcastGrant(actor)) {
-                    return cmdErr(source, `权限不足：影响超过 ${CONFIG.maxBroadcastTargets} 名玩家或跨维度的音频广播需要额外授予 [audio.broadcast] 作用域`)
+                    return cmdErr(source, `权限不足：影响超过 ${CONFIG.maxBroadcastTargets} 名玩家、跨维度或超出范围上限 (${CONFIG.playerMaxRange}格) 的音频广播需要额外授予 [audio.broadcast] 作用域`)
                 }
                 merged._sourceTier = 'player'
                 merged._ownerUuid  = actor.uuid

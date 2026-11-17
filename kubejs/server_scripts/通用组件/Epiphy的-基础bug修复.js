@@ -498,19 +498,57 @@
         }
     }
 
+    var storageCorruptBlocked = false
+
+    function resolveServerBase() {
+        if (typeof global === 'undefined' || global == null) return null
+        return global.EpiphyServerBase || null
+    }
+
     function ensureLoaded(server) {
         var srv = server
         if (srv == null || loadedServerRef === srv) return
-        loadedServerRef   = srv
-        loadedStoragePath = resolveWorldFilePath(srv)
-        records           = {}
-        pendingSessions   = {}
-        pendingCount      = 0
+        loadedServerRef       = srv
+        loadedStoragePath     = resolveWorldFilePath(srv)
+        records               = {}
+        pendingSessions       = {}
+        pendingCount          = 0
+        storageCorruptBlocked = false
 
         var loadedFromJsonIo = false
-        if (loadedStoragePath != null && typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.read === 'function') {
-            try {
-                var rawObj = JsonIO.read(loadedStoragePath)
+        var diskCorrupt      = false
+        var baseApi          = resolveServerBase()
+
+        if (loadedStoragePath != null) {
+            if (baseApi != null && typeof baseApi.readJsonDetailed === 'function') {
+                var detailRes = baseApi.readJsonDetailed(loadedStoragePath, null, true)
+                if (detailRes.status === 'ok' && detailRes.data != null) {
+                    var pf0 = readField(detailRes.data, 'players')
+                    if (pf0 != null) {
+                        importPlayerMap(pf0)
+                        loadedFromJsonIo = true
+                    }
+                } else if (detailRes.status === 'corrupt') {
+                    diskCorrupt = true
+                }
+            } else if (typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.read === 'function') {
+                var rawObj = null
+                try {
+                    rawObj = JsonIO.read(loadedStoragePath)
+                } catch (eJson) {
+                    diskCorrupt = true
+                    logCatch('ensureLoaded:JsonIO', eJson)
+                }
+                if (rawObj == null && diskCorrupt) {
+                    try {
+                        var bakObj = JsonIO.read(loadedStoragePath + '.bak')
+                        if (bakObj != null) {
+                            rawObj = bakObj
+                            diskCorrupt = false
+                            logWarn('ensureLoaded:bakRecovered', '主文件损坏，已从备份恢复: ' + loadedStoragePath + '.bak')
+                        }
+                    } catch (eBak) { }
+                }
                 if (rawObj != null) {
                     var playersField = readField(rawObj, 'players')
                     if (playersField != null) {
@@ -518,8 +556,6 @@
                         loadedFromJsonIo = true
                     }
                 }
-            } catch (eJson) {
-                logCatch('ensureLoaded:JsonIO', eJson)
             }
         }
 
@@ -527,6 +563,13 @@
             var pdObj = readServerPersistentJson(srv)
             if (pdObj != null && pdObj.players != null) {
                 importPlayerMap(pdObj.players)
+                if (diskCorrupt && Object.keys(records).length > 0) {
+                    diskCorrupt = false
+                    flushStorage(srv)
+                }
+            } else if (diskCorrupt) {
+                storageCorruptBlocked = true
+                logWarn('ensureLoaded:corrupt', 'HP 持久化文件损坏且无可用备份 (' + loadedStoragePath + ')，已挂起空表覆写保护')
             }
         }
     }
@@ -535,6 +578,7 @@
         var srv = server || loadedServerRef
         if (srv == null) return false
         var exportPlayers = {}
+        var playerCount   = 0
         for (var uuid in records) {
             if (hasOwn(records, uuid) && records[uuid] != null) {
                 exportPlayers[uuid] = {
@@ -542,23 +586,47 @@
                     max:          records[uuid].max,
                     recordedAtMs: records[uuid].recordedAtMs
                 }
+                playerCount++
             }
+        }
+        if (storageCorruptBlocked && playerCount === 0) {
+            return false
         }
         var payload = {
             version: VERSION,
             players: exportPlayers
         }
 
-        if (loadedStoragePath != null && typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.write === 'function') {
-            try {
-                ensureParentDir(loadedStoragePath)
-                JsonIO.write(loadedStoragePath, payload)
-                return true
-            } catch (eJsonWrite) {
-                logCatch('flushStorage:JsonIO', eJsonWrite)
+        // 始终同步双写一份到 srv.persistentData，确保 JSON 文件意外截断时仍可无损恢复
+        var wrotePd   = writeServerPersistentJson(srv, payload)
+        var wroteDisk = false
+        var baseApi   = resolveServerBase()
+
+        if (loadedStoragePath != null) {
+            if (baseApi != null && typeof baseApi.writeJsonAtomic === 'function') {
+                wroteDisk = Boolean(baseApi.writeJsonAtomic(loadedStoragePath, payload, true))
+            } else if (typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.write === 'function') {
+                try {
+                    ensureParentDir(loadedStoragePath)
+                    if (typeof JsonIO.read === 'function') {
+                        try {
+                            var prev = JsonIO.read(loadedStoragePath)
+                            if (prev != null) {
+                                JsonIO.write(loadedStoragePath + '.bak', prev)
+                            }
+                        } catch (ePrevBak) { }
+                    }
+                    JsonIO.write(loadedStoragePath, payload)
+                    wroteDisk = true
+                } catch (eJsonWrite) {
+                    logCatch('flushStorage:JsonIO', eJsonWrite)
+                }
             }
         }
-        return writeServerPersistentJson(srv, payload)
+        if (wroteDisk) {
+            storageCorruptBlocked = false
+        }
+        return Boolean(wroteDisk || wrotePd)
     }
 
     function removePendingSession(uuid) {
@@ -853,11 +921,12 @@
                     } else if (srv != null && loadedServerRef === srv) {
                         flushStorage(srv)
                     }
-                    pendingSessions   = {}
-                    pendingCount      = 0
-                    loadedServerRef   = null
-                    loadedStoragePath = null
-                    records           = {}
+                    pendingSessions       = {}
+                    pendingCount          = 0
+                    loadedServerRef       = null
+                    loadedStoragePath     = null
+                    storageCorruptBlocked = false
+                    records               = {}
                 } catch (e) {
                     logCatch('ServerEvents.unloaded', e)
                 }

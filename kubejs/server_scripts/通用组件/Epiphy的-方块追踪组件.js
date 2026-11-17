@@ -151,25 +151,43 @@
     function resolveWorldStorageInfo(server) { return BASE.resolveWorldStorageInfo(server || SERVER_REF, WORLD_FILE_NAME, FALLBACK_DIR) }
     function ensureParentDir(filePathStr) { return BASE.ensureParentDir(filePathStr, LOGGER) }
 
+    var storageReadFailed = false
+
     function flushTrackedBlocks() {
         if (SERVER_REF == null || !persistDirty) return false
+        if (storageReadFailed && trackedBlocks.size === 0) {
+            return false
+        }
         try {
             var arr = []
             trackedBlocks.forEach(function (item) {
                 arr.push([item.blockId, item.dim, item.x, item.y, item.z])
             })
-            if (typeof JsonIO !== 'undefined' && JsonIO != null) {
-                var targetPath = loadedStoragePath || resolveWorldStorageInfo(SERVER_REF).filePath
-                loadedStoragePath = targetPath
+            var targetPath = loadedStoragePath || resolveWorldStorageInfo(SERVER_REF).filePath
+            loadedStoragePath = targetPath
+            var payload = {
+                version:        2,
+                updatedAt:      formatTimestampNow(),
+                migratedLegacy: migratedLegacyFlag,
+                blocks:         arr
+            }
+            var wroteDisk = false
+            if (typeof BASE.writeJsonAtomic === 'function') {
+                wroteDisk = Boolean(BASE.writeJsonAtomic(targetPath, payload, true, LOGGER))
+            } else if (typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.write === 'function') {
                 ensureParentDir(targetPath)
-                JsonIO.write(targetPath, {
-                    version:        2,
-                    updatedAt:      formatTimestampNow(),
-                    migratedLegacy: migratedLegacyFlag,
-                    blocks:         arr
-                })
-                persistDirty  = false
-                lastFlushTick = tickCounter
+                JsonIO.write(targetPath, payload)
+                wroteDisk = true
+            }
+            try {
+                if (SERVER_REF.persistentData != null && typeof SERVER_REF.persistentData.putString === 'function') {
+                    SERVER_REF.persistentData.putString(PERSIST_KEY, JSON.stringify(arr))
+                }
+            } catch (ePData) { }
+            if (wroteDisk) {
+                storageReadFailed = false
+                persistDirty      = false
+                lastFlushTick     = tickCounter
                 return true
             }
         } catch (eSave) {
@@ -233,6 +251,9 @@
         var key = makePosKey(dim, ix, iy, iz)
         var rec = trackedBlocks.get(key)
         if (rec == null || rec.blockId !== blockId) {
+            if (rec != null && rec.blockId !== blockId) {
+                dispatchRemovedToSubscribers(rec, 'block_changed', null, null)
+            }
             rec = { key: key, blockId: blockId, dim: dim, x: ix, y: iy, z: iz, vSlot: allocVerifySlot(), chunkLoaded: true, extras: {} }
             trackedBlocks.set(key, rec)
             if (saveNow !== false) saveTrackedBlocks(false)
@@ -243,7 +264,7 @@
         return rec
     }
 
-    function importSerializedBlockArray(rawOrArr, fallbackBlockId, sourceKey) {
+    function importSerializedBlockArray(rawOrArr, fallbackBlockId, sourceKey, optAddedKeysOut) {
         var imported = 0
         var skipped  = 0
         if (rawOrArr == null) return 0
@@ -289,6 +310,7 @@
             var key = makePosKey(dim, bx, by, bz)
             if (!trackedBlocks.has(key)) {
                 trackedBlocks.set(key, { key: key, blockId: bid, dim: dim, x: bx, y: by, z: bz, vSlot: allocVerifySlot(), chunkLoaded: true, extras: {} })
+                if (Array.isArray(optAddedKeysOut)) optAddedKeysOut.push(key)
                 imported++
             }
         }
@@ -312,6 +334,7 @@
         resetScanQueue()
         migratedKeys.clear()
         persistDirty       = false
+        storageReadFailed  = false
         lastFlushTick      = -9999
         migratedLegacyFlag = false
         nextVerifySlot     = 0
@@ -319,33 +342,46 @@
         var storageInfo    = resolveWorldStorageInfo(SERVER_REF)
         loadedStoragePath  = storageInfo.filePath
 
-        if (typeof JsonIO !== 'undefined' && JsonIO != null) {
+        var diskStatus = 'missing'
+        var rawObj     = null
+        if (typeof BASE.readJsonDetailed === 'function') {
+            var detailRes = BASE.readJsonDetailed(loadedStoragePath, LOGGER, true)
+            diskStatus    = detailRes.status
+            rawObj        = detailRes.data
+        } else if (typeof JsonIO !== 'undefined' && JsonIO != null) {
             try {
-                var rawObj = JsonIO.read(loadedStoragePath)
-                if (rawObj != null) {
-                    var directSeq = toSeqArray(rawObj)
-                    if (directSeq != null) {
-                        importSerializedBlockArray(directSeq, null, loadedStoragePath)
-                    } else {
-                        var blocksField = readJsonField(rawObj, 'blocks')
-                        if (blocksField != null) {
-                            importSerializedBlockArray(blocksField, null, loadedStoragePath)
-                        }
-                        if (readJsonField(rawObj, 'migratedLegacy') === true) {
-                            migratedLegacyFlag = true
-                        }
-                    }
-                }
+                rawObj = JsonIO.read(loadedStoragePath)
+                diskStatus = (rawObj != null) ? 'ok' : 'missing'
             } catch (eJsonLoad) {
+                diskStatus = 'corrupt'
                 logCatch('ensureLoaded:JsonIO', eJsonLoad)
             }
         }
 
-        if (!migratedLegacyFlag) {
+        if (diskStatus === 'ok' && rawObj != null) {
+            var directSeq = toSeqArray(rawObj)
+            if (directSeq != null) {
+                importSerializedBlockArray(directSeq, null, loadedStoragePath)
+            } else {
+                var blocksField = readJsonField(rawObj, 'blocks')
+                if (blocksField != null) {
+                    importSerializedBlockArray(blocksField, null, loadedStoragePath)
+                }
+                if (readJsonField(rawObj, 'migratedLegacy') === true) {
+                    migratedLegacyFlag = true
+                }
+            }
+        } else if (diskStatus === 'corrupt') {
+            storageReadFailed = true
+            LOGGER.warn('ensureLoaded:corrupt', '追踪方块持久化文件损坏且无可用 .bak 备份 (' + loadedStoragePath + ')，尝试从 persistentData 恢复并挂起空表覆盖保护')
+        }
+
+        if (!migratedLegacyFlag || storageReadFailed) {
             var loadKeys = [PERSIST_KEY, 'epiphy_danmaku_bound_blocks_v1', 'epiphy_audio_bound_blocks_v1']
             var importedLegacy = 0
             for (var kIdx = 0; kIdx < loadKeys.length; kIdx++) {
                 try {
+                    if (SERVER_REF.persistentData == null || typeof SERVER_REF.persistentData.getString !== 'function') break
                     var raw = SERVER_REF.persistentData.getString(loadKeys[kIdx])
                     if (raw && String(raw).length > 0) {
                         importedLegacy += importSerializedBlockArray(raw, null, loadKeys[kIdx])
@@ -354,8 +390,11 @@
                     logCatch('ensureLoaded:' + loadKeys[kIdx], eLoad)
                 }
             }
-            migratedLegacyFlag = true
+            if (!storageReadFailed || importedLegacy > 0) {
+                migratedLegacyFlag = true
+            }
             if (importedLegacy > 0) {
+                storageReadFailed = false
                 saveTrackedBlocks(true)
             }
         }
@@ -388,13 +427,7 @@
             try {
                 var raw = SERVER_REF.persistentData.getString(String(specObj.serverKey))
                 if (raw && String(raw).length > 0) {
-                    var before = trackedBlocks.size
-                    importSerializedBlockArray(raw, bid, specObj.serverKey)
-                    if (trackedBlocks.size > before) {
-                        trackedBlocks.forEach(function (rec, k) {
-                            if (rec.blockId === bid) addedKeys.push(k)
-                        })
-                    }
+                    importSerializedBlockArray(raw, bid, specObj.serverKey, addedKeys)
                 }
             } catch (eSrvMig) {
                 logCatch('migrateLegacyOnce:serverKey', eSrvMig)
@@ -1037,6 +1070,16 @@
         ServerEvents.unloaded(function () {
             try {
                 flushTrackedBlocks()
+                SERVER_REF         = null
+                loadedPersistSrv   = null
+                loadedStoragePath  = null
+                storageReadFailed  = false
+                persistDirty       = false
+                migratedLegacyFlag = false
+                trackedBlocks.clear()
+                scannedSections.clear()
+                resetScanQueue()
+                migratedKeys.clear()
             } catch (eUnl) {
                 logCatch('ServerEvents.unloaded', eUnl)
             }
