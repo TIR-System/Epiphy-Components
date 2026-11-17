@@ -68,14 +68,14 @@
 | **L1 内容注册** | `创造模式栏-epiphy.js` | `startup` / `1000` | `EpiphyCreativeTab` (`epiphy:stuff`) |
 | **L1 内容注册** | 隐藏物品 / 测试方块 / 失稳拆解台 | `startup` | 物品、测试方块与 5 阶段失稳方块 |
 | **L2 基础设施** | `Epiphy的-日志.js` | `server` / `1100` | `EpiphyLog v1.2`（限频、去重、`catchWarn`、外部文本日志） |
-| **L2 基础设施** | `Epiphy的-服务端核心.js` | `server` / `1080` | `EpiphyServerCore / EpiphyServerBase v2.4`（访问器、世界/实体/Curios工具、`.bak` 自愈、`epiphy-data/`、自动分叉、DSL） |
-| **L2 基础设施** | `Epiphy的-方块与区块组件.js` | `server` / `1050` | `EpiphyBlockTracker / EpiphyWorldOps v2.3`（区块段扫描、持久化派发、三级开销门控流体剥离与地形批处理） |
-| **L2 安全控制** | `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v5.3`（`/epiphy`、三态分层权限域、命令方块修改锁、墓碑、按名备用模式） |
+| **L2 基础设施** | `Epiphy的-服务端核心.js` | `server` / `1080` | `EpiphyServerCore / EpiphyServerBase v2.5`（访问器、世界/实体/Curios工具、`.bak` 自愈、`epiphy-data/`、自动分叉、DSL） |
+| **L2 基础设施** | `Epiphy的-方块与区块组件.js` | `server` / `1050` | `EpiphyBlockTracker / EpiphyWorldOps v2.4`（区块段扫描、持久化派发、三级开销门控流体剥离与地形批处理） |
+| **L2 安全控制** | `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v5.4`（`/epiphy`、三态分层权限域、命令方块修改锁、墓碑、按名备用模式） |
 | **L2 诊断维护** | `Epiphy的-调试组件.js` | `server` / `950` | `EpiphyDebug v1`（`/epiphy debug`） |
 | **L2 独立修复** | `Epiphy的-基础bug修复.js` | `server` / `900` | `EpiphyBugfix v1`（退出 HP 服务端恢复） |
-| **L3 业务调度** | `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `ScreenDanmaku v5.6`（独立调度模块，禁止跨模块直接复用内部实现） |
-| **L3 业务调度** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.6`（独立调度模块，禁止跨模块直接复用内部实现） |
-| **L3 玩法脚本** | `拆解台-混沌殉爆.v18.js` & `合成表-*` | `server` | 混沌殉爆事件链（强前置核心/世界/弹幕组件，含持久化、防伪造遗物与主手钻石镐校验）与配方调整 |
+| **L3 业务调度** | `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `ScreenDanmaku v5.7`（独立调度模块，禁止跨模块直接复用内部实现） |
+| **L3 业务调度** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.7`（独立调度模块，禁止跨模块直接复用内部实现） |
+| **L3 玩法脚本** | `拆解台-混沌殉爆.v18.js` & `合成表-*` | `server` / `10` | 混沌殉爆事件链（强前置核心/世界/弹幕组件，含持久化、防伪造遗物与主手钻石镐校验）与配方调整 |
 | **L4 客户端表现** | `屏幕弹幕渲染器` / `音频播放器` / `拆解台描述` | `client` | `ScreenDanmakuClient v5.7`、`EpiphyAudioClient v5.6` |
 
 ### 3. 模块依赖与降级语义规范（YAML）

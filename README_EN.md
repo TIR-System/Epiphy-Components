@@ -68,14 +68,14 @@ A collection of shared server/client infrastructure modules, audiovisual present
 | **L1 Content Reg** | `创造模式栏-epiphy.js` | `startup` / `1000` | `EpiphyCreativeTab` (`epiphy:stuff`) |
 | **L1 Content Reg** | Hidden Items / Test Block / Unstable Table | `startup` | Custom items, test block & 5-stage blocks |
 | **L2 Infrastructure** | `Epiphy的-日志.js` | `server` / `1100` | `EpiphyLog v1.2` (rate-limit, `once`, `catchWarn`, external `.log` sink) |
-| **L2 Infrastructure** | `Epiphy的-服务端核心.js` | `server` / `1080` | `EpiphyServerCore / EpiphyServerBase v2.4` (accessors, world/entity/Curios helpers, `.bak` recovery, `epiphy-data/`, world fork, DSL) |
-| **L2 Infrastructure** | `Epiphy的-方块与区块组件.js` | `server` / `1050` | `EpiphyBlockTracker / EpiphyWorldOps v2.3` (section scanning, persist dispatch, cost-gated fluid purge & terrain ops) |
-| **L2 Access Control** | `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v5.3` (`/epiphy`, 3-state scopes, command-block mutation lock, tombstones, fail-closed auth) |
+| **L2 Infrastructure** | `Epiphy的-服务端核心.js` | `server` / `1080` | `EpiphyServerCore / EpiphyServerBase v2.5` (accessors, world/entity/Curios helpers, `.bak` recovery, `epiphy-data/`, world fork, DSL) |
+| **L2 Infrastructure** | `Epiphy的-方块与区块组件.js` | `server` / `1050` | `EpiphyBlockTracker / EpiphyWorldOps v2.4` (section scanning, persist dispatch, cost-gated fluid purge & terrain ops) |
+| **L2 Access Control** | `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v5.4` (`/epiphy`, 3-state scopes, command-block mutation lock, tombstones, fail-closed auth) |
 | **L2 Diagnostics** | `Epiphy的-调试组件.js` | `server` / `950` | `EpiphyDebug v1` (`/epiphy debug`) |
 | **L2 Standalone Fix** | `Epiphy的-基础bug修复.js` | `server` / `900` | `EpiphyBugfix v1` (logout HP restoration) |
-| **L3 Presentation** | `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `ScreenDanmaku v5.6` (standalone scheduler; internal logic not for cross-module reuse) |
-| **L3 Presentation** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.6` (standalone scheduler; internal logic not for cross-module reuse) |
-| **L3 Gameplay** | `拆解台-混沌殉爆.v18.js` & `合成表-*` | `server` | Meltdown progression (hard-requiring Core/WorldOps/Danmaku; persisted countdown, anti-spoof relic & mainhand pickaxe check) |
+| **L3 Presentation** | `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `ScreenDanmaku v5.7` (standalone scheduler; internal logic not for cross-module reuse) |
+| **L3 Presentation** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.7` (standalone scheduler; internal logic not for cross-module reuse) |
+| **L3 Gameplay** | `拆解台-混沌殉爆.v18.js` & `合成表-*` | `server` / `10` | Meltdown progression (hard-requiring Core/WorldOps/Danmaku; persisted countdown, anti-spoof relic & mainhand pickaxe check) |
 | **L4 Client** | `屏幕弹幕渲染器` / `音频播放器` / `拆解台描述` | `client` | `ScreenDanmakuClient v5.7`, `EpiphyAudioClient v5.6` |
 
 ### 3. Dependency & Fallback Specification (YAML)

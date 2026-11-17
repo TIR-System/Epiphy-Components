@@ -5888,9 +5888,9 @@ test('ScreenDanmaku v5.4: inDimension 0-player & cooldown skip, malformed warnin
 })
 
 // ----------------------------------------------------------------------------
-// 55. P2 audit fixes: grapheme ZWJ/flags/Extend, FIFO glyph eviction, rotated tryDrawUnitBatched, a<=2 fix, Valve __proto__/getContext/at sync, late tracker upgrade & v18 fallbackPkt proto:5
+// 55. P2 audit fixes: grapheme ZWJ/flags/Extend, FIFO glyph eviction, rotated tryDrawUnitBatched, a<=2 fix, Valve __proto__/getContext/at sync, late tracker upgrade & v18 fail-fast & scoped ScreenDanmaku
 // ----------------------------------------------------------------------------
-test('P2 fixes: grapheme ZWJ/flags/Extend, FIFO glyph eviction, rotated batched unit, low-alpha fidelity, Valve hardening, late tracker upgrade & v18 fallbackPkt', function () {
+test('P2 fixes: grapheme ZWJ/flags/Extend, FIFO glyph eviction, rotated batched unit, low-alpha fidelity, Valve hardening, late tracker upgrade & v18 fail-fast & scoped ScreenDanmaku', function () {
     // Part A: Client v5.6 pure & render behavior
     function M4() { this._rotZ = []; this._m00 = 1; this._m11 = 1; this.z = 0 }
     M4.prototype.set = function (o) { this._m00 = o ? o._m00 : 1; this._m11 = o ? o._m11 : 1; this.z = o ? (o.z || 0) : 0; return this }
@@ -7025,6 +7025,33 @@ test('Uncrafting Chaos & EpiphyServerCore/EpiphyWorldOps: anti-rename relic spoo
         }
         assert.strictEqual(worldBlocks['17,62,0'], 'minecraft:air', 'default cylinder2D=true purge must clear high-Y sea-level water at outer rim without leaving vertical water walls')
         assert.strictEqual(worldBlocks['17,-60,0'], 'minecraft:water', 'deep underground fluid below cylFloorY outside lower hemisphere (dx=16, dy=-40 -> 256+1600 > 324) must NOT be cleared')
+
+        // 6b. forEachEntityNear isolates single-entity callback exceptions without aborting remaining entities or falling back to forEachPlayerNear
+        var isoSb = createKubeSandbox(function (cls) {
+            if (cls === 'net.minecraft.world.phys.AABB') {
+                return function (x1, y1, z1, x2, y2, z2) { this.x1 = x1; this.x2 = x2 }
+            }
+            return null
+        })
+        loadServerBase(isoSb)
+        var isoHits = []
+        var isoPlayerHits = 0
+        var isoEntityList = [
+            { getX: function () { return 1 }, getY: function () { return 64 }, getZ: function () { return 0 }, tag: 'throws' },
+            { getX: function () { return 2 }, getY: function () { return 64 }, getZ: function () { return 0 }, tag: 'ok_entity' }
+        ]
+        var isoLevel = {
+            players: [Object.assign({}, mainHandPickPlayer, { getX: function () { return 1 }, getY: function () { return 64 }, getZ: function () { return 0 } })],
+            getEntitiesWithin: function () { return isoEntityList }
+        }
+        var isoCount = isoSb.global.EpiphyServerCore.forEachEntityNear(isoLevel, 0, 64, 0, 16, null, function (ent) {
+            if (ent.tag === 'throws') throw new Error('boom_entity')
+            if (ent.username === mainHandPickPlayer.username) isoPlayerHits++
+            isoHits.push(ent.tag)
+        })
+        assert.strictEqual(isoCount, 1, 'forEachEntityNear counts succeeded non-throwing callbacks')
+        assert.deepStrictEqual(isoHits, ['ok_entity'], 'throwing entity callback must NOT abort subsequent entities')
+        assert.strictEqual(isoPlayerHits, 0, 'throwing entity callback must NOT fall through to duplicate forEachPlayerNear pass')
 
         // 7. ScreenDanmakuClient v5.7: verify VERSION, isPotentialSpanTagHead fast-rejection, exact fast/slow slice & endPx parity, and TRANSIENT vs SHARED cache isolation/promotion
         var cliPaints = []

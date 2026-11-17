@@ -1,6 +1,6 @@
 // priority: 1080
 // ============================================================================
-// Epiphy 服务端核心与世界工具 (EpiphyServerCore / EpiphyServerBase v2.4)
+// Epiphy 服务端核心与世界工具 (EpiphyServerCore / EpiphyServerBase v2.5)
 //   许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //   放置位置：kubejs/server_scripts/通用组件/Epiphy的-服务端核心.js
 //   所属阶段：server_scripts
@@ -793,35 +793,50 @@
         var d2 = r * r;
         var count = 0;
         if (AABB_CLASS != null && safeHasMethod(level, 'getEntitiesWithin')) {
+            var ents = null;
             try {
                 var box = new AABB_CLASS(cx - r, cy - r, cz - r, cx + r, cy + r, cz + r);
-                var ents = toSeqArray(level.getEntitiesWithin(box));
+                ents = toSeqArray(level.getEntitiesWithin(box));
+            } catch (eBox) {
+                ents = null;
+                baseLogger.catchWarn('forEachEntityNear:query', eBox);
+            }
+            if (ents != null) {
                 for (var i = 0; i < ents.length; i++) {
                     var ent = ents[i];
                     if (ent == null) continue;
-                    if (typeof filterFn === 'function' && !filterFn(ent)) continue;
-                    var pos = readPos(ent);
-                    var distSq = 0;
-                    if (pos != null) {
-                        var dx = pos.x - cx, dy = pos.y - cy, dz = pos.z - cz;
-                        distSq = dx * dx + dy * dy + dz * dz;
-                        if (distSq > d2) continue;
-                    } else if (safeHasMethod(ent, 'getDistance')) {
-                        var dist = Number(ent.getDistance(cx, cy, cz));
-                        if (isFinite(dist) && dist > r) continue;
-                        distSq = dist * dist;
+                    try {
+                        if (typeof filterFn === 'function' && !filterFn(ent)) continue;
+                        var pos = readPos(ent);
+                        var distSq = 0;
+                        if (pos != null) {
+                            var dx = pos.x - cx, dy = pos.y - cy, dz = pos.z - cz;
+                            distSq = dx * dx + dy * dy + dz * dz;
+                            if (distSq > d2) continue;
+                        } else if (safeHasMethod(ent, 'getDistance')) {
+                            var dist = Number(ent.getDistance(cx, cy, cz));
+                            if (isFinite(dist) && dist > r) continue;
+                            distSq = dist * dist;
+                        }
+                        callback(ent, distSq, pos);
+                        count++;
+                    } catch (eEnt) {
+                        baseLogger.catchWarn('forEachEntityNear:entity', eEnt);
                     }
-                    count++;
-                    callback(ent, distSq, pos);
                 }
                 return count;
-            } catch (eBox) { }
+            }
         }
-        return forEachPlayerNear(level, cx, cy, cz, r, function (p, distSq, pos) {
-            if (typeof filterFn === 'function' && !filterFn(p)) return;
-            count++;
-            callback(p, distSq, pos);
+        forEachPlayerNear(level, cx, cy, cz, r, function (p, distSq, pos) {
+            try {
+                if (typeof filterFn === 'function' && !filterFn(p)) return;
+                callback(p, distSq, pos);
+                count++;
+            } catch (ePl) {
+                baseLogger.catchWarn('forEachEntityNear:player', ePl);
+            }
         });
+        return count;
     }
 
     var JSON_LEGACY_COLOR_MAP = {
@@ -1046,10 +1061,11 @@
     }
 
     function resolveGameDir() {
-        if (KUBEJS_PATHS_CLASS != null) {
+        var kjsPathsObj = KUBEJS_PATHS_CLASS != null ? KUBEJS_PATHS_CLASS : (typeof KubeJSPaths !== 'undefined' ? KubeJSPaths : null);
+        if (kjsPathsObj != null) {
             var directCandidates = [
-                safeReadProp(KUBEJS_PATHS_CLASS, 'GAMEDIR'),
-                safeReadProp(KUBEJS_PATHS_CLASS, 'INSTANCE')
+                safeReadProp(kjsPathsObj, 'GAMEDIR'),
+                safeReadProp(kjsPathsObj, 'INSTANCE')
             ];
             for (var i = 0; i < directCandidates.length; i++) {
                 var c = directCandidates[i];
@@ -1062,7 +1078,7 @@
                     } catch (eC) { }
                 }
             }
-            var kjsDir = safeReadProp(KUBEJS_PATHS_CLASS, 'DIRECTORY');
+            var kjsDir = safeReadProp(kjsPathsObj, 'DIRECTORY');
             if (kjsDir != null) {
                 try {
                     var dirStr = normalizeSlashPath(typeof kjsDir.toAbsolutePath === 'function' ? kjsDir.toAbsolutePath().normalize() : kjsDir);
@@ -1541,11 +1557,7 @@
     }
 
     function canWritePersistentFiles() {
-        if (JAVA_FILES_CLASS != null || JAVA_FILE_CLASS != null) return true;
-        if (typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.write === 'function') {
-            return Boolean(epiphyDataRootOverride != null || /^(?:[a-zA-Z]:[\\/]|\/)/.test(resolveGameDir()));
-        }
-        return false;
+        return Boolean(JAVA_FILES_CLASS != null || JAVA_FILE_CLASS != null || (typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.write === 'function'));
     }
 
     function writeJsonAtomic(filePath, obj, keepBackup, logger) {
@@ -2037,8 +2049,9 @@
             includeDebug:  false
         };
         var loaded = readJsonSafe(cfgPath, baseLogger);
+        var hasResolvedDir = Boolean(JAVA_FILES_CLASS != null || JAVA_FILE_CLASS != null || epiphyDataRootOverride != null || /^(?:[a-zA-Z]:[\\/]|\/)/.test(resolveGameDir()));
         if (loaded == null || !isObjectLike(loaded)) {
-            if (canWritePersistentFiles()) {
+            if (canWritePersistentFiles() && hasResolvedDir) {
                 writeJsonAtomic(cfgPath, defaultCfg, true, baseLogger);
             }
             loaded = defaultCfg;

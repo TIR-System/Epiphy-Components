@@ -1,3 +1,4 @@
+// priority: 10
 // ============================================================================
 //  拆解台 · 混沌殉爆 v18（3 分钟五阶段方块演进 & 终望珍珠吞噬停机 & 防破坏保护版）
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
@@ -467,7 +468,10 @@
                 })
             }
             var payload = { version: 2, jobs: records }
-            BASE.writeJsonAtomic(info.filePath, payload, true, LOGGER)
+            var okDisk = BASE.writeJsonAtomic(info.filePath, payload, true, LOGGER)
+            if (!okDisk) {
+                LOGGER.warn('saveUnstableJobs', '外部 JSON 落盘失败，暂依赖 persistentData 持久化: ' + info.filePath)
+            }
             if (SERVER.persistentData != null && typeof SERVER.persistentData.putString === 'function') {
                 SERVER.persistentData.putString(UNSTABLE_PDATA_KEY, JSON.stringify(payload))
             }
@@ -748,7 +752,7 @@
                 }
             } catch (eStop) { }
         }
-        var server = SERVER || level?.server
+        var server = SERVER || (level != null ? level.server : null)
         if (server == null || !isAllowedDim(dim)) return
         var limit = maxDist != null ? maxDist : SOUND_RANGE
         var prefix = `execute in ${dim} positioned ${x} ${y} ${z} run stopsound @a[distance=..${limit}] * `
@@ -1573,14 +1577,14 @@
     }
 
     function sendDanmakuNear(level, x, y, z, radius, opts) {
-        opts = opts || {}
-        if (!opts.namespace) opts.namespace = DANMAKU_NAMESPACE
-        if (!opts.group) opts.group = DANMAKU_GROUP
+        var pktOpts = Object.assign({}, opts || {})
+        if (!pktOpts.namespace) pktOpts.namespace = DANMAKU_NAMESPACE
+        if (!pktOpts.group) pktOpts.group = DANMAKU_GROUP
         // 全局防线：若显式传入的坐标意外落入 HUD 禁区（小地图/底部快捷栏），自动移至安全区
-        if (Array.isArray(opts.pos) && opts.pos.length >= 2 && isInHudForbiddenZone(opts.pos[0], opts.pos[1])) {
-            opts.pos = [opts.pos[0], 0.43 + Math.random() * 0.35]
+        if (Array.isArray(pktOpts.pos) && pktOpts.pos.length >= 2 && isInHudForbiddenZone(pktOpts.pos[0], pktOpts.pos[1])) {
+            pktOpts.pos = [pktOpts.pos[0], 0.43 + Math.random() * 0.35]
         }
-        DANMAKU.inDimension(level, x, y, z, radius, opts)
+        DANMAKU.inDimension(level, x, y, z, radius, pktOpts)
     }
 
     function deactivateTelemetryNear(level, x, y, z, radius, slotId, fadeOutTicks) {

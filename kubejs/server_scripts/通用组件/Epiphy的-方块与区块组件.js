@@ -1,6 +1,6 @@
 // priority: 1050
 // ============================================================================
-//  通用方块追踪与区块地形批处理组件 (EpiphyBlockTracker / EpiphyChunkEngine v2.3)
+//  通用方块追踪与区块地形批处理组件 (EpiphyBlockTracker / EpiphyChunkEngine v2.4)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 <repo-root> 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
@@ -9,7 +9,7 @@
 //  职责说明：
 //    1. 维护全服唯一的物理方块追踪表与 16x16x16 LevelChunkSection 渐进式扫描队列；
 //       同一物理方块可同时被同系列多个业务订阅者（如 danmaku、audio、uncrafting）订阅，只扫一遍、只存一份；
-//    2. 统一持久化至按存档隔离的 JsonIO 文件（kubejs_epiphy_tracked_blocks.json + 防抖落盘 + .bak 自愈 + persistentData 双写）；
+//    2. 统一持久化至按存档隔离的 JSON 文件（优先 Java NIO .tmp + .bak 原子写，ClassFilter 下回退 JsonIO + persistentData 双写）；
 //    3. 提供 migrateLegacyOnce(sourceSpec, blockId) 供业务侧声明旧存档数据一次性迁移，底座本身零业务耦合；
 //    4. 集成【三级开销门控与统一帧时间预算】的区块地形批处理服务（`EpiphyWorldOps` / `EpiphyBlockTracker`）：
 //       - 静态零开销休眠 + 反射句柄 Lazy Init（未提交重型地形任务时零内存与 CPU 开销）；
