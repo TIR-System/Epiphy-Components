@@ -1,11 +1,11 @@
 // ============================================================================
-//  通用空间音频与流式声场组件 —— 客户端播放引擎 (EpiphyAudioClient v5.5, ES6)
+//  通用空间音频与流式声场组件 —— 客户端播放引擎 (EpiphyAudioClient v5.6, ES6)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 <repo-root> 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-音频播放器.js
 //  配套服务端组件：
-//    - kubejs/server_scripts/通用组件/Epiphy的-音频组件.js（服务端调度器 EpiphyAudio v5.5）
+//    - kubejs/server_scripts/通用组件/Epiphy的-音频组件.js（服务端调度器 EpiphyAudio v5.6）
 //    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀）
 
 //  依赖与缺失降级：
@@ -32,7 +32,7 @@
     }
     var CHANNEL       = (PROTO && PROTO.AUDIO_CHANNEL) || 'epiphy:audio'
     var PROTO_VERSION = (PROTO && PROTO.AUDIO_PROTO_VERSION) || 5
-    var VERSION       = (PROTO && PROTO.AUDIO_SEMVER) || '5.5.0'
+    var VERSION       = (PROTO && PROTO.AUDIO_SEMVER) || '5.6.0'
 
     var CONFIG = {
         sweepIntervalTicks:     10,   // 慢速巡检周期（负责死链清理、异常断流重连、超时判定）
@@ -997,51 +997,123 @@
         }
     }
 
+    var extractNamespaceFromLocation = (loc) => {
+        if (loc == null) return null
+        try {
+            if (typeof loc.getNamespace === 'function') {
+                var nsG = String(loc.getNamespace() || '')
+                if (nsG) return nsG
+            }
+        } catch (eGn) { }
+        try {
+            if (loc.namespace != null && typeof loc.namespace !== 'function') {
+                var nsP = String(loc.namespace || '')
+                if (nsP) return nsP
+            }
+        } catch (ePn) { }
+        var s = String(loc)
+        var cIdx = s.indexOf(':')
+        if (cIdx > 0) return s.substring(0, cIdx)
+        if (cIdx === 0) return 'minecraft'
+        return null
+    }
+
+    var instLocCacheByClass = new Map()
+
+    var resolveSoundInstanceLocation = (inst) => {
+        if (inst == null) return null
+        try {
+            if (typeof inst.getLocation === 'function') return inst.getLocation()
+        } catch (eGl) { }
+        try {
+            if (inst.location != null && typeof inst.location !== 'function') return inst.location
+        } catch (ePl) { }
+        // Forge SRG/纯反射兜底：按实例类缓存 ResourceLocation 字段或零参 getter，不依赖硬编码 SRG 混淆号
+        try {
+            if (typeof inst.getClass === 'function') {
+                var cls = inst.getClass()
+                var accessor = instLocCacheByClass.get(cls)
+                if (accessor === undefined) {
+                    accessor = null
+                    var walkCls = cls
+                    while (walkCls != null && accessor == null) {
+                        try {
+                            var methods = walkCls.getDeclaredMethods()
+                            for (var mi = 0; mi < methods.length; mi++) {
+                                var m = methods[mi]
+                                if (m.getParameterCount() === 0 &&
+                                    (ResourceLocation != null ? ResourceLocation.equals(m.getReturnType()) : String(m.getReturnType().getName()) === 'net.minecraft.resources.ResourceLocation')) {
+                                    m.setAccessible(true)
+                                    accessor = { kind: 'method', member: m }
+                                    break
+                                }
+                            }
+                        } catch (eMScan) { }
+                        if (accessor == null) {
+                            try {
+                                var fields = walkCls.getDeclaredFields()
+                                for (var fi = 0; fi < fields.length; fi++) {
+                                    var f = fields[fi]
+                                    if (ResourceLocation != null ? ResourceLocation.equals(f.getType()) : String(f.getType().getName()) === 'net.minecraft.resources.ResourceLocation') {
+                                        f.setAccessible(true)
+                                        accessor = { kind: 'field', member: f }
+                                        break
+                                    }
+                                }
+                            } catch (eFScan) { }
+                        }
+                        walkCls = walkCls.getSuperclass()
+                    }
+                    instLocCacheByClass.set(cls, accessor)
+                }
+                if (accessor != null) {
+                    return accessor.kind === 'method' ? accessor.member.invoke(inst) : accessor.member.get(inst)
+                }
+            }
+        } catch (eRefl) { }
+        return null
+    }
+
     var restoreDuckedVanillaMusic = () => {
         if (duckedMusicInsts.size === 0) return
         var sm = getSoundManager()
         var se = sm != null ? getSoundEngine(sm) : null
         var chanMap = se != null ? readJavaField(se, ['instanceToChannel', 'f_120226_'], fieldCacheChannelMap) : null
-        if (chanMap != null && typeof chanMap.get === 'function') {
-            for (var dInst of duckedMusicInsts) {
-                try {
-                    var chHandle = chanMap.get(dInst)
-                    if (chHandle != null && typeof chHandle.execute === 'function') {
-                        chHandle.execute((ch) => {
-                            if (ch == null) return
-                            var stopFn    = probeMethodName(ch, ['stopped', 'm_83680_'], CHANNEL_OPS, 'stopFn')
-                            var unpauseFn = probeMethodName(ch, ['unpause', 'm_83678_'], CHANNEL_OPS, 'unpauseFn')
-                            if ((stopFn == null || !ch[stopFn]()) && unpauseFn != null) {
-                                ch[unpauseFn]()
-                            }
-                        })
-                    }
-                } catch (eUnpause) {
-                    logErrorThrottled('duckMusic unpause error', eUnpause)
+        // 当 SoundManager/SoundEngine/instanceToChannel 暂不可用时保留追踪集合，待后续 tick 就绪后立即恢复，防止已暂停音轨永久失联静音
+        if (chanMap == null || typeof chanMap.get !== 'function') return
+        for (var dInst of Array.from(duckedMusicInsts)) {
+            var restoredOrGone = false
+            try {
+                var chHandle = chanMap.get(dInst)
+                if (chHandle == null) {
+                    restoredOrGone = true
+                } else if (typeof chHandle.execute === 'function') {
+                    chHandle.execute((ch) => {
+                        if (ch == null) return
+                        var stopFn    = probeMethodName(ch, ['stopped', 'm_83680_'], CHANNEL_OPS, 'stopFn')
+                        var unpauseFn = probeMethodName(ch, ['unpause', 'm_83678_'], CHANNEL_OPS, 'unpauseFn')
+                        if ((stopFn == null || !ch[stopFn]()) && unpauseFn != null) {
+                            ch[unpauseFn]()
+                        }
+                    })
+                    restoredOrGone = true
                 }
+            } catch (eUnpause) {
+                logErrorThrottled('duckMusic unpause error', eUnpause)
+            }
+            if (restoredOrGone) {
+                duckedMusicInsts.delete(dInst)
             }
         }
-        duckedMusicInsts.clear()
     }
 
-    // 当存在开启了 duckMusic 的自定义 BGM 正在可听范围内播放时，温和暂停原版/第三方 MUSIC 频道（停播后自动恢复）
+    // 当存在开启了 duckMusic 的自定义 BGM 正在可听范围内播放时，仅温和暂停 minecraft: 原版 MUSIC 频道（停播后自动恢复，不暂停也不误杀其他模组 BGM）
     var tickVanillaMusicDucking = (hasAudibleDuckingBgm) => {
         if (!hasAudibleDuckingBgm) {
             restoreDuckedVanillaMusic()
             return
         }
         if ((clientTicks % CONFIG.musicDuckIntervalTicks) !== 0) return
-        var m = getMc()
-        if (m != null) {
-            try {
-                var mm = probeMember(m, ['getMusicManager', 'm_91107_'], ['musicManager', 'f_91043_'], MC_MM_CAP)
-                if (mm != null && typeof mm.stopPlaying === 'function') {
-                    mm.stopPlaying()
-                }
-            } catch (e) {
-                logErrorThrottled('duckMusic stopPlaying error', e)
-            }
-        }
         if (SoundSource != null && SoundSource.MUSIC != null) {
             var sm = getSoundManager()
             var se = sm != null ? getSoundEngine(sm) : null
@@ -1063,6 +1135,12 @@
                         if (srcCat == null || (srcCat !== SoundSource.MUSIC && String(srcCat) !== String(SoundSource.MUSIC))) {
                             continue
                         }
+                        // 按音频资源位置命名空间严格过滤：仅暂停原版 'minecraft' 音乐，彻底放行其他模组 BGM
+                        var instLoc = resolveSoundInstanceLocation(inst)
+                        var instNs  = extractNamespaceFromLocation(instLoc)
+                        if (instNs != null && instNs !== 'minecraft') {
+                            continue
+                        }
                         if (!duckedMusicInsts.has(inst) && typeof chHandle.execute === 'function') {
                             chHandle.execute((ch) => {
                                 if (ch == null) return
@@ -1077,6 +1155,20 @@
                     }
                 } catch (e) {
                     logErrorThrottled('duckMusic pauseSource error', e)
+                }
+            }
+        }
+        // 仅当未持有已暂停原版音轨时推迟原版 MusicManager 下一首计时，防止 stopPlaying 意外销毁刚暂停的原版音乐
+        if (duckedMusicInsts.size === 0) {
+            var m = getMc()
+            if (m != null) {
+                try {
+                    var mm = probeMember(m, ['getMusicManager', 'm_91107_'], ['musicManager', 'f_91043_'], MC_MM_CAP)
+                    if (mm != null && typeof mm.stopPlaying === 'function') {
+                        mm.stopPlaying()
+                    }
+                } catch (e) {
+                    logErrorThrottled('duckMusic stopPlaying error', e)
                 }
             }
         }
@@ -1518,6 +1610,7 @@
 
     var resetClientState = () => {
         clearAllNow()
+        duckedMusicInsts.clear()
         attCache.clear()
         missingSoundUntil.clear()
         pendingActions.length = 0

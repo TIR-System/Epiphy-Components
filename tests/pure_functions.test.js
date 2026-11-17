@@ -3851,6 +3851,7 @@ test('P1 regressions (audio client & server): ducking pause/restore, 3D Channel 
     var stopCalls = []
     var musicPaused = 0
     var musicUnpaused = 0
+    var modMusicPaused = 0
     var movedPositions = []
     var musicCh = {
         m_83666_: function () {},
@@ -3858,9 +3859,28 @@ test('P1 regressions (audio client & server): ducking pause/restore, 3D Channel 
         m_83678_: function () { musicUnpaused++ },
         m_83680_: function () { return false }
     }
-    var musicInst = { source: 'MUSIC', getSource: function () { return 'MUSIC' }, isStopped: function () { return false } }
+    var musicInst = {
+        source: 'MUSIC',
+        getSource: function () { return 'MUSIC' },
+        getLocation: function () { return 'minecraft:music.overworld.meadow' },
+        isStopped: function () { return false }
+    }
+    var modMusicCh = {
+        m_83666_: function () {},
+        m_83677_: function () { modMusicPaused++ },
+        m_83678_: function () {},
+        m_83680_: function () { return false }
+    }
+    var modMusicInst = {
+        source: 'MUSIC',
+        getSource: function () { return 'MUSIC' },
+        getLocation: function () { return 'bosses_of_mass_destruction:lich_theme' },
+        isStopped: function () { return false }
+    }
     activeSet.add(musicInst)
+    activeSet.add(modMusicInst)
     chanMap.set(musicInst, { execute: function (fn) { fn(musicCh) } })
+    chanMap.set(modMusicInst, { execute: function (fn) { fn(modMusicCh) } })
     // Simulate Java java.util.Map.entrySet().iterator() on chanMap
     chanMap.entrySet = function () {
         var arr = []
@@ -3942,8 +3962,9 @@ test('P1 regressions (audio client & server): ducking pause/restore, 3D Channel 
         data: { proto: 5, act: 'play', ses: 1, h: 10, snd: 'test:duck', cat: 'RECORDS', vol: 1.0, pit: 1.0, loop: 1, mode: 'smooth', duck: 1, anc: 'pos', x: 1, y: 64, z: 2, rng: 32 }
     })
     for (var dt = 0; dt < 12; dt++) tickHandlers[0]({})
-    assert.ok(musicPaused >= 1, 'duckMusic must pause external MUSIC channel')
-    assert.strictEqual(stopCalls.some(function (x) { return x === null || x === musicInst }), false, 'duckMusic must NOT call sm.stop on external MUSIC')
+    assert.ok(musicPaused >= 1, 'duckMusic must pause vanilla minecraft: MUSIC channel')
+    assert.strictEqual(modMusicPaused, 0, 'duckMusic must NOT pause third-party mod BGM (non-minecraft namespace)')
+    assert.strictEqual(stopCalls.some(function (x) { return x === null || x === musicInst || x === modMusicInst }), false, 'duckMusic must NOT call sm.stop on external MUSIC')
 
     // P1-14: Position update syncs Channel.setSelfPosition(Vec3) and instance coords
     netHandlers['epiphy:audio']({
@@ -3958,11 +3979,17 @@ test('P1 regressions (audio client & server): ducking pause/restore, 3D Channel 
     assert.ok(acPausedCount >= 1, 'category mute (mul=0) must pause channel instead of killing stream')
     assert.strictEqual(acPlayCount, 1, 'mul=0 mute must NOT cause stop->reconnect loop')
 
-    // Stop ducking handle -> external vanilla MUSIC is unpaused via m_83678_
+    // Stop ducking handle while chanMap is temporarily unavailable (e.g. SoundEngine reload):
+    // must NOT drop duckedMusicInsts tracking, and must unpause cleanly as soon as chanMap recovers!
     catVol.RECORDS = 1.0
+    var savedSeObj = soundManager.f_120349_
+    soundManager.f_120349_ = { f_120226_: null, f_120231_: [] }
     netHandlers['epiphy:audio']({ data: { proto: 5, act: 'stop', ses: 1, h: 10, fout: 0 } })
     tickHandlers[0]({})
-    assert.ok(musicUnpaused >= 1, 'ending ducking must unpause ducked external MUSIC')
+    assert.strictEqual(musicUnpaused, 0, 'cannot unpause while chanMap is null')
+    soundManager.f_120349_ = savedSeObj
+    tickHandlers[0]({})
+    assert.ok(musicUnpaused >= 1, 'ending ducking must retain duckedMusicInsts across transient chanMap==null and unpause once chanMap recovers')
 
     // --- Part B: Audio server (P1-7..P1-12, P1-16..P1-17) ---
     var svTick = []
@@ -6182,11 +6209,31 @@ test('P2 fixes: grapheme ZWJ/flags/Extend, FIFO glyph eviction, rotated batched 
     }
     assert.ok(v18Pkts.length >= 1, 'v18 sends fallback danmaku packet when ScreenDanmaku absent')
     assert.strictEqual(v18Pkts[0].proto, 5, 'v18 fallbackPkt must include proto:5')
+    assert.strictEqual(v18Pkts[0].namespace, 'uncrafting_chaos', 'v18 fallbackPkt must include uncrafting_chaos namespace')
+    assert.strictEqual(v18Pkts[0].tier, 'system', 'v18 fallbackPkt must carry tier:system')
     Cli.clear('*')
     paints[0](ev)
+    Cli.push({ id: 'keep_other_ns', namespace: 'other_mod', group: 'banner', title: 'PROTECTED_BANNER', stay: 500 })
     var beforeCnt = Cli.count()
     netHandlers['epiphy:screen_danmaku']({ data: v18Pkts[0] })
     assert.strictEqual(Cli.count(), beforeCnt + 1, 'ScreenDanmakuClient accepts v18 fallbackPkt through fail-closed dataReceived')
+    // Place stage 5 near v18Player (10,64,0) and advance to climax -> clearDanmakuNear fallback must only clear uncrafting_chaos namespace, NEVER other_mod!
+    v18Placed['epiphy:ultra_uncrafting_instability_5']({
+        level: v18Lv,
+        block: { id: 'epiphy:ultra_uncrafting_instability_5', x: 10, y: 64, z: 0 },
+        player: v18Player,
+        cancel: function () {}
+    })
+    v18Pkts.length = 0
+    for (var vt2 = 0; vt2 < 730; vt2++) {
+        for (var ti2 = 0; ti2 < v18Ticks.length; ti2++) v18Ticks[ti2]({ server: v18Srv })
+    }
+    var clearPkts = v18Pkts.filter(function (pk) { return pk && pk.action === 'clear' })
+    assert.ok(clearPkts.length >= 1, 'v18 emits clear packet on meltdown climax')
+    assert.strictEqual(clearPkts[0].namespace, 'uncrafting_chaos', 'v18 fallback clear packet MUST carry namespace:uncrafting_chaos')
+    netHandlers['epiphy:screen_danmaku']({ data: clearPkts[0] })
+    paints[0](ev)
+    assert.ok(Cli.list().some(function (ov) { return ov.namespace === 'other_mod' }), 'v18 fallback clear packet must NOT globally wipe other_mod danmaku')
 })
 
 test('hidden items: epiphy:chaos_crystal avoids createCompositeState(boolean) EnumTypeWrapper trap across Mojmap, no-AT, and SRG modes', function () {

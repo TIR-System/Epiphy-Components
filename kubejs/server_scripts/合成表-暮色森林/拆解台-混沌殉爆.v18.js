@@ -193,26 +193,21 @@
     // 爆炸后文案推进倍率：实测方块消失比进度条快，这里让文案按 3 倍速推进以便跟上实际观感
     var DE_PROGRESS_MULTIPLIER = 3
 
-    // 液体清除（原生 LevelChunkSection 调色板级极速剥离 + 活跃流体区段热点缓存复扫）：
-    //   1. 首轮扫描遍历球体内的 16×16 区块列，利用 section.hasOnlyAir() 与 section.maybeHas(FLUID_PREDICATE)
-    //      直接 O(1) 跳过 90% 以上不含流体的纯岩石/空气区段；
-    //   2. 首轮扫描同时记录「真正含有流体或位于边界层」的热点区段（hotSections）；
-    //   3. 后续复扫仅遍历 hotSections（数量仅为全量的几十分之一），每 tick 保证推进固定最小列数 + 时间预算双保险，
-    //      确保清理速度永远领先于 DE 爆炸波前，且后续复扫耗时 < 0.2ms。
+    // 液体清除与外圈岩浆环（全权委托 EpiphyWorldOps 统一 8ms/tick 帧预算与每 tick 列数限流驱动）：
+    //   1. 首轮扫描遍历柱/球域内的 16×16 区块列，利用 section.hasOnlyAir() 与调色板谓词跳过 90% 以上无流体岩石/空气区段；
+    //   2. 上部柱体 + 下部半球结合外沿 1~1.5 格 flag=3 邻接唤醒，截断海平面回灌水幕同时保护深层地下水体；
+    //   3. 增量复扫携带 excludeLava 过滤并在 DE_LIFETIME + 7 后浇筑闭合岩浆环，均受 EpiphyWorldOps.CONFIG.worldOpsTickBudgetMs (8ms) 与 ringBlocksPerTick (240) 约束。
     var LIQUID_PURGE_ENABLED    = true
     var LIQUID_PURGE_PADDING    = 14    // 在爆炸半径之外额外多清 14 格，截断外围海洋/湖泊向坑内回流
-    var LIQUID_SYNC_INIT_RADIUS = 96    // 爆炸 T+0 瞬间同步抽干的核心半径（格）
-    var LIQUID_SYNC_MAX_MS      = 25    // T+0 同步抽干的时间预算（毫秒）
-    var LIQUID_TICK_MAX_MS      = 8     // 全队列每 tick 允许推进的总时间预算上限（毫秒，严格受控防海洋地形尖峰卡顿）
-    var LIQUID_MAX_COLS_TICK    = 160   // 单 tick 纯干区段快速跳过的最大区块列数上限
+    var LIQUID_SYNC_INIT_RADIUS = 32    // 爆炸 T+0 瞬间同步抽干的核心半径上限（格，受 4ms 硬上限保护防初始化尖峰）
+    var LIQUID_SYNC_MAX_MS      = 4     // T+0 同步预扫的时间预算硬上限（毫秒）
     var LIQUID_PURGE_LOOPS      = 5     // 热点流体区段复扫轮数（防止外围水顺着坑壁回灌）
     var LIQUID_UNLOADED_TTL     = 600   // 未加载区块挂起等待加载的最大存活时长（600 tick = 30 秒，覆盖整个湮灭周期）
 
-    // 最外圈岩浆圈层（爆炸到达最大半径后在最外壳层浇筑一圈岩浆）
-    var MAGMA_RING_ENABLED     = true
-    var MAGMA_RING_THICKNESS   = 3    // 圈层厚度（格）
-    var MAGMA_RING_WIDTH       = 2    // 圈层径向宽度（格）
-    var MAGMA_RING_BATCH       = 1200 // 每 tick 最多浇筑的列数（分帧）
+    // 最外圈岩浆圈层（爆炸到达最大半径后在最外壳层交由 EpiphyWorldOps 分帧浇筑一圈岩浆，每 tick 列数与 8ms 时间预算由 EpiphyWorldOps 统一约束）
+    var MAGMA_RING_ENABLED      = true
+    var MAGMA_RING_THICKNESS    = 3     // 圈层厚度（格）
+    var MAGMA_RING_WIDTH        = 2     // 圈层径向宽度（格）
 
     // 终望珍珠与黑洞实体 ID
     var ENDEST_PEARL_ITEM   = 'avaritia:endest_pearl'
@@ -1896,6 +1891,47 @@
         return Number((sign * (8.0 + Math.random() * 26.0)).toFixed(1))
     }
 
+    var FALLBACK_DANMAKU_LIMITS = {
+        maxTitleLen:     160,
+        maxSubLen:       260,
+        maxCursorLen:    8,
+        maxScale:        2.5,
+        maxCharMs:       250,
+        maxStayTicks:    1200,
+        maxFadeOutTicks: 200
+    }
+
+    function truncateSafeText(s, maxLen) {
+        var str = (s == null) ? '' : String(s)
+        if (str.length <= maxLen) return str
+        var cut = str.substring(0, maxLen)
+        if (cut.length > 0) {
+            var lc = cut.charCodeAt(cut.length - 1)
+            if ((lc >= 0xD800 && lc <= 0xDBFF) || lc === 167) {
+                cut = cut.substring(0, cut.length - 1)
+            }
+        }
+        return cut
+    }
+
+    function clampFallbackNum(val, lo, hi, defVal) {
+        var n = Number(val)
+        if (!isFinite(n)) return defVal
+        return n < lo ? lo : (n > hi ? hi : n)
+    }
+
+    function resolveFallbackDanmakuProto() {
+        if (typeof global !== 'undefined' && global != null) {
+            if (global.EpiphyProtocol != null && global.EpiphyProtocol.DANMAKU_PROTO_VERSION != null) {
+                return Number(global.EpiphyProtocol.DANMAKU_PROTO_VERSION)
+            }
+            if (global.EpiphySpec != null && global.EpiphySpec.PROTOCOL != null && global.EpiphySpec.PROTOCOL.DANMAKU_PROTO_VERSION != null) {
+                return Number(global.EpiphySpec.PROTOCOL.DANMAKU_PROTO_VERSION)
+            }
+        }
+        return 5
+    }
+
     function sendDanmakuNear(level, x, y, z, radius, opts) {
         opts = opts || {}
         if (!opts.namespace) opts.namespace = DANMAKU_NAMESPACE
@@ -1908,29 +1944,75 @@
             global.ScreenDanmaku.inDimension(level, x, y, z, radius, opts)
             return
         }
-        // 兼容兜底：若 ScreenDanmaku 尚未加载，转换基础字段并附带 proto 版本号，避免被客户端 fail-closed 拒收
-        var protoVer = (typeof global !== 'undefined' && global.EpiphyProtocol != null && global.EpiphyProtocol.DANMAKU_PROTO_VERSION != null)
-            ? Number(global.EpiphyProtocol.DANMAKU_PROTO_VERSION)
-            : 5
-        var fallbackPkt = {
-            proto:    protoVer,
-            action:   opts.action || 'push',
-            group:    opts.group,
-            title:    String(opts.text || opts.title || ''),
-            sub:      String(opts.sub || ''),
-            rx:       Array.isArray(opts.pos) ? opts.pos[0] : 0.5,
-            ry:       Array.isArray(opts.pos) ? opts.pos[1] : 0.35,
-            stay:     Number(opts.duration || opts.stay || 65),
-            fadeOut:  Number(opts.fadeOut || 10)
+        // 兼容兜底：若 ScreenDanmaku 尚未加载，严格对齐服务端包契约（始终携带 namespace、tier='system'、proto 协商与 SYSTEM_PACKET_LIMITS 裁剪），
+        // 确保 clear/deactivate 绝对隔离在 uncrafting 命名空间内且不引发全局清屏或超长文本越界
+        var protoVer   = resolveFallbackDanmakuProto()
+        var channelId  = (typeof global !== 'undefined' && global.EpiphyProtocol != null && global.EpiphyProtocol.DANMAKU_CHANNEL)
+            ? String(global.EpiphyProtocol.DANMAKU_CHANNEL)
+            : 'epiphy:screen_danmaku'
+        var act        = String(opts.action || 'push')
+        var nsStr      = String(opts.namespace || DANMAKU_NAMESPACE)
+        var grpStr     = String(opts.group || DANMAKU_GROUP)
+        var fallbackPkt
+
+        if (act === 'clear' || act === 'deactivate' || act === 'stop') {
+            fallbackPkt = {
+                proto:       protoVer,
+                action:      act,
+                namespace:   nsStr,
+                tier:        'system',
+                group:       grpStr,
+                maxPriority: opts.maxPriority != null ? Number(opts.maxPriority) : 10
+            }
+            if (opts.id != null || opts.slotId != null) {
+                fallbackPkt.slotId = String(opts.slotId != null ? opts.slotId : opts.id)
+            }
+            if (opts.fadeOut != null) {
+                fallbackPkt.fadeOut = clampFallbackNum(opts.fadeOut, 1, FALLBACK_DANMAKU_LIMITS.maxFadeOutTicks, 16)
+            }
+        } else {
+            var lifeMode = (opts.lifeMode === 'active') ? 'active' : 'once'
+            var stayVal  = clampFallbackNum(opts.duration != null ? opts.duration : (opts.stay != null ? opts.stay : (lifeMode === 'active' ? 28 : 65)), 4, FALLBACK_DANMAKU_LIMITS.maxStayTicks, 65)
+            fallbackPkt = {
+                proto:     protoVer,
+                action:    act,
+                namespace: nsStr,
+                tier:      'system',
+                group:     grpStr,
+                lifeMode:  lifeMode,
+                title:     truncateSafeText(opts.text != null ? opts.text : (opts.title || ''), FALLBACK_DANMAKU_LIMITS.maxTitleLen),
+                sub:       truncateSafeText(opts.sub || '', FALLBACK_DANMAKU_LIMITS.maxSubLen),
+                rx:        clampFallbackNum(Array.isArray(opts.pos) ? opts.pos[0] : 0.5, 0.0, 1.0, 0.5),
+                ry:        clampFallbackNum(Array.isArray(opts.pos) ? opts.pos[1] : 0.35, 0.0, 1.0, 0.35),
+                stay:      stayVal,
+                fadeOut:   clampFallbackNum(opts.fadeOut != null ? opts.fadeOut : 10, 1, FALLBACK_DANMAKU_LIMITS.maxFadeOutTicks, 10)
+            }
+            if (opts.id != null || opts.slotId != null) {
+                fallbackPkt.slotId = String(opts.slotId != null ? opts.slotId : opts.id)
+            }
+            if (lifeMode === 'active') {
+                fallbackPkt.activeHold = clampFallbackNum(opts.activeHold != null ? opts.activeHold : stayVal, 4, FALLBACK_DANMAKU_LIMITS.maxStayTicks, stayVal)
+            }
+            if (typeof opts.priority === 'number' && isFinite(opts.priority)) {
+                fallbackPkt.priority = opts.priority
+            }
+            if (typeof opts.color === 'number' && isFinite(opts.color)) fallbackPkt.color = opts.color
+            if (typeof opts.subColor === 'number' && isFinite(opts.subColor)) fallbackPkt.subColor = opts.subColor
+            if (opts.scale != null || opts.size != null) {
+                var rawSc = opts.scale != null ? opts.scale : opts.size
+                if (typeof rawSc === 'number' && isFinite(rawSc)) {
+                    fallbackPkt.scale = clampFallbackNum(rawSc, 0.2, FALLBACK_DANMAKU_LIMITS.maxScale, 1.0)
+                }
+            }
+            if (opts.typewriter != null) fallbackPkt.typewriter = Boolean(opts.typewriter)
+            if (opts.charMs != null) fallbackPkt.charMs = clampFallbackNum(opts.charMs, 8, FALLBACK_DANMAKU_LIMITS.maxCharMs, 30)
+            if (opts.cursor != null) fallbackPkt.cursor = truncateSafeText(String(opts.cursor).replace(/[\r\n]/g, ''), FALLBACK_DANMAKU_LIMITS.maxCursorLen)
+            if (typeof opts.shakeMode === 'string') fallbackPkt.shakeMode = opts.shakeMode
+            if (typeof opts.fadeStyle === 'string') fallbackPkt.fadeStyle = opts.fadeStyle
         }
-        if (typeof opts.color === 'number') fallbackPkt.color = opts.color
-        if (typeof opts.subColor === 'number') fallbackPkt.subColor = opts.subColor
-        if (typeof opts.scale === 'number') fallbackPkt.scale = opts.scale
-        if (typeof opts.shakeMode === 'string') fallbackPkt.shakeMode = opts.shakeMode
-        if (typeof opts.fadeStyle === 'string') fallbackPkt.fadeStyle = opts.fadeStyle
         forEachPlayerNear(level, x, y, z, radius, function (p) {
             try {
-                p.sendData('epiphy:screen_danmaku', fallbackPkt)
+                p.sendData(channelId, fallbackPkt)
             } catch (e) { }
         })
     }
@@ -1943,19 +2025,33 @@
                 id:        slotId || '',
                 fadeOut:   fadeOutTicks || 16
             })
+            return
         }
+        sendDanmakuNear(level, x, y, z, radius, {
+            action:    'deactivate',
+            namespace: DANMAKU_NAMESPACE,
+            group:     TELEMETRY_GROUP,
+            slotId:    slotId || '',
+            fadeOut:   fadeOutTicks || 16
+        })
     }
 
     function clearDanmakuNear(level, x, y, z, radius, maxPriority) {
+        var maxPri = maxPriority != null ? maxPriority : 10
         if (typeof global !== 'undefined' && global.ScreenDanmaku != null) {
             global.ScreenDanmaku.clearNear(level, x, y, z, radius, {
                 namespace:   DANMAKU_NAMESPACE,
                 group:       '*',
-                maxPriority: maxPriority != null ? maxPriority : 10
+                maxPriority: maxPri
             })
             return
         }
-        sendDanmakuNear(level, x, y, z, radius, { action: 'clear', group: '*' })
+        sendDanmakuNear(level, x, y, z, radius, {
+            action:      'clear',
+            namespace:   DANMAKU_NAMESPACE,
+            group:       '*',
+            maxPriority: maxPri
+        })
     }
 
     function triggerRapidFinalErrorStream(job, remainTicks) {
@@ -3246,7 +3342,7 @@
                 loops:          LIQUID_PURGE_LOOPS,
                 unloadedTtl:    LIQUID_UNLOADED_TTL,
                 syncInitRadius: 0,
-                syncMaxMs:      4,
+                syncMaxMs:      LIQUID_SYNC_MAX_MS,
                 excludeLava:    true
             })
             return
@@ -3257,14 +3353,14 @@
         if (!LIQUID_PURGE_ENABLED || level == null) return
         var w = resolveWorldOps()
         if (w != null && typeof w.startSphereFluidPurge === 'function') {
-            // 引爆当 tick 仅做极短同步核心预扫（syncMaxMs=4ms），将主开销平摊至后续分帧预算，避免与 ProcessChaosImplosion 初始化叠加产生尖峰
+            // 引爆当 tick 仅做极短同步核心预扫（syncInitRadius=32, syncMaxMs=4ms），将主开销平摊至 EpiphyWorldOps 分帧预算（8ms/tick）
             w.startSphereFluidPurge(level, dim, cx, cy, cz, radius, {
                 isRimOnlySweep: Boolean(isRimOnlySweep),
                 padding:        LIQUID_PURGE_PADDING,
                 loops:          LIQUID_PURGE_LOOPS,
                 unloadedTtl:    LIQUID_UNLOADED_TTL,
-                syncInitRadius: Math.min(32, LIQUID_SYNC_INIT_RADIUS),
-                syncMaxMs:      4,
+                syncInitRadius: LIQUID_SYNC_INIT_RADIUS,
+                syncMaxMs:      LIQUID_SYNC_MAX_MS,
                 onDone: function () {
                     sendChatNear(
                         level, dim, cx, cy, cz, FX_PACKET_RANGE + 120,
