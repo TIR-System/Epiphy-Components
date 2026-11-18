@@ -3,15 +3,15 @@
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 <repo-root> 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
-//  放置位置：kubejs/client_scripts/通用组件/Epiphy的-屏幕弹幕渲染器.js
+//  放置位置：kubejs/client_scripts/通用组件/Epiphy的-平面渲染器.js
 //  配套服务端组件：
-//    - kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js（服务端调度器 Epiphy2DSurface / ScreenDanmaku v6.0）
+//    - kubejs/server_scripts/通用组件/Epiphy的-平面渲染组件.js（服务端调度器 Epiphy2DSurface / ScreenDanmaku v6.0）
 //    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀 EpiphyPermissionValve v5.4）
 //
 //  依赖与缺失降级：
 //    - 可选前置：kubejs/startup_scripts/通用组件/Epiphy的-Spec与通用工具.js (EpiphySpec / EpiphyProtocol, priority: 1200)
-//      缺失时启动输出 console.warn 并降级至内置 v5 协议常量与精简数值/布尔工具；收包仍严格执行 fail-closed 版本校验。
-//    - 必需配套：kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js（缺失时客户端处于待命状态，无弹幕数据包驱动）
+//      缺失时启动输出 console.warn 并降级至内置 v6 协议常量与精简数值/布尔工具；收包仍严格执行 fail-closed 版本校验。
+//    - 必需配套：kubejs/server_scripts/通用组件/Epiphy的-平面渲染组件.js（缺失时客户端处于待命状态，无弹幕数据包驱动）
 //
 //  功能概述：
 //    1. 屏幕相对坐标 (rx, ry)、旋转角 (angle)、字号缩放 (scale)、RGB/HEX 颜色与阴影；

@@ -14,9 +14,9 @@ var TRACKER_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用�
 var VALVE_PATH     = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-权限阀.js')
 var DEBUG_PATH        = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-调试组件.js')
 var BUGFIX_PATH       = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-基础bug修复.js')
-var DANMAKU_PATH      = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-屏幕弹幕组件.js')
+var DANMAKU_PATH      = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-平面渲染组件.js')
 var AUDIO_PATH        = path.join(ROOT_DIR, 'kubejs', 'server_scripts', '通用组件', 'Epiphy的-音频组件.js')
-var RENDERER_PATH     = path.join(ROOT_DIR, 'kubejs', 'client_scripts', '通用组件', 'Epiphy的-屏幕弹幕渲染器.js')
+var RENDERER_PATH     = path.join(ROOT_DIR, 'kubejs', 'client_scripts', '通用组件', 'Epiphy的-平面渲染器.js')
 var AUDIO_CLIENT_PATH = path.join(ROOT_DIR, 'kubejs', 'client_scripts', '通用组件', 'Epiphy的-音频播放器.js')
 
 function createKubeSandbox(loadClassFn) {
@@ -651,7 +651,7 @@ test('debug hub: dynamic queue drain, multi-module metrics, checks, actions & ad
     runScriptIn(isoSandbox, TRACKER_PATH)
     runScriptIn(isoSandbox, VALVE_PATH)
     vm.runInContext(fs.readFileSync(DEBUG_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-调试组件.js' })
-    vm.runInContext(fs.readFileSync(DANMAKU_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-屏幕弹幕组件.js' })
+    vm.runInContext(fs.readFileSync(DANMAKU_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-平面渲染组件.js' })
     vm.runInContext(fs.readFileSync(AUDIO_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-音频组件.js' })
 
     assert.strictEqual(tickHandlers.length, 5, 'single-load order must not duplicate ServerEvents.tick handlers (TRACKER + DEBUG + 2*DANMAKU + AUDIO; fallback skipped)')
@@ -1073,7 +1073,7 @@ test('danmaku: onBindingChanged invalidates scope cache & first/latest/nearest/s
         if (cfg && cfg.name === 'danmaku') capturedDanmakuSub = sub
         return sub
     }
-    vm.runInContext(fs.readFileSync(DANMAKU_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-屏幕弹幕组件.js' })
+    vm.runInContext(fs.readFileSync(DANMAKU_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-平面渲染组件.js' })
 
     var Tracker = isoSandbox.global.EpiphyBlockTracker
     var Debug   = isoSandbox.global.EpiphyDebug
@@ -1180,7 +1180,7 @@ test('danmaku: merge cluster honors earliest leader, suppresses followers, expan
     loadServerBase(isoSandbox)
     runScriptIn(isoSandbox, TRACKER_PATH)
     vm.runInContext(fs.readFileSync(DEBUG_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-调试组件.js' })
-    vm.runInContext(fs.readFileSync(DANMAKU_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-屏幕弹幕组件.js' })
+    vm.runInContext(fs.readFileSync(DANMAKU_PATH, 'utf8'), isoSandbox, { filename: 'Epiphy的-平面渲染组件.js' })
 
     var Danmaku = isoSandbox.global.ScreenDanmaku
     var Debug   = isoSandbox.global.EpiphyDebug
@@ -1433,7 +1433,7 @@ test('renderer: batched glow (4-diag) and stroke (8+4) emit circular passes with
     cliSandbox.globalThis = cliSandbox
     vm.createContext(cliSandbox)
     loadStartupBase(cliSandbox)
-    vm.runInContext(fs.readFileSync(RENDERER_PATH, 'utf8'), cliSandbox, { filename: 'Epiphy的-屏幕弹幕渲染器.js' })
+    vm.runInContext(fs.readFileSync(RENDERER_PATH, 'utf8'), cliSandbox, { filename: 'Epiphy的-平面渲染器.js' })
 
     var Client = cliSandbox.global.ScreenDanmakuClient
     assert.ok(Client && typeof Client.push === 'function')
@@ -1554,7 +1554,7 @@ test('renderer: ChatScreen triggers GUI blocking for showInGui=false danmaku and
     cliSandbox.globalThis = cliSandbox
     vm.createContext(cliSandbox)
     loadStartupBase(cliSandbox)
-    vm.runInContext(fs.readFileSync(RENDERER_PATH, 'utf8'), cliSandbox, { filename: 'Epiphy的-屏幕弹幕渲染器.js' })
+    vm.runInContext(fs.readFileSync(RENDERER_PATH, 'utf8'), cliSandbox, { filename: 'Epiphy的-平面渲染器.js' })
 
     var Client = cliSandbox.global.ScreenDanmakuClient
     Client.push({ title: 'H', showInGui: false, typewriter: false, stay: 100 })
@@ -1815,7 +1815,7 @@ test('renderer: ModernUI TextLayout fast path caches layouts, skips PoseStack/gl
     cliSandbox.globalThis = cliSandbox
     vm.createContext(cliSandbox)
     loadStartupBase(cliSandbox)
-    vm.runInContext(fs.readFileSync(RENDERER_PATH, 'utf8'), cliSandbox, { filename: 'Epiphy的-屏幕弹幕渲染器.js' })
+    vm.runInContext(fs.readFileSync(RENDERER_PATH, 'utf8'), cliSandbox, { filename: 'Epiphy的-平面渲染器.js' })
 
     var Client = cliSandbox.global.ScreenDanmakuClient
     var baseMat = new FullMockMatrix4f()

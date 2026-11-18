@@ -42,7 +42,7 @@ A collection of shared server/client infrastructure modules, audiovisual present
 ┌──────────────────────────────────────────────────────────────────────────────────┐
 │ Layer 3 · Server Scheduling & Gameplay Layer                                     │
 ├──────────────────────────────────────────────────────────────────────────────────┤
-│  Epiphy的-屏幕弹幕组件.js (P:500) ◄══ Hard    : Spec + ServerBase                 │
+│  Epiphy的-平面渲染组件.js (P:500) ◄══ Hard    : Spec + ServerBase                 │
 │                                   ◄── Optional: Log / BlockTracker / Valve       │
 │  Epiphy的-音频组件.js     (P:500) ◄══ Hard    : Spec + ServerBase                 │
 │                                   ◄── Optional: Log / BlockTracker / Valve       │
@@ -54,7 +54,7 @@ A collection of shared server/client infrastructure modules, audiovisual present
 ┌──────────────────────────────────────────────────────────────────────────────────┐
 │ Layer 4 · Client Rendering & Audio Playback Layer (Presentation Consumers Only)  │
 ├──────────────────────────────────────────────────────────────────────────────────┤
-│  Epiphy的-屏幕弹幕渲染器.js ──► Layout/Anim/Vanilla+ModernUI (opt startup: Spec) │
+│  Epiphy的-平面渲染器.js     ──► 2D Graph/Anim/Vanilla+ModernUI (opt startup:Spec)│
 │  Epiphy的-音频播放器.js     ──► 3D Soundscape/Ducking/Retry  (opt startup: Spec) │
 │  拆解台描述.js              ──► Client item tooltip descriptions                 │
 └──────────────────────────────────────────────────────────────────────────────────┘
@@ -73,11 +73,11 @@ A collection of shared server/client infrastructure modules, audiovisual present
 | **L2 Access Control** | `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v5.4` (`/epiphy`, 3-state scopes, command-block mutation lock, tombstones, fail-closed auth) |
 | **L2 Diagnostics** | `Epiphy的-调试组件.js` | `server` / `950` | `EpiphyDebug v1` (`/epiphy debug`) |
 | **L2 Standalone Fix** | `Epiphy的-基础bug修复.js` | `server` / `900` | `EpiphyBugfix v1` (logout HP restoration) |
-| **L3 Presentation** | `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `Epiphy2DSurface / ScreenDanmaku v6.0` (2D planar scene graph / progress panels / GUI overlay & danmaku scheduler; internal logic not for cross-module reuse) |
+| **L3 Presentation** | `Epiphy的-平面渲染组件.js` | `server` / `500` | `Epiphy2DSurface / ScreenDanmaku v6.0` (2D planar scene graph / progress panels / GUI overlay & danmaku scheduler; internal logic not for cross-module reuse) |
 | **L3 Presentation** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.7` (standalone scheduler; internal logic not for cross-module reuse) |
 | **L3 Gameplay** | `拆解台-混沌殉爆.v18.js` | `server` / `10` | Meltdown progression (hard-requiring Core/WorldOps/Danmaku; persisted countdown, native 2D progress bars, anti-spoof relic & mainhand pickaxe check) |
 | **L3 Gameplay** | `合成表-*` (Vanilla / Botania / Enigmatic) | `server` / `0` | Standalone recipe adjustments |
-| **L4 Client** | `屏幕弹幕渲染器` / `音频播放器` / `拆解台描述` | `client` | `Epiphy2DRenderer / ScreenDanmakuClient v6.0`, `EpiphyAudioClient v5.6` |
+| **L4 Client** | `平面渲染器` / `音频播放器` / `拆解台描述` | `client` | `Epiphy2DRenderer / ScreenDanmakuClient v6.0`, `EpiphyAudioClient v5.6` |
 
 ### 3. Dependency & Fallback Specification (YAML)
 
@@ -131,10 +131,10 @@ Epiphy的-基础bug修复.js:
   on_missing: Smoothly falls back to built-in rate-limited console logging
 
 # ==================== Layer 3 · Server Scheduling & Gameplay ====================
-Epiphy的-屏幕弹幕组件.js:
+Epiphy的-平面渲染组件.js:
   requires:
     hard:     [EpiphySpec, EpiphyProtocol, EpiphyServerBase]
-    paired:   [Epiphy的-屏幕弹幕渲染器.js]
+    paired:   [Epiphy的-平面渲染器.js]
     optional: [EpiphyLog, EpiphyBlockTracker, EpiphyPermissionValve]
   on_missing:
     no_client: Server API works normally with no client rendering
@@ -148,7 +148,7 @@ Epiphy的-音频组件.js:
   on_missing:
     no_client: Server handles run normally with no client audio output
     optional:  Each optional module triggers a clean single-layer fallback
-  note:     L3 schedulers (ScreenDanmaku / EpiphyAudio) must only be consumed via their public global APIs; internal logic cannot be reused across modules
+  note:     L3 schedulers (Epiphy2DSurface/ScreenDanmaku, EpiphyAudio) must only be consumed via their public global APIs; internal logic cannot be reused across modules
 
 拆解台-混沌殉爆.v18.js:
   requires:
@@ -157,9 +157,9 @@ Epiphy的-音频组件.js:
   on_missing: Throws Fail-Fast on load if any hard dependency is missing (no redundant gameplay-layer fallbacks)
 
 # ==================== Layer 4 · Client ====================
-Epiphy的-屏幕弹幕渲染器.js:
-  requires: { paired: [ScreenDanmaku], optional: [EpiphySpec, EpiphyProtocol] }
-  on_missing: Uses built-in v5 protocol constants & basic helpers when Startup Spec is absent
+Epiphy的-平面渲染器.js:
+  requires: { paired: [Epiphy2DSurface, ScreenDanmaku], optional: [EpiphySpec, EpiphyProtocol] }
+  on_missing: Uses built-in v6 protocol constants & basic helpers when Startup Spec is absent
 
 Epiphy的-音频播放器.js:
   requires: { paired: [EpiphyAudio], optional: [EpiphySpec, EpiphyProtocol] }

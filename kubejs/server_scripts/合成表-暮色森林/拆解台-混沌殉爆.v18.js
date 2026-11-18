@@ -7,7 +7,7 @@
 //    - kubejs/startup_scripts/拆解台-混沌殉爆/Epiphy的小玩意-终极拆解台_不稳定.js
 //    - kubejs/server_scripts/通用组件/Epiphy的-服务端核心.js (EpiphyServerCore, priority: 1080)
 //    - kubejs/server_scripts/通用组件/Epiphy的-方块与区块组件.js (EpiphyWorldOps, priority: 1050)
-//    - kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js (ScreenDanmaku, priority: 500)
+//    - kubejs/server_scripts/通用组件/Epiphy的-平面渲染组件.js (Epiphy2DSurface / ScreenDanmaku, priority: 500)
 //  可选增强：kubejs/server_scripts/通用组件/Epiphy的-音频组件.js (EpiphyAudio, priority: 500)
 //  [语法规范] 遵循 README-LLM.md §1 强制语法基准（与 docs/kube-mods-rhino-es5-es6-compatibility.md）
 //  资源位置：kubejs/assets/epiphy/（models / textures / blockstates / lang）—— 加载根，普通文件；

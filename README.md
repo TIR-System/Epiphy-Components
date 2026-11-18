@@ -42,7 +42,7 @@
 ┌──────────────────────────────────────────────────────────────────────────────────┐
 │ Layer 3 · Server 业务调度与玩法层                                                │
 ├──────────────────────────────────────────────────────────────────────────────────┤
-│  Epiphy的-屏幕弹幕组件.js (P:500) ◄══ 强依赖: Spec + ServerBase                   │
+│  Epiphy的-平面渲染组件.js (P:500) ◄══ 强依赖: Spec + ServerBase                   │
 │                                   ◄── 可选  : Log / BlockTracker / 权限阀         │
 │  Epiphy的-音频组件.js     (P:500) ◄══ 强依赖: Spec + ServerBase                   │
 │                                   ◄── 可选  : Log / BlockTracker / 权限阀         │
@@ -54,7 +54,7 @@
 ┌──────────────────────────────────────────────────────────────────────────────────┐
 │ Layer 4 · Client 渲染与播放层（纯端侧消费，不参与服务端权威判定）                 │
 ├──────────────────────────────────────────────────────────────────────────────────┤
-│  Epiphy的-屏幕弹幕渲染器.js ──► 排版/动画/原生+ModernUI渲染   (可选前置: Spec)   │
+│  Epiphy的-平面渲染器.js     ──► 2D 图元树/排版/原生+ModernUI  (可选前置: Spec)   │
 │  Epiphy的-音频播放器.js     ──► 3D 声场/衰减/MusicDuck/重连   (可选前置: Spec)   │
 │  拆解台描述.js              ──► 客户端物品 Tooltip 描述                          │
 └──────────────────────────────────────────────────────────────────────────────────┘
@@ -73,11 +73,11 @@
 | **L2 安全控制** | `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v5.4`（`/epiphy`、三态分层权限域、命令方块修改锁、墓碑、按名备用模式） |
 | **L2 诊断维护** | `Epiphy的-调试组件.js` | `server` / `950` | `EpiphyDebug v1`（`/epiphy debug`） |
 | **L2 独立修复** | `Epiphy的-基础bug修复.js` | `server` / `900` | `EpiphyBugfix v1`（退出 HP 服务端恢复） |
-| **L3 业务调度** | `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `Epiphy2DSurface / ScreenDanmaku v6.0`（2D 平面图元树/进度条/GUI 注入与弹幕调度，禁止跨模块直接复用内部实现） |
+| **L3 业务调度** | `Epiphy的-平面渲染组件.js` | `server` / `500` | `Epiphy2DSurface / ScreenDanmaku v6.0`（2D 平面图元树/进度条/GUI 注入与弹幕调度，禁止跨模块直接复用内部实现） |
 | **L3 业务调度** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.7`（独立调度模块，禁止跨模块直接复用内部实现） |
 | **L3 玩法脚本** | `拆解台-混沌殉爆.v18.js` | `server` / `10` | 混沌殉爆事件链（强前置核心/世界/弹幕组件，含持久化、原生 2D 图元进度条、防伪造遗物与主手钻石镐校验） |
 | **L3 玩法脚本** | `合成表-*`（原版 / 植物魔法 / 神秘遗物） | `server` / `0` | 独立合成表与配方微调脚本 |
-| **L4 客户端表现** | `屏幕弹幕渲染器` / `音频播放器` / `拆解台描述` | `client` | `Epiphy2DRenderer / ScreenDanmakuClient v6.0`、`EpiphyAudioClient v5.6` |
+| **L4 客户端表现** | `平面渲染器` / `音频播放器` / `拆解台描述` | `client` | `Epiphy2DRenderer / ScreenDanmakuClient v6.0`、`EpiphyAudioClient v5.6` |
 
 ### 3. 模块依赖与降级语义规范（YAML）
 
@@ -131,10 +131,10 @@ Epiphy的-基础bug修复.js:
   on_missing: 缺日志组件时平滑回退内置限频 console
 
 # ==================== Layer 3 · Server Scheduling & Gameplay ====================
-Epiphy的-屏幕弹幕组件.js:
+Epiphy的-平面渲染组件.js:
   requires:
     hard:     [EpiphySpec, EpiphyProtocol, EpiphyServerBase]
-    paired:   [Epiphy的-屏幕弹幕渲染器.js]
+    paired:   [Epiphy的-平面渲染器.js]
     optional: [EpiphyLog, EpiphyBlockTracker, EpiphyPermissionValve]
   on_missing:
     no_client: 服务端 API 可正常调用，客户端无接收与画面渲染
@@ -148,7 +148,7 @@ Epiphy的-音频组件.js:
   on_missing:
     no_client: 服务端句柄可正常调度，客户端无声音输出
     optional:  各可选组件均按单层明确降级，不阻断常规播放 API
-  note:     L3 业务调度组件（含 ScreenDanmaku / EpiphyAudio），仅通过全局公开 API 调用，禁止直接复用内部实现
+  note:     L3 业务调度组件（含 Epiphy2DSurface/ScreenDanmaku、EpiphyAudio），仅通过全局公开 API 调用，禁止直接复用内部实现
 
 拆解台-混沌殉爆.v18.js:
   requires:
@@ -157,9 +157,9 @@ Epiphy的-音频组件.js:
   on_missing: 任一硬前置缺失时立即抛出异常 Fail-Fast 拒载（玩法层不保留冗余兜底）
 
 # ==================== Layer 4 · Client ====================
-Epiphy的-屏幕弹幕渲染器.js:
-  requires: { paired: [ScreenDanmaku], optional: [EpiphySpec, EpiphyProtocol] }
-  on_missing: 缺 Startup Spec 时启用内置 v5 协议常量与基础工具兜底
+Epiphy的-平面渲染器.js:
+  requires: { paired: [Epiphy2DSurface, ScreenDanmaku], optional: [EpiphySpec, EpiphyProtocol] }
+  on_missing: 缺 Startup Spec 时启用内置 v6 协议常量与基础工具兜底
 
 Epiphy的-音频播放器.js:
   requires: { paired: [EpiphyAudio], optional: [EpiphySpec, EpiphyProtocol] }

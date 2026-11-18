@@ -22,7 +22,7 @@
 //  适用环境：Minecraft 1.20.1 / Forge 47.x / KubeJS 2001.6.x
 //
 //  [组件边界 / 禁止直接复用] 本组件属于 L3 业务调度层（非 L1/L2 通用基础设施），内部逻辑不得被其他模块
-//    或兄弟 L3 组件（如屏幕弹幕组件）直接复制或跨模块复用；外部玩法脚本仅应通过 global.EpiphyAudio 公开 API 调用。
+//    或兄弟 L3 组件（如平面渲染组件）直接复制或跨模块复用；外部玩法脚本仅应通过 global.EpiphyAudio 公开 API 调用。
 //  [语法规范] 遵循 README-LLM.md §1 强制语法基准（与 docs/kube-mods-rhino-es5-es6-compatibility.md）：
 //    以 ES5 + `var` 为主，可按需谨慎使用经实测无语义偏移的 ES6/ES2020 扩展语法；
 //    严禁使用 `??`、`let`/`const`、对象属性简写/计算属性、展开与默认参数等已确认高危/失效特性。

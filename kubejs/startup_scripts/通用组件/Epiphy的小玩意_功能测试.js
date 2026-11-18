@@ -4,8 +4,8 @@
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/startup_scripts/通用组件/Epiphy的小玩意_功能测试.js
 //  依赖组件：
-//    - kubejs/client_scripts/通用组件/Epiphy的-屏幕弹幕渲染器.js (ScreenDanmakuClient)
-//    - kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js   (global.ScreenDanmaku)
+//    - kubejs/client_scripts/通用组件/Epiphy的-平面渲染器.js   (Epiphy2DRenderer / ScreenDanmakuClient)
+//    - kubejs/server_scripts/通用组件/Epiphy的-平面渲染组件.js (global.Epiphy2DSurface / global.ScreenDanmaku)
 //    - kubejs/client_scripts/通用组件/Epiphy的-音频播放器.js     (EpiphyAudioClient)
 //    - kubejs/server_scripts/通用组件/Epiphy的-音频组件.js       (global.EpiphyAudio)
 //    - kubejs/startup_scripts/通用组件/创造模式栏-epiphy.js
