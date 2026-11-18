@@ -191,6 +191,16 @@
         return Date.now()
     }
 
+    var RENDERER_EPOCH_MS = monotonicNowMs()
+
+    function toAnimTimeSec(nowMs) {
+        var cur = Number(nowMs) || 0
+        if (RENDERER_EPOCH_MS > 1e9 && cur >= RENDERER_EPOCH_MS) {
+            return (cur - RENDERER_EPOCH_MS) * 0.001
+        }
+        return cur * 0.001
+    }
+
     // 限频错误日志：防止坏数据或渲染异常在 60+ FPS 下刷爆日志文件
     function logErrorThrottled(prefix, err) {
         var now = monotonicNowMs()
@@ -3749,14 +3759,17 @@
             } else if (mode === 'impulse') {
                 var wRef = String(tr.onChange || ('$' + tk))
                 var wKey = wRef.charAt(0) === '$' ? wRef.substring(1) : wRef
+                var initImp = (tr.initPeak != null && isFinite(Number(tr.initPeak)) && Number(tr.initPeak) > 0)
+                    ? Number(tr.initPeak)
+                    : 0.0
                 state[tk] = {
                     mode:           'impulse',
-                    cur:            0.0,
+                    cur:            initImp,
                     lastWatchedVal: vars[wKey],
-                    triggeredAtMs:  0,
+                    triggeredAtMs:  initImp > 0 ? now : 0,
                     initialized:    true
                 }
-                disp[tk] = 0.0
+                disp[tk] = initImp
             }
         }
         return { trackState: state, displayVars: disp }
@@ -5212,10 +5225,11 @@
         var ra = clampNum(evalAffinePropBind(baseAlpha, b.alpha, vMap), 0.0, 1.0)
         var rAng = evalAffinePropBind(baseAngle, b.angle, vMap)
 
-        var stepHz = Number(b.stepHz || 0)
-        var seed   = (Number(b.seed || 0) | 0)
+        var animSec = toAnimTimeSec(now)
+        var stepHz  = Number(b.stepHz || 0)
+        var seed    = (Number(b.seed || 0) | 0)
         if (stepHz > 0 && isFinite(stepHz)) {
-            var stepTick = Math.floor(((Number(now) || 0) * 0.001) * stepHz)
+            var stepTick = Math.floor(animSec * stepHz)
             if (b.jitterX) rx += Math.round(hashStepSigned(stepTick, seed, 11) * Number(b.jitterX))
             if (b.jitterY) ry += Math.round(hashStepSigned(stepTick, seed, 23) * Number(b.jitterY))
             if (b.jitterW) rw = max2(1, rw + Math.round(hashStepSigned(stepTick, seed, 37) * Number(b.jitterW)))
@@ -5225,15 +5239,23 @@
             var impKey = b.impulseVar ? String(b.impulseVar).replace(/^\$/, '') : 'impulse'
             var impVal = clampNum(resolveVarNum('$' + impKey, vMap, 0.0), 0.0, 2.0)
             if (impVal > 0.005) {
-                var tSec = (Number(now) || 0) * 0.001
-                if (b.shakeX) rx += Math.round(Math.sin(tSec * 42.0 + seed) * impVal * Number(b.shakeX))
-                if (b.shakeY) ry += Math.round(Math.cos(tSec * 35.0 + seed) * impVal * Number(b.shakeY))
+                if (b.shakeX) rx += Math.sin(animSec * 42.0 + seed) * impVal * Number(b.shakeX)
+                if (b.shakeY) ry += Math.cos(animSec * 35.0 + seed) * impVal * Number(b.shakeY)
+            }
+        }
+        if (b.vibX || b.vibY) {
+            var vHz = (b.vibHz !== undefined && isFinite(Number(b.vibHz))) ? Number(b.vibHz) : 18.0
+            if (vHz > 0) {
+                var vPhase = animSec * vHz * 6.2831853 + seed * 1.37
+                if (b.vibX) rx += Math.sin(vPhase) * Number(b.vibX)
+                if (b.vibY) ry += Math.cos(vPhase * 0.87 + 0.9) * Number(b.vibY)
             }
         }
         if (b.rotSpeed) {
             var rotSpd = Number(b.rotSpeed)
             if (isFinite(rotSpd) && rotSpd !== 0) {
-                rAng += ((Number(now) || 0) * 0.001) * rotSpd
+                var rotDelta = (animSec * rotSpd) % 360.0
+                rAng = ((rAng + rotDelta) % 360.0 + 360.0) % 360.0
             }
         }
         return { x: rx, y: ry, w: rw, h: rh, alpha: ra, angle: rAng }
@@ -5649,7 +5671,7 @@
                     }
                 }
 
-                var tSec = (Number(now) || 0) * 0.001
+                var tSec = toAnimTimeSec(now)
                 for (var li = 0; li < layers.length; li++) {
                     var lay = layers[li]
                     if (!isPlainObjLike(lay)) continue
@@ -5739,22 +5761,29 @@
                         var stHz    = max2(1, Number(lay.stepHz || 9))
                         var stTick  = Math.floor(tSec * stHz)
                         var stSeed  = (Number(lay.seed || 7) | 0)
-                        var stThk   = max2(1, Number(lay.thickness || 1.5))
+                        var stThk   = max2(0.8, Number(lay.thickness || 1.0))
                         var stSpan  = fw / stCount
+                        var stepRoom = max2(1.0, fh - stThk)
+                        var tierMidY = fy + stepRoom * 0.5
+                        var tierLowY = fy + stepRoom
                         var prevTier = 0
+                        var prevStY  = tierMidY
                         for (var si = 0; si < stCount; si++) {
                             var stX = fx + Math.round(si * stSpan)
-                            var stJit = ((stTick + si * 3 + stSeed) % 7) - 3
-                            var stW = max2(3, Math.round(stSpan - 3 + stJit))
+                            var stJit = ((stTick + si * 3 + stSeed) % 5) - 2
+                            var stW = max2(3, Math.round(stSpan - 4 + stJit))
                             var tier = (si + ((si % 3 === 0) ? stTick : 0)) % 3
-                            var stY = fy + (tier === 0 ? 2 : (tier === 1 ? 4 : 0))
+                            var stY = (tier === 0) ? tierMidY : ((tier === 1) ? tierLowY : fy)
                             var stColRaw = (tier === 0) ? layColRaw : ((tier === 1 && lay.altColor !== undefined) ? layAltRaw : 0x73FFFFFF)
                             var stArgb = toArgbWithAlpha(stColRaw, lAlpha)
                             emitClippedRect(stX, stY, stW, stThk, stArgb)
                             if (lay.risers !== false && si > 0 && tier !== prevTier) {
-                                emitClippedRect(stX, fy, 1, min2(5, fh), stArgb)
+                                var rY0 = min2(prevStY, stY)
+                                var rH  = max2(stThk, max2(prevStY, stY) + stThk - rY0)
+                                emitClippedRect(stX, rY0, 1, rH, stArgb)
                             }
                             prevTier = tier
+                            prevStY  = stY
                         }
                     } else {
                         var uOff = ((now * Number(lay.speedX || 0.0)) % 256 + 256) % 256

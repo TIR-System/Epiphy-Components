@@ -821,27 +821,27 @@
         var c          = (cfg != null && typeof cfg === 'object') ? cfg : {}
         var pVal       = Math.max(0.0, Math.min(1.0, Number(c.progress) || 0.0))
         var subPVal    = Math.max(0.0, Math.min(1.0, c.subProgress !== undefined ? Number(c.subProgress) : pVal))
-        var barW       = Math.max(120, Math.min(360, Math.round(Number(c.barWidth) || 248)))
-        var barH       = Math.max(6, Math.min(24, Math.round(Number(c.barHeight) || 13)))
+        var barW       = Math.max(120, Math.min(380, Math.round(Number(c.barWidth) || 286)))
+        var barH       = Math.max(6, Math.min(24, Math.round(Number(c.barHeight) || 10)))
         var barX0      = -Math.round(barW * 0.5)
         var barY0      = -Math.round(barH * 0.5)
 
         var fillFrom   = c.barColorFrom !== undefined ? c.barColorFrom : 0x174A5A
-        var fillMid    = c.barColorMid !== undefined ? c.barColorMid : (c.barColorFrom !== undefined ? c.barColorFrom : 0x26A69A)
+        var fillMid    = c.barColorMid !== undefined ? c.barColorMid : 0x26A69A
         var fillTo     = c.barColorTo !== undefined ? c.barColorTo : 0x80DEEA
         var accentCol  = c.accentColor !== undefined ? c.accentColor : fillTo
         var warnCol    = c.warnColor !== undefined ? c.warnColor : 0xFFD54F
         var pureCol    = c.pureColor !== undefined ? c.pureColor : 0xFFFFFF
         var trailCol   = c.trailColor !== undefined ? c.trailColor : 0x664DD0E1
-        var plateBgCol = c.plateBgColor !== undefined ? c.plateBgColor : 0x780A1218
-        var badgeBgCol = c.badgeBgColor !== undefined ? c.badgeBgColor : 0x680A1218
-        var mosaicACol = c.mosaicAColor !== undefined ? c.mosaicAColor : 0xD2FFFFFF
-        var mosaicBCol = c.mosaicBColor !== undefined ? c.mosaicBColor : 0x614DD0E1
-        var mosaicCCol = c.mosaicCColor !== undefined ? c.mosaicCColor : 0x3326A69A
+        var plateBgCol = c.plateBgColor !== undefined ? c.plateBgColor : 0xA60A1318
+        var badgeBgCol = c.badgeBgColor !== undefined ? c.badgeBgColor : 0xA60A1318
+        var mosaicACol = c.mosaicAColor !== undefined ? c.mosaicAColor : 0xD8FFFFFF
+        var mosaicBCol = c.mosaicBColor !== undefined ? c.mosaicBColor : 0x6E4DD0E1
+        var mosaicCCol = c.mosaicCColor !== undefined ? c.mosaicCColor : 0x3F26A69A
 
-        var badgeSize  = 32
-        var badgeX     = barX0 - badgeSize - 10
-        var badgeY     = barY0 - 8
+        var badgeSize  = 28
+        var badgeX     = barX0 - badgeSize - 9
+        var badgeY     = barY0 - 7
         var badgeCx    = badgeX + Math.round(badgeSize * 0.5)
         var badgeCy    = badgeY + Math.round(badgeSize * 0.5)
         var split72    = Math.round(barW * 0.72)
@@ -861,94 +861,95 @@
 
         // 定稿方案 α：【终末地工业科研拓扑 × 搁浅 T-Pin 吊线 × 阶梯破框 × 差速星空波纹视差】
         var schemeAlphaNodes = [
-            // 1. 左侧同心双框旋转方块准星徽章 + DET[██]D 故障签 + L型角撑 + 边缘变形体素块 + 微编号
+            // 1. 左侧同心双框连续旋转方格准星 + DET[██]D 故障签 + L型角撑 + 边缘变形体素块 + 微编号
             { id: 'badge_plate',   type: 'rect', anchor: 'top_left', x: badgeX - 2,             y: badgeY - 2,             w: badgeSize + 4,  h: badgeSize + 4,  fill: { mode: 'solid', color: badgeBgCol } },
-            { id: 'badge_aura_r',  type: 'rect', anchor: 'top_left', x: badgeX + badgeSize - 2, y: badgeY + 4,             w: 6,              h: 6,              fill: { mode: 'solid', color: mosaicCCol }, bind: { stepHz: 9, seed: 13, jitterX: 2, jitterY: 2, jitterW: 1 } },
-            { id: 'badge_aura_l',  type: 'rect', anchor: 'top_left', x: badgeX - 4,             y: badgeY + badgeSize - 9, w: 5,              h: 7,              fill: { mode: 'solid', color: mosaicCCol }, bind: { stepHz: 9, seed: 23, jitterX: 1, jitterY: 2 } },
-            { id: 'badge_aura_br', type: 'rect', anchor: 'top_left', x: badgeX + badgeSize - 1, y: badgeY + badgeSize - 6, w: 5,              h: 5,              fill: { mode: 'solid', color: mosaicBCol } },
-            { id: 'badge_outer',   type: 'rect', anchor: 'top_left', x: badgeX,                 y: badgeY,                 w: badgeSize,      h: badgeSize,      fill: { mode: 'outline', color: pureCol, thickness: 1 } },
-            { id: 'badge_brk_tl1', type: 'rect', anchor: 'top_left', x: badgeX - 1,             y: badgeY - 1,             w: 5,              h: 2,              fill: { mode: 'solid', color: warnCol } },
-            { id: 'badge_brk_tl2', type: 'rect', anchor: 'top_left', x: badgeX - 1,             y: badgeY - 1,             w: 2,              h: 5,              fill: { mode: 'solid', color: warnCol } },
-            { id: 'badge_brk_br1', type: 'rect', anchor: 'top_left', x: badgeX + badgeSize - 4, y: badgeY + badgeSize - 1, w: 5,              h: 2,              fill: { mode: 'solid', color: warnCol } },
-            { id: 'badge_brk_br2', type: 'rect', anchor: 'top_left', x: badgeX + badgeSize - 1, y: badgeY + badgeSize - 4, w: 2,              h: 5,              fill: { mode: 'solid', color: warnCol } },
-            { id: 'badge_inner',   type: 'rect', anchor: 'top_left', x: badgeX + 7,             y: badgeY + 7,             w: badgeSize - 14, h: badgeSize - 14, fill: { mode: 'outline', color: accentCol, thickness: 1 }, bind: { seed: 29, impulseVar: 'impulse', shakeX: 1.5, shakeY: 1.5 } },
-            { id: 'badge_rot_sq',  type: 'rect', anchor: 'center',   x: badgeCx,                y: badgeCy,                w: 9,              h: 9,              fill: { mode: 'solid', color: fillMid },   bind: { rotSpeed: 86, seed: 31, impulseVar: 'impulse', shakeX: 0.8, shakeY: 0.8 } },
-            { id: 'badge_rot_dia', type: 'rect', anchor: 'center',   x: badgeCx,                y: badgeCy,                w: 6,              h: 6, angle: 45,   fill: { mode: 'solid', color: pureCol },   bind: { rotSpeed: 86, seed: 31, impulseVar: 'impulse', shakeX: 0.8, shakeY: 0.8 } },
-            { id: 'badge_tag',     type: 'text', anchor: 'top_left', x: badgeX - 1,             y: badgeY - 8,             scale: 0.62,     text: '$badgeCode',   color: accentCol, shadow: true },
-            { id: 'badge_mask',    type: 'rect', anchor: 'top_left', x: badgeX + 9,             y: badgeY - 8,             w: 8,              h: 6,              fill: { mode: 'solid', color: pureCol },    bind: { stepHz: 9, seed: 41, jitterX: 5, jitterW: 2 } },
-            { id: 'badge_mask_tr', type: 'rect', anchor: 'top_left', x: badgeX + 17,            y: badgeY - 8,             w: 4,              h: 6,              fill: { mode: 'solid', color: mosaicBCol }, bind: { stepHz: 9, seed: 41, jitterX: 5 } },
-            { id: 'badge_idx',     type: 'text', anchor: 'top_left', x: badgeX,                 y: badgeY + badgeSize + 3, scale: 0.56,     text: 'ID//0x4F',     color: 0x90FFFFFF, shadow: true },
+            { id: 'badge_aura_r',  type: 'rect', anchor: 'top_left', x: badgeX + badgeSize - 2, y: badgeY + 3,             w: 5,              h: 5,              fill: { mode: 'solid', color: mosaicCCol }, bind: { stepHz: 9, seed: 13, jitterX: 2, jitterY: 2, jitterW: 1 } },
+            { id: 'badge_aura_l',  type: 'rect', anchor: 'top_left', x: badgeX - 4,             y: badgeY + badgeSize - 8, w: 4,              h: 6,              fill: { mode: 'solid', color: mosaicCCol }, bind: { stepHz: 9, seed: 23, jitterX: 1, jitterY: 2 } },
+            { id: 'badge_aura_br', type: 'rect', anchor: 'top_left', x: badgeX + badgeSize - 1, y: badgeY + badgeSize - 5, w: 4,              h: 4,              fill: { mode: 'solid', color: mosaicBCol } },
+            { id: 'badge_outer',   type: 'rect', anchor: 'top_left', x: badgeX,                 y: badgeY,                 w: badgeSize,      h: badgeSize,      fill: { mode: 'outline', color: pureCol, thickness: 1 }, bind: { seed: 17, impulseVar: 'impulse', shakeX: 1.0, shakeY: 0.8, vibX: 0.22, vibY: 0.18, vibHz: 18 } },
+            { id: 'badge_brk_tl1', type: 'rect', anchor: 'top_left', x: badgeX - 1,             y: badgeY - 1,             w: 4,              h: 1.5,            fill: { mode: 'solid', color: warnCol } },
+            { id: 'badge_brk_tl2', type: 'rect', anchor: 'top_left', x: badgeX - 1,             y: badgeY - 1,             w: 1.5,            h: 4,              fill: { mode: 'solid', color: warnCol } },
+            { id: 'badge_brk_br1', type: 'rect', anchor: 'top_left', x: badgeX + badgeSize - 3, y: badgeY + badgeSize - 0.5, w: 4,            h: 1.5,            fill: { mode: 'solid', color: warnCol } },
+            { id: 'badge_brk_br2', type: 'rect', anchor: 'top_left', x: badgeX + badgeSize - 0.5, y: badgeY + badgeSize - 3, w: 1.5,          h: 4,              fill: { mode: 'solid', color: warnCol } },
+            { id: 'badge_inner',   type: 'rect', anchor: 'top_left', x: badgeX + 6,             y: badgeY + 6,             w: badgeSize - 12, h: badgeSize - 12, fill: { mode: 'outline', color: accentCol, thickness: 1 }, bind: { seed: 29, impulseVar: 'impulse', shakeX: 1.8, shakeY: 1.8, vibX: 0.55, vibY: 0.45, vibHz: 22 } },
+            { id: 'badge_rot_sq',  type: 'rect', anchor: 'center',   x: badgeCx,                y: badgeCy,                w: 8,              h: 8,              fill: { mode: 'solid', color: fillMid },   bind: { rotSpeed: 86, seed: 31, impulseVar: 'impulse', shakeX: 1.2, shakeY: 1.2, vibX: 0.35, vibY: 0.35, vibHz: 24 } },
+            { id: 'badge_rot_dia', type: 'rect', anchor: 'center',   x: badgeCx,                y: badgeCy,                w: 5.5,            h: 5.5, angle: 45, fill: { mode: 'solid', color: pureCol },   bind: { rotSpeed: 86, seed: 31, impulseVar: 'impulse', shakeX: 1.2, shakeY: 1.2, vibX: 0.35, vibY: 0.35, vibHz: 24 } },
+            { id: 'badge_tag',     type: 'text', anchor: 'top_left', x: badgeX - 1,             y: badgeY - 7,             scale: 0.58,     text: '$badgeCode',   color: accentCol, shadow: true },
+            { id: 'badge_mask',    type: 'rect', anchor: 'top_left', x: badgeX + 8,             y: badgeY - 7,             w: 7,              h: 5.5,            fill: { mode: 'solid', color: pureCol },    bind: { stepHz: 9, seed: 41, jitterX: 5, jitterW: 2 } },
+            { id: 'badge_mask_tr', type: 'rect', anchor: 'top_left', x: badgeX + 15,            y: badgeY - 7,             w: 4,              h: 5.5,            fill: { mode: 'solid', color: mosaicBCol }, bind: { stepHz: 9, seed: 41, jitterX: 5 } },
+            { id: 'badge_idx',     type: 'text', anchor: 'top_left', x: badgeX,                 y: badgeY + badgeSize + 3, scale: 0.54,     text: 'ID//0x4F',     color: 0x99FFFFFF, shadow: true },
 
-            // 2. 主区轻量级半透明非矩形阶梯玻璃底衬 + 底部 4 层差速水面波纹场 + 左装甲舱壁折角 + 上 13 段动态阶梯框 + 下 3 段不对称折线轨
-            { id: 'panel_bg_l',      type: 'rect', anchor: 'top_left', x: barX0 - 4,           y: barY0 - 15,         w: split72,              h: barH + 22, fill: { mode: 'solid', color: plateBgCol } },
-            { id: 'panel_bg_r',      type: 'rect', anchor: 'top_left', x: barX0 + split72 - 4, y: barY0 - 11,         w: barW - split72 + 12,   h: barH + 23, fill: { mode: 'solid', color: plateBgCol } },
-            { id: 'under_ripples',   type: 'rect', anchor: 'top_left', x: barX0,               y: barY0 + barH + 7,   w: barW,                 h: 11,        fill: { mode: 'parallax', bgAlpha: 0, layers: [{ kind: 'ripples', rows: 4, rowGap: 2.5, offsetY: 0.5, segments: 6, baseLen: 22, ampLen: 13, speedX: 24, thickness: 1.0, color: mosaicBCol, altColor: mosaicCCol, alpha: 0.90 }] } },
-            { id: 'bulkhead_v',      type: 'rect', anchor: 'top_left', x: barX0 - 4,           y: barY0 - 3,          w: 1.5,                  h: barH + 8,  fill: { mode: 'solid', color: accentCol } },
-            { id: 'bulkhead_cap',    type: 'rect', anchor: 'top_left', x: barX0 - 4,           y: barY0 - 3,          w: 16,                   h: 1.5,       fill: { mode: 'solid', color: accentCol } },
-            { id: 'frame_top_steps', type: 'rect', anchor: 'top_left', x: barX0,               y: barY0 - 5,          w: barW,                 h: 5,         fill: { mode: 'parallax', bgAlpha: 0, layers: [{ kind: 'steps', count: 13, stepHz: 9, risers: true, thickness: 1.2, color: accentCol, altColor: mosaicBCol, alpha: 0.92 }] } },
+            // 2. 主区半透明终末地阶梯玻璃底衬（上沿阶梯错位，下沿整齐包覆外部差速水面波纹场） + 左装甲舱壁折角 + 上 13 段细锐动态阶梯框 + 下 3 段不对称折线轨
+            { id: 'panel_bg_l',      type: 'rect', anchor: 'top_left', x: barX0 - 4,           y: barY0 - 15,         w: split72,              h: barH + 34, fill: { mode: 'solid', color: plateBgCol } },
+            { id: 'panel_bg_r',      type: 'rect', anchor: 'top_left', x: barX0 + split72 - 4, y: barY0 - 12,         w: barW - split72 + 12,   h: barH + 31, fill: { mode: 'solid', color: plateBgCol } },
+            { id: 'under_ripples',   type: 'rect', anchor: 'top_left', x: barX0,               y: barY0 + barH + 7,   w: barW,                 h: 11,        fill: { mode: 'parallax', bgAlpha: 0, layers: [{ kind: 'ripples', rows: 4, rowGap: 2.5, offsetY: 0.5, segments: 6, baseLen: 26, ampLen: 15, speedX: 24, thickness: 1.1, color: mosaicBCol, altColor: mosaicCCol, alpha: 0.95 }] } },
+            { id: 'bulkhead_v',      type: 'rect', anchor: 'top_left', x: barX0 - 4,           y: barY0 - 4,          w: 1.5,                  h: barH + 9,  fill: { mode: 'solid', color: accentCol } },
+            { id: 'bulkhead_cap',    type: 'rect', anchor: 'top_left', x: barX0 - 4,           y: barY0 - 4,          w: 16,                   h: 1.2,       fill: { mode: 'solid', color: accentCol } },
+            { id: 'frame_top_steps', type: 'rect', anchor: 'top_left', x: barX0,               y: barY0 - 5,          w: barW,                 h: 4,         fill: { mode: 'parallax', bgAlpha: 0, layers: [{ kind: 'steps', count: 13, stepHz: 9, risers: true, thickness: 1.0, color: accentCol, altColor: mosaicBCol, alpha: 0.92 }] } },
             { id: 'frame_bot_1',     type: 'rect', anchor: 'top_left', x: barX0 - 4,           y: barY0 + barH + 2,   w: split1 + 4,           h: 1,         fill: { mode: 'solid', color: 0x6BFFFFFF } },
             { id: 'frame_bot_r1',    type: 'rect', anchor: 'top_left', x: barX0 + split1,      y: barY0 + barH + 2,   w: 1,                    h: 4,         fill: { mode: 'solid', color: 0x6BFFFFFF } },
             { id: 'frame_bot_2',     type: 'rect', anchor: 'top_left', x: barX0 + split1,      y: barY0 + barH + 5,   w: split2 - split1,      h: 1,         fill: { mode: 'solid', color: accentCol } },
             { id: 'frame_bot_r2',    type: 'rect', anchor: 'top_left', x: barX0 + split2,      y: barY0 + barH + 2,   w: 1,                    h: 4,         fill: { mode: 'solid', color: mosaicBCol } },
-            { id: 'frame_bot_3',     type: 'rect', anchor: 'top_left', x: barX0 + split2,      y: barY0 + barH + 2,   w: barW - split2 + 10,   h: 1.5,       fill: { mode: 'solid', color: mosaicBCol } },
+            { id: 'frame_bot_3',     type: 'rect', anchor: 'top_left', x: barX0 + split2,      y: barY0 + barH + 2,   w: barW - split2 + 10,   h: 1.2,       fill: { mode: 'solid', color: mosaicBCol } },
 
             // 3. 顶栏《终末地》反色工业铭牌 + 3 枚状态指示灯 + 主遥测标题
-            { id: 'ef_tag_plate', type: 'rect', anchor: 'top_left', x: barX0,      y: barY0 - 14, w: 54, h: 8,   fill: { mode: 'solid', color: warnCol } },
-            { id: 'ef_tag_text',  type: 'text', anchor: 'top_left', x: barX0 + 2,  y: barY0 - 13, scale: 0.64, text: '$efTag', color: 0x090C10, shadow: false },
-            { id: 'ef_pip_1',     type: 'rect', anchor: 'top_left', x: barX0 + 57, y: barY0 - 12, w: 3,  h: 5,   fill: { mode: 'solid', color: accentCol } },
-            { id: 'ef_pip_2',     type: 'rect', anchor: 'top_left', x: barX0 + 62, y: barY0 - 12, w: 3,  h: 5,   fill: { mode: 'solid', color: warnCol }, bind: { stepHz: 4, seed: 19, jitterH: 1 } },
-            { id: 'ef_pip_3',     type: 'rect', anchor: 'top_left', x: barX0 + 67, y: barY0 - 12, w: 3,  h: 5,   fill: { mode: 'solid', color: 0x44FFFFFF } },
-            { id: 'title',        type: 'text', anchor: 'top_left', x: barX0 + 73, y: barY0 - 13, scale: 0.74, text: '$title', color: pureCol, shadow: true },
+            { id: 'ef_tag_plate', type: 'rect', anchor: 'top_left', x: barX0,      y: barY0 - 14,   w: 50, h: 7.5, fill: { mode: 'solid', color: warnCol } },
+            { id: 'ef_tag_text',  type: 'text', anchor: 'top_left', x: barX0 + 2,  y: barY0 - 12.5, scale: 0.60, text: '$efTag', color: 0x090C10, shadow: false },
+            { id: 'ef_pip_1',     type: 'rect', anchor: 'top_left', x: barX0 + 53, y: barY0 - 12,   w: 2.5, h: 4.5, fill: { mode: 'solid', color: accentCol } },
+            { id: 'ef_pip_2',     type: 'rect', anchor: 'top_left', x: barX0 + 57, y: barY0 - 12,   w: 2.5, h: 4.5, fill: { mode: 'solid', color: warnCol }, bind: { stepHz: 4, seed: 19, jitterH: 1 } },
+            { id: 'ef_pip_3',     type: 'rect', anchor: 'top_left', x: barX0 + 61, y: barY0 - 12,   w: 2.5, h: 4.5, fill: { mode: 'solid', color: 0x44FFFFFF } },
+            { id: 'title',        type: 'text', anchor: 'top_left', x: barX0 + 67, y: barY0 - 13,   scale: 0.72, text: '$title', color: pureCol, shadow: true },
 
-            // 4. 进度槽核心：深邃暗腔 + trail 拖影 + 4 层程序化视差内胆 (三色渐变 + 斜向装甲暗肋 + 4层流动波纹 + 双速星空粒子 + 前缘辉光) + 25/50/75 刻度细线 + 副轨
-            { id: 'bar_bg',    type: 'rect', anchor: 'top_left', x: barX0, y: barY0,     w: barW, h: barH,     fill: { mode: 'solid', color: 0xDC04070B } },
+            // 4. 进度槽核心：深邃暗腔 + trail 拖影 + 5 层程序化视差内胆 (三色渐变 + 斜向装甲暗肋 + 4层流动波纹 + 双速星空粒子 + 前缘等离子辉光) + 刻度丝线 + 副轨
+            { id: 'bar_bg',    type: 'rect', anchor: 'top_left', x: barX0, y: barY0,     w: barW, h: barH,     fill: { mode: 'solid', color: 0xE604070B }, bind: { seed: 5, impulseVar: 'impulse', shakeX: 0.9 } },
             { id: 'bar_trail', type: 'rect', anchor: 'top_left', x: barX0, y: barY0 + 1, w: barW, h: barH - 2, fill: { mode: 'solid', color: trailCol }, clip: { dir: 'left', ratio: '$progressTrail', mode: 'local' } },
             {
                 id: 'bar_main', type: 'rect', anchor: 'top_left', x: barX0, y: barY0 + 1, w: barW, h: barH - 2,
                 clip: { dir: 'left', ratio: '$progress', mode: 'local' },
+                bind: { seed: 5, impulseVar: 'impulse', shakeX: 0.9 },
                 fill: {
                     mode: 'parallax',
                     bgAlpha: 0,
-                    bloomWidth: 18,
+                    bloomWidth: 16,
                     bloomColor: 0xE0FFFFFF,
                     layers: [
                         { kind: 'gradient',  from: fillFrom, mid: fillMid, to: fillTo, midPos: 0.62, alpha: 1.0 },
-                        { kind: 'stripes',   step: 16, width: 5, skew: 6, speedX: 18, color: 0x3D000000, alpha: 0.95 },
-                        { kind: 'ripples',   rows: 4, rowGap: 2.5, offsetY: 1.0, segments: 6, baseLen: 20, ampLen: 12, speedX: 30, thickness: 1.0, color: 0x4DFFFFFF, altColor: 0x29FFFFFF, alpha: 0.95 },
-                        { kind: 'particles', count: 16, speedX: 14, speedY: 0, minW: 1, maxW: 1.5, thickness: 1.2, color: 0x75FFFFFF, seed: 11, alpha: 0.80 },
-                        { kind: 'particles', count: 14, speedX: -40, speedY: 0, minW: 1, maxW: 4, thickness: 1.0, color: pureCol, altColor: accentCol, seed: 31, alpha: 0.90 }
+                        { kind: 'stripes',   step: 15, width: 5, skew: 5, speedX: 18, color: 0x3D000000, alpha: 0.95 },
+                        { kind: 'ripples',   rows: 3, rowGap: 2.3, offsetY: 0.8, segments: 6, baseLen: 22, ampLen: 12, speedX: 30, thickness: 1.0, color: 0x52FFFFFF, altColor: 0x2BFFFFFF, alpha: 0.95 },
+                        { kind: 'particles', count: 16, speedX: 14, speedY: 0, minW: 1, maxW: 1.5, thickness: 1.0, color: 0x7AFFFFFF, seed: 11, alpha: 0.85 },
+                        { kind: 'particles', count: 14, speedX: -40, speedY: 0, minW: 1, maxW: 3.5, thickness: 1.0, color: pureCol, altColor: accentCol, seed: 31, alpha: 0.92 }
                     ]
                 }
             },
-            { id: 'ms_25',        type: 'rect', anchor: 'top_left', x: barX0 + Math.round(barW * 0.25), y: barY0 - 2, w: 1, h: barH + 5, fill: { mode: 'solid', color: 0x38FFFFFF } },
-            { id: 'ms_50',        type: 'rect', anchor: 'top_left', x: barX0 + Math.round(barW * 0.50), y: barY0 - 2, w: 1, h: barH + 5, fill: { mode: 'solid', color: 0x38FFFFFF } },
-            { id: 'ms_75',        type: 'rect', anchor: 'top_left', x: barX0 + Math.round(barW * 0.75), y: barY0 - 2, w: 1, h: barH + 5, fill: { mode: 'solid', color: 0x38FFFFFF } },
-            { id: 'bar_sub_rail', type: 'rect', anchor: 'top_left', x: barX0, y: barY0 + barH + 1, w: barW, h: 1.2, fill: { mode: 'solid', color: warnCol }, clip: { dir: 'left', ratio: '$subProgress', mode: 'local' } },
+            { id: 'ms_25',        type: 'rect', anchor: 'top_left', x: barX0 + Math.round(barW * 0.25), y: barY0 - 1, w: 1, h: barH + 4, fill: { mode: 'solid', color: 0x38FFFFFF } },
+            { id: 'ms_50',        type: 'rect', anchor: 'top_left', x: barX0 + Math.round(barW * 0.50), y: barY0 - 1, w: 1, h: barH + 4, fill: { mode: 'solid', color: 0x38FFFFFF } },
+            { id: 'ms_75',        type: 'rect', anchor: 'top_left', x: barX0 + Math.round(barW * 0.75), y: barY0 - 1, w: 1, h: barH + 4, fill: { mode: 'solid', color: 0x38FFFFFF } },
+            { id: 'bar_sub_rail', type: 'rect', anchor: 'top_left', x: barX0, y: barY0 + barH + 1, w: barW, h: 1.0, fill: { mode: 'solid', color: warnCol }, clip: { dir: 'left', ratio: '$subProgress', mode: 'local' } },
 
-            // 5. 推进前缘动态跟随组：搁浅 □─── 垂直穿透吊线 + 4 块 9Hz 变形体素簇 + 半透明底签百分比
+            // 5. 推进前缘动态跟随组：搁浅 □─── 垂直穿透吊线 + 5 块 9Hz 变形体素簇 + 悬浮百分比旗标
             {
                 id: 'cursor_group', type: 'group', x: barX0, y: barY0,
-                bind: { x: { var: 'progress', mult: barW } },
+                bind: { x: { var: 'progress', mult: barW }, seed: 5, impulseVar: 'impulse', shakeX: 0.9 },
                 children: [
                     { id: 'cur_pin_box',   type: 'rect', anchor: 'top_left', x: -3, y: -9,       w: 6,  h: 6,        fill: { mode: 'outline', color: pureCol, thickness: 1 } },
                     { id: 'cur_drop_line', type: 'rect', anchor: 'top_left', x: 0,  y: -3,       w: 1,  h: barH + 20, fill: { mode: 'solid', color: pureCol } },
-                    { id: 'cur_vox_hi',    type: 'rect', anchor: 'top_left', x: -4, y: -3,       w: 6,  h: 4,        fill: { mode: 'solid', color: mosaicACol }, bind: { stepHz: 9, seed: 7,  jitterX: 2, jitterW: 2 } },
-                    { id: 'cur_vox_mid',   type: 'rect', anchor: 'top_left', x: 1,  y: 2,        w: 7,  h: 4,        fill: { mode: 'solid', color: mosaicBCol }, bind: { stepHz: 9, seed: 13, jitterX: 2, jitterW: 2 } },
-                    { id: 'cur_vox_lo',    type: 'rect', anchor: 'top_left', x: -7, y: barH - 2, w: 8,  h: 4,        fill: { mode: 'solid', color: mosaicBCol }, bind: { stepHz: 9, seed: 19, jitterX: 2, jitterW: 2 } },
-                    { id: 'cur_vox_lo2',   type: 'rect', anchor: 'top_left', x: 2,  y: barH - 4, w: 5,  h: 5,        fill: { mode: 'solid', color: mosaicCCol }, bind: { stepHz: 9, seed: 29, jitterX: 1, jitterW: 2 } },
-                    { id: 'cur_pct_bg',    type: 'rect', anchor: 'top_left', x: 2,  y: barH + 7, w: 26, h: 8,        fill: { mode: 'solid', color: plateBgCol } },
-                    { id: 'cur_pct_flag',  type: 'text', anchor: 'top_left', x: 4,  y: barH + 8, scale: 0.62, text: '$pctText', color: pureCol, shadow: true }
+                    { id: 'cur_vox_hi',    type: 'rect', anchor: 'top_left', x: -4, y: -3,       w: 6,  h: 3.5,      fill: { mode: 'solid', color: mosaicACol }, bind: { stepHz: 9, seed: 7,  jitterX: 2, jitterW: 2 } },
+                    { id: 'cur_vox_mid',   type: 'rect', anchor: 'top_left', x: 1,  y: 1.5,      w: 6,  h: 3.5,      fill: { mode: 'solid', color: mosaicBCol }, bind: { stepHz: 9, seed: 13, jitterX: 2, jitterW: 2 } },
+                    { id: 'cur_vox_lo',    type: 'rect', anchor: 'top_left', x: -7, y: barH - 2, w: 7,  h: 3.5,      fill: { mode: 'solid', color: mosaicBCol }, bind: { stepHz: 9, seed: 19, jitterX: 2, jitterW: 2 } },
+                    { id: 'cur_vox_lo2',   type: 'rect', anchor: 'top_left', x: 2,  y: barH - 3, w: 5,  h: 4.5,      fill: { mode: 'solid', color: mosaicCCol }, bind: { stepHz: 9, seed: 29, jitterX: 1, jitterW: 2 } },
+                    { id: 'cur_vox_tr',    type: 'rect', anchor: 'top_left', x: 7,  y: 3,        w: 4,  h: 3.5,      fill: { mode: 'solid', color: mosaicACol }, bind: { stepHz: 9, seed: 37, jitterX: 1 } },
+                    { id: 'cur_pct_flag',  type: 'text', anchor: 'top_left', x: 3,  y: barH + 10, scale: 0.60, text: '$pctText', color: pureCol, shadow: true }
                 ]
             },
 
             // 6. 右端 T-Pin 垂直吊线 (□───) + 三行遥测读数台 + 底部两端对齐表尾
-            { id: 'right_pin_box',  type: 'rect', anchor: 'top_left',  x: barX0 + barW + 9,  y: barY0 + 1,         w: 7, h: 7,  fill: { mode: 'outline', color: accentCol, thickness: 1 } },
-            { id: 'right_pin_line', type: 'rect', anchor: 'top_left',  x: barX0 + barW + 12, y: barY0 + 8,         w: 1, h: 25, fill: { mode: 'solid', color: accentCol } },
-            { id: 'right_unit',     type: 'text', anchor: 'top_left',  x: barX0 + barW + 19, y: barY0 - 4,         scale: 0.54, text: '$unitLabel', color: 0x99FFFFFF, shadow: true },
-            { id: 'right_readout',  type: 'text', anchor: 'top_left',  x: barX0 + barW + 19, y: barY0 + 3,         scale: 0.88, text: '$rightVal',  color: pureCol,    shadow: true },
-            { id: 'right_sub',      type: 'text', anchor: 'top_left',  x: barX0 + barW + 19, y: barY0 + 13,        scale: 0.66, text: '$rightSub',  color: warnCol,    shadow: true },
-            { id: 'sub',            type: 'text', anchor: 'top_left',  x: barX0,             y: barY0 + barH + 20, scale: 0.66, text: '$sub',       color: 0xC8FFFFFF, shadow: true },
-            { id: 'footer_right',   type: 'text', anchor: 'top_right', x: barX0 + barW,      y: barY0 + barH + 20, scale: 0.66, text: '$footRight', color: accentCol,  shadow: true }
+            { id: 'right_pin_box',  type: 'rect', anchor: 'top_left',  x: barX0 + barW + 9,  y: barY0 + 0.5,      w: 6.5, h: 6.5, fill: { mode: 'outline', color: accentCol, thickness: 1 } },
+            { id: 'right_pin_line', type: 'rect', anchor: 'top_left',  x: barX0 + barW + 12, y: barY0 + 7,        w: 1,   h: 24,  fill: { mode: 'solid', color: accentCol } },
+            { id: 'right_unit',     type: 'text', anchor: 'top_left',  x: barX0 + barW + 18, y: barY0 - 4,        scale: 0.52, text: '$unitLabel', color: 0xAAFFFFFF, shadow: true },
+            { id: 'right_readout',  type: 'text', anchor: 'top_left',  x: barX0 + barW + 18, y: barY0 + 2,        scale: 0.86, text: '$rightVal',  color: pureCol,    shadow: true },
+            { id: 'right_sub',      type: 'text', anchor: 'top_left',  x: barX0 + barW + 18, y: barY0 + 11.5,     scale: 0.64, text: '$rightSub',  color: warnCol,    shadow: true },
+            { id: 'sub',            type: 'text', anchor: 'top_left',  x: barX0,             y: barY0 + barH + 21, scale: 0.64, text: '$sub',       color: 0xD0FFFFFF, shadow: true },
+            { id: 'footer_right',   type: 'text', anchor: 'top_right', x: barX0 + barW,      y: barY0 + barH + 21, scale: 0.64, text: '$footRight', color: accentCol,  shadow: true }
         ]
 
         var panelCfg = {}
@@ -987,7 +988,7 @@
             progress:      { mode: 'lerp', speed: 10.0, easing: 'out_cubic' },
             progressTrail: { mode: 'trail', target: '$progress', delayMs: 220, speed: 4.5 },
             subProgress:   { mode: 'lerp', speed: 12.0, easing: 'out_cubic' },
-            impulse:       { mode: 'impulse', onChange: '$impulseEvent', peak: 1.0, decayMs: 280 }
+            impulse:       { mode: 'impulse', onChange: '$impulseEvent', peak: 1.0, initPeak: 0.90, decayMs: 420 }
         }
         return panelCfg
     }
@@ -1780,8 +1781,8 @@
                 priority:     'active',
                 progress:     pFinal,
                 subProgress:  subLock,
-                barWidth:     248,
-                barHeight:    13,
+                barWidth:     286,
+                barHeight:    10,
                 barColorFrom: 0x4A0714,
                 barColorMid:  0xC62828,
                 barColorTo:   0xFF8A80,
@@ -1789,11 +1790,11 @@
                 warnColor:    0xFFAB00,
                 pureColor:    0xFFEBEE,
                 trailColor:   0x70FF5252,
-                plateBgColor: 0x7A12090D,
-                badgeBgColor: 0x6812090D,
-                mosaicAColor: 0xD8FFEBEE,
-                mosaicBColor: 0x66FF5252,
-                mosaicCColor: 0x38C62828,
+                plateBgColor: 0xAE140B0E,
+                badgeBgColor: 0xAE140B0E,
+                mosaicAColor: 0xE0FFEBEE,
+                mosaicBColor: 0x70FF5252,
+                mosaicCColor: 0x40C62828,
                 efTag:        job.fatalTriggered ? 'HZ-LCK // T-0' : 'CT-FAIL // T-0',
                 impulseEvent: job.fatalTriggered ? 'HZ_LCK' : 'CT_FAIL',
                 badgeCode:    'CRITICAL',
@@ -1803,9 +1804,9 @@
                 footRight:    'HORIZON_LOCK // 100%',
                 text:         lockTag,
                 sub:          '§7(' + job.x + ',' + job.y + ',' + job.z + ') §8// §c奇点梯度锁死',
-                tracks:       { impulse: { mode: 'impulse', onChange: '$impulseEvent', peak: 1.0, decayMs: 280 } },
-                pos:          [0.27, 0.14],
-                size:         0.84,
+                tracks:       { impulse: { mode: 'impulse', onChange: '$impulseEvent', peak: 1.0, initPeak: 1.0, decayMs: 420 } },
+                pos:          [0.28, 0.14],
+                size:         0.78,
                 tilt:         0,
                 shakeMode:    'none',
                 shakeAmp:     0.0,
@@ -2242,6 +2243,8 @@
         if (job.t % 8 === 0) {
             var stageSubProg = Math.min(1.0, ((job.t % 720) / 720))
             var isCritStage  = (stageIdx >= 3)
+            var isStage5     = (stageIdx >= 4)
+            var stageTagCol  = isStage5 ? '§c' : (isCritStage ? '§6' : '§b')
             sendDanmakuNear(job.level, job.x, job.y, job.z, SCREEN_ALERT_RADIUS, buildTelemetryProgressOpts({
                 group:        TELEMETRY_GROUP,
                 id:           'core_telemetry_' + job.x + '_' + job.y + '_' + job.z,
@@ -2250,20 +2253,20 @@
                 priority:     'active',
                 progress:     p,
                 subProgress:  stageSubProg,
-                barWidth:     248,
-                barHeight:    13,
-                barColorFrom: isCritStage ? 0x5D1900 : 0x174A5A,
-                barColorMid:  meta.hex,
-                barColorTo:   isCritStage ? 0xFFE082 : 0x80DEEA,
-                accentColor:  isCritStage ? 0xFFD54F : 0x4DD0E1,
-                warnColor:    0xFFD54F,
-                pureColor:    0xFFFFFF,
-                trailColor:   isCritStage ? 0x66FFB300 : 0x664DD0E1,
-                plateBgColor: isCritStage ? 0x7816110B : 0x780A1218,
-                badgeBgColor: isCritStage ? 0x6816110B : 0x680A1218,
-                mosaicAColor: 0xD2FFFFFF,
-                mosaicBColor: isCritStage ? 0x61FFD54F : 0x614DD0E1,
-                mosaicCColor: isCritStage ? 0x33FF8F00 : 0x3326A69A,
+                barWidth:     286,
+                barHeight:    10,
+                barColorFrom: isStage5 ? 0x4A0714 : (isCritStage ? 0x5D1900 : 0x174A5A),
+                barColorMid:  isStage5 ? 0xC62828 : (isCritStage ? 0xFF8F00 : 0x26A69A),
+                barColorTo:   isStage5 ? 0xFF8A80 : (isCritStage ? 0xFFE082 : 0x80DEEA),
+                accentColor:  isStage5 ? 0xFF5252 : (isCritStage ? 0xFFD54F : 0x4DD0E1),
+                warnColor:    isStage5 ? 0xFFAB00 : 0xFFD54F,
+                pureColor:    isStage5 ? 0xFFEBEE : 0xFFFFFF,
+                trailColor:   isStage5 ? 0x70FF5252 : (isCritStage ? 0x66FFB300 : 0x6E4DD0E1),
+                plateBgColor: isStage5 ? 0xAE140B0E : (isCritStage ? 0xAC140E08 : 0xA60A1318),
+                badgeBgColor: isStage5 ? 0xAE140B0E : (isCritStage ? 0xAC140E08 : 0xA60A1318),
+                mosaicAColor: 0xD8FFFFFF,
+                mosaicBColor: isStage5 ? 0x70FF5252 : (isCritStage ? 0x6EFFD54F : 0x6E4DD0E1),
+                mosaicCColor: isStage5 ? 0x40C62828 : (isCritStage ? 0x3FFF8F00 : 0x3F26A69A),
                 efTag:        'EF-TLM // S' + (stageIdx + 1),
                 impulseEvent: 'STAGE_' + (stageIdx + 1),
                 badgeCode:    isCritStage ? 'UNSTABLE' : 'DETECTED',
@@ -2271,11 +2274,11 @@
                 rightVal:     pct + '.0%',
                 rightSub:     'T-' + remainSec + 's',
                 footRight:    'R_ESCAPE // ' + (16 + stageIdx * 16) + 'm',
-                text:         '§f§l堆芯约束失稳遥测 ' + meta.colorCode + '[S' + (stageIdx + 1) + '/5 · ' + meta.tag + ']',
+                text:         '§f§l堆芯约束失稳遥测 ' + stageTagCol + '[S' + (stageIdx + 1) + '/5 · ' + meta.tag + ']',
                 sub:          '§7(' + job.x + ',' + job.y + ',' + job.z + ') §8// §e终望珍珠可停机',
-                tracks:       { impulse: { mode: 'impulse', onChange: '$impulseEvent', peak: 1.0, decayMs: 280 } },
-                pos:          [0.27, 0.14],
-                size:         0.84,
+                tracks:       { impulse: { mode: 'impulse', onChange: '$impulseEvent', peak: 1.0, initPeak: 0.90, decayMs: 420 } },
+                pos:          [0.28, 0.14],
+                size:         0.78,
                 tilt:         0,
                 shakeMode:    'none',
                 shakeAmp:     0.0,
@@ -2968,20 +2971,20 @@
                 priority:     'active',
                 progress:     p,
                 subProgress:  shellSliceProg,
-                barWidth:     248,
-                barHeight:    13,
+                barWidth:     286,
+                barHeight:    10,
                 barColorFrom: 0x240B4D,
                 barColorMid:  0x651FFF,
                 barColorTo:   0x18FFFF,
                 accentColor:  0x84FFFF,
                 warnColor:    0xE040FB,
                 pureColor:    0xF3E5F5,
-                trailColor:   0x687C4DFF,
-                plateBgColor: 0x7A0B0917,
-                badgeBgColor: 0x680B0917,
+                trailColor:   0x6E7C4DFF,
+                plateBgColor: 0xAE0B0917,
+                badgeBgColor: 0xAE0B0917,
                 mosaicAColor: 0xD8FFFFFF,
-                mosaicBColor: 0x6618FFFF,
-                mosaicCColor: 0x3B7C4DFF,
+                mosaicBColor: 0x6E18FFFF,
+                mosaicCColor: 0x407C4DFF,
                 efTag:        'AW-300 // R+',
                 impulseEvent: 'STRATUM_' + stratumIdx,
                 badgeCode:    'WAVEFRONT',
@@ -2991,9 +2994,9 @@
                 footRight:    'STRATUM // #' + stratumIdx + '/30',
                 text:         '§f§l球状湮灭波前推进遥测 §b[R = ' + shownR + ' / ' + maxR + 'm]',
                 sub:          '§7(' + job.x + ',' + job.y + ',' + job.z + ') §8// §b物质层同步汽化',
-                tracks:       { impulse: { mode: 'impulse', onChange: '$impulseEvent', peak: 1.0, decayMs: 280 } },
-                pos:          [0.27, 0.14],
-                size:         0.84,
+                tracks:       { impulse: { mode: 'impulse', onChange: '$impulseEvent', peak: 1.0, initPeak: 0.90, decayMs: 420 } },
+                pos:          [0.28, 0.14],
+                size:         0.78,
                 tilt:         0,
                 shakeMode:    'none',
                 shakeAmp:     0.0,

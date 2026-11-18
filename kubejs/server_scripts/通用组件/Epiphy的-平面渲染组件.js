@@ -1201,6 +1201,9 @@
         if (rawBind.impulseVar !== undefined) { out.impulseVar = String(rawBind.impulseVar).replace(/^\$/, ''); hasField = true }
         if (rawBind.shakeX !== undefined) { out.shakeX = Math.max(0, Math.min(64, parseFiniteNum(rawBind.shakeX, 0))); hasField = true }
         if (rawBind.shakeY !== undefined) { out.shakeY = Math.max(0, Math.min(64, parseFiniteNum(rawBind.shakeY, 0))); hasField = true }
+        if (rawBind.vibX !== undefined) { out.vibX = Math.max(0, Math.min(32, parseFiniteNum(rawBind.vibX, 0))); hasField = true }
+        if (rawBind.vibY !== undefined) { out.vibY = Math.max(0, Math.min(32, parseFiniteNum(rawBind.vibY, 0))); hasField = true }
+        if (rawBind.vibHz !== undefined) { out.vibHz = Math.max(0, Math.min(120, parseFiniteNum(rawBind.vibHz, 18))); hasField = true }
         if (rawBind.rotSpeed !== undefined) { out.rotSpeed = Math.max(-720, Math.min(720, parseFiniteNum(rawBind.rotSpeed, 0))); hasField = true }
         return hasField ? out : null
     }
@@ -1453,6 +1456,7 @@
                 entry.onChange = String(tr.onChange || ('$' + k))
                 entry.peak     = Math.max(0.0, Math.min(100.0, parseFiniteNum(tr.peak, 1.0)))
                 entry.decayMs  = Math.max(16, Math.min(10000, Math.round(parseFiniteNum(tr.decayMs, 180))))
+                if (tr.initPeak !== undefined) entry.initPeak = Math.max(0.0, Math.min(100.0, parseFiniteNum(tr.initPeak, 0.0)))
             }
             out[k] = entry
         }

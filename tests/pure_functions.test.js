@@ -7560,8 +7560,15 @@ test('Epiphy2DSurface & Epiphy2DRenderer v6.0: adaptV5ToV6, aliases, quotas, tra
     assert.ok(tPkt.nodes.every(function (n) { return n.id !== 'badge_item' }), 'v18 Scheme Alpha badge reticle must not be obscured by static 16x16 badge_item')
     var v18GlassL = tPkt.nodes.find(function (n) { return n.id === 'panel_bg_l' })
     var v18BarMain = tPkt.nodes.find(function (n) { return n.id === 'bar_main' })
-    assert.ok(v18GlassL && ((v18GlassL.fill.color >>> 24) & 0xFF) === 0x78, 'v18 stepped glass backing must keep translucent 0x78 alpha (no opaque black box bug)')
+    var v18BadgeIn = tPkt.nodes.find(function (n) { return n.id === 'badge_inner' })
+    var v18RotSq   = tPkt.nodes.find(function (n) { return n.id === 'badge_rot_sq' })
+    assert.ok(v18GlassL && ((v18GlassL.fill.color >>> 24) & 0xFF) === 0xA6, 'v18 stepped glass backing must keep translucent 0xA6 alpha (no opaque black box bug)')
+    assert.ok(v18BarMain && v18BarMain.w >= 280 && (v18BarMain.w / v18BarMain.h) >= 28, 'v18 telemetry bar must keep sleek >=28:1 Scheme Alpha aspect ratio')
+    assert.ok(v18BarMain && (v18BarMain.fill.layers[0].mid >>> 0) === 0x26A69A, 'v18 Stage 1-3 bar gradient must keep Endfield cyan-teal #26A69A midstop')
     assert.ok(v18BarMain && (v18BarMain.fill.layers[1].color >>> 0) === 0x3D000000, 'v18 bar_main diagonal stripes must preserve 0x3D alpha byte')
+    assert.ok(v18RotSq && (v18RotSq.fill.color >>> 0) === 0x26A69A, 'v18 badge_rot_sq must keep Endfield cyan-teal #26A69A fill in Stage 1')
+    assert.ok(v18BadgeIn && v18BadgeIn.bind && v18BadgeIn.bind.vibX > 0 && v18BadgeIn.bind.vibY > 0, 'v18 badge_inner must enable continuous micro-vibration')
+    assert.ok(tPkt.tracks && tPkt.tracks.impulse && tPkt.tracks.impulse.initPeak > 0, 'v18 impulse track must trigger entrance shock via initPeak')
 
     // 5b. Verify evaluateNodeBind (affine track binding + discrete stepHz modulation + impulse shake)
     var bTestNode = {
@@ -8035,6 +8042,30 @@ test('62. 32-bit ARGB alpha preservation, bind.rotSpeed continuous rotation, and
     var stripeRects = rectCalls.filter(function (r) { return r.col === 0x3D000000 })
     assert.ok(stripeRects.length >= 12, 'diagonal stripes with alpha 0x3D must render multi-slice thin ribs instead of 2 chunky blocks')
     assert.ok(stripeRects.every(function (r) { return r.h < 3.0 }), 'each diagonal stripe slice must be thin (<3px), never halfH chunky block')
+
+    // Large epoch timestamp (Date.now() = 1.795e12) must NOT quantize/freeze float32 rotateDeg or stall vibX/vibY
+    var epochNow = 1795039370000
+    var cliSb4 = {
+        console: { info: function () {}, warn: function () {}, error: function (m) { throw new Error(m) }, debug: function () {}, log: function () {} },
+        Date: { now: function () { return epochNow } },
+        Client: { getCurrentScreen: function () { return null } },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function () {} },
+        NetworkEvents: { dataReceived: function () {} },
+        Java: { loadClass: function () { return null } },
+        Text: { of: function (s) { return { string: String(s) } } },
+        global: {}
+    }
+    cliSb4.globalThis = cliSb4
+    vm.createContext(cliSb4)
+    loadStartupBase(cliSb4)
+    runScriptIn(cliSb4, RENDERER_PATH)
+    var R4 = cliSb4.global.Epiphy2DRenderer
+    var rotNode = { bind: { rotSpeed: 86, vibX: 0.55, vibY: 0.45, vibHz: 22, seed: 29 } }
+    var evA = R4._pure.evaluateNodeBind(rotNode, 10, 10, 8, 8, 1.0, 0, {}, epochNow + 100)
+    var evB = R4._pure.evaluateNodeBind(rotNode, 10, 10, 8, 8, 1.0, 0, {}, epochNow + 250)
+    assert.ok(evA.angle >= 0 && evA.angle < 360 && evB.angle >= 0 && evB.angle < 360, 'epoch rotSpeed angle must stay normalized within [0, 360)')
+    assert.ok(Math.abs(Math.fround(evB.angle) - Math.fround(evA.angle)) > 5.0, 'float32-rounded angle must advance crisply under epoch Date.now() instead of freezing at 16384-deg steps')
+    assert.ok(Math.abs(evA.x - 10) > 0.01 && Math.abs(evB.x - evA.x) > 0.01, 'vibX micro-vibration must oscillate smoothly without Math.round stalling')
 })
 
 
