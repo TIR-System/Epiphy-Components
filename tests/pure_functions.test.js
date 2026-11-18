@@ -7550,6 +7550,130 @@ test('Epiphy2DSurface & Epiphy2DRenderer v6.0: adaptV5ToV6, aliases, quotas, tra
     assert.ok(tPkt.tracks != null && tPkt.tracks.progress.mode === 'lerp' && tPkt.tracks.progressTrail.mode === 'trail', 'v18 telemetry packet must configure lerp + trail tracks')
     assert.strictEqual(String(tPkt.sub).indexOf('█'), -1, 'v18 telemetry subtitle must not contain legacy text progress bar character █')
     assert.strictEqual(String(tPkt.sub).indexOf('░'), -1, 'v18 telemetry subtitle must not contain legacy text progress bar character ░')
+
+    // 6. Real KubeJS CompoundTag/ListTag + PaintScreenEventJS pipeline verification (catching Rhino NBT typeof & 6-arg rectangle/quads)
+    // Simulate KubeJS NBTUtils serialization (CompoundTag / ListTag / NumericTag / StringTag)
+    function toMockNbtTag(v) {
+        if (v === null || v === undefined) return null
+        if (typeof v === 'boolean') return { getId: function () { return 1 }, getAsNumber: function () { return v ? 1 : 0 }, getAsDouble: function () { return v ? 1 : 0 }, getAsString: function () { return v ? '1b' : '0b' } }
+        if (typeof v === 'number') return { getId: function () { return 6 }, getAsNumber: function () { return v }, getAsDouble: function () { return v }, getAsString: function () { return String(v) } }
+        if (typeof v === 'string') return { getId: function () { return 8 }, getAsString: function () { return v } }
+        if (Array.isArray(v)) {
+            var elems = v.map(toMockNbtTag)
+            return {
+                getId: function () { return 9 },
+                size: function () { return elems.length },
+                get: function (i) { return elems[i] }
+            }
+        }
+        if (typeof v === 'object') {
+            var nbtMap = {}
+            Object.keys(v).forEach(function (k) { nbtMap[k] = toMockNbtTag(v[k]) })
+            var keyArr = Object.keys(nbtMap)
+            return {
+                getId: function () { return 10 },
+                contains: function (k) { return Object.prototype.hasOwnProperty.call(nbtMap, k) },
+                getString: function (k) { var c = nbtMap[k]; return c && c.getAsString ? String(c.getAsString()) : '' },
+                getDouble: function (k) { var c = nbtMap[k]; return (c && c.getAsNumber) ? Number(c.getAsNumber()) : 0 },
+                getBoolean: function (k) { var c = nbtMap[k]; return Boolean(c && c.getAsNumber && c.getAsNumber() !== 0) },
+                getAllKeys: function () {
+                    var idx = 0
+                    return {
+                        iterator: function () {
+                            return {
+                                hasNext: function () { return idx < keyArr.length },
+                                next: function () { return keyArr[idx++] }
+                            }
+                        }
+                    }
+                },
+                get: function (k) { return nbtMap[k] }
+            }
+        }
+        return null
+    }
+
+    var nbtErrors = []
+    var realCliNow = 80000
+    var realCliPaints = []
+    var realCliNet = {}
+    var realCliSb = {
+        console: { info: function () {}, warn: function () {}, error: function (m) { nbtErrors.push(String(m)) }, debug: function () {}, log: function () {} },
+        Date: { now: function () { return realCliNow } },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function (fn) { realCliPaints.push(fn) } },
+        NetworkEvents: { dataReceived: function (ch, fn) { realCliNet[ch] = fn } },
+        Java: { loadClass: function () { return null } },
+        Text: { of: function (s) { return { string: String(s), getVisualOrderText: function () { return String(s) } } } },
+        global: {}
+    }
+    realCliSb.globalThis = realCliSb
+    vm.createContext(realCliSb)
+    loadStartupBase(realCliSb)
+    runScriptIn(realCliSb, RENDERER_PATH)
+
+    var progressedPkt = Dm.buildPacket(Dm.buildProgressPanel({
+        id: 'real_nbt_bar',
+        lifeMode: 'active',
+        activeHold: 24,
+        progress: 0.5,
+        barWidth: 160,
+        barHeight: 6,
+        barColorFrom: 0xFF3333,
+        barColorTo: 0xFFAA22,
+        text: '§c§l[堆芯遥测] §f50%',
+        sub: '§7正在运行'
+    }))
+    var mockRealCompound = toMockNbtTag(progressedPkt)
+    realCliNet['epiphy:screen_danmaku']({ data: mockRealCompound })
+
+    var rectDraws = []
+    var vertexDraws = []
+    var quadSessions = 0
+    var drawnTextStrings = []
+    var realPaintEv = {
+        width: 854, height: 480, level: 'minecraft:overworld',
+        font: { width: function (s) { return String(s || '').length * 6 } },
+        graphics: {
+            flush: function () {},
+            enableScissor: function () {},
+            disableScissor: function () {}
+        },
+        push: function () {},
+        pop: function () {},
+        translate: function () {},
+        rotateDeg: function () {},
+        scale: function () {},
+        getMatrix: function () { return { _id: 'mat' } },
+        setPositionColorShader: function () {},
+        setPositionColorTextureShader: function () {},
+        setShaderTexture: function () {},
+        blend: function () {},
+        beginQuads: function () { quadSessions++ },
+        end: function () {},
+        rectangle: function (x, y, z, w, h, col) {
+            assert.strictEqual(arguments.length >= 6, true, 'PaintScreenEventJS.rectangle requires 6 args (x,y,z,w,h,col)')
+            rectDraws.push({ x: x, y: y, z: z, w: w, h: h, col: col })
+        },
+        vertex: function (mat, x, y, z, col) {
+            vertexDraws.push({ x: x, y: y, z: z, col: col })
+        },
+        text: function (comp, x, y, col) {
+            assert.ok(comp != null && comp.string != null, 'fallback event.text must receive non-null Component')
+            drawnTextStrings.push(String(comp.string))
+        }
+    }
+    realCliPaints[0](realPaintEv)
+    assert.strictEqual(nbtErrors.length, 0, 'CompoundTag packet + PaintScreenEventJS draw must emit zero errors: ' + nbtErrors.join(' | '))
+    assert.strictEqual(realCliSb.global.Epiphy2DRenderer.count(), 1, 'CompoundTag progress packet must materialize in activeOverlays')
+    var activeBarOv = realCliSb.global.Epiphy2DRenderer._pure.inspectOverlays()[0]
+    assert.strictEqual(activeBarOv.hasGraphicNodes, true, 'CompoundTag progress packet must set hasGraphicNodes=true')
+    assert.ok(rectDraws.length >= 5, 'bar_bg + 4 border edges + bar_trail must draw via 6-arg PaintScreenEventJS.rectangle')
+    var barMainVerts = vertexDraws
+    assert.strictEqual(barMainVerts.length, 4, 'bar_main horizontal gradient must draw 1 hardware quad (4 vertices)')
+    var drawnBarWidth = barMainVerts[0].x - barMainVerts[1].x
+    assert.ok(Math.abs(drawnBarWidth - 80) < 0.01, 'at progress=0.5 with barWidth=160, gradient quad width must be 80px, got ' + drawnBarWidth)
+    assert.ok(drawnTextStrings.some(function (s) { return s.indexOf('堆芯遥测') >= 0 }), 'title text node must draw with valid Component')
+    assert.ok(drawnTextStrings.some(function (s) { return s.indexOf('正在运行') >= 0 }), 'sub text node must draw with valid Component')
 })
 
 

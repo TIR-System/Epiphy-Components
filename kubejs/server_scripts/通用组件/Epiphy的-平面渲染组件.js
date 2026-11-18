@@ -1938,7 +1938,7 @@
                 id:     'sub',
                 type:   'text',
                 x:      0,
-                y:      barY + Math.round(barH * 0.5) + 6,
+                y:      barY + Math.round(barH * 0.5) + 9,
                 anchor: 'center',
                 text:   subStr,
                 color:  parseColor(c.subColor, DEFAULTS.subColor).color,

@@ -898,8 +898,10 @@
     }
 
     function adaptV5ToV6(rawPkt) {
-        if (rawPkt == null || typeof rawPkt !== 'object') return rawPkt;
-        if (typeof rawPkt.contains === 'function' || typeof rawPkt.getString === 'function') return rawPkt;
+        if (rawPkt == null || !isObjectLike(rawPkt)) return rawPkt;
+        try {
+            if (typeof rawPkt.contains === 'function' || typeof rawPkt.getString === 'function') return rawPkt;
+        } catch (eTagCheck) { }
         var out = {};
         for (var k in rawPkt) {
             if (Object.prototype.hasOwnProperty.call(rawPkt, k)) {
@@ -929,8 +931,8 @@
         if (out.slotId == null) {
             out.slotId = out.id != null ? String(out.id) : (out.slot != null ? String(out.slot) : '');
         }
-        if (out.vars == null || typeof out.vars !== 'object') out.vars = {};
-        if (out.tracks == null || typeof out.tracks !== 'object') out.tracks = {};
+        if (!isObjectLike(out.vars) || Array.isArray(out.vars)) out.vars = {};
+        if (!isObjectLike(out.tracks) || Array.isArray(out.tracks)) out.tracks = {};
 
         var hasExplicitNodes = (Array.isArray(out.nodes) && out.nodes.length > 0) ||
             (Array.isArray(out.bgNodes) && out.bgNodes.length > 0) ||

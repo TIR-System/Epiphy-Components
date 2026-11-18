@@ -2082,7 +2082,7 @@
                 progress:     p,
                 barWidth:     160,
                 barHeight:    6,
-                barColorFrom: meta.color,
+                barColorFrom: meta.hex,
                 barColorTo:   0xFFCC33,
                 trailColor:   0x77FF6633,
                 text:         meta.colorCode + '§l[堆芯遥测 · 阶段 ' + (stageIdx + 1) + '/5 ' + meta.tag + '] §fT-' + remainSec + 's §7(' + pct + '%)',
