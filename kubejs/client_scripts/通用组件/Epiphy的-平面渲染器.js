@@ -5723,17 +5723,20 @@
                         var rBase = max2(3, Number(lay.baseLen || 26))
                         var rAmp  = max2(0, Number(lay.ampLen != null ? lay.ampLen : 15))
                         var rSpd  = Number(lay.speedX != null ? lay.speedX : 30)
-                        var rThk  = max2(0.8, Number(lay.thickness || 1.2))
-                        var spanW = fw + 48
+                        var rThk  = max2(0.4, Number(lay.thickness || 1.0))
+                        var rSeed = (Number(lay.seed || 17) | 0)
+                        var spanW = fw + 56
                         var stride = spanW / rSegs
                         for (var rIdx = 0; rIdx < rRows; rIdx++) {
                             var ry = fy + rOffY + rIdx * rGap
                             var rDir = (rIdx % 2 === 0) ? 1.0 : -1.0
-                            var phase = tSec * (rSpd + rIdx * 9.0) * rDir + rIdx * 37.0
-                            var rCol = toArgbWithAlpha((rIdx % 2 === 0 || lay.altColor === undefined) ? layColRaw : layAltRaw, lAlpha)
+                            var phase = tSec * (rSpd + rIdx * 11.0) * rDir + ((rIdx * 137 + rSeed * 53) % spanW)
+                            var rAlphaMod = lAlpha * (0.68 + (rIdx % 3) * 0.16)
+                            var rCol = toArgbWithAlpha((rIdx % 2 === 0 || lay.altColor === undefined) ? layColRaw : layAltRaw, rAlphaMod)
                             for (var sg = 0; sg < rSegs; sg++) {
-                                var rx = fx - 24 + (((sg * stride + phase) % spanW + spanW) % spanW)
-                                var rw = max2(3, rBase + Math.sin(tSec * 2.8 + rIdx * 1.3 + sg * 1.7) * rAmp)
+                                var segJit = (hashStepSigned(sg + rIdx * 17, rSeed, 71) * 0.42) * stride
+                                var rx = fx - 28 + (((sg * stride + segJit + phase) % spanW + spanW) % spanW)
+                                var rw = max2(3, rBase + Math.sin(tSec * 2.5 + rIdx * 1.9 + sg * 2.3) * rAmp)
                                 emitClippedRect(rx, ry, rw, rThk, rCol)
                             }
                         }
@@ -5761,7 +5764,7 @@
                         var stHz    = max2(1, Number(lay.stepHz || 9))
                         var stTick  = Math.floor(tSec * stHz)
                         var stSeed  = (Number(lay.seed || 7) | 0)
-                        var stThk   = max2(0.8, Number(lay.thickness || 1.0))
+                        var stThk   = max2(0.5, Number(lay.thickness || 1.0))
                         var stSpan  = fw / stCount
                         var stepRoom = max2(1.0, fh - stThk)
                         var tierMidY = fy + stepRoom * 0.5
