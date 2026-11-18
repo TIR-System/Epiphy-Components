@@ -846,10 +846,10 @@
         var badgeCy    = badgeY + Math.round(badgeSize * 0.5)
         var split1     = Math.round(barW * 0.44)
         var split2     = Math.round(barW * 0.78)
-        var t1End      = Math.round(barW * 0.56)
-        var t2Start    = Math.round(barW * 0.36)
-        var t2W        = Math.round(barW * 0.42)
-        var t3Start    = Math.round(barW * 0.74)
+        var seg1W      = Math.round(barW * 0.30)
+        var seg2W      = Math.round(barW * 0.30)
+        var seg3W      = Math.round(barW * 0.24)
+        var seg4W      = barW - seg1W - seg2W - seg3W + 10
 
         var titleStr   = String(c.text || c.title || '')
         var subStr     = String(c.sub || c.subtitle || '')
@@ -862,33 +862,31 @@
         var impulseEvt = String(c.impulseEvent !== undefined ? c.impulseEvent : efTagStr)
         var pctStr     = Math.round(pVal * 100) + '%'
 
-        // 定稿方案 α (1:1 HTML 画布坐标系)：472x16 细长条带 × 细锐 0.55px 线宽 × 三层立体底流 × 错位断裂半透明底衬
+        // 定稿方案 α (1:1 HTML 画布坐标系)：472x16 细长条带 × 零重叠阶梯切角玻璃底衬 × 居中无偏转旋转核 × 三层立体底流
         var schemeAlphaNodes = [
-            // 1. 左侧不规则错位微底衬 + 同心双框连续旋转方格准星 (42x42 / 22x22 / 11x11+7x7) + DET[██]D + 边缘变形体素块 + 微编号
-            { id: 'badge_plate',   type: 'rect', anchor: 'top_left', x: badgeX + 2,             y: badgeY - 1,             w: badgeSize - 2,  h: badgeSize + 1,  fill: { mode: 'solid', color: badgeBgCol } },
-            { id: 'badge_plate_s', type: 'rect', anchor: 'top_left', x: badgeX - 4,             y: badgeY + 14,            w: badgeSize - 8,  h: badgeSize - 11, fill: { mode: 'solid', color: mosaicCCol } },
-            { id: 'badge_aura_r',  type: 'rect', anchor: 'top_left', x: badgeX + badgeSize - 3, y: badgeY + 5,             w: 8,              h: 7,              fill: { mode: 'solid', color: mosaicCCol }, bind: { stepHz: 9, seed: 13, jitterX: 3, jitterY: 2, jitterW: 2 } },
-            { id: 'badge_aura_l',  type: 'rect', anchor: 'top_left', x: badgeX - 6,             y: badgeY + badgeSize - 13, w: 7,             h: 9,              fill: { mode: 'solid', color: mosaicCCol }, bind: { stepHz: 9, seed: 23, jitterX: 2, jitterY: 2 } },
-            { id: 'badge_aura_br', type: 'rect', anchor: 'top_left', x: badgeX + badgeSize - 1, y: badgeY + badgeSize - 8, w: 6,              h: 6,              fill: { mode: 'solid', color: mosaicBCol } },
-            { id: 'badge_outer',   type: 'rect', anchor: 'top_left', x: badgeX,                 y: badgeY,                 w: badgeSize,      h: badgeSize,      fill: { mode: 'outline', color: pureCol, thickness: 1 }, bind: { seed: 17, impulseVar: 'impulse', shakeX: 1.5, shakeY: 1.2, vibX: 0.32, vibY: 0.25, vibHz: 18 } },
+            // 1. 左侧同心严密对齐底衬 + 同心双框连续旋转方格准星 (外42 / 内22 / 旋转核11+7 同源同振零偏移) + 外缘不重叠体素碎片
+            { id: 'badge_plate',   type: 'rect', anchor: 'top_left', x: badgeX,                 y: badgeY,                 w: badgeSize,      h: badgeSize,      fill: { mode: 'solid', color: badgeBgCol } },
+            { id: 'badge_aura_r',  type: 'rect', anchor: 'top_left', x: badgeX + badgeSize + 1, y: badgeY + 5,             w: 6,              h: 6,              fill: { mode: 'solid', color: mosaicCCol }, bind: { stepHz: 9, seed: 13, jitterX: 2, jitterY: 2, jitterW: 1 } },
+            { id: 'badge_aura_l',  type: 'rect', anchor: 'top_left', x: badgeX - 6,             y: badgeY + badgeSize - 13, w: 5,             h: 8,              fill: { mode: 'solid', color: mosaicCCol }, bind: { stepHz: 9, seed: 23, jitterX: 1, jitterY: 2 } },
+            { id: 'badge_aura_br', type: 'rect', anchor: 'top_left', x: badgeX + badgeSize + 1, y: badgeY + badgeSize - 7, w: 5,              h: 5,              fill: { mode: 'solid', color: mosaicBCol } },
+            { id: 'badge_outer',   type: 'rect', anchor: 'top_left', x: badgeX,                 y: badgeY,                 w: badgeSize,      h: badgeSize,      fill: { mode: 'outline', color: pureCol, thickness: 1 } },
             { id: 'badge_brk_tl1', type: 'rect', anchor: 'top_left', x: badgeX - 1,             y: badgeY - 1,             w: 5,              h: 2,              fill: { mode: 'solid', color: warnCol } },
             { id: 'badge_brk_tl2', type: 'rect', anchor: 'top_left', x: badgeX - 1,             y: badgeY - 1,             w: 2,              h: 5,              fill: { mode: 'solid', color: warnCol } },
             { id: 'badge_brk_br1', type: 'rect', anchor: 'top_left', x: badgeX + badgeSize - 4, y: badgeY + badgeSize - 1, w: 5,              h: 2,              fill: { mode: 'solid', color: warnCol } },
             { id: 'badge_brk_br2', type: 'rect', anchor: 'top_left', x: badgeX + badgeSize - 1, y: badgeY + badgeSize - 4, w: 2,              h: 5,              fill: { mode: 'solid', color: warnCol } },
-            { id: 'badge_inner',   type: 'rect', anchor: 'top_left', x: badgeX + 10,            y: badgeY + 10,            w: badgeSize - 20, h: badgeSize - 20, fill: { mode: 'outline', color: accentCol, thickness: 1 }, bind: { seed: 29, impulseVar: 'impulse', shakeX: 2.2, shakeY: 2.2, vibX: 0.75, vibY: 0.65, vibHz: 22 } },
-            { id: 'badge_rot_sq',  type: 'rect', anchor: 'center',   x: badgeCx,                y: badgeCy,                w: 11,             h: 11,             fill: { mode: 'solid', color: fillMid },   bind: { rotSpeed: 86, seed: 31, impulseVar: 'impulse', shakeX: 1.5, shakeY: 1.5, vibX: 0.5, vibY: 0.5, vibHz: 24 } },
-            { id: 'badge_rot_dia', type: 'rect', anchor: 'center',   x: badgeCx,                y: badgeCy,                w: 7,              h: 7, angle: 45,    fill: { mode: 'solid', color: pureCol },   bind: { rotSpeed: 86, seed: 31, impulseVar: 'impulse', shakeX: 1.5, shakeY: 1.5, vibX: 0.5, vibY: 0.5, vibHz: 24 } },
-            { id: 'badge_tag',     type: 'text', anchor: 'top_left', x: badgeX - 2,             y: badgeY - 10,            scale: 0.80,     text: '$badgeCode',   color: accentCol, shadow: true },
+            { id: 'badge_inner',   type: 'rect', anchor: 'top_left', x: badgeX + 10,            y: badgeY + 10,            w: badgeSize - 20, h: badgeSize - 20, fill: { mode: 'outline', color: accentCol, thickness: 1 }, bind: { seed: 29, impulseVar: 'impulse', shakeX: 1.5, shakeY: 1.5, vibX: 0.45, vibY: 0.40, vibHz: 22 } },
+            { id: 'badge_rot_sq',  type: 'rect', anchor: 'center',   x: badgeCx,                y: badgeCy,                w: 11,             h: 11,             fill: { mode: 'solid', color: fillMid },   bind: { rotSpeed: 86, seed: 29, impulseVar: 'impulse', shakeX: 1.5, shakeY: 1.5, vibX: 0.45, vibY: 0.40, vibHz: 22 } },
+            { id: 'badge_rot_dia', type: 'rect', anchor: 'center',   x: badgeCx,                y: badgeCy,                w: 7,              h: 7, angle: 45,    fill: { mode: 'solid', color: pureCol },   bind: { rotSpeed: 86, seed: 29, impulseVar: 'impulse', shakeX: 1.5, shakeY: 1.5, vibX: 0.45, vibY: 0.40, vibHz: 22 } },
+            { id: 'badge_tag',     type: 'text', anchor: 'top_left', x: badgeX - 1,             y: badgeY - 10,            scale: 0.80,     text: '$badgeCode',   color: accentCol, shadow: true },
             { id: 'badge_mask',    type: 'rect', anchor: 'top_left', x: badgeX + 11,            y: badgeY - 10,            w: 11,             h: 8,              fill: { mode: 'solid', color: pureCol },    bind: { stepHz: 9, seed: 41, jitterX: 7, jitterW: 3 } },
             { id: 'badge_mask_tr', type: 'rect', anchor: 'top_left', x: badgeX + 22,            y: badgeY - 10,            w: 6,              h: 8,              fill: { mode: 'solid', color: mosaicBCol }, bind: { stepHz: 9, seed: 41, jitterX: 7 } },
             { id: 'badge_idx',     type: 'text', anchor: 'top_left', x: badgeX,                 y: badgeY + badgeSize + 4, scale: 0.74,     text: 'ID//0x4F',     color: 0x99FFFFFF, shadow: true },
 
-            // 2. 非规整多级错位半透明底衬（左顶错步 + 中部下探波纹护罩 + 右侧破框延展 + 边缘 9Hz 变形碎片）
-            { id: 'panel_bg_l',      type: 'rect', anchor: 'top_left', x: barX0 - 6,           y: barY0 - 20,         w: t1End + 6,            h: barH + 26, fill: { mode: 'solid', color: plateBgCol } },
-            { id: 'panel_bg_m',      type: 'rect', anchor: 'top_left', x: barX0 + t2Start,     y: barY0 - 15,         w: t2W,                  h: barH + 34, fill: { mode: 'solid', color: plateBgCol } },
-            { id: 'panel_bg_r',      type: 'rect', anchor: 'top_left', x: barX0 + t3Start,     y: barY0 - 11,         w: barW - t3Start + 18,  h: barH + 24, fill: { mode: 'solid', color: plateBgCol } },
-            { id: 'bg_frag_top',     type: 'rect', anchor: 'top_left', x: barX0 + t1End - 4,   y: barY0 - 21,         w: 24,                   h: 6,         fill: { mode: 'solid', color: mosaicCCol }, bind: { stepHz: 9, seed: 61, jitterX: 6, jitterW: 4 } },
-            { id: 'bg_frag_bot',     type: 'rect', anchor: 'top_left', x: barX0 + 18,          y: barY0 + barH + 4,   w: 36,                   h: 9,         fill: { mode: 'solid', color: plateBgCol }, bind: { stepHz: 9, seed: 73, jitterX: 4, jitterW: 5 } },
+            // 2. 四段严丝合缝零重叠阶梯切角半透明底衬（x 首尾精准衔接无叠色深斑，上下轮廓错步削角且完整包覆全部三层数据波纹不外露）
+            { id: 'panel_bg_l',  type: 'rect', anchor: 'top_left', x: barX0 - 6,                       y: barY0 - 20, w: seg1W + 6, h: barH + 46, fill: { mode: 'solid', color: plateBgCol } },
+            { id: 'panel_bg_m',  type: 'rect', anchor: 'top_left', x: barX0 + seg1W,                   y: barY0 - 18, w: seg2W,     h: barH + 45, fill: { mode: 'solid', color: plateBgCol } },
+            { id: 'panel_bg_m2', type: 'rect', anchor: 'top_left', x: barX0 + seg1W + seg2W,           y: barY0 - 13, w: seg3W,     h: barH + 39, fill: { mode: 'solid', color: plateBgCol } },
+            { id: 'panel_bg_r',  type: 'rect', anchor: 'top_left', x: barX0 + seg1W + seg2W + seg3W,   y: barY0 - 9,  w: seg4W,     h: barH + 33, fill: { mode: 'solid', color: plateBgCol } },
 
             // 3. 三层立体景深下方流动数据波纹场（远景长波慢流 + 中景非周期错位水纹 + 近景双速高速微粒与数据爆发）
             {
@@ -916,12 +914,12 @@
             { id: 'frame_bot_3',     type: 'rect', anchor: 'top_left', x: barX0 + split2,      y: barY0 + barH + 3,   w: barW - split2 + 16,   h: 1.5,       fill: { mode: 'solid', color: mosaicBCol } },
 
             // 5. 顶栏《终末地》反色工业铭牌 + 3 枚状态指示灯 + 主遥测标题
-            { id: 'ef_tag_plate', type: 'rect', anchor: 'top_left', x: barX0,      y: barY0 - 18.5, w: 66, h: 11, fill: { mode: 'solid', color: warnCol } },
-            { id: 'ef_tag_text',  type: 'text', anchor: 'top_left', x: barX0 + 3,  y: barY0 - 16.5, scale: 0.85, text: '$efTag', color: 0x090C10, shadow: false },
-            { id: 'ef_pip_1',     type: 'rect', anchor: 'top_left', x: barX0 + 70, y: barY0 - 15.5, w: 3.5, h: 6, fill: { mode: 'solid', color: accentCol } },
-            { id: 'ef_pip_2',     type: 'rect', anchor: 'top_left', x: barX0 + 76, y: barY0 - 15.5, w: 3.5, h: 6, fill: { mode: 'solid', color: warnCol }, bind: { stepHz: 4, seed: 19, jitterH: 1.5 } },
-            { id: 'ef_pip_3',     type: 'rect', anchor: 'top_left', x: barX0 + 82, y: barY0 - 15.5, w: 3.5, h: 6, fill: { mode: 'solid', color: 0x44FFFFFF } },
-            { id: 'title',        type: 'text', anchor: 'top_left', x: barX0 + 90, y: barY0 - 17,   scale: 0.96, text: '$title', color: pureCol, shadow: true },
+            { id: 'ef_tag_plate', type: 'rect', anchor: 'top_left', x: barX0,      y: barY0 - 18.5, w: 69, h: 11, fill: { mode: 'solid', color: warnCol } },
+            { id: 'ef_tag_text',  type: 'text', anchor: 'top_left', x: barX0 + 4,  y: barY0 - 16.5, scale: 0.85, text: '$efTag', color: 0x090C10, shadow: false },
+            { id: 'ef_pip_1',     type: 'rect', anchor: 'top_left', x: barX0 + 73, y: barY0 - 15.5, w: 3.5, h: 6, fill: { mode: 'solid', color: accentCol } },
+            { id: 'ef_pip_2',     type: 'rect', anchor: 'top_left', x: barX0 + 79, y: barY0 - 15.5, w: 3.5, h: 6, fill: { mode: 'solid', color: warnCol }, bind: { stepHz: 4, seed: 19, jitterH: 1.5 } },
+            { id: 'ef_pip_3',     type: 'rect', anchor: 'top_left', x: barX0 + 85, y: barY0 - 15.5, w: 3.5, h: 6, fill: { mode: 'solid', color: 0x44FFFFFF } },
+            { id: 'title',        type: 'text', anchor: 'top_left', x: barX0 + 93, y: barY0 - 17,   scale: 0.96, text: '$title', color: pureCol, shadow: true },
 
             // 6. 进度槽核心：深邃暗腔 + trail 拖影 + 5 层程序化视差内胆 + 刻度细线 + 副轨
             { id: 'bar_bg',    type: 'rect', anchor: 'top_left', x: barX0, y: barY0,     w: barW, h: barH,     fill: { mode: 'solid', color: 0xEA04070B }, bind: { seed: 5, impulseVar: 'impulse', shakeX: 1.4 } },
