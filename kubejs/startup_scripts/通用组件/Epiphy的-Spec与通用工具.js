@@ -385,15 +385,20 @@
         return ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
     }
 
-    function parseColor(val, defColor, presets) {
-        var def = (typeof defColor === 'number' && isFinite(defColor)) ? (defColor & 0xFFFFFF) : 0xFFFFFF;
+    function parseColor(val, defColor, presets, opts) {
+        var preserveAlpha = !!(opts && opts.preserveAlpha);
+        var mask = preserveAlpha ? 0xFFFFFFFF : 0xFFFFFF;
+        var def = (typeof defColor === 'number' && isFinite(defColor))
+            ? (preserveAlpha ? (Math.floor(defColor) >>> 0) : (Math.floor(defColor) & 0xFFFFFF))
+            : (preserveAlpha ? 0xFFFFFFFF : 0xFFFFFF);
         var presetMap = presets || COLOR_PRESETS;
         if (val === null || val === undefined || val === '' || typeof val === 'boolean') {
             return { color: def, isRandom: false };
         }
         if (typeof val === 'number') {
             if (!isFinite(val)) return { color: def, isRandom: false };
-            return { color: (Math.floor(val) & 0xFFFFFF), isRandom: false };
+            var numCol = Math.floor(val);
+            return { color: preserveAlpha ? (numCol >>> 0) : (numCol & mask), isRandom: false };
         }
         var s = String(val).trim().toLowerCase();
         if (!s) return { color: def, isRandom: false };
@@ -410,17 +415,23 @@
                 return { color: parseInt(exp, 16) & 0xFFFFFF, isRandom: false };
             }
             if (/^[0-9a-f]{6,8}$/.test(h)) {
-                return { color: parseInt(h, 16) & 0xFFFFFF, isRandom: false };
+                var parsedHex = parseInt(h, 16);
+                return { color: preserveAlpha ? (parsedHex >>> 0) : (parsedHex & 0xFFFFFF), isRandom: false };
             }
             return { color: def, isRandom: false };
         }
         if (/^0x[0-9a-f]{1,8}$/.test(s)) {
-            return { color: parseInt(s, 16) & 0xFFFFFF, isRandom: false };
+            var parsedOx = parseInt(s, 16);
+            return { color: preserveAlpha ? (parsedOx >>> 0) : (parsedOx & 0xFFFFFF), isRandom: false };
         }
         if (/^[0-9a-f]{6}$/.test(s)) {
             return { color: parseInt(s, 16) & 0xFFFFFF, isRandom: false };
         }
         return { color: def, isRandom: false };
+    }
+
+    function parseArgbColor(val, defColor, presets) {
+        return parseColor(val, defColor, presets, { preserveAlpha: true });
     }
 
     function sampleClampedRange(a, b, loBound, hiBound, defVal) {
@@ -1189,6 +1200,7 @@
             parseTicks:                 parseTicks,
             parseTicksOrSec:            parseTicksOrSec,
             parseColor:                 parseColor,
+            parseArgbColor:             parseArgbColor,
             parseSize:                  parseSize,
             parseTilt:                  parseTilt,
             parseCommandSpec:           parseCommandSpec,

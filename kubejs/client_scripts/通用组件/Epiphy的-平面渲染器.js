@@ -4831,6 +4831,7 @@
             return renderGuiSurfacePass(screenOrEvent, phase, guiCtx)
         },
         restoreReplacedTextures: restoreAllReplacedTextures,
+        registerShader:          registerCustomShader,
         _pure: {
             hashUnit:                     hashUnit,
             fastSinTurns:                 fastSinTurns,
@@ -5227,6 +5228,12 @@
                 var tSec = (Number(now) || 0) * 0.001
                 if (b.shakeX) rx += Math.round(Math.sin(tSec * 42.0 + seed) * impVal * Number(b.shakeX))
                 if (b.shakeY) ry += Math.round(Math.cos(tSec * 35.0 + seed) * impVal * Number(b.shakeY))
+            }
+        }
+        if (b.rotSpeed) {
+            var rotSpd = Number(b.rotSpeed)
+            if (isFinite(rotSpd) && rotSpd !== 0) {
+                rAng += ((Number(now) || 0) * 0.001) * rotSpd
             }
         }
         return { x: rx, y: ry, w: rw, h: rh, alpha: ra, angle: rAng }
@@ -5674,12 +5681,17 @@
                     } else if (kind === 'stripes') {
                         var stepPx = max2(4, Number(lay.step || 18))
                         var sWidth = max2(1, Number(lay.width || 6))
+                        var sSkew  = (lay.skew !== undefined && isFinite(Number(lay.skew))) ? Number(lay.skew) : Math.round(fh * 0.5)
                         var sShift = (((tSec * Number(lay.speedX || 20)) % stepPx) + stepPx) % stepPx
                         var sArgb  = toArgbWithAlpha(layColRaw, lAlpha)
-                        var halfH  = fh * 0.5
-                        for (var sx = fx - stepPx + sShift; sx < fx + fw + stepPx; sx += stepPx) {
-                            emitClippedRect(sx, fy, sWidth, halfH, sArgb)
-                            emitClippedRect(sx + sWidth * 0.45, fy + halfH, sWidth, fh - halfH, sArgb)
+                        var nSlices = max2(3, min2(14, Math.round(fh / 1.5)))
+                        var sliceH  = fh / nSlices
+                        for (var sx = fx - stepPx - Math.abs(sSkew) + sShift; sx < fx + fw + stepPx + Math.abs(sSkew); sx += stepPx) {
+                            for (var sl = 0; sl < nSlices; sl++) {
+                                var progY = (sl + 0.5) / nSlices
+                                var slX   = sx + sSkew * (1.0 - progY)
+                                emitClippedRect(slX, fy + sl * sliceH, sWidth, sliceH + 0.15, sArgb)
+                            }
                         }
                     } else if (kind === 'ripples') {
                         var rRows = max2(1, min2(16, Math.round(Number(lay.rows || 4))))
@@ -5736,7 +5748,7 @@
                             var stW = max2(3, Math.round(stSpan - 3 + stJit))
                             var tier = (si + ((si % 3 === 0) ? stTick : 0)) % 3
                             var stY = fy + (tier === 0 ? 2 : (tier === 1 ? 4 : 0))
-                            var stColRaw = (tier === 0) ? layColRaw : ((tier === 1 && lay.altColor !== undefined) ? layAltRaw : 0x88FFFFFF)
+                            var stColRaw = (tier === 0) ? layColRaw : ((tier === 1 && lay.altColor !== undefined) ? layAltRaw : 0x73FFFFFF)
                             var stArgb = toArgbWithAlpha(stColRaw, lAlpha)
                             emitClippedRect(stX, stY, stW, stThk, stArgb)
                             if (lay.risers !== false && si > 0 && tier !== prevTier) {
@@ -5799,6 +5811,13 @@
         }
     }
 
+    var CUSTOM_SHADER_HANDLERS = {}
+
+    function registerCustomShader(shaderId, handler) {
+        if (!shaderId || typeof handler !== 'function') return
+        CUSTOM_SHADER_HANDLERS[String(shaderId).toLowerCase()] = handler
+    }
+
     function drawRectShader(event, x, y, w, h, fill, now, fadeAlpha) {
         var fbCol = toArgbWithAlpha(fill.fallbackColor != null ? fill.fallbackColor : 0xFF140524, fadeAlpha)
         if (RenderTypeClass === null) {
@@ -5806,14 +5825,18 @@
         }
         var shaderId = String(fill.shader || fill.shaderId || 'end_portal').toLowerCase()
         var drewShader = false
-        if (RenderTypeClass && event.graphics != null && typeof event.graphics.fill === 'function') {
+        var customHandler = CUSTOM_SHADER_HANDLERS[shaderId]
+        if (typeof customHandler === 'function') {
+            try {
+                drewShader = Boolean(customHandler(event, x, y, w, h, fill, now, fadeAlpha))
+            } catch (eCustSh) {
+                warnOnce('shaderCustomErr:' + shaderId, '自定义着色器 "' + shaderId + '" 执行失败，已自动降级: ' + eCustSh)
+            }
+        }
+        if (!drewShader && RenderTypeClass && event.graphics != null && typeof event.graphics.fill === 'function') {
             try {
                 var rt = null
-                if (shaderId === 'chaos_vortex') {
-                    // KubeJS 阶段无独立混沌着色器时按 §3.3 降级矩阵回退至 endPortal，并记录一次提示
-                    warnOnce('shaderChaosFallback', 'fill.shader="chaos_vortex" 当前环境无原生混沌 Shader，已按降级矩阵回退至 end_portal')
-                    if (typeof RenderTypeClass.endPortal === 'function') rt = RenderTypeClass.endPortal()
-                } else if (shaderId === 'end_portal' && typeof RenderTypeClass.endPortal === 'function') {
+                if (shaderId === 'end_portal' && typeof RenderTypeClass.endPortal === 'function') {
                     rt = RenderTypeClass.endPortal()
                 } else if (shaderId === 'end_gateway' && typeof RenderTypeClass.endGateway === 'function') {
                     rt = RenderTypeClass.endGateway()
@@ -5921,8 +5944,12 @@
         if (!resolved) return
         var lines = resolved.split('\n')
         var rawCol = resolveVarValue(node.color, varsMap, item.color != null ? item.color : 0xFFFFFF)
-        if (typeof rawCol === 'string' && SPEC && typeof SPEC.parseColor === 'function') {
-            rawCol = SPEC.parseColor(rawCol, 0xFFFFFF).color
+        if (typeof rawCol === 'string' && SPEC) {
+            if (typeof SPEC.parseArgbColor === 'function') {
+                rawCol = SPEC.parseArgbColor(rawCol, 0xFFFFFF).color
+            } else if (typeof SPEC.parseColor === 'function') {
+                rawCol = SPEC.parseColor(rawCol, 0xFFFFFF).color
+            }
         }
         var argb = toArgbWithAlpha(rawCol, fadeAlpha)
         var shadow = node.shadow !== undefined ? Boolean(node.shadow) : (item.shadow !== undefined ? Boolean(item.shadow) : true)

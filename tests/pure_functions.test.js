@@ -7555,6 +7555,13 @@ test('Epiphy2DSurface & Epiphy2DRenderer v6.0: adaptV5ToV6, aliases, quotas, tra
     assert.ok(tPkt.nodes.some(function (n) { return n.id === 'frame_top_steps' && n.fill && n.fill.mode === 'parallax' && n.fill.layers[0].kind === 'steps' }), 'v18 Scheme Alpha must include irregular stepped top frame layer')
     assert.ok(tPkt.nodes.some(function (n) { return n.id === 'cursor_group' && n.type === 'group' && n.bind && n.bind.x && n.bind.x.var === 'progress' }), 'v18 Scheme Alpha must include track-bound T-pin cursor_group')
     assert.ok(tPkt.nodes.some(function (n) { return n.id === 'footer_right' && n.anchor === 'top_right' }), 'v18 Scheme Alpha must include right-aligned footer_right text node')
+    assert.ok(tPkt.nodes.some(function (n) { return n.id === 'badge_rot_sq' && n.anchor === 'center' && n.bind && n.bind.rotSpeed === 86 }), 'v18 Scheme Alpha must include continuous rotating reticle square badge_rot_sq')
+    assert.ok(tPkt.nodes.some(function (n) { return n.id === 'badge_rot_dia' && n.anchor === 'center' && n.angle === 45 && n.bind && n.bind.rotSpeed === 86 }), 'v18 Scheme Alpha must include 45-deg rotating diamond badge_rot_dia')
+    assert.ok(tPkt.nodes.every(function (n) { return n.id !== 'badge_item' }), 'v18 Scheme Alpha badge reticle must not be obscured by static 16x16 badge_item')
+    var v18GlassL = tPkt.nodes.find(function (n) { return n.id === 'panel_bg_l' })
+    var v18BarMain = tPkt.nodes.find(function (n) { return n.id === 'bar_main' })
+    assert.ok(v18GlassL && ((v18GlassL.fill.color >>> 24) & 0xFF) === 0x78, 'v18 stepped glass backing must keep translucent 0x78 alpha (no opaque black box bug)')
+    assert.ok(v18BarMain && (v18BarMain.fill.layers[1].color >>> 0) === 0x3D000000, 'v18 bar_main diagonal stripes must preserve 0x3D alpha byte')
 
     // 5b. Verify evaluateNodeBind (affine track binding + discrete stepHz modulation + impulse shake)
     var bTestNode = {
@@ -7806,7 +7813,7 @@ test('Schema parity, EpiphyLog deprecation control, PRIORITY_MAP pruning, GUI re
             {
                 kind: 'group', x: 0, y: 0,
                 items: [
-                    { kind: 'rect', w: 32, h: 16, fill: { mode: 'shader', shader: 'chaos_vortex', fallbackColor: 0x120024 } },
+                    { kind: 'rect', w: 32, h: 16, fill: { mode: 'shader', shader: 'end_portal', fallbackColor: 0x120024 } },
                     { kind: 'sprite', tex: 'epiphy:textures/gui/icon.png', w: 16, h: 16, texW: 64, texH: 64, tint: 0xFF8844 }
                 ]
             }
@@ -7825,9 +7832,9 @@ test('Schema parity, EpiphyLog deprecation control, PRIORITY_MAP pruning, GUI re
     assert.deepStrictEqual(Array.from(fullAliasPkt.bgNodes[1].slice), [3, 5, 7, 9], 'nine_slice.slice number[4] must be preserved')
     assert.strictEqual(fullAliasPkt.bgNodes[1].tw, 128)
     assert.strictEqual(fullAliasPkt.fgNodes[0].type, 'text')
-    assert.strictEqual(fullAliasPkt.fgNodes[0].color, 0xAABBCC)
+    assert.strictEqual(fullAliasPkt.fgNodes[0].color >>> 0, 0x00AABBCC)
     assert.strictEqual(fullAliasPkt.nodes[0].type, 'group')
-    assert.strictEqual(fullAliasPkt.nodes[0].children[0].fill.shader, 'chaos_vortex')
+    assert.strictEqual(fullAliasPkt.nodes[0].children[0].fill.shader, 'end_portal')
     assert.strictEqual(fullAliasPkt.nodes[0].children[1].tw, 64)
 
     var wpPkt = Dm2.buildPacket({
@@ -7842,7 +7849,7 @@ test('Schema parity, EpiphyLog deprecation control, PRIORITY_MAP pruning, GUI re
     assert.strictEqual(wpPkt.seeThrough, true)
     assert.strictEqual(wpPkt.renderPriority, 0)
 
-    // 4. Client GUI renderPriority ordering, nine_slice[4], chaos_vortex -> end_portal, flush order & screen_session lifecycle
+    // 4. Client GUI renderPriority ordering, nine_slice[4], registerShader / vanilla end_portal, flush order & screen_session lifecycle
     var cliNow2 = 50000
     var cliWarns2 = []
     var cliPaints2 = []
@@ -7871,9 +7878,11 @@ test('Schema parity, EpiphyLog deprecation control, PRIORITY_MAP pruning, GUI re
     runScriptIn(cliSb2, RENDERER_PATH)
 
     var R2 = cliSb2.global.Epiphy2DRenderer
+    var customShaderHits = 0
+    R2.registerShader('custom_nebula', function () { customShaderHits++; return true })
     // High eviction priority (10) screen danmaku still has default renderPriority = 0 (< GUI default 100)
     var scrPktHighPri = Dm2.buildPacket({ id: 'scr_high_pri', surface: 'screen', priority: 10, showInGui: true, layers: [{ kind: 'text', x: 0, y: 0, scale: 0.7, text: 'DANMAKU_TEXT' }] })
-    var guiPktDefPri  = Dm2.buildPacket({ id: 'gui_def_pri', surface: 'gui', lifeMode: 'screen_session', targetGui: { titleMatch: '拆解台' }, bg: [{ kind: 'nine_slice', tex: 'epiphy:textures/gui/panel.png', x: 0, y: 0, w: 60, h: 40, texW: 128, texH: 128, slice: [3, 5, 7, 9] }], layers: [{ kind: 'rect', x: 0, y: 0, w: 40, h: 20, fill: { mode: 'shader', shader: 'chaos_vortex' } }, { kind: 'text', x: 0, y: -8, scale: 0.65, text: 'BADGE_TAG' }, { kind: 'rect', x: 8, y: -8, w: 8, h: 6, color: 0xFFFFFFFF }] })
+    var guiPktDefPri  = Dm2.buildPacket({ id: 'gui_def_pri', surface: 'gui', lifeMode: 'screen_session', targetGui: { titleMatch: '拆解台' }, bg: [{ kind: 'nine_slice', tex: 'epiphy:textures/gui/panel.png', x: 0, y: 0, w: 60, h: 40, texW: 128, texH: 128, slice: [3, 5, 7, 9] }], layers: [{ kind: 'rect', x: 0, y: 0, w: 40, h: 20, fill: { mode: 'shader', shader: 'end_portal' } }, { kind: 'rect', x: 0, y: 20, w: 10, h: 10, fill: { mode: 'shader', shader: 'custom_nebula' } }, { kind: 'text', x: 0, y: -8, scale: 0.65, text: 'BADGE_TAG' }, { kind: 'rect', x: 8, y: -8, w: 8, h: 6, color: 0xFFFFFFFF }] })
     var scrPktTopPri  = Dm2.buildPacket({ id: 'scr_top_override', surface: 'screen', renderPriority: 300, showInGui: true, layers: [{ kind: 'rect', x: 0, y: 0, w: 12, h: 12, color: 0xFF00FF00 }] })
 
     assert.strictEqual(scrPktHighPri.renderPriority, 0)
@@ -7916,13 +7925,116 @@ test('Schema parity, EpiphyLog deprecation control, PRIORITY_MAP pruning, GUI re
     assert.ok(idxBadgeT >= 0 && idxFlushAfterBadgeT > idxBadgeT && idxMaskRect > idxFlushAfterBadgeT, 'graphics.flush() must run after scaled text BADGE_TAG before rect mask 8x6 draws on top')
     assert.ok(idxTopRect > idxMaskRect, 'explicit renderPriority=300 must override GUI default 100 and draw last (on top)')
     assert.ok(drawSeq.some(function (s) { return s.indexOf('rect:3x5') === 0 || s.indexOf('blit:3x5') === 0 }), 'nine_slice with [3,5,7,9] must draw asymmetric 3x5 corner without NaN')
-    assert.ok(cliWarns2.some(function (w) { return w.indexOf('chaos_vortex') >= 0 }), 'chaos_vortex fallback to end_portal must emit warnOnce')
+    assert.strictEqual(customShaderHits, 1, 'custom registered shader must execute cleanly via registerShader')
 
     // Closing GUI automatically expires screen_session overlays
     curActiveScr = null
     cliNow2 += 50
     cliPaints2[0](ev2)
     assert.strictEqual(R2.list().some(function (it) { return it.slotId === 'gui_def_pri' }), false, 'screen_session GUI overlay must auto-expire when target GUI closes')
+})
+
+test('62. 32-bit ARGB alpha preservation, bind.rotSpeed continuous rotation, and smooth diagonal stripes', function () {
+    var sb = {
+        console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+        Date: { now: function () { return 10000 } },
+        Java: { loadClass: function () { return null } },
+        ServerEvents: { tick: function () {}, loaded: function () {}, unloaded: function () {}, commandRegistry: function () {} },
+        BlockEvents: { placed: function () {}, broken: function () {}, rightClicked: function () {} },
+        PlayerEvents: { loggedIn: function () {}, loggedOut: function () {} },
+        LevelEvents: { loaded: function () {}, unloaded: function () {} },
+        Text: { of: function (s) { return String(s) } },
+        global: {}
+    }
+    sb.globalThis = sb
+    vm.createContext(sb)
+    runScriptIn(sb, SPEC_PATH)
+    runScriptIn(sb, LOG_PATH)
+    runScriptIn(sb, SERVER_BASE_PATH)
+    runScriptIn(sb, DANMAKU_PATH)
+
+    var Spec = sb.global.EpiphySpec
+    var Dm = sb.global.ScreenDanmaku
+
+    // 24-bit default parseColor compatibility preserved, parseArgbColor keeps high alpha byte
+    assert.strictEqual(Spec.parseColor(0x3D112233, 0xFFFFFF).color, 0x112233)
+    assert.strictEqual(Spec.parseArgbColor(0x3D000000, 0xFFFFFFFF).color >>> 0, 0x3D000000)
+    assert.strictEqual(Spec.parseArgbColor('#4DFFFFFF', 0xFFFFFFFF).color >>> 0, 0x4DFFFFFF)
+    assert.strictEqual(Spec.parseArgbColor(0x780A1218, 0xFFFFFFFF).color >>> 0, 0x780A1218)
+
+    // buildPacket preserves alpha in node fills, borders, parallax layers & progress panels
+    var pkt = Dm.buildPacket({
+        id: 'argb_rot_test',
+        surface: 'screen',
+        priority: 'active',
+        nodes: [
+            { id: 'glass', type: 'rect', anchor: 'top_left', x: 0, y: 0, w: 60, h: 20, fill: { mode: 'solid', color: 0x780A1218 } },
+            {
+                id: 'bar', type: 'rect', anchor: 'top_left', x: 0, y: 0, w: 80, h: 12,
+                fill: {
+                    mode: 'parallax', bgAlpha: 0,
+                    layers: [
+                        { kind: 'stripes', step: 16, width: 5, skew: 6, speedX: 18, color: 0x3D000000, alpha: 1.0 },
+                        { kind: 'ripples', rows: 2, color: 0x4DFFFFFF, altColor: '#29FFFFFF', alpha: 1.0 }
+                    ]
+                }
+            },
+            { id: 'rot_sq', type: 'rect', anchor: 'center', x: 20, y: 20, w: 9, h: 9, angle: 45, fill: { mode: 'solid', color: 0x80FFFFFF }, bind: { rotSpeed: 86 } }
+        ]
+    })
+    assert.strictEqual(pkt.nodes[0].fill.color >>> 0, 0x780A1218, 'solid glass alpha 0x78 must survive buildPacket')
+    assert.strictEqual(pkt.nodes[1].fill.layers[0].color >>> 0, 0x3D000000, 'stripe shadow alpha 0x3D must survive buildPacket')
+    assert.strictEqual(pkt.nodes[1].fill.layers[0].skew, 6, 'stripe skew must pass through sanitizeParallaxLayers')
+    assert.strictEqual(pkt.nodes[1].fill.layers[1].color >>> 0, 0x4DFFFFFF, 'ripple hex alpha 0x4D must survive buildPacket')
+    assert.strictEqual(pkt.nodes[1].fill.layers[1].altColor >>> 0, 0x29FFFFFF, 'ripple string #AARRGGBB alpha 0x29 must survive buildPacket')
+    assert.strictEqual(pkt.nodes[2].bind.rotSpeed, 86, 'bind.rotSpeed must survive sanitizeNodeBind')
+
+    // Client: evaluateNodeBind rotSpeed + smooth diagonal stripe slices + preserved alpha in emitted quads
+    var cliNow3 = 500
+    var cliPaints3 = []
+    var cliSb3 = {
+        console: { info: function () {}, warn: function () {}, error: function (m) { throw new Error(m) }, debug: function () {}, log: function () {} },
+        Date: { now: function () { return cliNow3 } },
+        Client: { getCurrentScreen: function () { return null } },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function (fn) { cliPaints3.push(fn) } },
+        NetworkEvents: { dataReceived: function () {} },
+        Java: { loadClass: function () { return null } },
+        Text: { of: function (s) { return { string: String(s) } } },
+        global: {}
+    }
+    cliSb3.globalThis = cliSb3
+    vm.createContext(cliSb3)
+    loadStartupBase(cliSb3)
+    runScriptIn(cliSb3, RENDERER_PATH)
+
+    var R3 = cliSb3.global.Epiphy2DRenderer
+    var bound500 = R3._pure.evaluateNodeBind(pkt.nodes[2], 20, 20, 9, 9, 1.0, 45, {}, 500)
+    assert.strictEqual(bound500.angle, 88, 'angle 45 + rotSpeed 86 deg/s at 500ms must equal 88 deg')
+
+    R3.push(pkt)
+    var rotAngles = []
+    var rectCalls = []
+    var ev3 = {
+        width: 854, height: 480, level: 'minecraft:overworld',
+        font: { width: function () { return 20 } },
+        graphics: { flush: function () {} },
+        push: function () {}, pop: function () {}, translate: function () {},
+        rotateDeg: function (deg) { rotAngles.push(deg) },
+        scale: function () {},
+        getMatrix: function () { return {} },
+        setPositionColorShader: function () {},
+        blend: function () {},
+        beginQuads: function () {},
+        end: function () {},
+        rectangle: function (x, y, z, w, h, col) { rectCalls.push({ w: w, h: h, col: col >>> 0 }) },
+        text: function () {}
+    }
+    cliPaints3[0](ev3)
+    assert.ok(rotAngles.indexOf(88) >= 0, 'rotSpeed node must invoke event.rotateDeg(88) during paint')
+    assert.ok(rectCalls.some(function (r) { return r.col === 0x780A1218 }), 'glass rect must pass translucent 0x780A1218 ARGB to event.rectangle')
+    var stripeRects = rectCalls.filter(function (r) { return r.col === 0x3D000000 })
+    assert.ok(stripeRects.length >= 12, 'diagonal stripes with alpha 0x3D must render multi-slice thin ribs instead of 2 chunky blocks')
+    assert.ok(stripeRects.every(function (r) { return r.h < 3.0 }), 'each diagonal stripe slice must be thin (<3px), never halfH chunky block')
 })
 
 

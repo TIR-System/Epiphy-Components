@@ -496,6 +496,13 @@
         return SPEC.parseColor(val, defColor, COLOR_PRESETS)
     }
 
+    function parseArgbColor(val, defColor) {
+        if (typeof SPEC.parseArgbColor === 'function') {
+            return SPEC.parseArgbColor(val, defColor, COLOR_PRESETS)
+        }
+        return SPEC.parseColor(val, defColor, COLOR_PRESETS, { preserveAlpha: true })
+    }
+
     function isArrayLike(v, minLen) {
         if (!SPEC.isArrayLike(v)) return false
         return v.length >= (minLen || 2)
@@ -1127,7 +1134,7 @@
 
     function sanitizeVarOrColor(val, defColor) {
         if (typeof val === 'string' && val.charAt(0) === '$') return val
-        return parseColor(val, defColor).color
+        return parseArgbColor(val, defColor).color
     }
 
     function sanitizeVarOrNum(val, defNum, minVal, maxVal) {
@@ -1194,6 +1201,7 @@
         if (rawBind.impulseVar !== undefined) { out.impulseVar = String(rawBind.impulseVar).replace(/^\$/, ''); hasField = true }
         if (rawBind.shakeX !== undefined) { out.shakeX = Math.max(0, Math.min(64, parseFiniteNum(rawBind.shakeX, 0))); hasField = true }
         if (rawBind.shakeY !== undefined) { out.shakeY = Math.max(0, Math.min(64, parseFiniteNum(rawBind.shakeY, 0))); hasField = true }
+        if (rawBind.rotSpeed !== undefined) { out.rotSpeed = Math.max(-720, Math.min(720, parseFiniteNum(rawBind.rotSpeed, 0))); hasField = true }
         return hasField ? out : null
     }
 
@@ -1264,6 +1272,7 @@
                 if (rl.midPos !== undefined) layOut.midPos = Math.max(0.05, Math.min(0.95, parseFiniteNum(rl.midPos, 0.62)))
                 if (rl.step !== undefined) layOut.step = Math.max(2, Math.min(256, parseFiniteNum(rl.step, 18)))
                 if (rl.width !== undefined) layOut.width = Math.max(1, Math.min(128, parseFiniteNum(rl.width, 6)))
+                if (rl.skew !== undefined) layOut.skew = Math.max(-64, Math.min(64, parseFiniteNum(rl.skew, 7)))
                 if (rl.rows !== undefined) layOut.rows = Math.max(1, Math.min(16, Math.round(parseFiniteNum(rl.rows, 4))))
                 if (rl.rowGap !== undefined) layOut.rowGap = Math.max(1, Math.min(64, parseFiniteNum(rl.rowGap, 3.5)))
                 if (rl.offsetY !== undefined) layOut.offsetY = parseFiniteNum(rl.offsetY, 2.0)
@@ -2099,9 +2108,9 @@
         var subStr   = String(pick(c, ['sub', 'subtitle'], ''))
         var fillFrom = parseColor(c.barColorFrom !== undefined ? c.barColorFrom : (c.barColor !== undefined ? c.barColor : 0xFF3333), 0xFF3333).color
         var fillTo   = parseColor(c.barColorTo !== undefined ? c.barColorTo : (c.barAccentColor !== undefined ? c.barAccentColor : 0xFFAA22), 0xFFAA22).color
-        var trailCol = parseColor(c.trailColor !== undefined ? c.trailColor : 0x77FF6644, 0x77FF6644).color
-        var bgCol    = parseColor(c.bgColor !== undefined ? c.bgColor : 0xB0120A16, 0xB0120A16).color
-        var borderCol= parseColor(c.borderColor !== undefined ? c.borderColor : 0xCC552233, 0xCC552233).color
+        var trailCol = parseArgbColor(c.trailColor !== undefined ? c.trailColor : 0x77FF6644, 0x77FF6644).color
+        var bgCol    = parseArgbColor(c.bgColor !== undefined ? c.bgColor : 0xB0120A16, 0xB0120A16).color
+        var borderCol= parseArgbColor(c.borderColor !== undefined ? c.borderColor : 0xCC552233, 0xCC552233).color
 
         var nodes = []
         if (Array.isArray(c.nodes) && c.nodes.length > 0) {
