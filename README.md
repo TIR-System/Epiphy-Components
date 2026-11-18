@@ -73,11 +73,11 @@
 | **L2 安全控制** | `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v5.4`（`/epiphy`、三态分层权限域、命令方块修改锁、墓碑、按名备用模式） |
 | **L2 诊断维护** | `Epiphy的-调试组件.js` | `server` / `950` | `EpiphyDebug v1`（`/epiphy debug`） |
 | **L2 独立修复** | `Epiphy的-基础bug修复.js` | `server` / `900` | `EpiphyBugfix v1`（退出 HP 服务端恢复） |
-| **L3 业务调度** | `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `ScreenDanmaku v5.7`（独立调度模块，禁止跨模块直接复用内部实现） |
+| **L3 业务调度** | `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `Epiphy2DSurface / ScreenDanmaku v6.0`（2D 平面图元树/进度条/GUI 注入与弹幕调度，禁止跨模块直接复用内部实现） |
 | **L3 业务调度** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.7`（独立调度模块，禁止跨模块直接复用内部实现） |
-| **L3 玩法脚本** | `拆解台-混沌殉爆.v18.js` | `server` / `10` | 混沌殉爆事件链（强前置核心/世界/弹幕组件，含持久化、防伪造遗物与主手钻石镐校验） |
+| **L3 玩法脚本** | `拆解台-混沌殉爆.v18.js` | `server` / `10` | 混沌殉爆事件链（强前置核心/世界/弹幕组件，含持久化、原生 2D 图元进度条、防伪造遗物与主手钻石镐校验） |
 | **L3 玩法脚本** | `合成表-*`（原版 / 植物魔法 / 神秘遗物） | `server` / `0` | 独立合成表与配方微调脚本 |
-| **L4 客户端表现** | `屏幕弹幕渲染器` / `音频播放器` / `拆解台描述` | `client` | `ScreenDanmakuClient v5.7`、`EpiphyAudioClient v5.6` |
+| **L4 客户端表现** | `屏幕弹幕渲染器` / `音频播放器` / `拆解台描述` | `client` | `Epiphy2DRenderer / ScreenDanmakuClient v6.0`、`EpiphyAudioClient v5.6` |
 
 ### 3. 模块依赖与降级语义规范（YAML）
 
@@ -193,7 +193,8 @@ Epiphy的-音频播放器.js:
 │   └── startup_scripts/          # 启动期 Spec/协议底座、物品/方块/创造栏注册
 ├── docs/
 │   ├── audio-assets.md                           # 音频资源分发边界与本地自备说明
-│   └── kube-mods-rhino-es5-es6-compatibility.md  # kube-mods/rhino 实测兼容性与语义偏移参考
+│   ├── kube-mods-rhino-es5-es6-compatibility.md  # kube-mods/rhino 实测兼容性与语义偏移参考
+│   └── rendering-subsystem-roadmap.md            # 2D 平面合成器与 3D 空间特效子系统演进路线图与 v6 协议规范
 ├── tests/
 │   └── pure_functions.test.js    # Node 沙盒与纯函数测试套件
 ├── README.md                     # 中文自述（默认）

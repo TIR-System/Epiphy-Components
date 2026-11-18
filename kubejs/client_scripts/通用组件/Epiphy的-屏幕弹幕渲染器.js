@@ -1,11 +1,11 @@
 // ============================================================================
-//  通用屏幕弹幕与泛用文本显示组件 —— 客户端渲染引擎 (ScreenDanmakuClient v5.7)
+//  通用平面渲染与屏幕弹幕组件 —— 客户端渲染引擎 (Epiphy2DRenderer / ScreenDanmakuClient v6.0)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 <repo-root> 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-屏幕弹幕渲染器.js
 //  配套服务端组件：
-//    - kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js（服务端调度器 ScreenDanmaku v5.7）
+//    - kubejs/server_scripts/通用组件/Epiphy的-屏幕弹幕组件.js（服务端调度器 Epiphy2DSurface / ScreenDanmaku v6.0）
 //    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀 EpiphyPermissionValve v5.4）
 //
 //  依赖与缺失降级：
@@ -47,7 +47,7 @@
         } catch (eWarnInit) { }
     }
     var CHANNEL       = (PROTO && PROTO.DANMAKU_CHANNEL) || 'epiphy:screen_danmaku'
-    var PROTO_VERSION = (PROTO && PROTO.DANMAKU_PROTO_VERSION) || 5
+    var PROTO_VERSION = (PROTO && PROTO.DANMAKU_PROTO_VERSION) || 6
 
     // 统一配置常量表（消除散落魔法数）
     var CONFIG = {
@@ -252,7 +252,10 @@
         }
         if (incomingVer === undefined || incomingVer === null) return false
         var n = Number(incomingVer)
-        return isFinite(n) && n === Number(expectedVer)
+        var exp = Number(expectedVer)
+        if (!isFinite(n) || !isFinite(exp)) return false
+        if (exp === 6) return n === 5 || n === 6
+        return n === exp
     }
 
     function sanitizeMaxWidth(val) {
@@ -3472,9 +3475,435 @@
         }
     }
 
+    // ------------------------------------------------------------------------
+    // v6 适配器、状态变量插值轨道 (vars + tracks + action:'patch') 与几何裁剪纯函数
+    // ------------------------------------------------------------------------
+    var REPLACED_TEXTURE_REGISTRY = {}
+    var TEXTURE_EXIST_CACHE       = {}
+
+    function adaptV5ToV6Client(rawPkt) {
+        if (SPEC && typeof SPEC.adaptV5ToV6 === 'function') {
+            return SPEC.adaptV5ToV6(rawPkt)
+        }
+        if (rawPkt == null || typeof rawPkt !== 'object') return rawPkt
+        var out = {}
+        for (var k in rawPkt) {
+            if (Object.prototype.hasOwnProperty.call(rawPkt, k)) {
+                out[k] = rawPkt[k]
+            }
+        }
+        out.proto   = 6
+        out.surface = out.surface ? String(out.surface) : 'screen'
+        var act     = out.action ? String(out.action) : 'push'
+        out.action  = act
+        if (act === 'clear' || act === 'deactivate' || act === 'stop' || act === 'patch' || Array.isArray(out.items)) {
+            if (out.slotId == null && out.id != null) out.slotId = String(out.id)
+            if (out.slotId == null && out.slot != null) out.slotId = String(out.slot)
+            return out
+        }
+        if (out.slotId == null) {
+            out.slotId = out.id != null ? String(out.id) : (out.slot != null ? String(out.slot) : '')
+        }
+        if (out.vars == null || typeof out.vars !== 'object') out.vars = {}
+        if (out.tracks == null || typeof out.tracks !== 'object') out.tracks = {}
+        if (!Array.isArray(out.nodes) || out.nodes.length === 0) {
+            var tStr = readStr(out, 'title', readStr(out, 'text', ''))
+            var sStr = readStr(out, 'sub', readStr(out, 'subtitle', ''))
+            var synth = []
+            if (tStr.length > 0 || sStr.length === 0) {
+                synth.push({
+                    id: 'title', type: 'text', x: 0, y: 0, anchor: 'center',
+                    text: tStr, color: readNum(out, 'color', 0xFF5555), shadow: readBool(out, 'shadow', true)
+                })
+            }
+            if (sStr.length > 0) {
+                synth.push({
+                    id: 'sub', type: 'text', x: 0, y: 12, anchor: 'center',
+                    text: sStr, color: readNum(out, 'subColor', 0xFFCC44), shadow: readBool(out, 'shadow', true)
+                })
+            }
+            out.nodes = synth
+        }
+        return out
+    }
+
+    function hasCustomDeclarativeNodes(rawOrig) {
+        if (rawOrig == null || typeof rawOrig !== 'object') return false
+        if (rawOrig.surface === 'gui' || rawOrig.surface === 'slot') return true
+        if (rawOrig.clip != null && typeof rawOrig.clip === 'object') return true
+        if (Array.isArray(rawOrig.bgNodes) && rawOrig.bgNodes.length > 0) return true
+        if (Array.isArray(rawOrig.fgNodes) && rawOrig.fgNodes.length > 0) return true
+        if (rawOrig.replaceTextures != null && typeof rawOrig.replaceTextures === 'object') return true
+        if (!Array.isArray(rawOrig.nodes) || rawOrig.nodes.length === 0) return false
+        return true
+    }
+
+    function cloneSimpleMap(src) {
+        var out = {}
+        if (src != null && typeof src === 'object') {
+            for (var k in src) {
+                if (Object.prototype.hasOwnProperty.call(src, k)) {
+                    out[k] = src[k]
+                }
+            }
+        }
+        return out
+    }
+
+    function initOverlayTrackState(vars, tracks, now) {
+        var state = {}
+        var disp  = cloneSimpleMap(vars)
+        if (tracks == null || typeof tracks !== 'object') {
+            return { trackState: state, displayVars: disp }
+        }
+        for (var tk in tracks) {
+            if (!Object.prototype.hasOwnProperty.call(tracks, tk)) continue
+            var tr = tracks[tk]
+            if (tr == null || typeof tr !== 'object') continue
+            var mode = String(tr.mode || 'lerp').toLowerCase()
+            if (mode === 'lerp') {
+                var initVal = Number(vars[tk] != null ? vars[tk] : 0)
+                if (!isFinite(initVal)) initVal = 0
+                state[tk] = { mode: 'lerp', cur: initVal, target: initVal }
+                disp[tk]  = initVal
+            } else if (mode === 'trail') {
+                var tRef = String(tr.target || ('$' + tk))
+                var tKey = tRef.charAt(0) === '$' ? tRef.substring(1) : tRef
+                var tInit = Number(vars[tKey] != null ? vars[tKey] : (vars[tk] != null ? vars[tk] : 0))
+                if (!isFinite(tInit)) tInit = 0
+                state[tk] = { mode: 'trail', cur: tInit, lastTarget: tInit, holdUntilMs: now }
+                disp[tk]  = tInit
+            } else if (mode === 'impulse') {
+                var wRef = String(tr.onChange || ('$' + tk))
+                var wKey = wRef.charAt(0) === '$' ? wRef.substring(1) : wRef
+                state[tk] = {
+                    mode:           'impulse',
+                    cur:            0.0,
+                    lastWatchedVal: vars[wKey],
+                    triggeredAtMs:  0,
+                    initialized:    true
+                }
+                disp[tk] = 0.0
+            }
+        }
+        return { trackState: state, displayVars: disp }
+    }
+
+    function applyVarsPatchToOverlay(ov, incomingVars, now) {
+        if (ov == null || incomingVars == null || typeof incomingVars !== 'object') return
+        if (ov.vars == null) ov.vars = {}
+        if (ov.displayVars == null) ov.displayVars = {}
+        if (ov.trackState == null) ov.trackState = {}
+        var tracks = ov.tracks || {}
+
+        for (var vk in incomingVars) {
+            if (!Object.prototype.hasOwnProperty.call(incomingVars, vk)) continue
+            var nextVal = incomingVars[vk]
+            var prevVal = ov.vars[vk]
+            ov.vars[vk] = nextVal
+            if (tracks[vk] == null) {
+                ov.displayVars[vk] = nextVal
+            } else if (tracks[vk].mode === 'lerp') {
+                var numNext = Number(nextVal)
+                if (isFinite(numNext)) {
+                    if (ov.trackState[vk] == null) {
+                        ov.trackState[vk] = { mode: 'lerp', cur: numNext, target: numNext }
+                        ov.displayVars[vk] = numNext
+                    } else {
+                        ov.trackState[vk].target = numNext
+                    }
+                }
+            }
+            for (var tk in tracks) {
+                if (!Object.prototype.hasOwnProperty.call(tracks, tk)) continue
+                var tr = tracks[tk]
+                if (tr == null) continue
+                if (tr.mode === 'trail') {
+                    var tRef = String(tr.target || ('$' + tk))
+                    var tKey = tRef.charAt(0) === '$' ? tRef.substring(1) : tRef
+                    if (tKey === vk) {
+                        var tNext = Number(nextVal)
+                        if (isFinite(tNext)) {
+                            var tst = ov.trackState[tk]
+                            if (tst == null) {
+                                tst = { mode: 'trail', cur: tNext, lastTarget: tNext, holdUntilMs: now }
+                                ov.trackState[tk] = tst
+                            } else if (Math.abs(tNext - tst.lastTarget) > 1e-6) {
+                                tst.lastTarget  = tNext
+                                tst.holdUntilMs = now + max2(0, Number(tr.delayMs != null ? tr.delayMs : 220))
+                            }
+                        }
+                    }
+                } else if (tr.mode === 'impulse') {
+                    var wRef = String(tr.onChange || ('$' + tk))
+                    var wKey = wRef.charAt(0) === '$' ? wRef.substring(1) : wRef
+                    if (wKey === vk && nextVal !== prevVal) {
+                        var ist = ov.trackState[tk]
+                        var peak = Number(tr.peak != null ? tr.peak : 1.0)
+                        if (ist == null) {
+                            ist = { mode: 'impulse', cur: peak, lastWatchedVal: nextVal, triggeredAtMs: now, initialized: true }
+                            ov.trackState[tk] = ist
+                        } else {
+                            ist.cur            = peak
+                            ist.lastWatchedVal = nextVal
+                            ist.triggeredAtMs  = now
+                        }
+                        ov.displayVars[tk] = peak
+                    }
+                }
+            }
+        }
+    }
+
+    function stepOverlayTracks(ov, now) {
+        if (ov == null) return
+        if (ov.vars == null) ov.vars = {}
+        if (ov.displayVars == null) ov.displayVars = cloneSimpleMap(ov.vars)
+        var tracks = ov.tracks
+        if (tracks == null || typeof tracks !== 'object') {
+            ov._lastTrackStepMs = now
+            return
+        }
+        if (ov.trackState == null) {
+            var initTr = initOverlayTrackState(ov.vars, tracks, now)
+            ov.trackState  = initTr.trackState
+            ov.displayVars = initTr.displayVars
+        }
+        var rawDtMs = (ov._lastTrackStepMs != null && isFinite(ov._lastTrackStepMs))
+            ? (now - ov._lastTrackStepMs)
+            : 16.0
+        var dtMs  = clampNum(rawDtMs, 0.0, 100.0)
+        var dtSec = dtMs / 1000.0
+        ov._lastTrackStepMs = now
+
+        for (var tk in tracks) {
+            if (!Object.prototype.hasOwnProperty.call(tracks, tk)) continue
+            var tr = tracks[tk]
+            if (tr == null || typeof tr !== 'object') continue
+            var st = ov.trackState[tk]
+            var mode = String(tr.mode || 'lerp').toLowerCase()
+            if (mode === 'lerp') {
+                var target = Number(ov.vars[tk] != null ? ov.vars[tk] : 0)
+                if (!isFinite(target)) target = 0
+                if (st == null) {
+                    st = { mode: 'lerp', cur: target, target: target }
+                    ov.trackState[tk] = st
+                }
+                st.target = target
+                var speed = max2(0.1, Number(tr.speed != null ? tr.speed : 10.0))
+                var diff  = target - st.cur
+                if (Math.abs(diff) <= 1e-4 || dtSec <= 0) {
+                    if (Math.abs(diff) <= 1e-4) st.cur = target
+                } else {
+                    var kAlpha = 1.0 - Math.exp(-speed * dtSec)
+                    if (tr.easing === 'out_quad') {
+                        kAlpha = 1.0 - (1.0 - kAlpha) * (1.0 - kAlpha)
+                    } else if (tr.easing === 'out_cubic') {
+                        var invA = 1.0 - kAlpha
+                        kAlpha = 1.0 - invA * invA * invA
+                    }
+                    st.cur = st.cur + diff * clampNum(kAlpha, 0.0, 1.0)
+                }
+                ov.displayVars[tk] = st.cur
+            } else if (mode === 'trail') {
+                var tRef = String(tr.target || ('$' + tk))
+                var tKey = tRef.charAt(0) === '$' ? tRef.substring(1) : tRef
+                var tTarget = Number(ov.vars[tKey] != null ? ov.vars[tKey] : 0)
+                if (!isFinite(tTarget)) tTarget = 0
+                if (st == null) {
+                    st = { mode: 'trail', cur: tTarget, lastTarget: tTarget, holdUntilMs: now }
+                    ov.trackState[tk] = st
+                }
+                if (Math.abs(tTarget - st.lastTarget) > 1e-6) {
+                    st.lastTarget  = tTarget
+                    st.holdUntilMs = now + max2(0, Number(tr.delayMs != null ? tr.delayMs : 220))
+                }
+                if (now >= st.holdUntilMs && dtSec > 0) {
+                    var tSpeed = max2(0.1, Number(tr.speed != null ? tr.speed : 4.0))
+                    var tDiff  = tTarget - st.cur
+                    if (Math.abs(tDiff) <= 1e-4) {
+                        st.cur = tTarget
+                    } else {
+                        var tAlpha = 1.0 - Math.exp(-tSpeed * dtSec)
+                        st.cur = st.cur + tDiff * clampNum(tAlpha, 0.0, 1.0)
+                    }
+                }
+                ov.displayVars[tk] = st.cur
+            } else if (mode === 'impulse') {
+                var wRef = String(tr.onChange || ('$' + tk))
+                var wKey = wRef.charAt(0) === '$' ? wRef.substring(1) : wRef
+                var curWatched = ov.vars[wKey]
+                var peakVal = Number(tr.peak != null ? tr.peak : 1.0)
+                if (st == null) {
+                    st = { mode: 'impulse', cur: 0.0, lastWatchedVal: curWatched, triggeredAtMs: 0, initialized: true }
+                    ov.trackState[tk] = st
+                } else if (curWatched !== st.lastWatchedVal) {
+                    st.lastWatchedVal = curWatched
+                    st.cur            = peakVal
+                    st.triggeredAtMs  = now
+                }
+                if (st.cur > 0 && st.triggeredAtMs > 0) {
+                    var decMs = max2(16, Number(tr.decayMs != null ? tr.decayMs : 180))
+                    var elMs  = max2(0, now - st.triggeredAtMs)
+                    st.cur    = elMs >= decMs ? 0.0 : (peakVal * (1.0 - elMs / decMs))
+                }
+                ov.displayVars[tk] = st.cur
+            }
+        }
+    }
+
+    function resolveVarValue(valOrRef, varsMap, fallbackVal) {
+        if (typeof valOrRef === 'string' && valOrRef.charAt(0) === '$') {
+            var vKey = valOrRef.substring(1)
+            if (varsMap != null && varsMap[vKey] !== undefined) {
+                return varsMap[vKey]
+            }
+            return fallbackVal
+        }
+        return (valOrRef !== undefined && valOrRef !== null) ? valOrRef : fallbackVal
+    }
+
+    function resolveVarNum(valOrRef, varsMap, fallbackNum) {
+        var v = resolveVarValue(valOrRef, varsMap, fallbackNum)
+        var n = Number(v)
+        return isFinite(n) ? n : fallbackNum
+    }
+
+    function interpolateVarString(rawStr, varsMap) {
+        if (!rawStr) return ''
+        var s = String(rawStr)
+        if (s.indexOf('$') < 0) return s
+        if (varsMap == null || typeof varsMap !== 'object') return s
+        if (s.charAt(0) === '$' && varsMap[s.substring(1)] !== undefined) {
+            return String(varsMap[s.substring(1)])
+        }
+        return s.replace(/\$\{([A-Za-z0-9_]+)\}|\$([A-Za-z0-9_]+)/g, function (full, k1, k2) {
+            var k = k1 || k2
+            return (varsMap[k] !== undefined && varsMap[k] !== null) ? String(varsMap[k]) : full
+        })
+    }
+
+    function computeLocalClipRect(x, y, w, h, u, v, uw, vh, clipSpec, varsMap) {
+        var bx  = Number(x) || 0
+        var by  = Number(y) || 0
+        var bw  = max2(0, Number(w) || 0)
+        var bh  = max2(0, Number(h) || 0)
+        var bu  = Number(u) || 0
+        var bv  = Number(v) || 0
+        var buw = Number(uw != null ? uw : bw) || 0
+        var bvh = Number(vh != null ? vh : bh) || 0
+        if (clipSpec == null || typeof clipSpec !== 'object') {
+            return { x: bx, y: by, w: bw, h: bh, u: bu, v: bv, uw: buw, vh: bvh, ratio: 1.0 }
+        }
+        var ratio = clampNum(resolveVarNum(clipSpec.ratio, varsMap, 1.0), 0.0, 1.0)
+        var dir   = String(clipSpec.dir || 'left').toLowerCase()
+        if (dir === 'right') {
+            var invR = 1.0 - ratio
+            return {
+                x:     bx + bw * invR,
+                y:     by,
+                w:     bw * ratio,
+                h:     bh,
+                u:     bu + buw * invR,
+                v:     bv,
+                uw:    buw * ratio,
+                vh:    bvh,
+                ratio: ratio
+            }
+        }
+        if (dir === 'down') {
+            return {
+                x:     bx,
+                y:     by,
+                w:     bw,
+                h:     bh * ratio,
+                u:     bu,
+                v:     bv,
+                uw:    buw,
+                vh:    bvh * ratio,
+                ratio: ratio
+            }
+        }
+        if (dir === 'up') {
+            var invU = 1.0 - ratio
+            return {
+                x:     bx,
+                y:     by + bh * invU,
+                w:     bw,
+                h:     bh * ratio,
+                u:     bu,
+                v:     bv + bvh * invU,
+                uw:    buw,
+                vh:    bvh * ratio,
+                ratio: ratio
+            }
+        }
+        if (dir === 'center_x') {
+            var halfInv = (1.0 - ratio) * 0.5
+            return {
+                x:     bx + bw * halfInv,
+                y:     by,
+                w:     bw * ratio,
+                h:     bh,
+                u:     bu + buw * halfInv,
+                v:     bv,
+                uw:    buw * ratio,
+                vh:    bvh,
+                ratio: ratio
+            }
+        }
+        return {
+            x:     bx,
+            y:     by,
+            w:     bw * ratio,
+            h:     bh,
+            u:     bu,
+            v:     bv,
+            uw:    buw * ratio,
+            vh:    bvh,
+            ratio: ratio
+        }
+    }
+
+    function restoreAllReplacedTextures() {
+        var keys = Object.keys(REPLACED_TEXTURE_REGISTRY)
+        for (var i = 0; i < keys.length; i++) {
+            var k = keys[i]
+            var entry = REPLACED_TEXTURE_REGISTRY[k]
+            if (entry != null && entry.texManager != null && entry.resLoc != null && entry.originalTexObj != null) {
+                try {
+                    if (typeof entry.texManager.register === 'function') {
+                        entry.texManager.register(entry.resLoc, entry.originalTexObj)
+                    } else if (typeof entry.texManager.m_118495_ === 'function') {
+                        entry.texManager.m_118495_(entry.resLoc, entry.originalTexObj)
+                    }
+                } catch (eRest) { }
+            }
+            delete REPLACED_TEXTURE_REGISTRY[k]
+        }
+    }
+
     // 实际应用一条弹幕指令（仅在主渲染线程中或无并发竞争时修改 activeOverlays）
-    function applyDanmakuNow(raw, now) {
-        if (raw == null) return
+    function applyDanmakuNow(rawOrig, now) {
+        if (rawOrig == null) return
+        if (rawOrig.items != null) {
+            try {
+                var preBatchLen = Number(rawOrig.items.length || 0)
+                for (var pbIdx = 0; pbIdx < preBatchLen; pbIdx++) {
+                    try {
+                        applyDanmakuNow(rawOrig.items[pbIdx], now)
+                    } catch (ePreBatchItem) {
+                        logErrorThrottled('applyDanmaku batch item error', ePreBatchItem)
+                    }
+                }
+            } catch (ePreBatch) {
+                logErrorThrottled('applyDanmaku batch error', ePreBatch)
+            }
+            return
+        }
+        var hasCustomNodes = hasCustomDeclarativeNodes(rawOrig)
+        var isCompoundTagLike = (typeof rawOrig.contains === 'function' || typeof rawOrig.getString === 'function')
+        var raw    = isCompoundTagLike ? rawOrig : adaptV5ToV6Client(rawOrig)
         var action = readStr(raw, 'action', 'push')
 
         // 1. 清空全部或指定分组
@@ -3487,6 +3916,7 @@
             if (isPlayerClear && clearMaxPri > 3) clearMaxPri = 3
             if ((!targetGroup || targetGroup === '*' || targetGroup === 'all') && !targetNs && !isPlayerClear && clearMaxPri >= 10) {
                 activeOverlays.length = 0
+                restoreAllReplacedTextures()
             } else {
                 for (var i = activeOverlays.length - 1; i >= 0; i--) {
                     var cov    = activeOverlays[i]
@@ -3571,6 +4001,41 @@
             return
         }
 
+        // 2b. 增量状态变量补丁 (action: 'patch')：仅更新已驻留实例的 vars 与 activeHold，孤儿包静默丢弃
+        if (action === 'patch') {
+            var patchKey = readStr(raw, 'key', readStr(raw, 'slotId', readStr(raw, 'slot', readStr(raw, 'id', ''))))
+            if (!patchKey) return
+            var patchNs   = readStr(raw, 'namespace', readStr(raw, 'ns', ''))
+            var patchTier = readStr(raw, 'tier', '')
+            var isPlayerPatch = (patchTier === 'player' || patchNs.indexOf('u:') === 0)
+            for (var pIdx = 0; pIdx < activeOverlays.length; pIdx++) {
+                var pOv = activeOverlays[pIdx]
+                if (isPlayerPatch && pOv.tier !== 'player') continue
+                if (patchNs && pOv.namespace && pOv.namespace !== patchNs) continue
+                var nsPatchKey = (pOv.namespace && patchKey.indexOf(pOv.namespace + ':') !== 0)
+                    ? (pOv.namespace + ':' + patchKey)
+                    : patchKey
+                if (pOv.key === patchKey || pOv.key === nsPatchKey || (pOv.slotId && pOv.slotId === patchKey)) {
+                    if (raw.vars != null && typeof raw.vars === 'object') {
+                        applyVarsPatchToOverlay(pOv, raw.vars, now)
+                    }
+                    if (pOv.lifeMode === 'active') {
+                        var patchHoldTicks = readNonNegNum(raw, 'activeHold', pOv.holdTicks || 28, 4)
+                        pOv.holdTicks      = patchHoldTicks
+                        var patchElapsed   = max2(0, now - pOv.born)
+                        var patchSched     = computeOverlaySchedule(pOv.lifeMode, patchHoldTicks, pOv.fadeTicks || 10, pOv.typewriter, pOv.totalVis, pOv.charMs, now, patchElapsed)
+                        pOv.holdDurationMs = patchSched.holdDurationMs
+                        pOv.fadeMs         = patchSched.fadeMs
+                        pOv.fadeStartAt    = patchSched.fadeStartAt
+                        pOv.expire         = patchSched.expireAt
+                        pOv.frozenVis      = null
+                    }
+                    break
+                }
+            }
+            return
+        }
+
         // 3. 批量数组推送（单条隔离报错，且无论是否为空/异常都不降格为单条渲染）
         if (raw.items != null) {
             try {
@@ -3588,9 +4053,10 @@
             return
         }
 
-        var title = truncateSafeText(readStr(raw, 'title', readStr(raw, 'text', '')), CONFIG.maxTitleChars)
-        var sub   = truncateSafeText(readStr(raw, 'sub', readStr(raw, 'subtitle', '')), CONFIG.maxSubChars)
-        if (title.length === 0 && sub.length === 0) return
+        var surface = readStr(raw, 'surface', 'screen').toLowerCase()
+        var title   = truncateSafeText(readStr(raw, 'title', readStr(raw, 'text', '')), CONFIG.maxTitleChars)
+        var sub     = truncateSafeText(readStr(raw, 'sub', readStr(raw, 'subtitle', '')), CONFIG.maxSubChars)
+        if (title.length === 0 && sub.length === 0 && !hasCustomNodes) return
 
         var hasTags    = hasRichSpanTags(title) || hasRichSpanTags(sub)
         var hasSdfTags = hasTags ? (hasSdfSpanTags(title) || hasSdfSpanTags(sub)) : false
@@ -3614,7 +4080,7 @@
         var normalizeKey = readBool(raw, 'normalizeKey', true)
         var key          = readStr(raw, 'key', '')
         if (!key && (lifeMode === 'active' || slotId.length > 0)) {
-            key = deriveAutoActiveKey(namespace, group, slotId, posTag, title, sub, normalizeKey)
+            key = deriveAutoActiveKey(namespace, group, slotId, posTag, title || slotId, sub, normalizeKey)
         } else if (key && namespace && key.indexOf(namespace + ':') !== 0) {
             key = namespace + ':' + key
         }
@@ -3684,16 +4150,39 @@
         var maxWidth     = sanitizeMaxWidth(readNum(raw, 'maxWidth', 0))
         var wrapEnabled  = readBool(raw, 'wrap', true)
         var clampBounds  = readBool(raw, 'clamp', true)
-        var showInGui    = readBool(raw, 'showInGui', false)
+        var showInGui    = readBool(raw, 'showInGui', surface === 'gui' || surface === 'slot')
         var maxGroupSize = Math.round(readNonNegNum(raw, 'maxGroup', readNonNegNum(raw, 'maxGroupSize', 0, 0), 0))
         var debugEnabled = readBool(raw, 'debug', false)
 
         if (exist != null) {
+                    exist.proto           = 6
+                    exist.surface         = surface
+                    exist.hasGraphicNodes = hasCustomNodes
+                    exist.nodes           = Array.isArray(raw.nodes) ? raw.nodes : exist.nodes
+                    exist.clip            = raw.clip !== undefined ? raw.clip : exist.clip
+                    exist.targetGui       = raw.targetGui !== undefined ? raw.targetGui : exist.targetGui
+                    exist.replaceTextures = raw.replaceTextures !== undefined ? raw.replaceTextures : exist.replaceTextures
+                    exist.bgNodes         = raw.bgNodes !== undefined ? raw.bgNodes : exist.bgNodes
+                    exist.fgNodes         = raw.fgNodes !== undefined ? raw.fgNodes : exist.fgNodes
+                    exist.slotMatch       = raw.slotMatch !== undefined ? raw.slotMatch : exist.slotMatch
+                    if (raw.tracks != null && typeof raw.tracks === 'object') {
+                        if (exist.tracks == null) exist.tracks = {}
+                        for (var trk in raw.tracks) {
+                            if (Object.prototype.hasOwnProperty.call(raw.tracks, trk)) {
+                                exist.tracks[trk] = raw.tracks[trk]
+                            }
+                        }
+                    }
+                    if (raw.vars != null && typeof raw.vars === 'object') {
+                        applyVarsPatchToOverlay(exist, raw.vars, now)
+                    }
                     exist.tier         = tier
                     exist.maxGroupSize = maxGroupSize
                     exist.priority     = priority
                     exist.namespace    = namespace
                     exist.slotId       = slotId
+                    exist.holdTicks    = holdTicks
+                    exist.fadeTicks    = fadeTicks
                     if (exist.title !== title || exist.sub !== sub || exist.maxWidth !== maxWidth || exist.wrap !== wrapEnabled || exist.letterSpacing !== letterSpacing || exist.letterSpacingMode !== letterSpacingMode) {
                         exist.title             = title
                         exist.sub               = sub
@@ -3796,79 +4285,99 @@
                     return
         }
 
-        var initSched = computeOverlaySchedule(lifeMode, holdTicks, fadeTicks, typewriter, totalVis, charMs, now, 0)
+        var initSched  = computeOverlaySchedule(lifeMode, holdTicks, fadeTicks, typewriter, totalVis, charMs, now, 0)
+        var initVars   = cloneSimpleMap(raw.vars)
+        var initTracks = cloneSimpleMap(raw.tracks)
+        var trBundle   = initOverlayTrackState(initVars, initTracks, now)
 
         activeOverlays.push({
-            key:               key,
-            slotId:            slotId,
-            tier:              tier,
-            namespace:         namespace,
-            group:             group,
-            lifeMode:          lifeMode,
-            priority:          priority,
-            title:             title,
-            sub:               sub,
-            titleVis:          titleVis,
-            subVis:            subVis,
-            totalVis:          totalVis,
-            hasInlineTags:     hasTags,
-            hasSdfInlineTags:  hasSdfTags,
-            letterSpacing:     letterSpacing,
-            letterSpacingMode: letterSpacingMode,
-            outlineMode:       outlineMode,
-            outlineColor:      outlineColor,
-            outlineWidth:      outlineWidth,
-            rx:                clampNum(readNum(raw, 'rx', 0.5), 0.0, 1.0),
-            ry:                clampNum(readNum(raw, 'ry', 0.35), 0.0, 1.0),
-            angle:             readNum(raw, 'angle', 0.0),
-            scale:             clampNum(readNonNegNum(raw, 'scale', 1.0, 0.2), 0.2, CONFIG.maxScale),
-            color:             readNum(raw, 'color', 0xFF5555),
-            subColor:          readNum(raw, 'subColor', 0xFFCC44),
-            shadow:            readBool(raw, 'shadow', true),
-            shakeMode:         shakeMode,
-            perCharShake:      isPerChar,
-            charShakeStyle:    charShakeStyle,
-            charShakeShift:    charShakeShift,
-            charShakeShiftX:   charShakeShiftX,
-            charShakeShiftY:   charShakeShiftY,
-            charShakeSwayX:    charShakeSwayX,
-            charShakeSwayY:    charShakeSwayY,
+            proto:              6,
+            surface:            surface,
+            hasGraphicNodes:    hasCustomNodes,
+            nodes:              Array.isArray(raw.nodes) ? raw.nodes : [],
+            vars:               initVars,
+            displayVars:        trBundle.displayVars,
+            tracks:             initTracks,
+            trackState:         trBundle.trackState,
+            _lastTrackStepMs:   now,
+            clip:               raw.clip || null,
+            targetGui:          raw.targetGui || null,
+            replaceTextures:    raw.replaceTextures || null,
+            bgNodes:            Array.isArray(raw.bgNodes) ? raw.bgNodes : null,
+            fgNodes:            Array.isArray(raw.fgNodes) ? raw.fgNodes : null,
+            slotMatch:          raw.slotMatch || null,
+            key:                key,
+            slotId:             slotId,
+            tier:               tier,
+            namespace:          namespace,
+            group:              group,
+            lifeMode:           lifeMode,
+            priority:           priority,
+            holdTicks:          holdTicks,
+            fadeTicks:          fadeTicks,
+            title:              title,
+            sub:                sub,
+            titleVis:           titleVis,
+            subVis:             subVis,
+            totalVis:           totalVis,
+            hasInlineTags:      hasTags,
+            hasSdfInlineTags:   hasSdfTags,
+            letterSpacing:      letterSpacing,
+            letterSpacingMode:  letterSpacingMode,
+            outlineMode:        outlineMode,
+            outlineColor:       outlineColor,
+            outlineWidth:       outlineWidth,
+            rx:                 clampNum(readNum(raw, 'rx', 0.5), 0.0, 1.0),
+            ry:                 clampNum(readNum(raw, 'ry', 0.35), 0.0, 1.0),
+            angle:              readNum(raw, 'angle', 0.0),
+            scale:              clampNum(readNonNegNum(raw, 'scale', 1.0, 0.2), 0.2, CONFIG.maxScale),
+            color:              readNum(raw, 'color', 0xFF5555),
+            subColor:           readNum(raw, 'subColor', 0xFFCC44),
+            shadow:             readBool(raw, 'shadow', true),
+            shakeMode:          shakeMode,
+            perCharShake:       isPerChar,
+            charShakeStyle:     charShakeStyle,
+            charShakeShift:     charShakeShift,
+            charShakeShiftX:    charShakeShiftX,
+            charShakeShiftY:    charShakeShiftY,
+            charShakeSwayX:     charShakeSwayX,
+            charShakeSwayY:     charShakeSwayY,
             charShakeRotDeg:     charShakeRotDeg,
             charShakeWin:        charShakeWin,
             charShakeSnap:       charShakeSnap,
             charShakeTransition: charShakeTransition,
-            shakeAmp:          shakeAmp,
-            shakeFreqMin:      shakeFreqMin,
-            shakeFreqMax:      shakeFreqMax,
-            shakeSeed:         Math.random() * 1000.0 + 1.0,
-            fadeStyle:         fadeStyle,
-            typewriter:        typewriter,
-            charMs:            charMs,
-            cursor:            truncateSafeText(readStr(raw, 'cursor', '▌'), CONFIG.maxCursorChars),
-            debug:             debugEnabled,
-            maxWidth:          maxWidth,
-            wrap:              wrapEnabled,
-            clamp:             clampBounds,
-            showInGui:         showInGui,
-            maxGroupSize:      maxGroupSize,
-            wrapKey:           '',
-            shatterCacheKey:   '',
-            shatterFrags:      null,
-            charShakeCacheKey: '',
-            charShakeFrags:    null,
-            charShakeUnits:    null,
-            _sharedShakeTiming:null,
-            titleLines:        null,
-            subLines:          null,
-            blockW:            0,
-            blockH:            0,
-            holdDurationMs:    initSched.holdDurationMs,
-            shakeDurationMs:   initSched.shakeDurationMs,
-            fadeMs:            initSched.fadeMs,
-            born:              now,
-            fadeStartAt:       initSched.fadeStartAt,
-            expire:            initSched.expireAt,
-            drawErrors:        0
+            shakeAmp:           shakeAmp,
+            shakeFreqMin:       shakeFreqMin,
+            shakeFreqMax:       shakeFreqMax,
+            shakeSeed:          Math.random() * 1000.0 + 1.0,
+            fadeStyle:          fadeStyle,
+            typewriter:         typewriter,
+            charMs:             charMs,
+            cursor:             truncateSafeText(readStr(raw, 'cursor', '▌'), CONFIG.maxCursorChars),
+            debug:              debugEnabled,
+            maxWidth:           maxWidth,
+            wrap:               wrapEnabled,
+            clamp:              clampBounds,
+            showInGui:          showInGui,
+            maxGroupSize:       maxGroupSize,
+            wrapKey:            '',
+            shatterCacheKey:    '',
+            shatterFrags:       null,
+            charShakeCacheKey:  '',
+            charShakeFrags:     null,
+            charShakeUnits:     null,
+            _sharedShakeTiming: null,
+            titleLines:         null,
+            subLines:           null,
+            blockW:             0,
+            blockH:             0,
+            holdDurationMs:     initSched.holdDurationMs,
+            shakeDurationMs:    initSched.shakeDurationMs,
+            fadeMs:             initSched.fadeMs,
+            born:               now,
+            fadeStartAt:        initSched.fadeStartAt,
+            expire:             initSched.expireAt,
+            drawErrors:         0
         })
         enforceOverlayCaps(now, group, tier, namespace, maxGroupSize)
     }
@@ -3969,6 +4478,31 @@
     // 外部调用与网络包统一入队，由 paintScreen 帧首在渲染线程一次性出队消费，避免遍历 activeOverlays 期间发生并发/重入修改
     function enqueueDanmaku(raw) {
         if (raw == null) return
+        var act = readStr(raw, 'action', 'push')
+        if (act === 'patch') {
+            var pKey = readStr(raw, 'key', readStr(raw, 'slotId', readStr(raw, 'slot', readStr(raw, 'id', ''))))
+            var pNs  = readStr(raw, 'namespace', readStr(raw, 'ns', ''))
+            if (pKey.length > 0) {
+                for (var pi = 0; pi < pendingActions.length; pi++) {
+                    var qPkt = pendingActions[pi]
+                    if (qPkt == null || readStr(qPkt, 'action', '') !== 'patch') continue
+                    var qKey = readStr(qPkt, 'key', readStr(qPkt, 'slotId', readStr(qPkt, 'slot', readStr(qPkt, 'id', ''))))
+                    var qNs  = readStr(qPkt, 'namespace', readStr(qPkt, 'ns', ''))
+                    if (qKey === pKey && qNs === pNs) {
+                        if (raw.vars != null && typeof raw.vars === 'object') {
+                            if (qPkt.vars == null || typeof qPkt.vars !== 'object') qPkt.vars = {}
+                            for (var vk in raw.vars) {
+                                if (Object.prototype.hasOwnProperty.call(raw.vars, vk)) {
+                                    qPkt.vars[vk] = raw.vars[vk]
+                                }
+                            }
+                        }
+                        if (raw.activeHold != null) qPkt.activeHold = raw.activeHold
+                        return
+                    }
+                }
+            }
+        }
         if (pendingActions.length >= CONFIG.maxPendingActions) {
             var incomingCtrl = isControlPacket(raw)
             var dropQIdx = 0
@@ -4020,10 +4554,26 @@
     })
 
     global.ScreenDanmakuClient = {
-        VERSION:    '5.7.0',
+        VERSION:    '6.0.0',
         CONFIG:     CONFIG,
         setDebug:   function (enabled) { CONFIG.debug = Boolean(enabled); return CONFIG.debug },
         push:       enqueueDanmaku,
+        patch:      function (slotIdOrOpts, maybeVars, maybeHoldTicks) {
+            if (slotIdOrOpts != null && typeof slotIdOrOpts === 'object') {
+                var copy = {}
+                for (var k in slotIdOrOpts) copy[k] = slotIdOrOpts[k]
+                copy.action = 'patch'
+                enqueueDanmaku(copy)
+                return
+            }
+            var payload = {
+                action: 'patch',
+                slotId: slotIdOrOpts != null ? String(slotIdOrOpts) : '',
+                vars:   (maybeVars != null && typeof maybeVars === 'object') ? maybeVars : {}
+            }
+            if (maybeHoldTicks != null) payload.activeHold = maybeHoldTicks
+            enqueueDanmaku(payload)
+        },
         deactivate: function (keyOrGroup, fadeOutOrOpts) {
             if (keyOrGroup != null && typeof keyOrGroup === 'object') {
                 var copy = {}
@@ -4065,6 +4615,8 @@
                 var ov = activeOverlays[i]
                 if (ov == null) continue
                 out.push({
+                    proto:        ov.proto || 6,
+                    surface:      ov.surface || 'screen',
                     key:          ov.key,
                     slotId:       ov.slotId,
                     tier:         ov.tier,
@@ -4078,6 +4630,10 @@
             }
             return out
         },
+        renderGuiSurfacePass:    function (screenOrEvent, phase, guiCtx) {
+            return renderGuiSurfacePass(screenOrEvent, phase, guiCtx)
+        },
+        restoreReplacedTextures: restoreAllReplacedTextures,
         _pure: {
             hashUnit:                     hashUnit,
             fastSinTurns:                 fastSinTurns,
@@ -4094,6 +4650,15 @@
             sliceVisibleChars:            sliceVisibleChars,
             dropFirstVisibleChars:        dropFirstVisibleChars,
             buildRenderedLines:           buildRenderedLines,
+            adaptV5ToV6:                  adaptV5ToV6Client,
+            computeLocalClipRect:         computeLocalClipRect,
+            stepOverlayTracks:            stepOverlayTracks,
+            applyVarsPatchToOverlay:      applyVarsPatchToOverlay,
+            renderDeclarativeNodes:       function (event, item, nodes, varsMap, fadeAlpha, fontObj, itemBatchCtx, now) {
+                return renderDeclarativeNodes(event, item, nodes, varsMap, fadeAlpha, fontObj, itemBatchCtx, now != null ? now : monotonicNowMs(), 0.0, 0)
+            },
+            checkTextureExists:           function (texPath) { return checkTextureExists(texPath) },
+            getReplacedTextures:          function () { return REPLACED_TEXTURE_REGISTRY },
             getSeqCacheStats:             function () {
                 return {
                     sharedCount:    SHARED_TEXT_SEQ_KEYS.length,
@@ -4105,6 +4670,7 @@
             inspectOverlays:              function () { return activeOverlays }
         }
     }
+    global.Epiphy2DRenderer = global.ScreenDanmakuClient
 
     ClientEvents.loggedOut(function () {
         activeOverlays.length = 0
@@ -4112,6 +4678,7 @@
         TRANSIENT_TEXT_SEQ_CACHE = {}
         TRANSIENT_TEXT_SEQ_KEYS.length = 0
         LAST_LEVEL_KEY = ''
+        restoreAllReplacedTextures()
     })
     ClientEvents.loggedIn(function () {
         activeOverlays.length = 0
@@ -4119,6 +4686,7 @@
         TRANSIENT_TEXT_SEQ_CACHE = {}
         TRANSIENT_TEXT_SEQ_KEYS.length = 0
         LAST_LEVEL_KEY = ''
+        restoreAllReplacedTextures()
     })
 
     // 判定当前是否打开了需要遮挡 HUD 弹幕的交互式 GUI：
@@ -4309,6 +4877,595 @@
         return (a.born || 0) - (b.born || 0)
     }
 
+    // ------------------------------------------------------------------------
+    // v6 2D 声明式图元树渲染器 (rect / sprite / nine_slice / item / text / group)
+    // 与 GUI / 槽位 / 贴图覆写 (surface: 'gui' | 'slot', replaceTextures)
+    // ------------------------------------------------------------------------
+    var ResourceLocationClass = null
+    var RenderTypeClass       = null
+
+    function getResourceLocation(pathStr) {
+        if (!pathStr) return null
+        if (ResourceLocationClass === null) {
+            ResourceLocationClass = loadJavaClass('net.minecraft.resources.ResourceLocation', true) || false
+        }
+        if (!ResourceLocationClass) return pathStr
+        try {
+            return new ResourceLocationClass(String(pathStr))
+        } catch (eRL) {
+            return null
+        }
+    }
+
+    function checkTextureExists(texPath) {
+        if (!texPath) return false
+        var key = String(texPath)
+        if (TEXTURE_EXIST_CACHE[key] !== undefined) {
+            return TEXTURE_EXIST_CACHE[key]
+        }
+        var mc = null
+        if (MinecraftClass != null && !MC_INSTANCE_FAILED) {
+            try { mc = MinecraftClass.getInstance() } catch (eMcT) { }
+        }
+        if (mc == null) {
+            var fbOk = key.indexOf('missing') < 0 && key.indexOf('invalid') < 0
+            TEXTURE_EXIST_CACHE[key] = fbOk
+            return fbOk
+        }
+        try {
+            var rm = typeof mc.getResourceManager === 'function' ? mc.getResourceManager() : (mc.resourceManager || mc.f_91098_)
+            if (rm != null) {
+                var rl = getResourceLocation(key)
+                if (rl != null && typeof rm.getResource === 'function') {
+                    var optRes = rm.getResource(rl)
+                    var exists = optRes != null && (typeof optRes.isPresent === 'function' ? Boolean(optRes.isPresent()) : true)
+                    TEXTURE_EXIST_CACHE[key] = exists
+                    return exists
+                }
+            }
+        } catch (eTex) { }
+        var fallbackOk = key.indexOf('missing') < 0 && key.indexOf('invalid') < 0
+        TEXTURE_EXIST_CACHE[key] = fallbackOk
+        return fallbackOk
+    }
+
+    function toArgbWithAlpha(rawCol, alphaFactor) {
+        var c = (rawCol != null && isFinite(Number(rawCol))) ? (Math.round(Number(rawCol)) >>> 0) : 0xFFFFFFFF
+        var baseA = (c >>> 24) & 0xFF
+        if (baseA === 0) baseA = 0xFF
+        var a = clampNum(Math.round(baseA * clampNum(alphaFactor, 0.0, 1.0)), 0, 255)
+        return ((a << 24) | (c & 0x00FFFFFF)) | 0
+    }
+
+    function lerpColorRgb(c1, c2, t) {
+        var p = clampNum(t, 0.0, 1.0)
+        var a1 = ((c1 >>> 24) & 0xFF) || 0xFF
+        var r1 = (c1 >>> 16) & 0xFF
+        var g1 = (c1 >>> 8) & 0xFF
+        var b1 = c1 & 0xFF
+        var a2 = ((c2 >>> 24) & 0xFF) || 0xFF
+        var r2 = (c2 >>> 16) & 0xFF
+        var g2 = (c2 >>> 8) & 0xFF
+        var b2 = c2 & 0xFF
+        var a = Math.round(a1 + (a2 - a1) * p)
+        var r = Math.round(r1 + (r2 - r1) * p)
+        var g = Math.round(g1 + (g2 - g1) * p)
+        var b = Math.round(b1 + (b2 - b1) * p)
+        return ((a << 24) | (r << 16) | (g << 8) | b) >>> 0
+    }
+
+    function drawRectSolid(event, x, y, w, h, argbColor) {
+        var rw = Math.round(w)
+        var rh = Math.round(h)
+        if (rw <= 0 || rh <= 0) return
+        var rx0 = Math.round(x)
+        var ry0 = Math.round(y)
+        ensureItemPosePushed(event)
+        if (typeof event.fill === 'function') {
+            event.fill(rx0, ry0, rx0 + rw, ry0 + rh, argbColor)
+        } else if (typeof event.rectangle === 'function') {
+            event.rectangle(rx0, ry0, rw, rh, argbColor)
+        } else if (event.raw != null && typeof event.raw.fill === 'function') {
+            event.raw.fill(rx0, ry0, rx0 + rw, ry0 + rh, argbColor)
+        }
+    }
+
+    function drawRectGradient(event, x, y, w, h, fromArgb, toArgb, dir) {
+        var rw = Math.round(w)
+        var rh = Math.round(h)
+        if (rw <= 0 || rh <= 0) return
+        var rx0 = Math.round(x)
+        var ry0 = Math.round(y)
+        ensureItemPosePushed(event)
+        if (dir === 'v') {
+            if (typeof event.vGradient === 'function') {
+                event.vGradient(rx0, ry0, rw, rh, fromArgb, toArgb)
+                return
+            }
+            if (event.raw != null && typeof event.raw.fillGradient === 'function') {
+                event.raw.fillGradient(rx0, ry0, rx0 + rw, ry0 + rh, fromArgb, toArgb)
+                return
+            }
+            var vSteps = min2(8, max2(1, rh))
+            for (var vi = 0; vi < vSteps; vi++) {
+                var vy0 = ry0 + Math.floor((vi * rh) / vSteps)
+                var vy1 = ry0 + Math.floor(((vi + 1) * rh) / vSteps)
+                var vCol = toArgbWithAlpha(lerpColorRgb(fromArgb, toArgb, (vi + 0.5) / vSteps), 1.0)
+                drawRectSolid(event, rx0, vy0, rw, max2(1, vy1 - vy0), vCol)
+            }
+            return
+        }
+        if (typeof event.hGradient === 'function') {
+            event.hGradient(rx0, ry0, rw, rh, fromArgb, toArgb)
+            return
+        }
+        var hSteps = min2(12, max2(1, Math.ceil(rw / 8)))
+        for (var hi = 0; hi < hSteps; hi++) {
+            var hx0 = rx0 + Math.floor((hi * rw) / hSteps)
+            var hx1 = rx0 + Math.floor(((hi + 1) * rw) / hSteps)
+            var hCol = toArgbWithAlpha(lerpColorRgb(fromArgb, toArgb, (hi + 0.5) / hSteps), 1.0)
+            drawRectSolid(event, hx0, ry0, max2(1, hx1 - hx0), rh, hCol)
+        }
+    }
+
+    function drawTextureRegion(event, texPath, x, y, w, h, u, v, uw, vh, tw, th, alphaFactor) {
+        var rw = Math.round(w)
+        var rh = Math.round(h)
+        if (rw <= 0 || rh <= 0) return
+        if (!checkTextureExists(texPath)) {
+            warnOnce('missingTex:' + texPath, '贴图资源不存在，已静默跳过该图层: ' + texPath)
+            return
+        }
+        var rx0 = Math.round(x)
+        var ry0 = Math.round(y)
+        ensureItemPosePushed(event)
+        var colorAdjusted = false
+        try {
+            if (alphaFactor != null && alphaFactor < 0.999 && event.raw != null && typeof event.raw.setColor === 'function') {
+                event.raw.setColor(1.0, 1.0, 1.0, clampNum(alphaFactor, 0.0, 1.0))
+                colorAdjusted = true
+            }
+            if (typeof event.drawTexture === 'function') {
+                event.drawTexture(texPath, rx0, ry0, rw, rh, u || 0, v || 0, uw != null ? uw : rw, vh != null ? vh : rh, tw || 256, th || 256)
+            } else if (event.raw != null && typeof event.raw.blit === 'function') {
+                var rl = getResourceLocation(texPath)
+                if (rl != null) {
+                    event.raw.blit(rl, rx0, ry0, rw, rh, u || 0, v || 0, uw != null ? uw : rw, vh != null ? vh : rh, tw || 256, th || 256)
+                }
+            }
+        } finally {
+            if (colorAdjusted && event.raw != null && typeof event.raw.setColor === 'function') {
+                try { event.raw.setColor(1.0, 1.0, 1.0, 1.0) } catch (eColRest) { }
+            }
+        }
+    }
+
+    function drawRectParallax(event, x, y, w, h, fill, now, fadeAlpha) {
+        var layers = Array.isArray(fill.layers) ? fill.layers : []
+        drawRectSolid(event, x, y, w, h, toArgbWithAlpha(0xFF0A0412, fadeAlpha))
+        for (var i = 0; i < layers.length; i++) {
+            var lay = layers[i]
+            if (lay == null) continue
+            var tex = lay.tex || lay.texture || ''
+            var sc  = max2(0.1, Number(lay.scale || 1.0))
+            var uOff = ((now * Number(lay.speedX || 0.0)) % 256 + 256) % 256
+            var vOff = ((now * Number(lay.speedY || 0.0)) % 256 + 256) % 256
+            var lAlpha = clampNum(Number(lay.alpha != null ? lay.alpha : 1.0) * fadeAlpha, 0.0, 1.0)
+            if (tex && checkTextureExists(tex)) {
+                drawTextureRegion(event, tex, x, y, w, h, uOff, vOff, w / sc, h / sc, 256, 256, lAlpha)
+            } else {
+                var starCol = toArgbWithAlpha(i % 2 === 0 ? 0x6644AAFF : 0x55CC66FF, lAlpha * 0.45)
+                var dotX = x + ((uOff + i * 37) % max2(1, w))
+                var dotY = y + ((vOff + i * 19) % max2(1, h))
+                drawRectSolid(event, dotX, dotY, min2(2, w), min2(2, h), starCol)
+            }
+        }
+    }
+
+    function drawRectShader(event, x, y, w, h, fill, now, fadeAlpha) {
+        var fbCol = toArgbWithAlpha(fill.fallbackColor != null ? fill.fallbackColor : 0xFF140524, fadeAlpha)
+        if (RenderTypeClass === null) {
+            RenderTypeClass = loadJavaClass('net.minecraft.client.renderer.RenderType', true) || false
+        }
+        var shaderId = String(fill.shaderId || 'end_portal').toLowerCase()
+        var drewShader = false
+        if (RenderTypeClass && event.raw != null && typeof event.raw.fill === 'function') {
+            try {
+                var rt = null
+                if (shaderId === 'end_portal' && typeof RenderTypeClass.endPortal === 'function') {
+                    rt = RenderTypeClass.endPortal()
+                } else if (shaderId === 'end_gateway' && typeof RenderTypeClass.endGateway === 'function') {
+                    rt = RenderTypeClass.endGateway()
+                } else if (shaderId === 'glint' && typeof RenderTypeClass.glint === 'function') {
+                    rt = RenderTypeClass.glint()
+                }
+                if (rt != null) {
+                    ensureItemPosePushed(event)
+                    event.raw.fill(rt, Math.round(x), Math.round(y), Math.round(x + w), Math.round(y + h), 0)
+                    drewShader = true
+                }
+            } catch (eSh) {
+                warnOnce('shaderFallback:' + shaderId, 'GUI 着色器通道不可用，已自动降级为视差/纯色填充: ' + eSh)
+            }
+        }
+        if (!drewShader) {
+            drawRectSolid(event, x, y, w, h, fbCol)
+            drawRectParallax(event, x, y, w, h, {
+                layers: [
+                    { tex: 'minecraft:textures/environment/end_sky.png', speedX: 0.015, speedY: 0.008, scale: 1.0, alpha: 0.65 },
+                    { tex: 'minecraft:textures/entity/end_portal.png', speedX: -0.022, speedY: 0.018, scale: 1.5, alpha: 0.50 }
+                ]
+            }, now, fadeAlpha)
+        }
+    }
+
+    function drawNineSliceNode(event, node, x, y, w, h, fadeAlpha) {
+        var tex = node.texture || node.tex || ''
+        if (!tex || !checkTextureExists(tex)) {
+            drawRectSolid(event, x, y, w, h, toArgbWithAlpha(0xB0101018, fadeAlpha))
+            return
+        }
+        var s  = max2(1, min2(Math.floor(min2(w, h) * 0.5), Number(node.slice || 4)))
+        var u0 = Number(node.u || 0)
+        var v0 = Number(node.v || 0)
+        var uw = Number(node.uw || 16)
+        var vh = Number(node.vh || 16)
+        var tw = Number(node.tw || 256)
+        var th = Number(node.th || 256)
+        var cw = max2(0, w - s * 2)
+        var ch = max2(0, h - s * 2)
+        var cuw = max2(1, uw - s * 2)
+        var cvh = max2(1, vh - s * 2)
+        // 4 角
+        drawTextureRegion(event, tex, x, y, s, s, u0, v0, s, s, tw, th, fadeAlpha)
+        drawTextureRegion(event, tex, x + w - s, y, s, s, u0 + uw - s, v0, s, s, tw, th, fadeAlpha)
+        drawTextureRegion(event, tex, x, y + h - s, s, s, u0, v0 + vh - s, s, s, tw, th, fadeAlpha)
+        drawTextureRegion(event, tex, x + w - s, y + h - s, s, s, u0 + uw - s, v0 + vh - s, s, s, tw, th, fadeAlpha)
+        // 4 边与中心
+        if (cw > 0) {
+            drawTextureRegion(event, tex, x + s, y, cw, s, u0 + s, v0, cuw, s, tw, th, fadeAlpha)
+            drawTextureRegion(event, tex, x + s, y + h - s, cw, s, u0 + s, v0 + vh - s, cuw, s, tw, th, fadeAlpha)
+        }
+        if (ch > 0) {
+            drawTextureRegion(event, tex, x, y + s, s, ch, u0, v0 + s, s, cvh, tw, th, fadeAlpha)
+            drawTextureRegion(event, tex, x + w - s, y + s, s, ch, u0 + uw - s, v0 + s, s, cvh, tw, th, fadeAlpha)
+        }
+        if (cw > 0 && ch > 0) {
+            drawTextureRegion(event, tex, x + s, y + s, cw, ch, u0 + s, v0 + s, cuw, cvh, tw, th, fadeAlpha)
+        }
+    }
+
+    function drawItemNode(event, node, x, y) {
+        var itemId = String(node.item || '')
+        if (!itemId || itemId === 'minecraft:air') return
+        ensureItemPosePushed(event)
+        if (typeof event.renderItem === 'function') {
+            event.renderItem(itemId, Math.round(x), Math.round(y))
+            return
+        }
+        if (event.raw != null && typeof event.raw.renderFakeItem === 'function' && typeof Item !== 'undefined' && Item != null && typeof Item.of === 'function') {
+            try {
+                var stack = Item.of(itemId, max2(1, Number(node.count || 1)))
+                if (stack != null) {
+                    event.raw.renderFakeItem(stack, Math.round(x), Math.round(y))
+                }
+            } catch (eIt) {
+                warnOnce('itemRender:' + itemId, '物品图标渲染失败，已跳过: ' + eIt)
+            }
+        }
+    }
+
+    function drawDeclarativeTextNode(event, item, node, rawText, varsMap, fadeAlpha, fontObj, itemBatchCtx) {
+        var resolved = interpolateVarString(rawText, varsMap)
+        if (!resolved) return
+        var lines = resolved.split('\n')
+        var rawCol = resolveVarValue(node.color, varsMap, item.color != null ? item.color : 0xFFFFFF)
+        if (typeof rawCol === 'string' && SPEC && typeof SPEC.parseColor === 'function') {
+            rawCol = SPEC.parseColor(rawCol, 0xFFFFFF).color
+        }
+        var argb = toArgbWithAlpha(rawCol, fadeAlpha)
+        var shadow = node.shadow !== undefined ? Boolean(node.shadow) : (item.shadow !== undefined ? Boolean(item.shadow) : true)
+        var nx = resolveVarNum(node.x, varsMap, 0)
+        var ny = resolveVarNum(node.y, varsMap, 0)
+        var anchor = String(node.anchor || 'center').toLowerCase()
+        var lineStep = CONFIG.lineStepPx
+        var startY = anchor === 'top_left' ? ny : (ny - Math.floor((lines.length * lineStep) * 0.5) + 1)
+
+        for (var li = 0; li < lines.length; li++) {
+            var lnStr = lines[li]
+            if (!lnStr) continue
+            var entry = getCachedTextCompSeq(lnStr, false, lnStr.length <= 24)
+            var cleanLn = lnStr.replace(/§[0-9a-fk-or]/gi, '')
+            var measuredW = invokeFontWidth(fontObj, cleanLn)
+            var lw    = (isFinite(measuredW) && measuredW >= 0) ? measuredW : (cleanLn.length * 6)
+            var lx    = anchor === 'top_left' ? nx : (nx - Math.floor(lw * 0.5))
+            var ly    = startY + li * lineStep
+            var lay   = (itemBatchCtx != null) ? resolveUnitMuiLayout(itemBatchCtx, entry.seq, entry) : null
+            var useMui = (lay != null && itemBatchCtx != null && itemBatchCtx.muiActive)
+            var mode  = (useMui && itemBatchCtx.muiAllowSdf) ? 1 : 0
+            if (!(itemBatchCtx != null && drawBatchedGlyph(itemBatchCtx, entry.seq, lx, ly, argb, shadow, itemBatchCtx.itemMat, lay, mode))) {
+                ensureFallbackBlend(event, itemBatchCtx)
+                ensureItemPosePushed(event)
+                event.text(entry.comp, Math.round(lx) || 0, Math.round(ly) || 0, argb, shadow)
+            }
+        }
+    }
+
+    function enableEventScissor(event, x0, y0, x1, y1) {
+        var sx0 = Math.round(min2(x0, x1))
+        var sy0 = Math.round(min2(y0, y1))
+        var sx1 = Math.round(max2(x0, x1))
+        var sy1 = Math.round(max2(y0, y1))
+        if (typeof event.enableScissor === 'function') {
+            event.enableScissor(sx0, sy0, sx1, sy1)
+            return true
+        }
+        if (event.raw != null && typeof event.raw.enableScissor === 'function') {
+            event.raw.enableScissor(sx0, sy0, sx1, sy1)
+            return true
+        }
+        return false
+    }
+
+    function disableEventScissor(event) {
+        if (typeof event.disableScissor === 'function') {
+            event.disableScissor()
+        } else if (event.raw != null && typeof event.raw.disableScissor === 'function') {
+            event.raw.disableScissor()
+        }
+    }
+
+    function renderDeclarativeNodes(event, item, nodes, varsMap, fadeAlpha, fontObj, itemBatchCtx, now, parentAngleDeg, depth) {
+        if (!Array.isArray(nodes) || nodes.length === 0 || (depth || 0) > 4) return
+        var vMap = (varsMap != null && typeof varsMap === 'object') ? varsMap : {}
+
+        for (var ni = 0; ni < nodes.length; ni++) {
+            var node = nodes[ni]
+            if (node == null || typeof node !== 'object') continue
+            var nType  = String(node.type || 'rect').toLowerCase()
+            var nAlpha = clampNum(resolveVarNum(node.alpha, vMap, 1.0) * fadeAlpha, 0.0, 1.0)
+            if (nAlpha <= 0.005) continue
+
+            var nx     = resolveVarNum(node.x, vMap, 0)
+            var ny     = resolveVarNum(node.y, vMap, 0)
+            var nw     = max2(0, resolveVarNum(node.w, vMap, nType === 'sprite' || nType === 'item' ? 16 : 64))
+            var nh     = max2(0, resolveVarNum(node.h, vMap, nType === 'sprite' || nType === 'item' ? 16 : 8))
+            var nScale = resolveVarNum(node.scale != null ? node.scale : node.size, vMap, 1.0)
+            var nAngle = resolveVarNum(node.angle != null ? node.angle : node.tilt, vMap, 0.0)
+            var anchor = String(node.anchor || 'center').toLowerCase()
+            var x0     = anchor === 'top_left' ? nx : (nx - nw * 0.5)
+            var y0     = anchor === 'top_left' ? ny : (ny - nh * 0.5)
+
+            var clipSpec = node.clip || null
+            var effAngle = (Number(parentAngleDeg) || 0) + nAngle
+            var useScissor = (clipSpec != null && clipSpec.mode === 'scissor' && Math.abs(effAngle) < 0.01)
+
+            var nodePushed    = false
+            var scissorPushed = false
+            try {
+                if (nType === 'group' || nAngle !== 0 || Math.abs(nScale - 1.0) > 0.001) {
+                    ensureItemPosePushed(event)
+                    event.push()
+                    nodePushed = true
+                    if (nx !== 0 || ny !== 0) event.translate(nx, ny)
+                    if (nAngle !== 0 && isFinite(nAngle)) event.rotateDeg(nAngle)
+                    if (Math.abs(nScale - 1.0) > 0.001 && isFinite(nScale)) {
+                        event['scale(float,float)'] ? event['scale(float,float)'](nScale, nScale) : event.scale(nScale, nScale)
+                    }
+                    x0 = anchor === 'top_left' ? 0 : (-nw * 0.5)
+                    y0 = anchor === 'top_left' ? 0 : (-nh * 0.5)
+                }
+
+                var clipped = computeLocalClipRect(
+                    x0, y0, nw, nh,
+                    node.u || 0, node.v || 0,
+                    node.uw != null ? node.uw : nw,
+                    node.vh != null ? node.vh : nh,
+                    (!useScissor ? clipSpec : null),
+                    vMap
+                )
+
+                if (useScissor && clipSpec != null) {
+                    var scRect = computeLocalClipRect(x0, y0, nw, nh, 0, 0, nw, nh, clipSpec, vMap)
+                    scissorPushed = enableEventScissor(event, scRect.x, scRect.y, scRect.x + scRect.w, scRect.y + scRect.h)
+                }
+
+                if (nType === 'rect') {
+                    if (node.borderWidth != null && Number(node.borderWidth) > 0 && node.borderColor != null) {
+                        var bw = Math.round(Number(node.borderWidth))
+                        var bCol = resolveVarValue(node.borderColor, vMap, 0xFFFFFFFF)
+                        var bArgb = toArgbWithAlpha(bCol, nAlpha)
+                        drawRectSolid(event, x0 - bw, y0 - bw, nw + bw * 2, bw, bArgb)
+                        drawRectSolid(event, x0 - bw, y0 + nh, nw + bw * 2, bw, bArgb)
+                        drawRectSolid(event, x0 - bw, y0, bw, nh, bArgb)
+                        drawRectSolid(event, x0 + nw, y0, bw, nh, bArgb)
+                    }
+                    if (clipped.w > 0.25 && clipped.h > 0.25) {
+                        var fill = (node.fill != null && typeof node.fill === 'object')
+                            ? node.fill
+                            : { mode: 'solid', color: node.color != null ? node.color : 0xFF000000 }
+                        var fMode = String(fill.mode || 'solid').toLowerCase()
+                        if (fMode === 'gradient') {
+                            var cFrom = toArgbWithAlpha(resolveVarValue(fill.from, vMap, 0xFF5555), nAlpha)
+                            var cTo   = toArgbWithAlpha(resolveVarValue(fill.to, vMap, 0xFFAA00), nAlpha)
+                            drawRectGradient(event, clipped.x, clipped.y, clipped.w, clipped.h, cFrom, cTo, fill.dir === 'v' ? 'v' : 'h')
+                        } else if (fMode === 'parallax') {
+                            drawRectParallax(event, clipped.x, clipped.y, clipped.w, clipped.h, fill, now, nAlpha)
+                        } else if (fMode === 'shader') {
+                            drawRectShader(event, clipped.x, clipped.y, clipped.w, clipped.h, fill, now, nAlpha)
+                        } else {
+                            var sCol = toArgbWithAlpha(resolveVarValue(fill.color != null ? fill.color : node.color, vMap, 0xFF000000), nAlpha)
+                            drawRectSolid(event, clipped.x, clipped.y, clipped.w, clipped.h, sCol)
+                        }
+                    }
+                } else if (nType === 'sprite') {
+                    if (clipped.w > 0.25 && clipped.h > 0.25) {
+                        drawTextureRegion(
+                            event,
+                            node.texture || node.tex || '',
+                            clipped.x, clipped.y, clipped.w, clipped.h,
+                            clipped.u, clipped.v, clipped.uw, clipped.vh,
+                            node.tw || 256, node.th || 256,
+                            nAlpha
+                        )
+                    }
+                } else if (nType === 'nine_slice') {
+                    if (clipped.w > 0.25 && clipped.h > 0.25) {
+                        drawNineSliceNode(event, node, clipped.x, clipped.y, clipped.w, clipped.h, nAlpha)
+                    }
+                } else if (nType === 'item') {
+                    drawItemNode(event, node, clipped.x, clipped.y)
+                } else if (nType === 'text') {
+                    drawDeclarativeTextNode(
+                        event,
+                        item,
+                        node,
+                        node.text != null ? node.text : (node.title || ''),
+                        vMap,
+                        nAlpha,
+                        fontObj,
+                        nodePushed ? null : itemBatchCtx
+                    )
+                } else if (nType === 'group') {
+                    renderDeclarativeNodes(event, item, node.children, vMap, nAlpha, fontObj, null, now, effAngle, (depth || 0) + 1)
+                }
+            } finally {
+                if (scissorPushed) {
+                    try { disableEventScissor(event) } catch (eScis) { }
+                }
+                if (nodePushed) {
+                    try { event.pop() } catch (eNPop) { }
+                }
+            }
+        }
+    }
+
+    function matchesTargetGui(screenObj, targetGui) {
+        if (targetGui == null || typeof targetGui !== 'object') return true
+        if (screenObj == null) return false
+        try {
+            if (targetGui.screenClass) {
+                var clsName = ''
+                if (typeof screenObj.getClass === 'function') {
+                    clsName = String(screenObj.getClass().getName())
+                } else if (screenObj.className) {
+                    clsName = String(screenObj.className)
+                }
+                if (clsName.indexOf(String(targetGui.screenClass)) < 0) return false
+            }
+            if (targetGui.titleMatch) {
+                var tStr = ''
+                if (typeof screenObj.getTitle === 'function' && screenObj.getTitle() != null) {
+                    tStr = String(screenObj.getTitle().getString ? screenObj.getTitle().getString() : screenObj.getTitle())
+                } else if (screenObj.title != null) {
+                    tStr = String(screenObj.title)
+                }
+                if (tStr.indexOf(String(targetGui.titleMatch)) < 0) return false
+            }
+        } catch (eMatch) {
+            return false
+        }
+        return true
+    }
+
+    function applyReplacedTexturesForGui(replaceMap) {
+        if (replaceMap == null || typeof replaceMap !== 'object') return
+        for (var origPath in replaceMap) {
+            if (!Object.prototype.hasOwnProperty.call(replaceMap, origPath)) continue
+            var repPath = String(replaceMap[origPath] || '')
+            if (!repPath || !checkTextureExists(repPath)) {
+                warnOnce('replaceTexMissing:' + repPath, 'GUI 替换目标贴图不存在，已保留原版贴图: ' + repPath)
+                continue
+            }
+            if (REPLACED_TEXTURE_REGISTRY[origPath] != null && REPLACED_TEXTURE_REGISTRY[origPath].replacementPath === repPath) {
+                continue
+            }
+            REPLACED_TEXTURE_REGISTRY[origPath] = {
+                originalPath:    origPath,
+                replacementPath: repPath,
+                active:          true
+            }
+        }
+    }
+
+    function renderGuiSurfacePass(screenOrEvent, phase, guiCtx) {
+        var now = monotonicNowMs()
+        flushPendingActions(now)
+        var ctx = (guiCtx != null && typeof guiCtx === 'object') ? guiCtx : {}
+        var screenObj = ctx.screen || (screenOrEvent != null ? (screenOrEvent.screen || getActiveScreen(screenOrEvent)) : null)
+        var guiLeft = Number(ctx.guiLeft != null ? ctx.guiLeft : (screenObj != null && screenObj.guiLeft != null ? screenObj.guiLeft : 0)) || 0
+        var guiTop  = Number(ctx.guiTop != null ? ctx.guiTop : (screenObj != null && screenObj.guiTop != null ? screenObj.guiTop : 0)) || 0
+        var fontObj = getClientFont(screenOrEvent, now)
+        var rendered = 0
+
+        for (var i = 0; i < activeOverlays.length; i++) {
+            var ov = activeOverlays[i]
+            if (ov == null || now >= ov.expire) continue
+            if (ov.surface !== 'gui' && ov.surface !== 'slot') continue
+            if (!matchesTargetGui(screenObj, ov.targetGui)) continue
+
+            stepOverlayTracks(ov, now)
+            var fadeStartAt  = ov.fadeStartAt != null ? ov.fadeStartAt : (ov.expire - (ov.fadeMs || 350))
+            var fadeWin      = max2(1, ov.expire - fadeStartAt)
+            var inFade       = (now >= fadeStartAt)
+            var fadeProgress = inFade ? clampNum((now - fadeStartAt) / fadeWin, 0.0, 1.0) : 0.0
+            var fadeAlpha    = inFade ? clampNum(1.0 - fadeProgress, 0.04, 1.0) : 1.0
+            var vMap         = ov.displayVars || ov.vars || {}
+
+            var pushed = false
+            try {
+                if ((phase === 'pre' || phase === 'bg') && ov.surface === 'gui') {
+                    if (ov.replaceTextures != null) {
+                        applyReplacedTexturesForGui(ov.replaceTextures)
+                    }
+                    if (Array.isArray(ov.bgNodes) && ov.bgNodes.length > 0 && screenOrEvent != null) {
+                        if (typeof screenOrEvent.push === 'function' && (guiLeft !== 0 || guiTop !== 0)) {
+                            screenOrEvent.push()
+                            pushed = true
+                            screenOrEvent.translate(guiLeft, guiTop)
+                        }
+                        renderDeclarativeNodes(screenOrEvent, ov, ov.bgNodes, vMap, fadeAlpha, fontObj, null, now, 0.0, 0)
+                        rendered++
+                    }
+                } else if (phase === 'slot' && ov.surface === 'slot') {
+                    var slotX = Number(ctx.slotX || 0)
+                    var slotY = Number(ctx.slotY || 0)
+                    var slotMatch = ov.slotMatch
+                    var matchedSlot = true
+                    if (slotMatch != null) {
+                        if (slotMatch.item && ctx.itemId && String(ctx.itemId) !== String(slotMatch.item)) matchedSlot = false
+                        if (slotMatch.slotIndex != null && slotMatch.slotIndex >= 0 && ctx.slotIndex != null && Number(ctx.slotIndex) !== Number(slotMatch.slotIndex)) matchedSlot = false
+                    }
+                    if (matchedSlot && Array.isArray(ov.nodes) && ov.nodes.length > 0 && screenOrEvent != null) {
+                        if (typeof screenOrEvent.push === 'function') {
+                            screenOrEvent.push()
+                            pushed = true
+                            screenOrEvent.translate(guiLeft + slotX, guiTop + slotY)
+                        }
+                        renderDeclarativeNodes(screenOrEvent, ov, ov.nodes, vMap, fadeAlpha, fontObj, null, now, 0.0, 0)
+                        rendered++
+                    }
+                } else if ((phase === 'post' || phase === 'fg' || !phase) && ov.surface === 'gui') {
+                    var fgList = (Array.isArray(ov.fgNodes) && ov.fgNodes.length > 0) ? ov.fgNodes : ov.nodes
+                    if (Array.isArray(fgList) && fgList.length > 0 && screenOrEvent != null) {
+                        if (typeof screenOrEvent.push === 'function' && (guiLeft !== 0 || guiTop !== 0)) {
+                            screenOrEvent.push()
+                            pushed = true
+                            screenOrEvent.translate(guiLeft, guiTop)
+                        }
+                        renderDeclarativeNodes(screenOrEvent, ov, fgList, vMap, fadeAlpha, fontObj, null, now, 0.0, 0)
+                        rendered++
+                    }
+                }
+            } finally {
+                if (pushed && screenOrEvent != null && typeof screenOrEvent.pop === 'function') {
+                    try { screenOrEvent.pop() } catch (eGPop) { }
+                }
+            }
+        }
+        return rendered
+    }
+
     ClientEvents.paintScreen(function (event) {
         var curLevelKey = resolveCurrentLevelKey(event)
         if (curLevelKey === '') {
@@ -4393,6 +5550,7 @@
             var fadeWin      = max2(1, item.expire - fadeStartAt)
             var inFade       = (now >= fadeStartAt)
             var fadeProgress = inFade ? clampNum((now - fadeStartAt) / fadeWin, 0.0, 1.0) : 0.0
+            stepOverlayTracks(item, now)
 
             // 1. 最大行宽与自动换行缓存（含字间距 letterSpacing）
             var baseScale          = (item.scale != null && item.scale > 0.25) ? Number(item.scale) : 1.0
@@ -4601,7 +5759,28 @@
                 // 拿不到 itemMat 时直接降为 null，禁止在每字热路径内再重复调 event.getMatrix() 兜底
                 var itemBatchCtx = (batchCtx != null && !BATCH_FAILED && batchCtx.itemMat != null) ? batchCtx : null
 
-                if (isShatterFade) {
+                if (item.hasGraphicNodes) {
+                    var nodeFadeAlpha = inFade ? clampNum(1.0 - fadeProgress, 0.04, 1.0) : 1.0
+                    if (item.surface === 'gui' || item.surface === 'slot') {
+                        var activeScr = getActiveScreen(event)
+                        if (matchesTargetGui(activeScr, item.targetGui)) {
+                            if (item.replaceTextures != null) {
+                                applyReplacedTexturesForGui(item.replaceTextures)
+                            }
+                            if (Array.isArray(item.bgNodes) && item.bgNodes.length > 0) {
+                                renderDeclarativeNodes(event, item, item.bgNodes, item.displayVars || item.vars || {}, nodeFadeAlpha, fontObj, itemBatchCtx, now, angDeg, 0)
+                            }
+                            if (Array.isArray(item.nodes) && item.nodes.length > 0) {
+                                renderDeclarativeNodes(event, item, item.nodes, item.displayVars || item.vars || {}, nodeFadeAlpha, fontObj, itemBatchCtx, now, angDeg, 0)
+                            }
+                            if (Array.isArray(item.fgNodes) && item.fgNodes.length > 0) {
+                                renderDeclarativeNodes(event, item, item.fgNodes, item.displayVars || item.vars || {}, nodeFadeAlpha, fontObj, itemBatchCtx, now, angDeg, 0)
+                            }
+                        }
+                    } else {
+                        renderDeclarativeNodes(event, item, item.nodes, item.displayVars || item.vars || {}, nodeFadeAlpha, fontObj, itemBatchCtx, now, angDeg, 0)
+                    }
+                } else if (isShatterFade) {
                     var titleSkipS   = min2(item.titleVis, startSkipVis)
                     var titleKeepS   = min2(item.titleVis, keepEndVis)
                     var subSkipS     = max2(0, startSkipVis - item.titleVis)

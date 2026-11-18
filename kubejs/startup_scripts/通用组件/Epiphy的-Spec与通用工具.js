@@ -32,7 +32,7 @@
     };
 
     var DANMAKU_CHANNEL       = 'epiphy:screen_danmaku';
-    var DANMAKU_PROTO_VERSION = 5;
+    var DANMAKU_PROTO_VERSION = 6;
 
     var AUDIO_CHANNEL         = 'epiphy:audio';
     var AUDIO_PROTO_VERSION   = 5;
@@ -41,7 +41,10 @@
     function isProtoCompatible(expectedVer, incomingVer) {
         if (incomingVer === undefined || incomingVer === null) return false;
         var n = Number(incomingVer);
-        return isFinite(n) && n === Number(expectedVer);
+        var exp = Number(expectedVer);
+        if (!isFinite(n) || !isFinite(exp)) return false;
+        if (exp === 6) return n === 5 || n === 6;
+        return n === exp;
     }
 
     function registerPriorityAlias(name, level) {
@@ -771,6 +774,230 @@
         return clusters;
     }
 
+    // ------------------------------------------------------------------------
+    // 6. 平面渲染协议 v6 别名收敛表、配额预算与 v5 -> v6 确定性适配器
+    // ------------------------------------------------------------------------
+    var OFFICIAL_DANMAKU_ALIASES = Object.freeze({
+        text:      'title',
+        subtitle:  'sub',
+        id:        'slotId',
+        size:      'scale',
+        tilt:      'angle',
+        duration:  'stay',
+        hold:      'activeHold',
+        fade:      'fadeStyle',
+        fadeTicks: 'fadeOut',
+        outline:   'outlineMode',
+        ns:        'namespace'
+    });
+
+    var DEPRECATED_DANMAKU_ALIASES = Object.freeze({
+        msg:            'title',
+        message:        'title',
+        main:           'title',
+        subText:        'sub',
+        desc:           'sub',
+        slot:           'slotId',
+        fontSize:       'scale',
+        rot:            'angle',
+        rotation:       'angle',
+        deg:            'angle',
+        angleDeg:       'angle',
+        holdTicks:      'activeHold',
+        holdSec:        'activeHold',
+        fadeSec:        'fadeOut',
+        fadeMode:       'fadeStyle',
+        spacing:        'letterSpacing',
+        charSpacing:    'letterSpacing',
+        stroke:         'outlineMode',
+        glow:           'outlineMode',
+        importance:     'priority',
+        move:           'movable',
+        updatePos:      'movable',
+        resetAnimation: 'restart',
+        maxGroupSize:   'maxGroup',
+        charShake:      'perCharShake',
+        randShake:      'randomShake',
+        randColor:      'randomColor',
+        randScale:      'randomScale'
+    });
+
+    function normalizeDanmakuAliases(opts, warnFn) {
+        if (opts == null || typeof opts !== 'object') return {};
+        var out = {};
+        var k;
+        for (k in opts) {
+            if (Object.prototype.hasOwnProperty.call(opts, k)) {
+                out[k] = opts[k];
+            }
+        }
+        for (k in OFFICIAL_DANMAKU_ALIASES) {
+            if (Object.prototype.hasOwnProperty.call(OFFICIAL_DANMAKU_ALIASES, k) && out[k] !== undefined) {
+                var canon1 = OFFICIAL_DANMAKU_ALIASES[k];
+                if (out[canon1] === undefined) {
+                    out[canon1] = out[k];
+                }
+            }
+        }
+        for (k in DEPRECATED_DANMAKU_ALIASES) {
+            if (Object.prototype.hasOwnProperty.call(DEPRECATED_DANMAKU_ALIASES, k) && out[k] !== undefined) {
+                var canon2 = DEPRECATED_DANMAKU_ALIASES[k];
+                if (out[canon2] === undefined) {
+                    if ((k === 'stroke' || k === 'glow') && typeof out[k] === 'boolean') {
+                        if (out[k]) out[canon2] = k;
+                    } else {
+                        out[canon2] = out[k];
+                    }
+                }
+                if (typeof warnFn === 'function') {
+                    warnFn(k, canon2);
+                }
+            }
+        }
+        return out;
+    }
+
+    function computeNodeListCost(nodes) {
+        if (!Array.isArray(nodes)) return 0;
+        var cost = 0;
+        for (var i = 0; i < nodes.length; i++) {
+            var n = nodes[i];
+            if (n == null || typeof n !== 'object') continue;
+            var nType = String(n.type || 'rect');
+            if (nType === 'group') {
+                cost += 1 + computeNodeListCost(n.children);
+            } else if (nType === 'rect' && n.fill != null && typeof n.fill === 'object' && n.fill.mode === 'parallax') {
+                var layers = Array.isArray(n.fill.layers) ? n.fill.layers.length : 1;
+                cost += 1 + layers;
+            } else if (nType === 'nine_slice') {
+                cost += 4;
+            } else if (nType === 'text') {
+                var rawText = n.text != null ? String(n.text) : (n.title != null ? String(n.title) : '');
+                var isPerChar = Boolean(n.perCharShake || n.shakeMode === 'per_char');
+                cost += isPerChar ? Math.max(2, Math.ceil(rawText.length / 8)) : 2;
+            } else {
+                cost += 1;
+            }
+        }
+        return cost;
+    }
+
+    function computeOverlayCost(pkt) {
+        if (pkt == null || typeof pkt !== 'object') return 0;
+        if (Array.isArray(pkt)) return computeNodeListCost(pkt);
+        var cost = 0;
+        if (Array.isArray(pkt.nodes)) cost += computeNodeListCost(pkt.nodes);
+        if (Array.isArray(pkt.bgNodes)) cost += computeNodeListCost(pkt.bgNodes);
+        if (Array.isArray(pkt.fgNodes)) cost += computeNodeListCost(pkt.fgNodes);
+        if (cost === 0 && (pkt.title || pkt.text || pkt.sub || pkt.subtitle)) {
+            var rawT = String(pkt.title || pkt.text || '') + String(pkt.sub || pkt.subtitle || '');
+            var perC = Boolean(pkt.perCharShake || pkt.shakeMode === 'per_char');
+            cost = perC ? Math.max(2, Math.ceil(rawT.length / 8)) : 2;
+        }
+        return cost;
+    }
+
+    function adaptV5ToV6(rawPkt) {
+        if (rawPkt == null || typeof rawPkt !== 'object') return rawPkt;
+        if (typeof rawPkt.contains === 'function' || typeof rawPkt.getString === 'function') return rawPkt;
+        var out = {};
+        for (var k in rawPkt) {
+            if (Object.prototype.hasOwnProperty.call(rawPkt, k)) {
+                out[k] = rawPkt[k];
+            }
+        }
+        out.proto   = 6;
+        out.surface = out.surface ? String(out.surface) : 'screen';
+        var act     = out.action ? String(out.action) : 'push';
+        out.action  = act;
+
+        if (Array.isArray(out.items)) {
+            var adaptedItems = [];
+            for (var i = 0; i < out.items.length; i++) {
+                adaptedItems.push(adaptV5ToV6(out.items[i]));
+            }
+            out.items = adaptedItems;
+            return out;
+        }
+
+        if (act === 'clear' || act === 'deactivate' || act === 'stop' || act === 'patch') {
+            if (out.slotId == null && out.id != null) out.slotId = String(out.id);
+            if (out.slotId == null && out.slot != null) out.slotId = String(out.slot);
+            return out;
+        }
+
+        if (out.slotId == null) {
+            out.slotId = out.id != null ? String(out.id) : (out.slot != null ? String(out.slot) : '');
+        }
+        if (out.vars == null || typeof out.vars !== 'object') out.vars = {};
+        if (out.tracks == null || typeof out.tracks !== 'object') out.tracks = {};
+
+        var hasExplicitNodes = (Array.isArray(out.nodes) && out.nodes.length > 0) ||
+            (Array.isArray(out.bgNodes) && out.bgNodes.length > 0) ||
+            (Array.isArray(out.fgNodes) && out.fgNodes.length > 0) ||
+            (out.replaceTextures != null);
+        if (hasExplicitNodes) {
+            if (!Array.isArray(out.nodes)) out.nodes = [];
+            return out;
+        }
+
+        var titleStr = out.title != null ? String(out.title) : (out.text != null ? String(out.text) : '');
+        var subStr   = out.sub != null ? String(out.sub) : (out.subtitle != null ? String(out.subtitle) : '');
+        var nodes    = [];
+        if (titleStr.length > 0 || subStr.length === 0) {
+            nodes.push({
+                id:                  'title',
+                type:                'text',
+                x:                   0,
+                y:                   0,
+                anchor:              'center',
+                text:                titleStr,
+                color:               out.color != null ? out.color : 0xFF5555,
+                shadow:              out.shadow !== undefined ? Boolean(out.shadow) : true,
+                maxWidth:            out.maxWidth != null ? out.maxWidth : 0,
+                wrap:                out.wrap !== undefined ? Boolean(out.wrap) : true,
+                typewriter:          Boolean(out.typewriter),
+                charMs:              out.charMs != null ? out.charMs : 30,
+                cursor:              out.cursor != null ? String(out.cursor) : '▌',
+                letterSpacing:       out.letterSpacing != null ? out.letterSpacing : (out.spacing != null ? out.spacing : 0),
+                letterSpacingMode:   out.letterSpacingMode || 'relative',
+                outlineMode:         out.outlineMode || out.outline || 'none',
+                outlineColor:        out.outlineColor != null ? out.outlineColor : -1,
+                outlineWidth:        out.outlineWidth != null ? out.outlineWidth : 0.72,
+                perCharShake:        Boolean(out.perCharShake),
+                charShakeStyle:      out.charShakeStyle || 'omni',
+                charShakeShift:      out.charShakeShift != null ? out.charShakeShift : 0.32,
+                charShakeShiftX:     out.charShakeShiftX,
+                charShakeShiftY:     out.charShakeShiftY,
+                charShakeSwayX:      out.charShakeSwayX,
+                charShakeSwayY:      out.charShakeSwayY,
+                charShakeRotDeg:     out.charShakeRotDeg,
+                charShakeWin:        out.charShakeWin,
+                charShakeSnap:       out.charShakeSnap,
+                charShakeTransition: out.charShakeTransition
+            });
+        }
+        if (subStr.length > 0) {
+            nodes.push({
+                id:           'sub',
+                type:         'text',
+                x:            0,
+                y:            12,
+                anchor:       'center',
+                text:         subStr,
+                color:        out.subColor != null ? out.subColor : 0xFFCC44,
+                shadow:       out.shadow !== undefined ? Boolean(out.shadow) : true,
+                maxWidth:     out.maxWidth != null ? out.maxWidth : 0,
+                wrap:         out.wrap !== undefined ? Boolean(out.wrap) : true,
+                outlineMode:  out.outlineMode || out.outline || 'none',
+                outlineColor: out.outlineColor != null ? out.outlineColor : -1,
+                outlineWidth: out.outlineWidth != null ? out.outlineWidth : 0.72
+            });
+        }
+        out.nodes = nodes;
+        return out;
+    }
+
     if (typeof global !== 'undefined') {
         global.EpiphySpec = {
             PROTOCOL:                   PROTOCOL,
@@ -778,7 +1005,13 @@
             COLOR_PRESETS:              COLOR_PRESETS,
             SIZE_PRESETS:               SIZE_PRESETS,
             PRIORITY_MAP:               PRIORITY_MAP,
+            OFFICIAL_DANMAKU_ALIASES:   OFFICIAL_DANMAKU_ALIASES,
+            DEPRECATED_DANMAKU_ALIASES: DEPRECATED_DANMAKU_ALIASES,
             isProtoCompatible:          isProtoCompatible,
+            normalizeDanmakuAliases:    normalizeDanmakuAliases,
+            computeNodeListCost:        computeNodeListCost,
+            computeOverlayCost:         computeOverlayCost,
+            adaptV5ToV6:                adaptV5ToV6,
             min2:                       min2,
             max2:                       max2,
             clampNum:                   clampNum,

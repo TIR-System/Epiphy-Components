@@ -817,19 +817,31 @@
         })
     }
 
-    var PROGRESS_BAR_CACHE = []
-    ;(function initProgressBarCache() {
-        var total = 16
-        for (var filled = 0; filled <= total; filled++) {
-            var s = ''
-            for (var i = 0; i < total; i++) s += (i < filled) ? '█' : '░'
-            PROGRESS_BAR_CACHE[filled] = s
+    function buildTelemetryProgressOpts(cfg) {
+        if (typeof DANMAKU.buildProgressPanel === 'function') {
+            return DANMAKU.buildProgressPanel(cfg)
         }
-    })()
-
-    function makeProgressBar(progress) {
-        var filled = Math.max(0, Math.min(16, Math.round(progress * 16)))
-        return PROGRESS_BAR_CACHE[filled]
+        var pVal = Math.max(0.0, Math.min(1.0, Number(cfg.progress) || 0.0))
+        var barW = Number(cfg.barWidth) || 160
+        var barH = Number(cfg.barHeight) || 6
+        var out  = {}
+        for (var k in cfg) {
+            if (Object.prototype.hasOwnProperty.call(cfg, k)) out[k] = cfg[k]
+        }
+        out.surface = 'screen'
+        out.vars    = { progress: pVal, progressTrail: pVal, pctText: Math.round(pVal * 100) + '%' }
+        out.tracks  = {
+            progress:      { mode: 'lerp', speed: 10.0, easing: 'out_cubic' },
+            progressTrail: { mode: 'trail', target: '$progress', delayMs: 220, speed: 4.5 }
+        }
+        out.nodes = [
+            { id: 'bar_bg', type: 'rect', x: 0, y: 0, w: barW + 2, h: barH + 2, anchor: 'center', fill: { mode: 'solid', color: 0xB0120A16 }, borderColor: 0xCC552233, borderWidth: 1 },
+            { id: 'bar_trail', type: 'rect', x: 0, y: 0, w: barW, h: barH, anchor: 'center', fill: { mode: 'solid', color: cfg.trailColor || 0x77FF6644 }, clip: { dir: 'left', ratio: '$progressTrail', mode: 'local' } },
+            { id: 'bar_main', type: 'rect', x: 0, y: 0, w: barW, h: barH, anchor: 'center', fill: { mode: 'gradient', dir: 'h', from: cfg.barColorFrom || 0xFF3333, to: cfg.barColorTo || 0xFFAA22 }, clip: { dir: 'left', ratio: '$progress', mode: 'local' } },
+            { id: 'title', type: 'text', x: 0, y: -12, anchor: 'center', text: String(cfg.text || ''), color: 0xFF5555, shadow: true },
+            { id: 'sub', type: 'text', x: 0, y: 9, anchor: 'center', text: String(cfg.sub || ''), color: 0xFFCC44, shadow: true }
+        ]
+        return out
     }
 
     // ------------------------------------------------------------------------
@@ -1607,27 +1619,32 @@
     function triggerRapidFinalErrorStream(job, remainTicks) {
         if (remainTicks <= 0 || remainTicks > FATAL_ERROR_TICKS) return
 
-        // 0. 左上角【终末 10 秒死刑遥测面板】（持续激活模式 lifeMode: 'active'，始终稳定静止不震动，每 4 tick 原地刷新）
+        // 0. 左上角【终末 10 秒死刑遥测面板】（持续激活模式 lifeMode: 'active'，原生 2D 图元进度条 + 延迟拖影，每 4 tick 原地刷新）
         if (remainTicks % 4 === 0) {
-            var pFinal   = Math.max(0, Math.min(1.0, 1.0 - (remainTicks / FATAL_ERROR_TICKS)))
-            var barFinal = makeProgressBar(pFinal)
-            var lockTag  = job.fatalTriggered ? '§4§l[防破坏锁死 · 死刑序列]' : '§c§l[堆芯熔毁 · 终末倒计时]'
-            sendDanmakuNear(job.level, job.x, job.y, job.z, SCREEN_ALERT_RADIUS, {
-                group:      TELEMETRY_GROUP,
-                id:         'core_telemetry_' + job.x + '_' + job.y + '_' + job.z,
-                lifeMode:   'active',
-                activeHold: 14,
-                priority:   'active',
-                text:       lockTag + ' §fT-' + (remainTicks / 20).toFixed(1) + 's',
-                sub:        '§c' + barFinal + ' §e' + Math.round(pFinal * 100) + '%\n§7坐标 (' + job.x + ', ' + job.y + ', ' + job.z + ') // 奇点释放临界',
-                pos:        [0.19, 0.12],
-                size:       0.78,
-                tilt:       0,
-                shakeMode:  'none',
-                shakeAmp:   0.0,
-                fadeStyle:  'shatter',
-                fadeOut:    14
-            })
+            var pFinal  = Math.max(0, Math.min(1.0, 1.0 - (remainTicks / FATAL_ERROR_TICKS)))
+            var lockTag = job.fatalTriggered ? '§4§l[防破坏锁死 · 死刑序列]' : '§c§l[堆芯熔毁 · 终末倒计时]'
+            sendDanmakuNear(job.level, job.x, job.y, job.z, SCREEN_ALERT_RADIUS, buildTelemetryProgressOpts({
+                group:        TELEMETRY_GROUP,
+                id:           'core_telemetry_' + job.x + '_' + job.y + '_' + job.z,
+                lifeMode:     'active',
+                activeHold:   14,
+                priority:     'active',
+                progress:     pFinal,
+                barWidth:     164,
+                barHeight:    6,
+                barColorFrom: 0xFF1122,
+                barColorTo:   0xFFAA00,
+                trailColor:   0x88FF4422,
+                text:         lockTag + ' §fT-' + (remainTicks / 20).toFixed(1) + 's §e(' + Math.round(pFinal * 100) + '%)',
+                sub:          '§7坐标 (' + job.x + ', ' + job.y + ', ' + job.z + ') // 奇点释放临界',
+                pos:          [0.19, 0.12],
+                size:         0.78,
+                tilt:         0,
+                shakeMode:    'none',
+                shakeAmp:     0.0,
+                fadeStyle:    'shatter',
+                fadeOut:      14
+            }))
         }
 
         // 1. 固定时间节点的主干错误层：全屏广域打散 + 随机色彩与来源 + 40% 概率静止不震动（确保有静有动、层次分明）
@@ -2054,25 +2071,30 @@
             return
         }
 
-        // 每 8 tick 刷新一次左上角持续激活【堆芯失稳遥测面板】HUD（lifeMode: 'active'，全程静止不震动，已移除旧版物品栏上方 ActionBar 进度条）
+        // 每 8 tick 刷新一次左上角持续激活【堆芯失稳遥测面板】HUD（lifeMode: 'active'，原生 2D 图元进度条 + 拖影轨道，全程静止不震动）
         if (job.t % 8 === 0) {
-            var bar = makeProgressBar(p)
-            sendDanmakuNear(job.level, job.x, job.y, job.z, SCREEN_ALERT_RADIUS, {
-                group:      TELEMETRY_GROUP,
-                id:         'core_telemetry_' + job.x + '_' + job.y + '_' + job.z,
-                lifeMode:   'active',
-                activeHold: 22,
-                priority:   'active',
-                text:       meta.colorCode + '§l[堆芯遥测 · 阶段 ' + (stageIdx + 1) + '/5 ' + meta.tag + '] §fT-' + remainSec + 's',
-                sub:        meta.colorCode + bar + ' §f' + pct + '%\n§7核心 (' + job.x + ', ' + job.y + ', ' + job.z + ') §8| §e投掷【终望珍珠】可吞噬停机',
-                pos:        [0.19, 0.12],
-                size:       0.75,
-                tilt:       0,
-                shakeMode:  'none',
-                shakeAmp:   0.0,
-                fadeStyle:  'char_last',
-                fadeOut:    14
-            })
+            sendDanmakuNear(job.level, job.x, job.y, job.z, SCREEN_ALERT_RADIUS, buildTelemetryProgressOpts({
+                group:        TELEMETRY_GROUP,
+                id:           'core_telemetry_' + job.x + '_' + job.y + '_' + job.z,
+                lifeMode:     'active',
+                activeHold:   22,
+                priority:     'active',
+                progress:     p,
+                barWidth:     160,
+                barHeight:    6,
+                barColorFrom: meta.color,
+                barColorTo:   0xFFCC33,
+                trailColor:   0x77FF6633,
+                text:         meta.colorCode + '§l[堆芯遥测 · 阶段 ' + (stageIdx + 1) + '/5 ' + meta.tag + '] §fT-' + remainSec + 's §7(' + pct + '%)',
+                sub:          '§7核心 (' + job.x + ', ' + job.y + ', ' + job.z + ') §8| §e投掷【终望珍珠】可吞噬停机',
+                pos:          [0.19, 0.12],
+                size:         0.75,
+                tilt:         0,
+                shakeMode:    'none',
+                shakeAmp:     0.0,
+                fadeStyle:    'char_last',
+                fadeOut:      14
+            }))
         }
 
         // 在主进度条运行期间，时不时在屏幕安全边缘带与聊天栏插入小型故障子报
@@ -2742,26 +2764,31 @@
         var pct = Math.min(100, Math.round(p * 100))
         var alertRange = FX_PACKET_RANGE + 80
 
-        // 1. 左上角【300m 物质湮灭实时波前监控面板】（新版持续激活 HUD，始终稳定静止不震动，已移除旧版物品栏上方 ActionBar 进度条）
-        var bar = makeProgressBar(p)
+        // 1. 左上角【300m 物质湮灭实时波前监控面板】（原生 2D 图元进度条 + 拖影轨道，持续激活 HUD，始终稳定静止不震动）
         var waveSlotId = 'annihilation_hud_' + job.x + '_' + job.y + '_' + job.z
         if (shownR < maxR && job.t % 6 === 0) {
-            sendDanmakuNear(job.level, job.x, job.y, job.z, alertRange, {
-                group:      TELEMETRY_GROUP,
-                id:         waveSlotId,
-                lifeMode:   'active',
-                activeHold: 18,
-                priority:   'active',
-                text:       '§4§l[物质湮灭波前 // REALITY WIPE] §f' + pct + '%',
-                sub:        '§c' + bar + ' §e' + shownR + 'm / ' + maxR + 'm\n§7爆心 (' + job.x + ', ' + job.y + ', ' + job.z + ') §8| §6流体与岩层正在同步汽化',
-                pos:        [0.20, 0.12],
-                size:       0.78,
-                tilt:       0,
-                shakeMode:  'none',
-                shakeAmp:   0.0,
-                fadeStyle:  'shatter',
-                fadeOut:    18
-            })
+            sendDanmakuNear(job.level, job.x, job.y, job.z, alertRange, buildTelemetryProgressOpts({
+                group:        TELEMETRY_GROUP,
+                id:           waveSlotId,
+                lifeMode:     'active',
+                activeHold:   18,
+                priority:     'active',
+                progress:     p,
+                barWidth:     168,
+                barHeight:    6,
+                barColorFrom: 0xAA0022,
+                barColorTo:   0xFF5500,
+                trailColor:   0x88FF2244,
+                text:         '§4§l[物质湮灭波前 // REALITY WIPE] §f' + pct + '% §e(' + shownR + 'm / ' + maxR + 'm)',
+                sub:          '§7爆心 (' + job.x + ', ' + job.y + ', ' + job.z + ') §8| §6流体与岩层正在同步汽化',
+                pos:          [0.20, 0.12],
+                size:         0.78,
+                tilt:         0,
+                shakeMode:    'none',
+                shakeAmp:     0.0,
+                fadeStyle:    'shatter',
+                fadeOut:      18
+            }))
         }
 
         // 3. 湮灭进度推进期间（shownR < maxR），在避开右上角小地图与底部快捷栏的全屏自由位置插入丰富色彩与来源的异常子报

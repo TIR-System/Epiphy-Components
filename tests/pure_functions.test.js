@@ -6219,7 +6219,7 @@ test('P2 fixes: grapheme ZWJ/flags/Extend, FIFO glyph eviction, rotated batched 
     loadServerBase(v18Sb)
     runScriptIn(v18Sb, TRACKER_PATH)
     runScriptIn(v18Sb, DANMAKU_PATH)
-    runScriptIn(v18Sb, V18_PATH)
+    runScriptIn(v18Sb, path.join(__dirname, '..', 'kubejs', 'server_scripts', '合成表-暮色森林', '拆解台-混沌殉爆.v18.js'))
     assert.ok(typeof v18Placed['epiphy:ultra_uncrafting_instability_1'] === 'function')
     v18Placed['epiphy:ultra_uncrafting_instability_1']({
         level: v18Lv,
@@ -6231,7 +6231,7 @@ test('P2 fixes: grapheme ZWJ/flags/Extend, FIFO glyph eviction, rotated batched 
         for (var ti = 0; ti < v18Ticks.length; ti++) v18Ticks[ti]({ server: v18Srv })
     }
     assert.ok(v18Pkts.length >= 1, 'v18 sends danmaku packet via ScreenDanmaku')
-    assert.strictEqual(v18Pkts[0].proto, 5, 'v18 packet must include proto:5')
+    assert.strictEqual(v18Pkts[0].proto, 6, 'v18 packet must include proto:6')
     assert.strictEqual(v18Pkts[0].namespace, 'uncrafting_chaos', 'v18 packet must include uncrafting_chaos namespace')
     assert.strictEqual(v18Pkts[0].tier, 'system', 'v18 packet must carry tier:system')
     Cli.clear('*')
@@ -7078,7 +7078,8 @@ test('Uncrafting Chaos & EpiphyServerCore/EpiphyWorldOps: anti-rename relic spoo
         loadStartupBase(cliSb)
         runScriptIn(cliSb, RENDERER_PATH)
         var CliV57 = cliSb.global.ScreenDanmakuClient
-        assert.strictEqual(CliV57.VERSION, '5.7.0', 'ScreenDanmakuClient must expose VERSION 5.7.0')
+        assert.strictEqual(CliV57.VERSION, '6.0.0', 'ScreenDanmakuClient must expose VERSION 6.0.0')
+        assert.strictEqual(cliSb.global.Epiphy2DRenderer, CliV57, 'Epiphy2DRenderer must alias ScreenDanmakuClient')
         assert.strictEqual(CliV57._pure.isPotentialSpanTagHead('<AVARITIA_BIOS>', 0), false, '<AVARITIA_BIOS> must be fast-rejected in O(1)')
         assert.strictEqual(CliV57._pure.hasRichSpanTags('<AVARITIA_BIOS> :: [0x00F8_DEADC0DE] >>'), false, 'non-tag brackets must not trigger regex or span tag mode')
         assert.strictEqual(CliV57._pure.hasRichSpanTags('<b>WARN</b> <shake>CORE</shake>'), true, 'real inline tags must be detected')
@@ -7140,6 +7141,415 @@ test('Uncrafting Chaos & EpiphyServerCore/EpiphyWorldOps: anti-rename relic spoo
     } finally {
         fs.rmSync(tmpRoot, { recursive: true, force: true })
     }
+})
+
+// ----------------------------------------------------------------------------
+// 60. Epiphy2DSurface & Epiphy2DRenderer v6.0: adaptV5ToV6, aliases, quotas, tracks, patch, nodes, rect.fill, GUI/slot & v18 native progress bars
+// ----------------------------------------------------------------------------
+test('Epiphy2DSurface & Epiphy2DRenderer v6.0: adaptV5ToV6, aliases, quotas, tracks, patch, nodes, rect.fill, GUI/slot & v18 native progress bars', function () {
+    var svCon = {
+        warns: [],
+        info: function () {},
+        warn: function (m) { svCon.warns.push(String(m)) },
+        error: function () {},
+        debug: function () {},
+        log: function () {}
+    }
+    var svSb = {
+        console: svCon,
+        Java: { loadClass: function () { return null } },
+        ServerEvents: { tick: function () {}, loaded: function () {}, unloaded: function () {}, commandRegistry: function () {} },
+        BlockEvents: { placed: function () {}, broken: function () {}, rightClicked: function () {} },
+        PlayerEvents: { loggedIn: function () {}, loggedOut: function () {} },
+        LevelEvents: { loaded: function () {}, unloaded: function () {} },
+        Text: { of: function (s) { return String(s) } },
+        global: {}
+    }
+    svSb.globalThis = svSb
+    vm.createContext(svSb)
+    loadServerBase(svSb)
+    runScriptIn(svSb, DANMAKU_PATH)
+
+    var Spec    = svSb.global.EpiphySpec
+    var Proto   = svSb.global.EpiphyProtocol
+    var Dm      = svSb.global.ScreenDanmaku
+    var Surface = svSb.global.Epiphy2DSurface
+
+    // 1. P2-4 & P1-2: Dual export and protocol compatibility (v6 accepts 5 and 6, rejects 4)
+    assert.strictEqual(Surface, Dm, 'Epiphy2DSurface must alias ScreenDanmaku')
+    assert.strictEqual(Dm.VERSION, '6.0.0', 'ScreenDanmaku VERSION must be 6.0.0')
+    assert.strictEqual(Proto.DANMAKU_PROTO_VERSION, 6, 'DANMAKU_PROTO_VERSION must be 6')
+    assert.strictEqual(Spec.isProtoCompatible(6, 6), true)
+    assert.strictEqual(Spec.isProtoCompatible(6, 5), true)
+    assert.strictEqual(Spec.isProtoCompatible(6, 4), false)
+
+    // 2. P1-1: Official vs Deprecated aliases
+    var depHitsBefore = Object.keys(Dm._pure.getDeprecatedAliasHits()).length
+    var pktOfficial = Dm.buildPacket({
+        text: 'OfficialTitle',
+        subtitle: 'OfficialSub',
+        id: 'off_slot',
+        size: 1.5,
+        tilt: 12,
+        duration: 80,
+        hold: 40,
+        fade: 'shatter',
+        fadeTicks: 16,
+        outline: 'stroke',
+        ns: 'test_ns'
+    })
+    assert.strictEqual(pktOfficial.title, 'OfficialTitle')
+    assert.strictEqual(pktOfficial.sub, 'OfficialSub')
+    assert.strictEqual(pktOfficial.slotId, 'off_slot')
+    assert.strictEqual(pktOfficial.scale, 1.5)
+    assert.strictEqual(pktOfficial.angle, 12)
+    assert.strictEqual(pktOfficial.stay, 80)
+    assert.strictEqual(pktOfficial.activeHold, 40)
+    assert.strictEqual(pktOfficial.fadeStyle, 'shatter')
+    assert.strictEqual(pktOfficial.fadeOut, 16)
+    assert.strictEqual(pktOfficial.outlineMode, 'stroke')
+    assert.strictEqual(pktOfficial.namespace, 'test_ns')
+    assert.strictEqual(Object.keys(Dm._pure.getDeprecatedAliasHits()).length, depHitsBefore, 'official aliases must not trigger deprecated hits')
+
+    Dm.configure({ warnDeprecatedAliases: true })
+    var warnsBeforeDep = svCon.warns.length
+    var pktDep = Dm.buildPacket({
+        msg: 'DeprecatedMsg',
+        subText: 'DeprecatedSub',
+        slot: 'dep_slot',
+        fontSize: 1.25,
+        rot: -15,
+        spacing: 2.0
+    })
+    assert.strictEqual(pktDep.title, 'DeprecatedMsg')
+    assert.strictEqual(pktDep.sub, 'DeprecatedSub')
+    assert.strictEqual(pktDep.slotId, 'dep_slot')
+    assert.strictEqual(pktDep.scale, 1.25)
+    assert.strictEqual(pktDep.angle, -15)
+    assert.strictEqual(pktDep.letterSpacing, 2.0)
+    assert.ok(Dm._pure.getDeprecatedAliasHits().msg >= 1, 'deprecated alias msg must be recorded')
+    assert.ok(svCon.warns.length > warnsBeforeDep, 'warnDeprecatedAliases=true must emit one-time warning via LOGGER.once')
+    var warnsAfterFirstDep = svCon.warns.length
+    Dm.buildPacket({ msg: 'SecondDeprecatedMsg' })
+    assert.strictEqual(svCon.warns.length, warnsAfterFirstDep, 'LOGGER.once must not spam repeated warnings for the same deprecated alias')
+    Dm.configure({ warnDeprecatedAliases: false })
+
+    // 3. P1-2: adaptV5ToV6 snapshot & computeOverlayCost quota enforcement
+    var adapted = Spec.adaptV5ToV6({
+        proto: 5,
+        title: 'LegacyTitle',
+        sub: 'LegacySub',
+        color: 0x112233,
+        subColor: 0x445566,
+        typewriter: true,
+        charMs: 25
+    })
+    assert.strictEqual(adapted.proto, 6)
+    assert.strictEqual(adapted.surface, 'screen')
+    assert.strictEqual(adapted.nodes.length, 2)
+    assert.strictEqual(adapted.nodes[0].id, 'title')
+    assert.strictEqual(adapted.nodes[0].type, 'text')
+    assert.strictEqual(adapted.nodes[0].text, 'LegacyTitle')
+    assert.strictEqual(adapted.nodes[0].color, 0x112233)
+    assert.strictEqual(adapted.nodes[0].typewriter, true)
+    assert.strictEqual(adapted.nodes[1].id, 'sub')
+    assert.strictEqual(adapted.nodes[1].text, 'LegacySub')
+    assert.strictEqual(adapted.nodes[1].color, 0x445566)
+
+    // Quota: player <= 24, system <= 96
+    var expensiveNodes = []
+    for (var ni = 0; ni < 7; ni++) {
+        expensiveNodes.push({ type: 'nine_slice', texture: 'epiphy:textures/gui/frame.png', w: 64, h: 24, slice: 4 }) // 7 * 4 = 28 > 24
+    }
+    assert.strictEqual(Spec.computeOverlayCost({ nodes: expensiveNodes }), 28)
+    var playerRejected = Dm.buildPacket({ tier: 'player', nodes: expensiveNodes })
+    assert.strictEqual(playerRejected, null, 'player tier packet with cost 28 (>24) must be rejected')
+    var systemAccepted = Dm.buildPacket({ tier: 'system', nodes: expensiveNodes })
+    assert.ok(systemAccepted != null && systemAccepted.cost === 28, 'system tier packet with cost 28 (<=96) must be accepted')
+
+    // 4. P1-3, P1-4, P1-5, P2-1 ~ P2-3: Client tracks, patch coalescing & orphan drop, nodes & try/finally state recovery
+    var cliNowMs = 50000
+    var cliPaints = []
+    var cliNetHandlers = {}
+    var cliSb = {
+        console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+        Date: { now: function () { return cliNowMs } },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function (fn) { cliPaints.push(fn) } },
+        NetworkEvents: { dataReceived: function (ch, fn) { cliNetHandlers[ch] = fn } },
+        Java: { loadClass: function () { return null } },
+        Text: { of: function (s) { return { string: String(s), getVisualOrderText: function () { return String(s) } } } },
+        global: {}
+    }
+    cliSb.globalThis = cliSb
+    vm.createContext(cliSb)
+    loadStartupBase(cliSb)
+    runScriptIn(cliSb, RENDERER_PATH)
+    var Renderer = cliSb.global.Epiphy2DRenderer
+
+    // 4a. Orphan patch must be silently dropped without creating an overlay
+    Renderer.patch('non_existent_slot', { progress: 0.5 })
+    var stackDepth = 0
+    var scissorDepth = 0
+    var fillCalls = []
+    var texCalls = []
+    var textCalls = []
+    var mockEv = {
+        width: 854, height: 480, level: 'minecraft:overworld',
+        font: { width: function (s) { return String(s || '').length * 6 } },
+        push: function () { stackDepth++ },
+        pop: function () { stackDepth-- },
+        translate: function () {},
+        rotateDeg: function () {},
+        scale: function () {},
+        enableScissor: function () { scissorDepth++ },
+        disableScissor: function () { scissorDepth-- },
+        fill: function (x0, y0, x1, y1, col) { fillCalls.push({ x0: x0, y0: y0, x1: x1, y1: y1, col: col }) },
+        drawTexture: function (tex, x, y, w, h, u, v, uw, vh) { texCalls.push({ tex: tex, x: x, y: y, w: w, h: h, u: u, v: v, uw: uw, vh: vh }) },
+        text: function (comp, x, y, col) { textCalls.push({ text: comp && comp.string != null ? comp.string : String(comp), x: x, y: y, col: col }) }
+    }
+    cliPaints[0](mockEv)
+    assert.strictEqual(Renderer.count(), 0, 'orphan patch must be dropped without creating an overlay')
+
+    // 4b. Push progress panel, queue multiple patches (in-queue coalescing), verify lerp + trail + impulse + dt <= 100ms clamp
+    var panelPkt = Dm.buildPacket(Dm.buildProgressPanel({
+        id: 'boss_hp',
+        lifeMode: 'active',
+        activeHold: 20,
+        progress: 1.0,
+        barWidth: 100,
+        barHeight: 6,
+        text: 'BOSS $pctText',
+        sub: 'Phase 1',
+        tracks: {
+            hitFlash: { mode: 'impulse', onChange: '$progress', peak: 1.0, decayMs: 200 }
+        }
+    }))
+    cliNetHandlers['epiphy:screen_danmaku']({ data: panelPkt })
+    cliPaints[0](mockEv)
+    assert.strictEqual(Renderer.count(), 1)
+
+    // Queue 3 patches before next frame -> must coalesce in pendingActions
+    Renderer.patch('boss_hp', { progress: 0.8, pctText: '80%' })
+    Renderer.patch('boss_hp', { progress: 0.6, pctText: '60%' })
+    Renderer.patch('boss_hp', { progress: 0.4, pctText: '40%' }, 40)
+    assert.strictEqual(Renderer.count(), 2, '3 patches for same slotId must coalesce into 1 queued patch + 1 active overlay')
+
+    // Advance by 5000ms (simulating a huge lag spike) -> dt must be clamped to <= 100ms so lerp does not overshoot/NaN, and trail waits delayMs
+    cliNowMs += 50
+    cliPaints[0](mockEv)
+    var ov = Renderer._pure.inspectOverlays()[0]
+    assert.strictEqual(ov.vars.progress, 0.4, 'coalesced patch must set target progress=0.4')
+    assert.strictEqual(ov.vars.pctText, '40%', 'coalesced patch must preserve latest pctText')
+    assert.ok(ov.displayVars.progress < 1.0 && ov.displayVars.progress > 0.4, 'lerp track must interpolate smoothly toward 0.4')
+    assert.strictEqual(ov.displayVars.progressTrail, 1.0, 'trail track must hold at 1.0 during delayMs (220ms)')
+    assert.ok(ov.displayVars.hitFlash > 0.5, 'impulse track must spike on progress change')
+
+    // Advance past trail delayMs (220ms) and verify trail catches up
+    for (var step = 0; step < 10; step++) {
+        cliNowMs += 60
+        cliPaints[0](mockEv)
+    }
+    assert.ok(ov.displayVars.progressTrail < 0.85 && ov.displayVars.progressTrail >= ov.displayVars.progress, 'trail track must smoothly catch up after delayMs')
+    assert.strictEqual(ov.displayVars.hitFlash, 0.0, 'impulse track must decay back to 0 after decayMs')
+
+    // 4c. Pure geometry clip test across all 5 directions
+    var clipL = Renderer._pure.computeLocalClipRect(10, 20, 100, 10, 0, 0, 100, 10, { dir: 'left', ratio: '$p' }, { p: 0.25 })
+    assert.strictEqual(clipL.x, 10)
+    assert.strictEqual(clipL.w, 25)
+    assert.strictEqual(clipL.uw, 25)
+    var clipR = Renderer._pure.computeLocalClipRect(10, 20, 100, 10, 0, 0, 100, 10, { dir: 'right', ratio: 0.25 }, {})
+    assert.strictEqual(clipR.x, 85)
+    assert.strictEqual(clipR.w, 25)
+    assert.strictEqual(clipR.u, 75)
+    var clipC = Renderer._pure.computeLocalClipRect(0, 0, 100, 10, 0, 0, 100, 10, { dir: 'center_x', ratio: 0.5 }, {})
+    assert.strictEqual(clipC.x, 25)
+    assert.strictEqual(clipC.w, 50)
+
+    // 4d. All node types (rect solid/gradient/parallax/shader, sprite, nine_slice, item, text, group) + try/finally recovery on exception
+    Renderer.clear('*')
+    cliPaints[0](mockEv)
+    Renderer.push(Dm.buildPacket({
+        id: 'complex_graph',
+        nodes: [
+            { id: 'r_solid', type: 'rect', w: 40, h: 8, fill: { mode: 'solid', color: 0xFF112233 } },
+            { id: 'r_grad', type: 'rect', w: 40, h: 8, fill: { mode: 'gradient', dir: 'v', from: 0xFFFF0000, to: 0xFF00FF00 } },
+            { id: 'r_para', type: 'rect', w: 40, h: 8, fill: { mode: 'parallax', layers: [{ tex: 'minecraft:textures/environment/end_sky.png', speedX: 0.02, speedY: -0.01, scale: 1.0, alpha: 0.8 }] } },
+            { id: 'r_shd', type: 'rect', w: 40, h: 8, fill: { mode: 'shader', shaderId: 'end_portal', fallbackColor: 0xFF1A0033 } },
+            { id: 's_ok', type: 'sprite', texture: 'epiphy:textures/gui/bar.png', w: 32, h: 8, clip: { dir: 'left', ratio: 0.5, mode: 'scissor' } },
+            { id: 's_missing', type: 'sprite', texture: 'epiphy:textures/gui/missing_tex.png', w: 32, h: 8 },
+            { id: 'ns_box', type: 'nine_slice', texture: 'epiphy:textures/gui/frame.png', w: 48, h: 20, slice: 4 },
+            { id: 'it_icon', type: 'item', item: 'minecraft:nether_star', count: 1 },
+            { id: 'grp', type: 'group', x: 10, y: 5, angle: 15, scale: 1.2, children: [
+                { id: 'child_txt', type: 'text', text: 'NestedText', color: 0xFFAA00 }
+            ]}
+        ]
+    }))
+    cliPaints[0](mockEv)
+    assert.strictEqual(stackDepth, 0, 'pose stack must return to 0 after rendering complex graph')
+    assert.strictEqual(scissorDepth, 0, 'scissor stack must return to 0 after rendering complex graph')
+    assert.strictEqual(Renderer._pure.checkTextureExists('epiphy:textures/gui/missing_tex.png'), false, 'missing texture must be cached as false')
+
+    // Now test try/finally recovery when a draw method throws mid-node!
+    var throwEv = {
+        width: 854, height: 480, level: 'minecraft:overworld',
+        push: function () { stackDepth++ },
+        pop: function () { stackDepth-- },
+        translate: function () {},
+        rotateDeg: function () {},
+        scale: function () {},
+        enableScissor: function () { scissorDepth++ },
+        disableScissor: function () { scissorDepth-- },
+        fill: function () { throw new Error('Simulated GL draw crash inside node') }
+    }
+    assert.throws(function () {
+        Renderer._pure.renderDeclarativeNodes(throwEv, {}, [
+            { id: 'crash_node', type: 'rect', angle: 0, scale: 1.5, w: 20, h: 10, clip: { dir: 'left', ratio: 0.5, mode: 'scissor' } }
+        ], {}, 1.0, null, null, cliNowMs)
+    }, /Simulated GL draw crash/)
+    assert.strictEqual(stackDepth, 0, 'try/finally must pop pose stack even when draw throws')
+    assert.strictEqual(scissorDepth, 0, 'try/finally must disable scissor even when draw throws')
+
+    // 4e. Phase 2: surface='gui' & surface='slot' + replaceTextures & automatic restoration
+    Renderer.clear('*')
+    cliPaints[0](mockEv)
+    var guiPkt = Dm.buildPacket({
+        id: 'custom_uncrafting_gui',
+        surface: 'gui',
+        lifeMode: 'active',
+        targetGui: { titleMatch: '拆解台' },
+        replaceTextures: {
+            'twilightforest:textures/gui/uncrafting.png': 'epiphy:textures/gui/chaos_uncrafting.png'
+        },
+        bgNodes: [
+            { id: 'gui_bg_glow', type: 'rect', x: 88, y: 40, w: 60, h: 12, fill: { mode: 'solid', color: 0x88440066 } }
+        ],
+        fgNodes: [
+            { id: 'gui_fg_label', type: 'text', x: 88, y: 12, text: '§d混沌谐振已激活' }
+        ]
+    })
+    var slotPkt = Dm.buildPacket({
+        id: 'chaos_slot_starfield',
+        surface: 'slot',
+        lifeMode: 'active',
+        targetGui: { titleMatch: '拆解台' },
+        slotMatch: { item: 'epiphy:chaos_relic', slotIndex: 0 },
+        nodes: [
+            { id: 'slot_star', type: 'rect', x: 8, y: 8, w: 16, h: 16, fill: { mode: 'parallax', layers: [{ tex: 'minecraft:textures/environment/end_sky.png', speedX: 0.03, speedY: 0.02, scale: 1.0, alpha: 0.9 }] } }
+        ]
+    })
+    Renderer.push(guiPkt)
+    Renderer.push(slotPkt)
+    var preRendered = Renderer.renderGuiSurfacePass(mockEv, 'pre', {
+        screen: { title: '暮色拆解台', guiLeft: 100, guiTop: 50 },
+        guiLeft: 100,
+        guiTop: 50
+    })
+    assert.strictEqual(preRendered, 1, 'renderGuiSurfacePass(pre) must render bgNodes and apply replaceTextures')
+    assert.ok(Renderer._pure.getReplacedTextures()['twilightforest:textures/gui/uncrafting.png'] != null, 'replaceTextures must register active texture override')
+    var slotRendered = Renderer.renderGuiSurfacePass(mockEv, 'slot', {
+        screen: { title: '暮色拆解台', guiLeft: 100, guiTop: 50 },
+        guiLeft: 100,
+        guiTop: 50,
+        slotX: 16,
+        slotY: 24,
+        slotIndex: 0,
+        itemId: 'epiphy:chaos_relic'
+    })
+    assert.strictEqual(slotRendered, 1, 'renderGuiSurfacePass(slot) must render matching slot nodes')
+    var postRendered = Renderer.renderGuiSurfacePass(mockEv, 'post', {
+        screen: { title: '暮色拆解台', guiLeft: 100, guiTop: 50 },
+        guiLeft: 100,
+        guiTop: 50
+    })
+    assert.strictEqual(postRendered, 1, 'renderGuiSurfacePass(post) must render fgNodes')
+    Renderer.restoreReplacedTextures()
+    assert.strictEqual(Object.keys(Renderer._pure.getReplacedTextures()).length, 0, 'restoreReplacedTextures must clean up all texture overrides')
+
+    // 5. P1-6: Verify 拆解台-混沌殉爆.v18.js emits native 2D graphical progress bar packets (nodes + vars + tracks + clip, zero '█'/'░')
+    var v18Pkts = []
+    var v18Ticks = []
+    var v18Placed = {}
+    var v18Player = {
+        username: 'TelemetryTester',
+        stringUuid: '00000000-0000-0000-0000-000000000099',
+        x: 2, y: 64, z: 2,
+        isSpectator: function () { return false },
+        sendData: function (ch, pkt) { if (ch === 'epiphy:screen_danmaku') v18Pkts.push(pkt) },
+        tell: function () {}
+    }
+    var v18Lv = {
+        dimension: 'minecraft:overworld',
+        players: [v18Player],
+        getPlayers: function () { return [v18Player] },
+        getBlock: function () { return { id: 'epiphy:ultra_uncrafting_instability_1', set: function () {} } },
+        getEntitiesWithin: function () { return [] },
+        runCommandSilent: function () {},
+        spawnParticles: function () {}
+    }
+    var v18Srv = {
+        getLevel: function () { return v18Lv },
+        getPlayers: function () { return [v18Player] },
+        runCommandSilent: function () {}
+    }
+    v18Lv.server = v18Srv
+    var v18Sb = {
+        console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+        Java: {
+            loadClass: function (cls) {
+                if (cls === 'net.minecraft.world.level.Level') return { OVERWORLD: 'minecraft:overworld', NETHER: 'minecraft:the_nether', END: 'minecraft:the_end' }
+                if (cls === 'net.minecraft.world.level.Level$ExplosionInteraction') return { NONE: 'NONE', TNT: 'TNT' }
+                return function () {}
+            }
+        },
+        ServerEvents: {
+            tick: function (fn) { v18Ticks.push(fn) },
+            loaded: function (fn) { fn({ server: v18Srv }) },
+            unloaded: function () {},
+            recipes: function () {},
+            commandRegistry: function () {},
+            command: function () {}
+        },
+        BlockEvents: {
+            placed: function (id, fn) { v18Placed[id] = fn },
+            broken: function () {},
+            rightClicked: function () {},
+            leftClicked: function () {}
+        },
+        ItemEvents: { rightClicked: function () {} },
+        PlayerEvents: { loggedIn: function () {}, loggedOut: function () {}, tick: function () {} },
+        EntityEvents: { hurt: function () {}, death: function () {} },
+        LevelEvents: { loaded: function () {}, unloaded: function () {}, beforeExplosion: function () {} },
+        Text: { of: function (s) { return String(s) } },
+        Utils: { server: v18Srv },
+        server: v18Srv,
+        global: {}
+    }
+    v18Sb.globalThis = v18Sb
+    vm.createContext(v18Sb)
+    loadServerBase(v18Sb)
+    runScriptIn(v18Sb, TRACKER_PATH)
+    runScriptIn(v18Sb, DANMAKU_PATH)
+    runScriptIn(v18Sb, path.join(__dirname, '..', 'kubejs', 'server_scripts', '合成表-暮色森林', '拆解台-混沌殉爆.v18.js'))
+
+    v18Placed['epiphy:ultra_uncrafting_instability_1']({
+        level: v18Lv,
+        block: { id: 'epiphy:ultra_uncrafting_instability_1', x: 0, y: 64, z: 0 },
+        player: v18Player,
+        cancel: function () {}
+    })
+    for (var tickIdx = 0; tickIdx < 16; tickIdx++) {
+        for (var tf = 0; tf < v18Ticks.length; tf++) v18Ticks[tf]({ server: v18Srv })
+    }
+    var telemetryPkts = v18Pkts.filter(function (p) { return p.group === 'uncrafting_telemetry' })
+    assert.ok(telemetryPkts.length >= 1, 'v18 must emit uncrafting_telemetry HUD packet')
+    var tPkt = telemetryPkts[0]
+    assert.strictEqual(tPkt.proto, 6)
+    assert.strictEqual(tPkt.surface, 'screen')
+    assert.ok(Array.isArray(tPkt.nodes) && tPkt.nodes.length >= 4, 'v18 telemetry packet must contain native 2D graphical progress bar nodes')
+    assert.ok(tPkt.vars != null && typeof tPkt.vars.progress === 'number', 'v18 telemetry packet must bind numeric vars.progress')
+    assert.ok(tPkt.tracks != null && tPkt.tracks.progress.mode === 'lerp' && tPkt.tracks.progressTrail.mode === 'trail', 'v18 telemetry packet must configure lerp + trail tracks')
+    assert.strictEqual(String(tPkt.sub).indexOf('█'), -1, 'v18 telemetry subtitle must not contain legacy text progress bar character █')
+    assert.strictEqual(String(tPkt.sub).indexOf('░'), -1, 'v18 telemetry subtitle must not contain legacy text progress bar character ░')
 })
 
 

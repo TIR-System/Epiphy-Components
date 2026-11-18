@@ -73,11 +73,11 @@ A collection of shared server/client infrastructure modules, audiovisual present
 | **L2 Access Control** | `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v5.4` (`/epiphy`, 3-state scopes, command-block mutation lock, tombstones, fail-closed auth) |
 | **L2 Diagnostics** | `Epiphy的-调试组件.js` | `server` / `950` | `EpiphyDebug v1` (`/epiphy debug`) |
 | **L2 Standalone Fix** | `Epiphy的-基础bug修复.js` | `server` / `900` | `EpiphyBugfix v1` (logout HP restoration) |
-| **L3 Presentation** | `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `ScreenDanmaku v5.7` (standalone scheduler; internal logic not for cross-module reuse) |
+| **L3 Presentation** | `Epiphy的-屏幕弹幕组件.js` | `server` / `500` | `Epiphy2DSurface / ScreenDanmaku v6.0` (2D planar scene graph / progress panels / GUI overlay & danmaku scheduler; internal logic not for cross-module reuse) |
 | **L3 Presentation** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.7` (standalone scheduler; internal logic not for cross-module reuse) |
-| **L3 Gameplay** | `拆解台-混沌殉爆.v18.js` | `server` / `10` | Meltdown progression (hard-requiring Core/WorldOps/Danmaku; persisted countdown, anti-spoof relic & mainhand pickaxe check) |
+| **L3 Gameplay** | `拆解台-混沌殉爆.v18.js` | `server` / `10` | Meltdown progression (hard-requiring Core/WorldOps/Danmaku; persisted countdown, native 2D progress bars, anti-spoof relic & mainhand pickaxe check) |
 | **L3 Gameplay** | `合成表-*` (Vanilla / Botania / Enigmatic) | `server` / `0` | Standalone recipe adjustments |
-| **L4 Client** | `屏幕弹幕渲染器` / `音频播放器` / `拆解台描述` | `client` | `ScreenDanmakuClient v5.7`, `EpiphyAudioClient v5.6` |
+| **L4 Client** | `屏幕弹幕渲染器` / `音频播放器` / `拆解台描述` | `client` | `Epiphy2DRenderer / ScreenDanmakuClient v6.0`, `EpiphyAudioClient v5.6` |
 
 ### 3. Dependency & Fallback Specification (YAML)
 
@@ -193,7 +193,8 @@ Epiphy的-音频播放器.js:
 │   └── startup_scripts/          # Startup Spec/Protocol base, item/block/creative-tab registrations
 ├── docs/
 │   ├── audio-assets.md                           # Audio asset exclusion & BYO placement notes
-│   └── kube-mods-rhino-es5-es6-compatibility.md  # Bytecode & runtime audit of kube-mods/rhino
+│   ├── kube-mods-rhino-es5-es6-compatibility.md  # Bytecode & runtime audit of kube-mods/rhino
+│   └── rendering-subsystem-roadmap.md            # 2D Planar Compositor & 3D Spatial FX roadmap & v6 protocol specification
 ├── tests/
 │   └── pure_functions.test.js    # Node.js sandbox & pure-function test suite
 ├── README.md                     # Chinese README (default)

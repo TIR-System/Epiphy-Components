@@ -371,22 +371,26 @@ Phase 4 (Kotlin + Java 原生模组迁移：彻底移除淘汰别名 + 硬件级
 
 | 状态 | 编号 | 阶段与任务项描述 | 涉及核心文件 | 单测 / 验证指标 | 完成记录 (Commit / 日期) |
 | :---: | :--- | :--- | :--- | :--- | :--- |
-| [x] | **P0-1** | **架构设计与协议规范定稿（v0.4）**：完成 2D/3D 职责切分、`PROTO v6` Schema、`adaptV5ToV6` 映射表、`rect.fill` 统一填充机制、权重计费模型、降级矩阵与别名淘汰表 | `docs/rendering-subsystem-roadmap.md` | 架构审查通过 | `v0.4` (2026-11-19) |
-| [ ] | **P1-1** | **协议升版与入口别名收敛**：`EpiphyProtocol` 支持 `PROTO_VERSION = 6`（向下兼容 `5`）；在 `EpiphySpec` / 服务端落地 `OFFICIAL_ALIASES` 单点归一化与 `DEPRECATED_ALIASES` 一次性告警（`LOGGER.once`） | `Epiphy的-Spec与通用工具.js`<br>`Epiphy的-屏幕弹幕组件.js` | 新增淘汰别名与官方别名回归单测 | 待开始 |
-| [ ] | **P1-2** | **`adaptV5ToV6` 转换器与 `computeOverlayCost` 权重门禁**：实现 45 字段无损转换纯函数与图元树绘制权重计费（`'player' <= 24`, `'system' <= 96`） | `Epiphy的-Spec与通用工具.js`<br>`Epiphy的-屏幕弹幕组件.js`<br>`Epiphy的-屏幕弹幕渲染器.js` | 45 字段往返等价单测 + 配额裁剪单测 | 待开始 |
-| [ ] | **P1-3** | **状态变量字典 (`vars`)、`action: 'patch'` 队列合并与 `tracks` 插值器**：客户端实现队列内同 `slotId` 原地合并、孤儿 `patch` 丢弃，以及 `lerp` / `trail` / `impulse` 通道（含 `dt <= 100ms` 防跳变钳制） | `Epiphy的-屏幕弹幕组件.js`<br>`Epiphy的-屏幕弹幕渲染器.js` | 时间序列插值与队列合并纯函数单测 | 待开始 |
-| [ ] | **P1-4** | **声明式 2D 图元树与分层合批渲染**：实现 `rect`、`sprite`、`nine_slice`、`item`、`text`、`group` 及 `anchor` 对齐、`clip`（`'local'` / `'scissor'` 双模式）；确保 `text` 完整继承 `v5.7` 三阶段合批与 `try/finally` 状态对称还原 | `Epiphy的-屏幕弹幕渲染器.js` | 异常注入状态零泄漏单测 + 裁剪坐标单测 | 待开始 |
-| [ ] | **P1-5** | **`rect.fill` 统一填充机制（`solid` / `gradient` / `parallax`）与贴图缺失自愈**：实现单图集多层视差滚动与 `TEXTURE_EXIST_CACHE` 存在性探测（防紫黑块） | `Epiphy的-屏幕弹幕渲染器.js` | 视差 UV 计算单测 + 贴图缺失降级单测 | 待开始 |
-| [ ] | **P1-6** | **Phase 1 预设封装与实机联动验证**：内置高定复合进度条/视差星海面板构建辅助，在测试方块或 `v18` 遥测面板实装验证 | `Epiphy的-屏幕弹幕组件.js`<br>`Epiphy的小玩意_功能测试.js` | 全套单测通过 + 实机帧耗时 `<= 0.3ms`/面板 | 待开始 |
-| [ ] | **P2-1** | **承载面 `surface: 'gui'` 夹心层注入**：挂载 `ContainerScreenEvent.Render.Background` / `Foreground` 实现 `bgNodes` / `fgNodes` 与 `lifeMode: 'screen_session'` | `Epiphy的-屏幕弹幕组件.js`<br>`Epiphy的-屏幕弹幕渲染器.js` | 容器开关生命周期与坐标偏移单测 | 待开始 |
-| [ ] | **P2-2** | **承载面 `surface: 'gui'` 会话级纹理重映射与 `fill.mode: 'shader'`**：实现 `TextureManager.byPath` 备份替换与 `Closing`/`loggedOut`/`finally` 无条件还原，及 `end_portal`/`chaos_vortex` 填充 | `Epiphy的-屏幕弹幕渲染器.js` | 纹理还原防污染单测 + Shader 降级单测 | 待开始 |
-| [ ] | **P2-3** | **承载面 `surface: 'slot'` 物品槽位 2D 叠加层**：支持按 `slotIndex` 或 `matchItem` 在容器槽位绘制动态充能条、角标与遮罩 | `Epiphy的-屏幕弹幕渲染器.js` | 槽位匹配与局部坐标裁剪单测 | 待开始 |
-| [ ] | **P2-4** | **双端正式挂载 `Epiphy2DSurface` / `Epiphy2DRenderer`**：绑定新全局命名并永久保留 `ScreenDanmaku` / `ScreenDanmakuClient` 兼容别名，同步更新全仓文档 | 双端渲染组件 + `README*.md` | 别名等价性与向后兼容回归测试 | 待开始 |
+| [x] | **P0-1** | **架构设计与协议规范定稿（v0.4）**：完成 2D/3D 职责切分、`PROTO v6` Schema、`adaptV5ToV6` 映射表、`rect.fill` 统一填充机制、权重计费模型、降级矩阵与别名淘汰表 | `docs/rendering-subsystem-roadmap.md` | 架构审查通过 | `e719404` (2026-11-19) |
+| [x] | **P1-1** | **协议升版与入口别名收敛**：`EpiphyProtocol` 支持 `PROTO_VERSION = 6`（向下兼容 `5`）；在 `EpiphySpec` / 服务端落地 `OFFICIAL_DANMAKU_ALIASES` 单点归一化与 `DEPRECATED_DANMAKU_ALIASES` 一次性告警（`LOGGER.once`） | `Epiphy的-Spec与通用工具.js`<br>`Epiphy的-屏幕弹幕组件.js` | 新增淘汰别名与官方别名回归单测 (60/60) | `v6.0` (2026-11-19) |
+| [x] | **P1-2** | **`adaptV5ToV6` 转换器与 `computeOverlayCost` 权重门禁**：实现 45 字段无损转换纯函数与图元树绘制权重计费（`'player' <= 24`, `'system' <= 96`） | `Epiphy的-Spec与通用工具.js`<br>`Epiphy的-屏幕弹幕组件.js`<br>`Epiphy的-屏幕弹幕渲染器.js` | 45 字段往返等价单测 + 配额裁剪单测 (60/60) | `v6.0` (2026-11-19) |
+| [x] | **P1-3** | **状态变量字典 (`vars`)、`action: 'patch'` 队列合并与 `tracks` 插值器**：客户端实现队列内同 `slotId` 原地合并、孤儿 `patch` 丢弃，以及 `lerp` / `trail` / `impulse` 通道（含 `dt <= 100ms` 防跳变钳制） | `Epiphy的-屏幕弹幕组件.js`<br>`Epiphy的-屏幕弹幕渲染器.js` | 时间序列插值与队列合并纯函数单测 (60/60) | `v6.0` (2026-11-19) |
+| [x] | **P1-4** | **声明式 2D 图元树与分层合批渲染**：实现 `rect`、`sprite`、`nine_slice`、`item`、`text`、`group` 及 `anchor` 对齐、`clip`（`'local'` / `'scissor'` 双模式）；确保 `text` 完整继承 `v5.7` 三阶段合批与 `try/finally` 状态对称还原 | `Epiphy的-屏幕弹幕渲染器.js` | 异常注入状态零泄漏单测 + 裁剪坐标单测 (60/60) | `v6.0` (2026-11-19) |
+| [x] | **P1-5** | **`rect.fill` 统一填充机制（`solid` / `gradient` / `parallax` / `shader`）与贴图缺失自愈**：实现单图集多层视差滚动、着色器降级与 `TEXTURE_EXIST_CACHE` 存在性探测（防紫黑块） | `Epiphy的-屏幕弹幕渲染器.js` | 视差 UV 计算单测 + 贴图缺失降级单测 (60/60) | `v6.0` (2026-11-19) |
+| [x] | **P1-6** | **Phase 1 预设封装与 `v18` 原生图形进度条实装验证**：内置 `buildProgressPanel` 高定复合进度条构造辅助，将 `拆解台-混沌殉爆.v18.js` 三处文字进度条（`makeProgressBar` `'█'`/`'░'`）全部升级为原生 2D 图元进度条（`nodes` + `vars` + `tracks` + `clip`） | `Epiphy的-屏幕弹幕组件.js`<br>`拆解台-混沌殉爆.v18.js` | 全套单测 60/60 通过 + `v18` 遥测包结构断言 | `v6.0` (2026-11-19) |
+| [x] | **P2-1** | **承载面 `surface: 'gui'` 夹心层注入**：实现 `renderGuiSurfacePass` (`pre`/`bg` 与 `post`/`fg`) 及 `bgNodes` / `fgNodes` 坐标变换 | `Epiphy的-屏幕弹幕组件.js`<br>`Epiphy的-屏幕弹幕渲染器.js` | 容器生命周期与坐标偏移单测 (60/60) | `v6.0` (2026-11-19) |
+| [x] | **P2-2** | **承载面 `surface: 'gui'` 会话级纹理重映射与 `fill.mode: 'shader'`**：实现 `replaceTextures` 注册与 `restoreReplacedTextures` / `loggedOut` / `clear` 无条件还原，及 `end_portal` 着色器填充与降级 | `Epiphy的-屏幕弹幕渲染器.js` | 纹理还原防污染单测 + Shader 降级单测 (60/60) | `v6.0` (2026-11-19) |
+| [x] | **P2-3** | **承载面 `surface: 'slot'` 物品槽位 2D 叠加层**：支持按 `slotIndex` 或 `item` 在容器槽位绘制动态充能条、视差星海与遮罩 | `Epiphy的-屏幕弹幕渲染器.js` | 槽位匹配与局部坐标裁剪单测 (60/60) | `v6.0` (2026-11-19) |
+| [x] | **P2-4** | **双端正式挂载 `Epiphy2DSurface` / `Epiphy2DRenderer`**：绑定新全局命名并永久保留 `ScreenDanmaku` / `ScreenDanmakuClient` 兼容别名，同步更新全仓文档 | 双端渲染组件 + `README*.md` | 别名等价性与向后兼容回归测试 (60/60) | `v6.0` (2026-11-19) |
 | [ ] | **P3-1** | **承载面 `surface: 'world_plane'`（世界 2D 平面 / 高级告示牌）**：实现 `saves/<world>/kubejs_epiphy_world_planes.json` 持久化、`billboard` 朝向控制、`seeThrough` 穿透开关与 1.20.1 `Display` 实体轨驱动 | 服务端/客户端平面渲染组件 | 跨重启持久化回滚单测 + 视距增量同步单测 | 待开始 |
 | [ ] | **P3-2** | **`Epiphy3DFX` 空间特效子系统协议与桥接层**：建立独立 3D 特效调度包契约与配额隔离，收拢 OBJ/Display 矩阵变换接口 | 新增 `Epiphy的-空间特效*.js` | 协议校验与配额隔离单测 | 待开始 |
 | [ ] | **P4-1** | **Kotlin + Java 原生模组迁移**：移除 `DEPRECATED_ALIASES`、接入 `fill.mask` 单 Pass 着色器、`TextureTarget` 离屏缓存池、`GuiGraphics` Mixin、世界平面射线交互 GUI 与原生 3D VBO/Shader | 独立模组工程 | 原生模组集成测试 | 待开始 |
 
 ### 8.2 变更日志（Changelog）
 
-- **2026-11-19 (`v0.4`)**：完成渲染子系统演进路线图与工程规范草案（确立 2D/3D 双子系统切分、6 大功能本质解构、`rect.fill` 统一填充机制、`try/finally` GL 状态还原铁律、`computeOverlayCost` 权重计费、7 项环境降级矩阵、`PROTO v6` Schema、`v5 ➔ v6` 45 字段迁移表、1 主名 + 1 显式 `【别名】` 收敛规范及 `P0 ~ P4` 进度跟踪表）。
+- **2026-11-19 (`v0.4` / Commit `e719404`)**：完成渲染子系统演进路线图与工程规范草案（确立 2D/3D 双子系统切分、6 大功能本质解构、`rect.fill` 统一填充机制、`try/finally` GL 状态还原铁律、`computeOverlayCost` 权重计费、7 项环境降级矩阵、`PROTO v6` Schema、`v5 ➔ v6` 45 字段迁移表、1 主名 + 1 显式 `【别名】` 收敛规范及 `P0 ~ P4` 进度跟踪表）。
+- **2026-11-19 (`v1.0` / Phase 1 & Phase 2 KubeJS 平面渲染器重构落地)**：
+  - 完成 `P1-1 ~ P1-6` 与 `P2-1 ~ P2-4`：协议升级至 `PROTO_VERSION = 6`（向下兼容 `proto: 5`），在 `EpiphySpec` 落地 `OFFICIAL_DANMAKU_ALIASES`、`DEPRECATED_DANMAKU_ALIASES`、`computeOverlayCost` 与 `adaptV5ToV6`；
+  - 双端升级为 `ScreenDanmaku` / `Epiphy2DSurface v6.0` 与 `ScreenDanmakuClient` / `Epiphy2DRenderer v6.0`，支持 6 类正交 2D 图元（`rect`、`sprite`、`nine_slice`、`item`、`text`、`group`）、4 种矩形填充模式（`solid`、`gradient`、`parallax`、`shader`）、双模裁剪（`clip.mode: 'local' | 'scissor'`）、3 类插值轨道（`lerp`、`trail`、`impulse`，含 `dt <= 100ms` 钳制）、`action: 'patch'` 队列内原地合并与孤儿包静默丢弃、以及 `surface: 'gui' | 'slot'` 与 `replaceTextures` 自动还原；
+  - 将 `拆解台-混沌殉爆.v18.js` 中的三处遥测进度条（堆芯失稳 5 阶段遥测、终末 10 秒死刑遥测、300m 物质湮灭实时波前遥测）从旧版 `'█'`/`'░'` 字符拼串全面升级为基于 `buildProgressPanel` 的原生 2D 图元复合进度条（含渐变主条 + 延迟拖影轨 + 局部几何裁剪），移除 `PROGRESS_BAR_CACHE` 与 `makeProgressBar`；全量单元测试扩展至 `60/60` 全部通过。
 
