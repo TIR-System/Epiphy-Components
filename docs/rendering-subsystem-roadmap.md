@@ -1,0 +1,392 @@
+# Epiphy 渲染子系统演进路线图与工程规范草案
+> **文档状态**：架构设计、协议 Schema、降级矩阵与别名收敛规范（v0.4）  
+> **许可证声明 (License)**：本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)  
+> **关联规范**：[`README-LLM.md`](../README-LLM.md) · [`docs/kube-mods-rhino-es5-es6-compatibility.md`](kube-mods-rhino-es5-es6-compatibility.md)  
+> **核心编写原则**：
+> 1. **功能本质导向**：严格按 **【通过什么（底层机制）➔ 能做到什么（通用能力）➔ 已有的例子（具象应用）】** 定义模块，禁止用特例命名底层机制；
+> 2. **硬件与管线诚实性**：严格受制于 MC 1.20.1 `GuiGraphics` 批处理状态机、主 FBO 通道语义、`glScissor` 轴对齐限制与 Rhino JNI 调用成本；
+> 3. **反黑箱与别名收敛**：无论存量接口还是新增接口，每个字段最多允许 **2 个高频字段名（1 个主标准名 + 至多 1 个显式标注的 `【别名】`）**，枚举值仅保留最常用的 **3~5 种**标准写法；所有别名必须在输入入口一次性归一化为主标准名（内部管线与网络包零别名），其余历史冗余写法全部列入淘汰表（Deprecation List）。
+
+---
+
+## 1. 架构演进核心决策：2D 平面合成与 3D 空间渲染的职责切分
+
+按**几何空间维度与底层渲染管线**，将视觉表现层切分为两个正交子系统：
+
+```text
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                           Epiphy 视觉表现层双子系统切分                                │
+├───────────────────────────────────────────┬────────────────────────────────────────────┤
+│ 子系统 A：Epiphy的-平面渲染器              │ 子系统 B：Epiphy的-空间特效组件            │
+│ (Epiphy2DSurface / 兼容原 ScreenDanmaku)  │ (Epiphy3DFX / 三维网格与着色器渲染器)      │
+├───────────────────────────────────────────┼────────────────────────────────────────────┤
+│ 【功能本质】                              │ 【功能本质】                               │
+│ 局部 2D 坐标系 (u, v) 内的多层图元合成器  │ 三维世界坐标系 (x, y, z) 内的网格、体积与  │
+│ 与多载体平面投影引擎                      │ 空间着色器渲染引擎                         │
+├───────────────────────────────────────────┼────────────────────────────────────────────┤
+│ 【四大投影载体 (surface)】                │ 【核心机制范畴】                           │
+│ 1. screen      : 屏幕 HUD 归一化平面      │ 1. 程序化 3D 网格 (VBO 球体/柱体/丝带刀光) │
+│ 2. gui         : 界面容器图层与纹理重映射 │ 2. 外部 3D 模型解析 (OBJ / Bedrock 网格)   │
+│ 3. slot        : 物品槽位 16×16 局部平面  │ 3. 方块/实体自定义渲染挂载 (BER / Entity)  │
+│ 4. world_plane : 三维空间中的 2D 投影平面 │ 4. 3D Core / Post-Processing 着色器管线    │
+└───────────────────────────────────────────┴────────────────────────────────────────────┘
+```
+
+### 1.1 协议版本递增与 `adaptV5ToV6` 单一内部形态
+- **显式升版至 `PROTO_VERSION = 6`**：
+  - `EpiphyProtocol.isProtoCompatible` 同时接受 `proto === 5`（旧版 45 字段扁平文本包）与 `proto === 6`（新版 `{ surface, nodes[], vars, tracks }` 图元树包）；
+  - 客户端收包入口处设唯一纯函数转换器 **`adaptV5ToV6(rawPkt)`**：在进入队列与续期合并（`applyDanmakuNow`）前，将 `proto: 5` 扁平包**确定性地归一化为 `v6` 标准包结构**（文本内容收拢为 `nodes: [{ type: 'text', ... }]`），杜绝渲染管线内部出现“既判扁平字段又判 `nodes` 数组”的双轨分叉。
+
+---
+
+## 2. 六大核心功能解构（通过什么 ➔ 做到什么 ➔ 已有的例子）
+
+### 功能一：声明式 2D 图元树与分层分阶段合批（Declarative 2D Scene Graph）
+
+1. **通过什么（底层机制与原语）**：
+   - 将 2D 平面拆解为 **5 种原子叶节点 + 1 种容器节点**：
+     - `rect`（几何矩形载体，通过统一 `fill` 机制承载纯色、渐变、单图集多层视差或内置 Shader 填充）；
+     - `sprite`（单张贴图 UV 采样与序列帧切换）；
+     - `nine_slice`（九宫格边缘保持拉伸框）；
+     - `item`（MC 物品图标渲染）；
+     - `text`（富文本/打字机/逐字位移）；
+     - `group`（维护局部 `PoseStack` 2D 变换：平移 `x, y`、缩放 `scale`、旋转 `angle`、不透明度 `alpha` 与裁剪 `clip`）。
+   - **明确定义的局部坐标原点与对齐基准（Anchor Convention）**：
+     - 面板根部 `PoseStack` 原点 `(0, 0)` 固定位于 `(rx * screenW + ox, ry * screenH + oy)`；
+     - 矩形类节点（`rect`, `sprite`, `nine_slice`, `item`）通过 `anchor: 'top_left' | 'center'`（默认 `'center'` 以对齐弹幕中心坐标系，GUI 子面板可设 `'top_left'`）决定 `(x, y)` 是图元中心还是左上角，彻底消除偏移半宽的对齐歧义。
+   - **分层分阶段合批管线（Pass-Grouped Batching）**：
+     - 几何与贴图节点按层序调用 `GuiGraphics` 原生方法；
+     - **`text` 节点完全继承现行 `v5.7` 三大性能快路径**：① `ensureLineVisTable` $O(1)$ 打字机字素切片与像素宽度查表；② `SHARED_TEXT_SEQ_CACHE` / `TRANSIENT_TEXT_SEQ_CACHE` + ModernUI `lookupVanillaLayout(String)`（零 `Text.of` 构造、跳过逐字 `PoseStack` 与 `glIsEnabled`）；③ 同一深度层的 `text` 节点汇总至 `drawUnitsPassGrouped`（描边 Pass ➔ 阴影 Pass ➔ 前景 Pass）统一执行单次 `MultiBufferSource.endBatch()`，**严禁退化为逐节点或逐字符 Flush**。
+2. **能做到什么（通用能力）**：
+   - 用纯 JSON 数据结构拼装任意多层级 2D 视觉组件，同时保证在 60 字 × 20 面板同屏的高压场景下维持与现行 `v5.7` 相同的帧率水准。
+3. **已有的例子（具象应用）**：
+   - 科技风多栏遥测面板（九宫格底框 + 半透明渐变底板 + 物品图标 + 实时状态文字）；
+   - 物品栏槽位上的复合角标；`v18` 混沌殉爆的故障弹窗与全屏警报横幅。
+
+---
+
+### 功能二：状态变量驱动、客户端缓动跟踪与几何裁剪（State Interpolation & Clipping）
+
+1. **通过什么（底层机制与原语）**：
+   - **状态字典（`vars`）与队列内合并更新（`action: 'patch'`）**：
+     - 服务端仅在数值变化时下发轻量 `patch` 包（如 `{ action: 'patch', slotId: 'boss_hp', vars: { hp: 0.62 } }`）；
+     - **队列合并与孤儿保护**：客户端 `enqueueDanmaku` 收到 `patch` 时，若待处理队列中已有同 `namespace + slotId` 的未消费包则直接原地合并 `vars`（不占额外队列槽位）；若目标面板尚未创建或已过期则静默丢弃；命中活跃面板时更新 `vars` 并自动顺延 `activeHold` 心跳窗口。
+   - **客户端多通道插值跟踪器（`tracks`）**：基于单调时钟 `monotonicNowMs`（单步帧间隔钳制 `dt <= 100ms`，防止窗口失焦或卡顿恢复瞬间残影条直接跳变）维护三类通道：
+     - `lerp`（平滑过渡）：按 `durationMs` 与缓动函数（`linear` / `out_quad` / `out_cubic`）平滑逼近目标值；
+     - `trail`（滞后追赶）：目标值下降时先停顿 `delayMs`，再以 `speed`（每秒追赶比例）平滑收敛；
+     - `impulse`（突变脉冲）：检测到目标值突变时产生 `1.0 -> 0.0` 的衰减振荡量，可绑定至位移抖动或闪烁不透明度。
+   - **双模式比例裁剪器（`clip` —— 兼顾旋转面板与复合容器）**：
+     - `mode: 'local'`（**默认**，局部几何/UV 收缩）：在 `PoseStack` 局部坐标系内直接按绑定变量比例 `[0.0, 1.0]` 收缩 `rect` / `sprite` 的绘制宽高 `(w, h)` 与终点 UV `(u1, v1)`——**零 `glScissor` 状态开销，且在面板或父容器带旋转角（`angle !== 0`）时依然能沿斜向完美裁剪**！
+     - `mode: 'scissor'`（屏幕轴对齐硬件裁剪）：调用 `GuiGraphics.enableScissor`，专门用于裁剪包含 `text` / `item` / `nine_slice` 的复合 `group` 容器（注：`glScissor` 仅支持屏幕轴对齐矩形，当 `angle !== 0` 时对 `rect`/`sprite` 自动优先走 `'local'`）。
+2. **能做到什么（通用能力）**：
+   - 服务端无需高频发包驱动动画帧，客户端即可让任意图元的可见比例、宽高、坐标偏移与不透明度随逻辑数值丝滑过渡，自动呈现平滑增减、停顿残影拖尾与受击脉冲反馈。
+3. **已有的例子（具象应用）**：
+   - **高定 Boss 血条**：`nine_slice` 底框 + 绑定 `$hp_trail` 的掉血残影黄条 + 绑定 `$hp_cur` 的主填充条 + 绑定 `$hp_impulse` 的受击框体抖动；
+   - 机器能量槽、斜置机甲风能量尺、`v18` 物质湮灭波前推进度条。
+
+---
+
+### 功能三：统一区域填充机制（`fill` —— 纯色 / 渐变 / 单图集多层视差 / 着色器填充）
+
+1. **通过什么（底层机制与原语 —— 将填充抽象为单一可辨识联合对象 `fill`）**：
+   - 不再将 `fillMode`、`shaderId`、`parallaxLayers`、`colorBottom` 散落为平级字段或拆分额外图元类型，而是将**「矩形区域如何被填充」**统一收敛为 `rect` 节点的 **`fill` 机制对象**（通过 `fill.mode` 区分 4 种互斥填充策略）：
+     - **`fill.mode = 'solid'`（默认）**：纯色填充 `{ mode: 'solid', color: 0xFF... }`（支持顶层简写 `rect.color`）；
+     - **`fill.mode = 'gradient'`**：垂直或水平渐变填充 `{ mode: 'gradient', color: 0xFF..., colorEnd: 0xFF... }`；
+     - **`fill.mode = 'parallax'`（单图集多层视差合成 —— KubeJS 阶段零风险主力方案）**：
+       - `{ mode: 'parallax', texture: 'epiphy:textures/effect/atlas.png', texW: 256, texH: 256, bgColor: 0xFF090418, layers: [...] }`；
+       - **单图集与统一混合态约束**：所有 `layers` 采样同一张 `texture` 图集的不同 `(u, v, uw, vh)` 子区域，共享标准半透明混合状态（`SRC_ALPHA, ONE_MINUS_SRC_ALPHA`），每层独立计算缩放 `scale`、时间自滚动 `scrollU/V`、视角/鼠标视差偏移 `parallax` 与呼吸闪烁 `pulseHz`；
+       - **前景镂空遮盖法（规避主 FBO `DST_ALPHA` 失效与 `GL_EQUAL` 泄漏）**：底层画带 `clip` 的 `parallax` 矩形，顶层直接叠放一张外缘不透明、中间透明镂空的边框图元（`sprite` / `nine_slice`），零危险 GL 状态修改即可塑造异形视差窗口；
+     - **`fill.mode = 'shader'`（内置着色器直绑填充）**：
+       - `{ mode: 'shader', shader: 'end_portal' | 'chaos_vortex', fallbackColor: 0xFF090418 }`；
+       - 由于 `fill.mode` 为互斥枚举，从 Schema 结构上天然杜绝了“同时指定外部贴图 UV 与内置 Shader”的非法组合；
+     - **独立 Kotlin/Java Mod 阶段扩展（`fill.mask`）**：进入原生 Mod 阶段后，在 `fill` 对象上解锁可选字段 `mask: 'namespace:path.png'`，由单 Pass 双采样器片元着色器（`Sampler0` 读 `mask` Alpha，`Sampler1` 跑 `parallax` 图集）1 次 DrawCall 完成任意异形剪影填充。
+2. **能做到什么（通用能力）**：
+   - 用同一个 `rect` 图元结构，无缝切换从简单纯色条、渐变条到深邃多层景深视差流或原生着色器裂隙的填充表现。
+3. **已有的例子（具象应用）**：
+   - **类【寰宇支配之剑】深空视差进度条/面板**：`rect` 配置 `fill: { mode: 'parallax', texture: '.../star_atlas.png', layers: [...] }` + `clip: { dir: 'left', ratio: '$hp_cur' }` + 顶层镂空金属外框；
+   - **原版【末地折跃门】/ 龙之研究【混沌晶体】裂隙窗**：`rect` 配置 `fill: { mode: 'shader', shader: 'end_portal' }`。
+
+**统一 `fill` 机制配置示例**：
+```js
+{
+    type: 'rect',
+    x: 0, y: 0, w: 180, h: 16,
+    clip: { dir: 'left', ratio: '$hp_cur', mode: 'local' },
+    fill: {
+        mode:    'parallax',
+        texture: 'epiphy:textures/effect/cosmic_atlas.png',
+        texW:    256,
+        texH:    256,
+        bgColor: 0xFF090418,
+        layers: [
+            { u: 0,   v: 0,  uw: 128, vh: 64, scale: 1.0, scrollU: 2.0,  scrollV: 0.5, parallax: 0.15, alpha: 0.90 },
+            { u: 128, v: 0,  uw: 128, vh: 64, scale: 1.8, scrollU: -4.5, scrollV: 1.2, parallax: 0.35, alpha: 0.85 },
+            { u: 0,   v: 64, uw: 128, vh: 64, scale: 2.5, scrollU: 1.0,  scrollV: -3.0, parallax: 0.60, alpha: 1.00, pulseHz: 2.0 }
+        ]
+    }
+}
+```
+
+---
+
+### 功能四：GUI 渲染管线介入与纹理动态重映射（GUI Interception & Texture Remapping）
+
+1. **通过什么（底层机制与原语）**：
+   - **渲染时序夹心层注入（`bgNodes` & `fgNodes` —— KubeJS 阶段首选零风险方案）**：利用 Forge `ContainerScreenEvent.Render.Background`（原版 `renderBg()` 画完底图后、`renderSlots()` 画物品前）与 `Foreground`（画完物品后、`renderTooltip()` 前），以 `(guiLeft, guiTop)` 为原点注入 2D 图元树；
+   - **会话级纹理表重定向（`replaceTextures`）**：在匹配目标 `Screen` 打开期间，备份并替换 `TextureManager.byPath` (`f_118468_`) 中目标 `ResourceLocation` 指向的 `AbstractTexture`，界面关闭或异常时在 `try / finally` 与 `ScreenEvent.Closing` 中无条件还原（独立 Mod 阶段升级为 `GuiGraphics.blit` Mixin 拦截）；
+   - **容器会话生命周期（`lifeMode: 'screen_session'`）**：除支持定时 `once` / 心跳 `active` 外，`gui` 与 `slot` 载体额外支持 `'screen_session'`（在目标界面打开期间持续生效，关闭界面时自动销毁规则）与长期绑定模式。
+2. **能做到什么（通用能力）**：
+   - 按运行期上下文（特定方块、失稳阶段、玩家状态）动态替换某个 GUI 的原有背景与部件贴图，且完全不遮挡容器槽位内的物品图标、数量和高亮提示。
+3. **已有的例子（具象应用）**：
+   - 处于失稳阶段的【暮色森林拆解台】打开时动态换上赤红脉冲科技底图；特定容器槽位加盖锁死封条。
+
+---
+
+### 功能五：三维空间中的 2D 画布投影与姿态锚定（3D-Projected 2D Canvas）
+
+1. **通过什么（底层机制与原语）**：
+   - 将 2D 画布锚定至世界三维坐标 `(x, y, z)`，通过 `billboard: 'center' | 'vertical' | 'fixed'`（配 `yaw, pitch, roll`）控制朝向，通过 `seeThrough: boolean` 控制深度测试，通过 `persist: boolean` 写入 `saves/<world>/kubejs_epiphy_world_planes.json`（随存档同步回滚）；
+   - KubeJS 阶段优先驱动 1.20.1 原生 `Display` 实体簇；独立 Mod 阶段接入 **`TextureTarget`（FBO 离屏烘焙池）** 与 3D 射线平面求交交互 GUI。
+2. **能做到什么（通用能力）**：
+   - 将 2D 富文本与图案面板投射到三维世界中，自由配置是否跨重启保留、是否跟随玩家视角、是否隔墙透视。
+3. **已有的例子（具象应用）**：
+   - 跨重启保留的基地【高级告示牌】、`pitch: -90` 平铺地面的 2D 旋转魔法阵、隔墙可见的失稳核心信标。
+
+---
+
+### 功能六：三维网格、模型与空间着色器管线（3D Mesh & Spatial Shader Pipeline —— `Epiphy3DFX`）
+
+1. **通过什么（底层机制与原语）**：
+   - 独立子系统操作三维顶点缓冲（VBO / `CCRenderState`）、外部 OBJ/Bedrock 模型、Display 实体矩阵变换与 3D Core/Post Shaders。
+2. **能做到什么（通用能力）**：
+   - 渲染具备真实三维体积、空间遮挡与后处理扭曲的立体特效与自定义方块/实体模型。
+3. **已有的例子（具象应用）**：
+   - 已落地的【混沌晶体】CCL 3D OBJ + Chaos Shader 物品渲染；独立 Mod 阶段的真 3D 球壳冲击波与体积光柱。
+
+---
+
+## 3. 硬性工程红线、配额计费模型与环境降级矩阵
+
+### 3.1 OpenGL / `GuiGraphics` 状态绝对对称还原红线（`try / finally` 铁律）
+在 HUD 与 GUI 相位中，任何状态泄漏都会导致原版物品栏、Tooltip 或其他 Mod 界面黑屏且无法归因。**所有渲染函数必须遵守以下铁律**：
+1. **`PoseStack` 推弹对称**：每次 `pose.pushPose()` 必须在紧邻的 `try { ... } finally { pose.popPose() }` 中弹出；
+2. **`enableScissor` 裁剪栈对称**：每次 `guiGraphics.enableScissor(x0, y0, x1, y1)` 必须在 `finally { guiGraphics.disableScissor() }` 中关闭；
+3. **着色器颜色复位**：凡调用 `RenderSystem.setShaderColor(r, g, b, a)` 修改了染色或 Alpha，必须在 `finally` 中执行 `RenderSystem.setShaderColor(1.0, 1.0, 1.0, 1.0)`；
+4. **KubeJS 阶段严禁在 GUI 相位修改 `depthMask` / `depthFunc` / `colorMask` / 主 FBO Alpha 通道**。
+
+### 3.2 绘制开销权重计费模型（`computeOverlayCost` —— 取代单纯节点数限制）
+废除不反映真实 GPU 开销的“节点数 `<= 16`”规则，改为在服务端发包校验与客户端入队时统一通过纯函数 **`computeOverlayCost(pkt)`** 计算绘制权重（Draw Weight）：
+
+| 图元与填充模式 | 权重计算公式 (`cost`) | 计费依据 |
+| :--- | :--- | :--- |
+| `rect` (`fill.mode === 'solid' \| 'gradient'`) | `1`（若带描边 `borderWidth > 0` 则 `+1`） | 1~2 次 `GuiGraphics.fill` / `fillGradient` |
+| `rect` (`fill.mode === 'parallax'`) | `1 + fill.layers.length`（最多 4 层） | 背景底色 + 单图集内每次 UV 采样叠加记 `1` 权重 |
+| `rect` (`fill.mode === 'shader'`) | `4` | 独立 Shader 切换与批次 Flush 开销 |
+| `sprite`（普通单层贴图） | `1` | 1 次 `GuiGraphics.blit` |
+| `nine_slice` | `4`（若运行环境无 `blitNineSliced` 回退 9 切片则记 `9`） | 九宫格批次开销 |
+| `item` | `3` | 物品模型矩阵变换与光照设置开销 |
+| `text`（静态整行） | `2 * lineCount` | 命中 `SHARED_TEXT_SEQ_CACHE` 整行合批绘制 |
+| `text`（`typewriter` 或 `per_char`） | `2 + Math.ceil(visibleGraphemes * 0.5)` | 逐字素矩阵变换或过渡态切片开销 |
+
+- **配额门禁上限**：
+  - `'player'` 层级（非 OP 授权玩家指令）：单面板 `maxCost <= 24`，同屏总权重 `<= 120`；
+  - `'system'` 层级（JS 脚本 / OP / 控制台 / 命令方块）：单面板 `maxCost <= 96`，同屏总权重 `<= 600`；超出部分按优先级自动拒绝或裁剪。
+
+### 3.3 异常与环境降级矩阵（Fallback Matrix）
+
+| 异常 / 环境场景 | 探测方式 | 确定性降级行为（Fail-Safe） | 日志与告警策略 |
+| :--- | :--- | :--- | :--- |
+| **1. 贴图资源不存在** (`ResourceLocation` 缺失或路径非法) | `ResourceManager.getResource(rl).isPresent()`（结果缓存至 `TEXTURE_EXIST_CACHE`，资源重载时清空） | **绝不绘制紫黑丢失块**：若有 `fallbackColor` / `bgColor` 则退化为纯色 `rect`；若无则静默跳过该节点 | 每个缺失贴图路径通过 `warnOnce` 仅打印 1 次客户端警告 |
+| **2. 目标 Shader 不可用** (`fill.mode === 'shader'` 但 Shader 为 `null`) | 反射获取 Shader 实例为 `null` 或抛异常 | `'chaos_vortex'` 自动降级为原版 `'end_portal'`；若原版 Shader 亦不可用，降级为 `fill.fallbackColor`（默认 `#090418`）纯色填充 | `warnOnce` 记录一次降级原因 |
+| **3. 旋转面板遇到 `clip.mode === 'scissor'`** | `totalAngle !== 0` 且节点请求 `'scissor'` | 对 `rect` / `sprite` 自动切换为支持任意旋转角的 `'local'` 局部宽高/UV 收缩裁剪；对 `group` 取旋转后外接 AABB | 静默自适应 |
+| **4. 开启 Iris / OptiFine 光影或 Fabulous 画质** | 探测活跃光影管线或渲染阶段异常 | `screen` / `gui` / `slot` 仅使用标准 `GuiGraphics` 调用与 `enableScissor`；`world_plane` 在 KubeJS 阶段走原版 `Display` 实体轨，天然兼容一切光影 | 静默兼容，零报错 |
+| **5. GUI 类名不匹配或 `TextureManager.byPath` 反射失败** | `Screen.getClass().getName()` 未命中，或 `byPath` (`f_118468_`) 无法访问 | 类名不匹配时整个 `gui` 覆盖层休眠不绘制；`byPath` 反射失败时自动放弃 `replaceTextures`，仅执行 100% 安全的 `bgNodes` 背景夹心层覆写 | `byPath` 失败记 1 次 `warnOnce` |
+| **6. 未安装 ModernUI** | 复用现行 `probeModernUiBridge()` 状态机 | `text` 节点自动回退原版 `Font.drawInBatch` + `SHARED_TEXT_SEQ_CACHE` 缓存；`'mui_stroke'` 自动回退 8 向合并 `'stroke'` | 现有机制已完备验证（测试 21/54） |
+| **7. 单帧渲染耗时超限** | 帧耗时监控 `frameElapsedMs` | 单帧排队处理超 `frameBudgetMs (2.5ms)` 留待下帧；单帧总渲染超 `45ms` 触发紧急熔断跳过当帧绘制（10 秒冷却自动恢复） | 复用现行 `v5.7` 防闪烁熔断器 |
+
+---
+
+## 4. 严格协议 Schema 与 `v5 ➔ v6` 迁移映射表
+
+### 4.1 `PROTO_VERSION = 6` 顶层包与节点 Schema 规范表
+
+#### (A) 顶层信封（Envelope Fields）
+| 主标准名 (Canonical) | 显式高频别名（至多 1 个） | 类型 | 取值范围 / 枚举 | 默认值 | 单位 | 说明 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `proto` | - | `number` | `5 \| 6` | `6` | - | 协议版本号（`5` 经 `adaptV5ToV6` 自动转 `6`） |
+| `action` | `【别名: act】` | `string` | `'push' \| 'patch' \| 'deactivate' \| 'clear'` | `'push'` | - | `'patch'` 仅更新已存在面板的 `vars` 并顺延心跳 |
+| `surface` | `【别名: carrier】` | `string` | `'screen' \| 'gui' \| 'slot' \| 'world_plane'` | `'screen'` | - | 渲染投影载体平面 |
+| `namespace` | `【别名: ns】` | `string` | 长度 `1..64`，`[a-z0-9_:\-.]` | `'default'` | - | 命名空间隔离键（玩家层强制 `'u:<uuid>'`） |
+| `group` | - | `string` | 长度 `1..64` | `'default'` | - | 分组标识（用于组并发上限与按组清理） |
+| `slotId` | `【别名: id】` | `string` | 长度 `0..128` | `''` | - | 显式实例槽位 ID（同 `namespace + slotId` 续期覆盖） |
+| `key` | - | `string` | 长度 `0..160` | `''` | - | 逻辑去重/续期键 |
+| `tier` | - | `string` | `'system' \| 'player'` | `'system'` | - | 调用源权限层级 |
+| `lifeMode` | - | `string` | `'once' \| 'active' \| 'screen_session'` | `'once'` | - | 单次定时、心跳续期或随当前打开的 GUI 会话共存亡 |
+| `priority` | - | `number` | 整数 `0..10`（玩家层 `<= 3`） | `2` (`once`) / `5` (`active`) | - | 淘汰与绘制层级优先级 |
+| `rx`, `ry` | `【组合别名: pos】` | `number` | `0.0 .. 1.0` | `0.5`, `0.34` | 归一化屏幕比 | `surface === 'screen'` 时的锚点坐标（`pos: [rx, ry]`） |
+| `ox`, `oy` | - | `number` | `-4096 .. 4096` | `0`, `0` | `px` | 相对于锚点的像素微调偏移 |
+| `scale` | `【别名: size】` | `number` | `0.2 .. 8.0`（玩家层 `0.5..2.0`） | `1.0` | 倍率 | 面板整体缩放倍率 |
+| `angle` | `【别名: tilt】` | `number` | `-180.0 .. 180.0` | `0.0` | 度 (`deg`) | 面板整体顺时针旋转角 |
+| `stay` | `【别名: duration】` | `number` | 整数 `4 .. 72000` | `65` | `ticks` (50ms) | 维持时长 |
+| `activeHold` | - | `number` | 整数 `4 .. 72000` | `28` | `ticks` (50ms) | `lifeMode: 'active'` 单次心跳维持窗口 |
+| `fadeOut` | - | `number` | 整数 `1 .. 1200` | `10` | `ticks` (50ms) | 淡出阶段时长 |
+| `fadeStyle` | `【别名: fade】` | `string` | `'shrink' \| 'char_first' \| 'char_last' \| 'blink' \| 'shatter' \| 'blur' \| 'split' \| 'random'` | `'shrink'` | - | 退场动画风格 |
+| `vars` | - | `object` | `Record<string, number>`（最多 16 个键） | `{}` | 数值 / 比例 | 服务端下发的状态变量字典 |
+| `tracks` | - | `object` | `Record<string, TrackSpec>`（最多 16 个通道） | `{}` | - | 客户端插值通道定义（`lerp` / `trail` / `impulse`） |
+| `nodes` | `【别名: layers】` | `array` | `NodeSpec[]`（总权重 `cost <= maxCost`） | `[]` | - | 声明式 2D 图元树根节点列表 |
+| `targetGui` | - | `object` | `{ screenClass?: string, titleMatch?: string }` | `null` | - | `surface === 'gui'` 时的目标界面匹配条件 |
+| `replaceTextures` | `【别名: texMap】` | `object` | `Record<string, string>` | `{}` | - | `surface === 'gui'` 时会话级原贴图重映射表 |
+| `bgNodes` | `【别名: bg】` | `array` | `NodeSpec[]` | `[]` | - | `surface === 'gui'` 时背景夹心层图元（底图后/槽位前） |
+| `fgNodes` | `【别名: fg】` | `array` | `NodeSpec[]` | `[]` | - | `surface === 'gui'` 时前景装饰层图元（槽位后/提示前） |
+| `worldPos` | `【别名: at】` | `number[3]` | `[x, y, z]` | `null` | 米 (`m`) | `surface === 'world_plane'` 时的世界三维坐标 |
+| `billboard` | `【别名: facing】` | `string` | `'center' \| 'vertical' \| 'fixed'` | `'vertical'` | - | `surface === 'world_plane'` 时的朝向跟随模式 |
+| `seeThrough` | `【别名: xray】` | `boolean` | `true \| false` | `false` | - | `surface === 'world_plane'` 时是否穿透方块遮挡 |
+
+#### (B) 图元节点 Schema（`NodeSpec`）
+| 主标准名 (Canonical) | 显式高频别名（至多 1 个） | 适用 `type` | 类型 | 范围 / 默认值 | 单位 | 说明 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `type` | `【别名: kind】` | 全部 | `string` | `'text' \| 'rect' \| 'sprite' \| 'nine_slice' \| 'item' \| 'group'` | - | **必填**，图元种类（共 6 种正交类型） |
+| `anchor` | - | 除 `text` 外 | `string` | `'center' \| 'top_left'`（默认 `'center'`） | - | 决定 `(x, y)` 对应图元的中心点还是左上角 |
+| `x`, `y` | - | 全部 | `number` | `-2048 .. 2048`（默认 `0`） | `px` | 相对于父容器/面板锚点的局部像素坐标 |
+| `w`, `h` | - | 除 `text` 外 | `number` | `0 .. 2048`（`item` 默认 `16`） | `px` | 图元像素宽高 |
+| `color` | `【别名: tint】` | `rect`, `text`, `sprite` | `number` | 32位 `0xAARRGGBB` 或 24位 `0xRRGGBB`（默认 `0xFFFFFFFF`） | ARGB | 文本/纯色矩形主色或贴图染色 Tint |
+| `fill` | - | `rect` | `object` | `{ mode: 'solid' \| 'gradient' \| 'parallax' \| 'shader', ... }` | - | **统一区域填充机制**（未传时默认 `{ mode: 'solid', color: node.color }`） |
+| `texture` | `【别名: tex】` | `sprite`, `nine_slice` | `string` | `namespace:path.png`（长 `<= 128`，须过白名单） | - | 纹理资源路径（`parallax` 填充的图集写在 `fill.texture`） |
+| `u`, `v`, `uw`, `vh` | - | `sprite`, `nine_slice` | `number` | `0 .. 4096`（默认 `0, 0, w, h`） | `px` | 采样区域的左上角 UV 与宽高 |
+| `texW`, `texH` | - | `sprite`, `nine_slice` | `number` | `1 .. 4096`（默认 `256, 256`） | `px` | 纹理文件总像素宽高 |
+| `slice` | - | `nine_slice` | `number[4]` | `[left, top, right, bottom]`（各 `1..64`） | `px` | 九宫格四边不拉伸像素边距 |
+| `clip` | - | 全部 | `object` | `{ dir: 'left'\|'right'\|'down'\|'up'\|'center_x', ratio: number\|'$var', mode: 'local'\|'scissor' }` | 比例 `0..1` | 比例裁剪（默认 `'local'` 支持任意旋转角） |
+| `children` | `【别名: items】` | `group` | `array` | `NodeSpec[]` | - | 容器子节点列表 |
+
+#### (C) `rect.fill` 统一填充机制子 Schema（`FillSpec`）
+| `fill.mode` 取值 | 必填与可选子字段 | 说明 |
+| :--- | :--- | :--- |
+| **`'solid'`**（默认） | `color?: number`, `borderColor?: number`, `borderWidth?: number` | 纯色填充与可选描边 |
+| **`'gradient'`** | `color: number`, `colorEnd: number`, `dir?: 'vertical' \| 'horizontal'` | 线性渐变填充（默认垂直渐变） |
+| **`'parallax'`** | `texture: string` `【别名: tex】`, `texW?: number`, `texH?: number`, `bgColor?: number`, `layers: ParallaxLayerSpec[1..4]` | 单图集多层视差滚动填充（每层含 `{ u, v, uw, vh, scale, scrollU, scrollV, parallax, alpha, pulseHz }`） |
+| **`'shader'`** | `shader: 'end_portal' \| 'chaos_vortex'`, `fallbackColor?: number` | 内置着色器直绑填充（与 `texture`/`layers` 结构性互斥） |
+
+---
+
+### 4.2 `v5 ➔ v6` 45 字段完整迁移映射表（`adaptV5ToV6` 契约与单测基准）
+
+客户端 `adaptV5ToV6(v5Pkt)` 将原 `v5` 扁平包的 45 个字段无损映射至 `v6` 结构，规则如下：
+
+| 原 `v5` 字段（共 45 项） | 在 `v6` 中的归属位置 | 转换规则与说明 |
+| :--- | :--- | :--- |
+| `proto` (`5`) | 顶层 `proto` ➔ `6` | 标记已由适配器归一化为 `v6`（保留 `_fromProto: 5` 供诊断） |
+| `action`, `tier`, `key`, `slotId`, `namespace`, `group`, `posTag`, `normalizeKey`, `lifeMode`, `priority` | **顶层 Envelope 同名字段** | 1:1 原样保留 |
+| `rx`, `ry`, `movable`, `angle`, `scale`, `randomScale` | **顶层 Envelope 同名字段** | 面板级空间变换与续期移动锁 |
+| `stay`, `activeHold`, `fadeStyle`, `fadeOut`, `showInGui`, `maxGroup`, `restart`, `debug` | **顶层 Envelope 同名字段** | 面板级生命周期与队列控制 |
+| `jitter`, `shakeMode`, `shakeAmp`, `shakeFreqMin`, `shakeFreqMax`, `randomShake` | **`shakeMode !== 'per_char'` 时归属顶层 Envelope；`'per_char'` 时下沉至 `nodes[0]`** | 整体震动作用在面板根部；逐字震动作用在 `text` 节点 |
+| `title`, `sub`, `color`, `randomColor`, `subColor`, `typewriter`, `charMs`, `cursor`, `shadow`, `letterSpacing`, `letterSpacingMode`, `outlineMode`, `outlineColor`, `outlineWidth`, `perCharShake`, `charShakeStyle`, `charShakeShift`, `charShakeShiftX`, `charShakeShiftY`, `charShakeSwayX`, `charShakeSwayY`, `charShakeRotDeg`, `charShakeWin`, `charShakeSnap`, `charShakeTransition`, `maxWidth`, `wrap`, `clamp` | **全部收拢至 `nodes[0]` (`{ type: 'text', ... }`)** | 完整保留所有文本排版、ModernUI 描边与逐字震动参数，直接驱动现行 `buildRenderedLines` 与 `drawUnitsPassGrouped` |
+
+---
+
+## 5. 兼容性语义收敛与黑箱淘汰清单（Alias Pruning & Deprecation Policy）
+
+当前代码库中存在大量早期积累的同义词别名（如布尔值 18 种写法、生命周期 11 种写法、冲突模式 15 种写法），不仅增加解析分支开销，更导致脚本调用呈现出“技术黑箱”。
+
+### 5.1 别名收敛三大原则
+1. **新老字段统一「1 主标准名 + 至多 1 显式高频别名」铁律**：
+   - 无论存量字段还是 `v6` 新增字段，每个字段最多允许 **2 个高频名称**：**1 个主标准名（Canonical Name）** + **至多 1 个高频简写别名**；
+   - 必须在文档 Schema 表（见 §4.1）与代码中的 `OFFICIAL_ALIASES` 常量表里明确标注 **`【别名: xxx】`**，严禁在业务代码各处散落隐式 `opts.a || opts.b || opts.c`；
+   - **入口单点归一化**：所有允许的 `【别名】` 在服务端发包构建入口（及客户端 `adaptV5ToV6` 入口）一次性归一化为主标准名，**网络传输包与渲染管线内部只出现主标准名**。
+2. **枚举值保留 3~5 种最常用标准写法**：每个枚举维度仅保留 **3~5 个核心标准值**。
+3. **两阶段透明淘汰**：超出“1 主名 + 1 别名”以外的所有历史冗余写法，全部移入静态 `DEPRECATED_ALIASES` 淘汰映射表——过渡期命中时通过 `LOGGER.once('warn', ...)` 输出一次性迁移提示并自动映射；进入独立 Kotlin/Java 模组阶段后彻底删除。
+
+### 5.2 核心接口保留写法（主名 + 显式别名）vs 淘汰列表对照表
+
+| 配置维度 | ✅ 永久保留的标准写法（主名 + 显式标注 `【别名】`，枚举 3~5 种） | ❌ 列入淘汰列表的冗余写法（Deprecated） |
+| :--- | :--- | :--- |
+| **1. 布尔值 (`parseBoolStrict`)** | `true` / `false`、`1` / `0`、`'true'` / `'false'`、`'on'` / `'off'` | `'1b'` / `'0b'`、`'yes'` / `'no'`、`'y'` / `'n'`、`'是'` / `'否'`、`'开启'` / `'关闭'`、`'开'` / `'关'`、`'none'`（布尔上下文中） |
+| **2. 优先级 (`PRIORITY_MAP`)** | 数字 `0..10`、`'low'(1)`、`'normal'(2)`、`'high'(3)`、`'critical'(4)`、`'active'(5)` | `'minor'`, `'medium'`, `'default'`, `'major'`, `'important'`, `'fatal'`, `'urgent'`, `'boss'`, `'sustain'` 及全部中文别名（`'低'`, `'次要'`, `'中'`, `'普通'`, `'高'`, `'重要'`, `'极高'`, `'致命'`, `'持续'`） |
+| **3. 生命周期 (`lifeMode`)** | 主名 `lifeMode`（无字段别名）；枚举 `'once' \| 'active' \| 'screen_session'`（音频支持 `'loop'`） | 字段 `existMode`, `continuous`, `sustained`, `life`；枚举值 `'continuous'`, `'sustain'`, `'hold'`, `'持续'`；以及向 `duration` 传 `'active'` 的隐式重载 |
+| **4. 震动模式 (`shakeMode`)** | 主名 `shakeMode` `【别名: shake】`；枚举 `'none' \| 'constant' \| 'decay' \| 'fade_in' \| 'pulse' \| 'per_char' \| 'random'` | 字段 `jitter`, `perCharShake`, `charShake`；枚举 `'perchar'`, `'char'`, `'char_shake'`, `'spawn'`, `'impact'`, `'fadein'`, `'before_fade'`, `'wave'`, `'rand'`, `'逐字'`, `'逐字震动'`；以及向 `shake` 直接传布尔或数字的隐式重载 |
+| **5. 淡出风格 (`fadeStyle`)** | 主名 `fadeStyle` `【别名: fade】`；枚举 `'shrink' \| 'char_first' \| 'char_last' \| 'blink' \| 'shatter' \| 'blur' \| 'split' \| 'random'` | 字段 `fadeMode`；枚举 `'char'`, `'glitch'`, `'defocus'`, `'clone'`, `'rand'`, `'虚化'`, `'裂解'`, `'分解'` |
+| **6. 文本外圈 (`outlineMode`)** | 主名 `outlineMode` `【别名: outline】`；枚举 `'none' \| 'stroke' \| 'glow' \| 'mui_stroke'` | 字段 `glow`, `glowColor`, `glowWidth`；枚举 `'off'`, `'border'`, `'halo'`, `'sdf_stroke'`, `'描边'`, `'外圈'`, `'发光'`；以及向 `outline` 直接传颜色码的隐式重载 |
+| **7. 发射源冲突仲裁 (`conflictMode`)** | 主名 `conflictMode`（无字段别名）；枚举 `'overlap' \| 'merge' \| 'nearest' \| 'first' \| 'latest' \| 'stagger'` | 字段 `sourceConflict`, `overlapMode`；枚举 `'allow'`, `'none'`, `'independent'`, `'combine'`, `'union'`, `'throttle'`, `'dedup'`, `'closest'`, `'oldest'`, `'newest'`, `'replace'` |
+| **8. 存量高频属性字段名** | `title` `【别名: text】`, `sub` `【别名: subtitle】`, `stay` `【别名: duration】`, `scale` `【别名: size】`, `angle` `【别名: tilt】`, `slotId` `【别名: id】`, `namespace` `【别名: ns】`, `letterSpacing` `【别名: spacing】`, `activeHold`, `maxGroup`, `movable`, `restart` | `existTime`, `holdTicks`, `maxGroupSize`, `groupLimit`, `maxConcurrent`, `move`, `updatePos`, `resetAnimation`, `charSpacing`, `byChar`, `slot` |
+| **9. `v6` 新增高频字段名** | `surface` `【别名: carrier】`, `nodes` `【别名: layers】`, `type` `【别名: kind】`, `texture` `【别名: tex】`, `color` `【别名: tint】`, `children` `【别名: items】`, `replaceTextures` `【别名: texMap】`, `bgNodes` `【别名: bg】`, `fgNodes` `【别名: fg】`, `worldPos` `【别名: at】`, `billboard` `【别名: facing】`, `seeThrough` `【别名: xray】` | 严禁为新字段引入第 3 个名称或未登记的隐式同义词（注：`fill` 为单一结构化属性，不再平铺 `fillMode`/`shaderId`/`parallaxLayers`） |
+
+---
+
+## 6. 测试验证方案与性能帧预算（Verification & Performance Budget）
+
+所有新增能力必须同步扩展 [`tests/pure_functions.test.js`](../tests/pure_functions.test.js)（当前基线 **59/59 passed**），并在实机通过帧耗时预算核验：
+
+### 6.1 沙盒单元测试必测项（`npm test` 新增用例清单）
+1. **`adaptV5ToV6` 无损往返与等价性测试**：遍历全部 45 个 `v5` 字段输入，断言转换后的 `v6` 包在顶层 Envelope 与 `nodes[0]` 上数值 100% 精确对齐，且 `ScreenDanmakuClient` 对 `proto: 5` 与 `proto: 6` 包产生完全相同的内部 Overlay 状态与渲染调用序列；
+2. **`action: 'patch'` 队列内原地合并与孤儿丢弃测试**：断言同一帧入队多条同 `slotId` 的 `'patch'` 包时在 `pendingActions` 内合并为 1 条并顺延 `activeHold`；对不存在的 `slotId` 发送 `'patch'` 时安全丢弃不产生空壳 Overlay；
+3. **`computeOverlayCost` 权重计费与配额拦截测试**：断言 `rect`（含 `solid` / `gradient` / `parallax` / `shader` 四种 `fill.mode`）、`sprite`、`nine_slice`、`text` 的权重累加准确，验证 `'player'` 层级超 `24` 权重被裁剪/拒绝，`'system'` 层级放行至 `96`；
+4. **`tracks` 状态插值（含卡顿 `dt <= 100ms` 钳制）与 `clip` 双模式边界测试**：给定固定时间戳序列 `nowMs`，断言 `lerp`、`trail`、`impulse` 数值曲线精确，以及 `angle !== 0` 时 `clip.mode: 'local'` 局部宽高/UV 收缩与 `'scissor'` 外接框计算的准确性；
+5. **`try / finally` 渲染状态对称还原测试**：在模拟 `GuiGraphics` / `PoseStack` 中注入抛错图元节点，断言异常捕获后 `poseStackDepth === 0`、`scissorDepth === 0`、`shaderColor === [1,1,1,1]`、`TextureManager.byPath` 100% 恢复原纹理；
+6. **淘汰别名一次性告警测试**：断言使用 `DEPRECATED_ALIASES` 中的旧写法时触发且仅触发 1 次迁移警告，标准写法与显式 `OFFICIAL_ALIASES` 零警告。
+
+### 6.2 客户端帧耗时预算（Performance Budget）
+- **单面板 CPU/JNI 预算**：HUD / GUI 相位下，单个含 5~8 个图元节点（如九宫格底框 + 残影条 + 3 层单图集视差 `fill` + 图标 + 文本）的复合面板，在 Rhino 解释器下的单帧平均耗时须 **`<= 0.3 ms`**（60 FPS 下占帧预算 `< 1.8%`）；
+- **同屏高压预算**：20 条并发弹幕 + 2 个复合进度面板同屏时，帧耗时增量 **`<= 2.5 ms`**；
+- **帧紧急熔断线**：维持现行 `45 ms` 帧预算熔断保护与 10 秒冷却自动恢复机制不变。
+
+---
+
+## 7. 按风险重排的分阶段实施路线图（Risk-Ordered Roadmap）
+
+将高确定性的纯 `GuiGraphics` 图元树与插值底座前置，将涉及外部环境兼容的 GUI 纹理替换、世界平面投影与自定义 Shader 逐级后置隔离：
+
+```text
+Phase 1 (零 GL 风险底座：PROTO v6 + 图元树 + fill 机制 + 状态插值 + 局部/Scissor 裁剪 + 别名收敛)
+  ├─ 升级 PROTO_VERSION = 6，实现 adaptV5ToV6(pkt)、action:'patch' 队列合并与 computeOverlayCost(pkt) 权重配额门禁
+  ├─ 实现纯 GuiGraphics 图元树 (rect / sprite / nine_slice / item / text / group)，text 完整继承 v5.7 三阶段合批
+  ├─ 实现 rect.fill 统一填充机制 (mode: 'solid' | 'gradient' | 'parallax')、vars + tracks 插值器与 clip (local / scissor)
+  ├─ 落地 §5 别名收敛表 (OFFICIAL_ALIASES 单点归一化 + DEPRECATED_ALIASES 一次性迁移提示)
+  └─ 通过「rect(fill.mode:'parallax') + clip + 顶层镂空外框 sprite」零 GL 风险实现高定血条/视差星海面板，补齐单测
+        │
+        ▼
+Phase 2 (多载体扩展 A：GUI 夹心层注入 / 物品槽位叠加 / 可选纹理表重映射与 shader 填充)
+  ├─ 实现 surface: 'gui' 的 ContainerScreenEvent Background/Foreground 夹心层绘制 (bgNodes / fgNodes，零反射风险)
+  ├─ 实现 surface: 'slot' 的容器槽位 2D 动态角标、充能条与遮罩叠加
+  ├─ 实现带严格 try/finally + Closing/loggedOut 无条件还原的 replaceTextures 会话级纹理重映射与 fill.mode:'shader'
+  └─ 正式挂载 global.Epiphy2DSurface / Epiphy2DRenderer 命名（永久保留 ScreenDanmaku 兼容别名）
+        │
+        ▼
+Phase 3 (多载体扩展 B & 3D 协议先行：世界 2D 平面 + Epiphy3DFX 契约)
+  ├─ 实现 surface: 'world_plane'：saves/<world>/ 持久化、billboard 跟随/固定、seeThrough 穿透控制（优先驱动 Display 实体轨）
+  └─ 独立建立 Epiphy3DFX 服务端调度协议与客户端轻量桥接层，与 2D 平面渲染器彻底解耦
+        │
+        ▼
+Phase 4 (Kotlin + Java 原生模组迁移：彻底移除淘汰别名 + 硬件级加速)
+  ├─ 正式移除 §5.2 淘汰列表中的冗余别名，冻结原生 API
+  ├─ 2D 平面渲染器接入 fill.mask 单 Pass 双采样器蒙版 Shader、TextureTarget (FBO) 离屏缓存池、GuiGraphics Mixin 与世界平面射线交互 GUI
+  └─ 3D 空间特效接入自有 Core/Post Shader、VBO 程序化网格生成与原生 BlockEntityRenderer
+```
+
+---
+
+## 8. 实施进度与变更记录表（Implementation Progress & Milestone Log）
+
+> **维护规则**：后续每完成并验证通过一个子项，必须同步更新下表中的状态（`[ ]` ➔ `[x]`）、实际修改文件、单测通过数与提交哈希/日期，确保工程状态与文档零漂移。
+
+### 8.1 分阶段任务跟踪矩阵
+
+| 状态 | 编号 | 阶段与任务项描述 | 涉及核心文件 | 单测 / 验证指标 | 完成记录 (Commit / 日期) |
+| :---: | :--- | :--- | :--- | :--- | :--- |
+| [x] | **P0-1** | **架构设计与协议规范定稿（v0.4）**：完成 2D/3D 职责切分、`PROTO v6` Schema、`adaptV5ToV6` 映射表、`rect.fill` 统一填充机制、权重计费模型、降级矩阵与别名淘汰表 | `docs/rendering-subsystem-roadmap.md` | 架构审查通过 | `v0.4` (2026-11-19) |
+| [ ] | **P1-1** | **协议升版与入口别名收敛**：`EpiphyProtocol` 支持 `PROTO_VERSION = 6`（向下兼容 `5`）；在 `EpiphySpec` / 服务端落地 `OFFICIAL_ALIASES` 单点归一化与 `DEPRECATED_ALIASES` 一次性告警（`LOGGER.once`） | `Epiphy的-Spec与通用工具.js`<br>`Epiphy的-屏幕弹幕组件.js` | 新增淘汰别名与官方别名回归单测 | 待开始 |
+| [ ] | **P1-2** | **`adaptV5ToV6` 转换器与 `computeOverlayCost` 权重门禁**：实现 45 字段无损转换纯函数与图元树绘制权重计费（`'player' <= 24`, `'system' <= 96`） | `Epiphy的-Spec与通用工具.js`<br>`Epiphy的-屏幕弹幕组件.js`<br>`Epiphy的-屏幕弹幕渲染器.js` | 45 字段往返等价单测 + 配额裁剪单测 | 待开始 |
+| [ ] | **P1-3** | **状态变量字典 (`vars`)、`action: 'patch'` 队列合并与 `tracks` 插值器**：客户端实现队列内同 `slotId` 原地合并、孤儿 `patch` 丢弃，以及 `lerp` / `trail` / `impulse` 通道（含 `dt <= 100ms` 防跳变钳制） | `Epiphy的-屏幕弹幕组件.js`<br>`Epiphy的-屏幕弹幕渲染器.js` | 时间序列插值与队列合并纯函数单测 | 待开始 |
+| [ ] | **P1-4** | **声明式 2D 图元树与分层合批渲染**：实现 `rect`、`sprite`、`nine_slice`、`item`、`text`、`group` 及 `anchor` 对齐、`clip`（`'local'` / `'scissor'` 双模式）；确保 `text` 完整继承 `v5.7` 三阶段合批与 `try/finally` 状态对称还原 | `Epiphy的-屏幕弹幕渲染器.js` | 异常注入状态零泄漏单测 + 裁剪坐标单测 | 待开始 |
+| [ ] | **P1-5** | **`rect.fill` 统一填充机制（`solid` / `gradient` / `parallax`）与贴图缺失自愈**：实现单图集多层视差滚动与 `TEXTURE_EXIST_CACHE` 存在性探测（防紫黑块） | `Epiphy的-屏幕弹幕渲染器.js` | 视差 UV 计算单测 + 贴图缺失降级单测 | 待开始 |
+| [ ] | **P1-6** | **Phase 1 预设封装与实机联动验证**：内置高定复合进度条/视差星海面板构建辅助，在测试方块或 `v18` 遥测面板实装验证 | `Epiphy的-屏幕弹幕组件.js`<br>`Epiphy的小玩意_功能测试.js` | 全套单测通过 + 实机帧耗时 `<= 0.3ms`/面板 | 待开始 |
+| [ ] | **P2-1** | **承载面 `surface: 'gui'` 夹心层注入**：挂载 `ContainerScreenEvent.Render.Background` / `Foreground` 实现 `bgNodes` / `fgNodes` 与 `lifeMode: 'screen_session'` | `Epiphy的-屏幕弹幕组件.js`<br>`Epiphy的-屏幕弹幕渲染器.js` | 容器开关生命周期与坐标偏移单测 | 待开始 |
+| [ ] | **P2-2** | **承载面 `surface: 'gui'` 会话级纹理重映射与 `fill.mode: 'shader'`**：实现 `TextureManager.byPath` 备份替换与 `Closing`/`loggedOut`/`finally` 无条件还原，及 `end_portal`/`chaos_vortex` 填充 | `Epiphy的-屏幕弹幕渲染器.js` | 纹理还原防污染单测 + Shader 降级单测 | 待开始 |
+| [ ] | **P2-3** | **承载面 `surface: 'slot'` 物品槽位 2D 叠加层**：支持按 `slotIndex` 或 `matchItem` 在容器槽位绘制动态充能条、角标与遮罩 | `Epiphy的-屏幕弹幕渲染器.js` | 槽位匹配与局部坐标裁剪单测 | 待开始 |
+| [ ] | **P2-4** | **双端正式挂载 `Epiphy2DSurface` / `Epiphy2DRenderer`**：绑定新全局命名并永久保留 `ScreenDanmaku` / `ScreenDanmakuClient` 兼容别名，同步更新全仓文档 | 双端渲染组件 + `README*.md` | 别名等价性与向后兼容回归测试 | 待开始 |
+| [ ] | **P3-1** | **承载面 `surface: 'world_plane'`（世界 2D 平面 / 高级告示牌）**：实现 `saves/<world>/kubejs_epiphy_world_planes.json` 持久化、`billboard` 朝向控制、`seeThrough` 穿透开关与 1.20.1 `Display` 实体轨驱动 | 服务端/客户端平面渲染组件 | 跨重启持久化回滚单测 + 视距增量同步单测 | 待开始 |
+| [ ] | **P3-2** | **`Epiphy3DFX` 空间特效子系统协议与桥接层**：建立独立 3D 特效调度包契约与配额隔离，收拢 OBJ/Display 矩阵变换接口 | 新增 `Epiphy的-空间特效*.js` | 协议校验与配额隔离单测 | 待开始 |
+| [ ] | **P4-1** | **Kotlin + Java 原生模组迁移**：移除 `DEPRECATED_ALIASES`、接入 `fill.mask` 单 Pass 着色器、`TextureTarget` 离屏缓存池、`GuiGraphics` Mixin、世界平面射线交互 GUI 与原生 3D VBO/Shader | 独立模组工程 | 原生模组集成测试 | 待开始 |
+
+### 8.2 变更日志（Changelog）
+
+- **2026-11-19 (`v0.4`)**：完成渲染子系统演进路线图与工程规范草案（确立 2D/3D 双子系统切分、6 大功能本质解构、`rect.fill` 统一填充机制、`try/finally` GL 状态还原铁律、`computeOverlayCost` 权重计费、7 项环境降级矩阵、`PROTO v6` Schema、`v5 ➔ v6` 45 字段迁移表、1 主名 + 1 显式 `【别名】` 收敛规范及 `P0 ~ P4` 进度跟踪表）。
+
