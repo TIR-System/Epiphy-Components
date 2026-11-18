@@ -7712,6 +7712,219 @@ test('Epiphy2DSurface & Epiphy2DRenderer v6.0: adaptV5ToV6, aliases, quotas, tra
     assert.ok(drawnTextStrings.some(function (s) { return s.indexOf('R_ESCAPE') >= 0 }), 'v18 Scheme Alpha right-aligned footer must render')
 })
 
+// ----------------------------------------------------------------------------
+// 61. Schema parity, EpiphyLog deprecation control, PRIORITY_MAP pruning, GUI renderPriority layering & flush order
+// ----------------------------------------------------------------------------
+test('Schema parity, EpiphyLog deprecation control, PRIORITY_MAP pruning, GUI renderPriority & flush order', function () {
+    var logCon = { warns: [], infos: [], errors: [], debugs: [] }
+    var svCon2 = {
+        warns: [],
+        info:  function (m) { logCon.infos.push(String(m)) },
+        warn:  function (m) { svCon2.warns.push(String(m)); logCon.warns.push(String(m)) },
+        error: function (m) { logCon.errors.push(String(m)) },
+        debug: function (m) { logCon.debugs.push(String(m)) },
+        log:   function () {}
+    }
+    var svSb2 = {
+        console: svCon2,
+        Java: { loadClass: function () { return null } },
+        ServerEvents: { tick: function () {}, loaded: function () {}, unloaded: function () {}, commandRegistry: function () {} },
+        BlockEvents: { placed: function () {}, broken: function () {}, rightClicked: function () {} },
+        PlayerEvents: { loggedIn: function () {}, loggedOut: function () {} },
+        LevelEvents: { loaded: function () {}, unloaded: function () {} },
+        Text: { of: function (s) { return String(s) } },
+        global: {}
+    }
+    svSb2.globalThis = svSb2
+    vm.createContext(svSb2)
+    runScriptIn(svSb2, SPEC_PATH)
+    runScriptIn(svSb2, LOG_PATH)
+    runScriptIn(svSb2, SERVER_BASE_PATH)
+    runScriptIn(svSb2, DANMAKU_PATH)
+
+    var Spec2 = svSb2.global.EpiphySpec
+    var Proto2 = svSb2.global.EpiphyProtocol
+    var Log2  = svSb2.global.EpiphyLog
+    var Dm2   = svSb2.global.ScreenDanmaku
+
+    // 1. PRIORITY_MAP must contain only the 5 canonical priority names; deprecated strings move to DEPRECATED_PRIORITY_ALIASES
+    assert.deepStrictEqual(Object.keys(Proto2.PRIORITY_MAP).sort(), ['active', 'critical', 'high', 'low', 'normal'])
+    assert.strictEqual(Proto2.DEPRECATED_PRIORITY_ALIASES.minor, 1)
+    assert.strictEqual(Proto2.DEPRECATED_PRIORITY_ALIASES['致命'], 4)
+    assert.strictEqual(Proto2.DEPRECATED_PRIORITY_ALIASES.sustain, 5)
+
+    // 2. Deprecation alerts obey EpiphyLog control when CONFIG.warnDeprecatedAliases === 'log'
+    assert.strictEqual(Dm2.CONFIG.warnDeprecatedAliases, 'log', 'default warnDeprecatedAliases must delegate to EpiphyLog')
+    assert.strictEqual(svCon2.warns.length, 0)
+    var pSilent = Dm2.buildPacket({
+        title:       'PriTestSilent',
+        priority:    'important',
+        continuous:  true,
+        shakeMode:   'perchar',
+        fadeStyle:   'defocus',
+        outlineMode: 'border'
+    })
+    assert.strictEqual(pSilent.priority, 3)
+    assert.strictEqual(pSilent.lifeMode, 'active')
+    assert.strictEqual(pSilent.shakeMode, 'per_char')
+    assert.strictEqual(pSilent.fadeStyle, 'blur')
+    assert.strictEqual(pSilent.outlineMode, 'stroke')
+    assert.strictEqual(svCon2.warns.length, 0, 'with EpiphyLog deprecation control off, deprecated usages emit zero warns')
+    assert.ok(Dm2._pure.getDeprecatedAliasHits()['priority:important'] >= 1, 'deprecated priority must still be counted in hits')
+
+    // Enable deprecation warnings via EpiphyLog (e.g. /epiphy debug log deprecations on)
+    Log2.setDeprecationWarnings(true)
+    var wBeforeLogOn = svCon2.warns.length
+    Dm2.buildPacket({
+        title:       'PriTestLogOn',
+        priority:    '致命',
+        fadeMode:    '虚化',
+        sourceConflict: 'union'
+    })
+    Dm2.buildPacket({ title: 'PriTestLogOn2', priority: '致命' })
+    var wAfterLogOn = svCon2.warns.length
+    assert.ok(wAfterLogOn >= wBeforeLogOn + 2, 'enabling EpiphyLog deprecation warnings must emit one-time alerts for priority/enum/field deprecations')
+    Log2.setDeprecationWarnings(false)
+
+    // 3. Full §4.1 & §5.2 Official Aliases & Node Schema Normalization
+    var fullAliasPkt = Dm2.buildPacket({
+        act:      'push',
+        carrier:  'gui',
+        lifeMode: 'screen_session',
+        zIndex:   140,
+        shake:    'constant',
+        texMap:   { 'twilightforest:textures/gui/uncrafting.png': 'epiphy:textures/gui/chaos_uncrafting.png' },
+        targetGui:{ titleMatch: '拆解台' },
+        bg: [
+            { kind: 'rect', x: 10, y: 10, w: 60, h: 20, fill: { mode: 'gradient', color: 0x112233, colorEnd: 0x445566 } },
+            { kind: 'nine_slice', tex: 'epiphy:textures/gui/panel.png', w: 40, h: 30, texW: 128, texH: 128, slice: [3, 5, 7, 9] }
+        ],
+        fg: [
+            { kind: 'text', x: 20, y: 12, text: 'FG', tint: 0xAABBCC }
+        ],
+        layers: [
+            {
+                kind: 'group', x: 0, y: 0,
+                items: [
+                    { kind: 'rect', w: 32, h: 16, fill: { mode: 'shader', shader: 'chaos_vortex', fallbackColor: 0x120024 } },
+                    { kind: 'sprite', tex: 'epiphy:textures/gui/icon.png', w: 16, h: 16, texW: 64, texH: 64, tint: 0xFF8844 }
+                ]
+            }
+        ]
+    })
+    assert.ok(fullAliasPkt != null)
+    assert.strictEqual(fullAliasPkt.surface, 'gui')
+    assert.strictEqual(fullAliasPkt.lifeMode, 'screen_session')
+    assert.strictEqual(fullAliasPkt.renderPriority, 140)
+    assert.strictEqual(fullAliasPkt.shakeMode, 'constant')
+    assert.ok(fullAliasPkt.replaceTextures['twilightforest:textures/gui/uncrafting.png'])
+    assert.strictEqual(fullAliasPkt.bgNodes[0].fill.mode, 'gradient')
+    assert.strictEqual(fullAliasPkt.bgNodes[0].fill.dir, 'v', 'gradient with color/colorEnd defaults to vertical')
+    assert.strictEqual(fullAliasPkt.bgNodes[0].fill.from, 0x112233)
+    assert.strictEqual(fullAliasPkt.bgNodes[0].fill.to, 0x445566)
+    assert.deepStrictEqual(Array.from(fullAliasPkt.bgNodes[1].slice), [3, 5, 7, 9], 'nine_slice.slice number[4] must be preserved')
+    assert.strictEqual(fullAliasPkt.bgNodes[1].tw, 128)
+    assert.strictEqual(fullAliasPkt.fgNodes[0].type, 'text')
+    assert.strictEqual(fullAliasPkt.fgNodes[0].color, 0xAABBCC)
+    assert.strictEqual(fullAliasPkt.nodes[0].type, 'group')
+    assert.strictEqual(fullAliasPkt.nodes[0].children[0].fill.shader, 'chaos_vortex')
+    assert.strictEqual(fullAliasPkt.nodes[0].children[1].tw, 64)
+
+    var wpPkt = Dm2.buildPacket({
+        carrier: 'world_plane',
+        at:      [10, 70, -5],
+        facing:  'fixed',
+        xray:    true,
+        layers:  [{ kind: 'text', text: 'HI' }]
+    })
+    assert.deepStrictEqual(Array.from(wpPkt.worldPos), [10, 70, -5])
+    assert.strictEqual(wpPkt.billboard, 'fixed')
+    assert.strictEqual(wpPkt.seeThrough, true)
+    assert.strictEqual(wpPkt.renderPriority, 0)
+
+    // 4. Client GUI renderPriority ordering, nine_slice[4], chaos_vortex -> end_portal, flush order & screen_session lifecycle
+    var cliNow2 = 50000
+    var cliWarns2 = []
+    var cliPaints2 = []
+    var fakeScrOpen = { title: '暮色拆解台', guiLeft: 10, guiTop: 10 }
+    var curActiveScr = fakeScrOpen
+    var cliSb2 = {
+        console: { info: function () {}, warn: function (m) { cliWarns2.push(String(m)) }, error: function (m) { throw new Error(m) }, debug: function () {}, log: function () {} },
+        Date: { now: function () { return cliNow2 } },
+        Client: { getCurrentScreen: function () { return curActiveScr } },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function (fn) { cliPaints2.push(fn) } },
+        NetworkEvents: { dataReceived: function () {} },
+        Java: {
+            loadClass: function (cls) {
+                if (cls === 'net.minecraft.client.renderer.RenderType') {
+                    return { endPortal: function () { return { _rt: 'end_portal' } } }
+                }
+                return null
+            }
+        },
+        Text: { of: function (s) { return { string: String(s), getVisualOrderText: function () { return String(s) } } } },
+        global: {}
+    }
+    cliSb2.globalThis = cliSb2
+    vm.createContext(cliSb2)
+    loadStartupBase(cliSb2)
+    runScriptIn(cliSb2, RENDERER_PATH)
+
+    var R2 = cliSb2.global.Epiphy2DRenderer
+    // High eviction priority (10) screen danmaku still has default renderPriority = 0 (< GUI default 100)
+    var scrPktHighPri = Dm2.buildPacket({ id: 'scr_high_pri', surface: 'screen', priority: 10, showInGui: true, layers: [{ kind: 'text', x: 0, y: 0, scale: 0.7, text: 'DANMAKU_TEXT' }] })
+    var guiPktDefPri  = Dm2.buildPacket({ id: 'gui_def_pri', surface: 'gui', lifeMode: 'screen_session', targetGui: { titleMatch: '拆解台' }, bg: [{ kind: 'nine_slice', tex: 'epiphy:textures/gui/panel.png', x: 0, y: 0, w: 60, h: 40, texW: 128, texH: 128, slice: [3, 5, 7, 9] }], layers: [{ kind: 'rect', x: 0, y: 0, w: 40, h: 20, fill: { mode: 'shader', shader: 'chaos_vortex' } }, { kind: 'text', x: 0, y: -8, scale: 0.65, text: 'BADGE_TAG' }, { kind: 'rect', x: 8, y: -8, w: 8, h: 6, color: 0xFFFFFFFF }] })
+    var scrPktTopPri  = Dm2.buildPacket({ id: 'scr_top_override', surface: 'screen', renderPriority: 300, showInGui: true, layers: [{ kind: 'rect', x: 0, y: 0, w: 12, h: 12, color: 0xFF00FF00 }] })
+
+    assert.strictEqual(scrPktHighPri.renderPriority, 0)
+    assert.strictEqual(guiPktDefPri.renderPriority, 100)
+    assert.strictEqual(scrPktTopPri.renderPriority, 300)
+
+    R2.push(scrPktTopPri)
+    R2.push(guiPktDefPri)
+    R2.push(scrPktHighPri)
+
+    var drawSeq = []
+    var ev2 = {
+        width: 854, height: 480, level: 'minecraft:overworld',
+        font: { width: function (s) { return String(s || '').length * 6 } },
+        graphics: {
+            flush: function () { drawSeq.push('graphics.flush') },
+            fill: function (rt, x0, y0, x1, y1) { drawSeq.push('shader:' + rt._rt) },
+            blit: function (rl, rx, ry, rw, rh) { drawSeq.push('blit:' + rw + 'x' + rh) }
+        },
+        push: function () {}, pop: function () {}, translate: function () {}, rotateDeg: function () {}, scale: function () {},
+        getMatrix: function () { return {} },
+        setPositionColorShader: function () {},
+        setPositionColorTextureShader: function () {},
+        setShaderTexture: function () {},
+        blend: function () {},
+        beginQuads: function () {},
+        end: function () {},
+        rectangle: function (x, y, z, w, h, col) { drawSeq.push('rect:' + Math.round(w) + 'x' + Math.round(h)) },
+        text: function (comp) { drawSeq.push('text:' + comp.string) }
+    }
+    cliPaints2[0](ev2)
+    var idxDanmaku = drawSeq.indexOf('text:DANMAKU_TEXT')
+    var idxShader  = drawSeq.indexOf('shader:end_portal')
+    var idxBadgeT  = drawSeq.indexOf('text:BADGE_TAG')
+    var idxFlushAfterBadgeT = drawSeq.indexOf('graphics.flush', idxBadgeT)
+    var idxMaskRect = drawSeq.indexOf('rect:8x6')
+    var idxTopRect  = drawSeq.indexOf('rect:12x12')
+
+    assert.ok(idxDanmaku >= 0 && idxShader > idxDanmaku, 'GUI (renderPriority=100) must render AFTER screen danmaku (renderPriority=0) even if danmaku priority=10')
+    assert.ok(idxBadgeT >= 0 && idxFlushAfterBadgeT > idxBadgeT && idxMaskRect > idxFlushAfterBadgeT, 'graphics.flush() must run after scaled text BADGE_TAG before rect mask 8x6 draws on top')
+    assert.ok(idxTopRect > idxMaskRect, 'explicit renderPriority=300 must override GUI default 100 and draw last (on top)')
+    assert.ok(drawSeq.some(function (s) { return s.indexOf('rect:3x5') === 0 || s.indexOf('blit:3x5') === 0 }), 'nine_slice with [3,5,7,9] must draw asymmetric 3x5 corner without NaN')
+    assert.ok(cliWarns2.some(function (w) { return w.indexOf('chaos_vortex') >= 0 }), 'chaos_vortex fallback to end_portal must emit warnOnce')
+
+    // Closing GUI automatically expires screen_session overlays
+    curActiveScr = null
+    cliNow2 += 50
+    cliPaints2[0](ev2)
+    assert.strictEqual(R2.list().some(function (it) { return it.slotId === 'gui_def_pri' }), false, 'screen_session GUI overlay must auto-expire when target GUI closes')
+})
+
 
 var passed = 0
 for (var i = 0; i < tests.length; i++) {

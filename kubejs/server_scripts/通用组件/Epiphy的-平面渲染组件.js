@@ -85,7 +85,7 @@
 
     var CONFIG = {
         debug:                 false,
-        warnDeprecatedAliases: false,
+        warnDeprecatedAliases: 'log',
         errorLogIntervalMs:    5000,
         avoidMaxRetries:       14,
         sizeMin:               0.2,
@@ -177,8 +177,11 @@
         wrap:           true,
         clamp:          true,
         maxWidth:       0,
-        maxGroup:       0,         // 同组同屏最大并发弹幕数（0 表示不额外限制）
-        showInGui:      false
+        maxGroup:            0,         // 同组同屏最大并发弹幕数（0 表示不额外限制）
+        showInGui:           false,
+        screenRenderPriority: 0,        // 独立画面层叠渲染优先级（默认高于低层、低于 GUI）
+        guiRenderPriority:    100,      // GUI 承载面默认渲染优先级（不被 screen 弹幕覆盖，可独立调整）
+        slotRenderPriority:   200       // 槽位承载面默认渲染优先级（位于 GUI 图层上方）
     }
 
     var PRIORITY_MAP = PROTO.PRIORITY_MAP
@@ -322,11 +325,31 @@
     function normalizeDanmakuConflictMode(raw, fallback) {
         var s = raw != null ? String(raw).trim().toLowerCase() : ''
         if (!s) return fallback || 'overlap'
-        if (s === 'overlap' || s === 'allow' || s === 'none' || s === 'independent') return 'overlap'
-        if (s === 'merge' || s === 'combine' || s === 'union' || s === 'throttle' || s === 'dedup') return 'merge'
-        if (s === 'nearest' || s === 'closest') return 'nearest'
-        if (s === 'first' || s === 'oldest') return 'first'
-        if (s === 'latest' || s === 'newest' || s === 'replace') return 'latest'
+        if (s === 'overlap') return 'overlap'
+        if (s === 'allow' || s === 'none' || s === 'independent') {
+            reportDeprecatedUsage('conflictMode:' + s, 'overlap', '旧版冲突仲裁枚举')
+            return 'overlap'
+        }
+        if (s === 'merge') return 'merge'
+        if (s === 'combine' || s === 'union' || s === 'throttle' || s === 'dedup') {
+            reportDeprecatedUsage('conflictMode:' + s, 'merge', '旧版冲突仲裁枚举')
+            return 'merge'
+        }
+        if (s === 'nearest') return 'nearest'
+        if (s === 'closest') {
+            reportDeprecatedUsage('conflictMode:' + s, 'nearest', '旧版冲突仲裁枚举')
+            return 'nearest'
+        }
+        if (s === 'first') return 'first'
+        if (s === 'oldest') {
+            reportDeprecatedUsage('conflictMode:' + s, 'first', '旧版冲突仲裁枚举')
+            return 'first'
+        }
+        if (s === 'latest') return 'latest'
+        if (s === 'newest' || s === 'replace') {
+            reportDeprecatedUsage('conflictMode:' + s, 'latest', '旧版冲突仲裁枚举')
+            return 'latest'
+        }
         if (s === 'stagger') return 'stagger'
         return fallback || 'overlap'
     }
@@ -400,8 +423,38 @@
         return true
     }
 
+    function shouldEmitDeprecationWarn() {
+        if (CONFIG.warnDeprecatedAliases === false) return false
+        if (CONFIG.warnDeprecatedAliases === true) return true
+        // 默认 'log' 模式：受 EpiphyLog（/epiphy debug log deprecations on | danmaku on）或 CONFIG.debug 统一管控
+        if (typeof LOGGER.isDeprecationEnabled === 'function' && LOGGER.isDeprecationEnabled()) return true
+        return Boolean(CONFIG.debug)
+    }
+
+    function reportDeprecatedUsage(depKey, canonKey, kindLabel) {
+        var hitKey = String(depKey || '')
+        deprecatedAliasHits[hitKey] = (deprecatedAliasHits[hitKey] || 0) + 1
+        if (!shouldEmitDeprecationWarn()) return
+        var logApi = (typeof global !== 'undefined' && global != null) ? global.EpiphyLog : null
+        var label = kindLabel || '旧版别名字段'
+        var msg = '检测到已进入淘汰列表的' + label + ' `' + depKey + '`（已自动映射为标准写法 `' + canonKey + '`），请迁移至标准写法。'
+        if (CONFIG.warnDeprecatedAliases !== true && logApi != null && typeof logApi.warnDeprecatedOnce === 'function') {
+            logApi.warnDeprecatedOnce('ScreenDanmaku', 'deprecatedAlias:' + hitKey, msg)
+        } else {
+            LOGGER.once('warn', 'deprecatedAlias:' + hitKey, msg)
+        }
+    }
+
     function parsePriority(val, defVal) {
-        return SPEC.parsePriority(val, defVal, { map: PRIORITY_MAP, min: 0, max: 10 })
+        return SPEC.parsePriority(val, defVal, {
+            map:           PRIORITY_MAP,
+            deprecatedMap: SPEC.DEPRECATED_PRIORITY_ALIASES,
+            min:           0,
+            max:           10,
+            onDeprecated:  function (depKey, canonName) {
+                reportDeprecatedUsage('priority:' + depKey, 'priority=' + canonName, '旧版优先级别名')
+            }
+        })
     }
 
     function parseFiniteNum(val, defVal) {
@@ -843,6 +896,9 @@
 
         var s = String(rawMode).trim().toLowerCase()
         if (s === 'per_char' || s === 'perchar' || s === 'char' || s === 'char_shake' || s === '逐字' || s === '逐字震动') {
+            if (s !== 'per_char') {
+                reportDeprecatedUsage('shakeMode:' + s, 'per_char', '旧版震动枚举')
+            }
             var charAmp = parseNonNegNum(opts.shakeAmp, DEFAULTS.charShakeAmp, 0.0)
             return {
                 jitter:       true,
@@ -858,15 +914,19 @@
             return { jitter: true, perCharShake: false, shakeMode: 'constant', shakeAmp: amp, shakeFreqMin: freqRange.minMs, shakeFreqMax: freqRange.maxMs, isRandom: false }
         }
         if (s === 'decay' || s === 'spawn' || s === 'impact') {
+            if (s !== 'decay') reportDeprecatedUsage('shakeMode:' + s, 'decay', '旧版震动枚举')
             return { jitter: true, perCharShake: false, shakeMode: 'decay', shakeAmp: amp, shakeFreqMin: freqRange.minMs, shakeFreqMax: freqRange.maxMs, isRandom: false }
         }
         if (s === 'fade_in' || s === 'fadein' || s === 'before_fade') {
+            if (s !== 'fade_in') reportDeprecatedUsage('shakeMode:' + s, 'fade_in', '旧版震动枚举')
             return { jitter: true, perCharShake: false, shakeMode: 'fade_in', shakeAmp: amp, shakeFreqMin: freqRange.minMs, shakeFreqMax: freqRange.maxMs, isRandom: false }
         }
         if (s === 'pulse' || s === 'wave') {
+            if (s !== 'pulse') reportDeprecatedUsage('shakeMode:' + s, 'pulse', '旧版震动枚举')
             return { jitter: true, perCharShake: false, shakeMode: 'pulse', shakeAmp: amp, shakeFreqMin: freqRange.minMs, shakeFreqMax: freqRange.maxMs, isRandom: false }
         }
         if (s === 'random' || s === 'rand') {
+            if (s !== 'random') reportDeprecatedUsage('shakeMode:' + s, 'random', '旧版震动枚举')
             var r = Math.random()
             if (r < 0.28) return { jitter: false, perCharShake: false, shakeMode: 'none', shakeAmp: 0.0, shakeFreqMin: freqRange.minMs, shakeFreqMax: freqRange.maxMs, isRandom: true }
             if (r < 0.48) return { jitter: true, perCharShake: false, shakeMode: 'decay', shakeAmp: amp, shakeFreqMin: freqRange.minMs, shakeFreqMax: freqRange.maxMs, isRandom: true }
@@ -888,7 +948,11 @@
             return DEFAULTS.fade
         }
         var s = String(raw).trim().toLowerCase()
-        return VALID_FADE_STYLES[s] || DEFAULTS.fade
+        var mapped = VALID_FADE_STYLES[s] || DEFAULTS.fade
+        if (VALID_FADE_STYLES[s] && s !== mapped) {
+            reportDeprecatedUsage('fadeStyle:' + s, mapped, '旧版淡出枚举')
+        }
+        return mapped
     }
 
     // 解析字体外圈与发光配置（默认关闭 'none'）
@@ -913,15 +977,20 @@
             var outStr = String(rawOut).trim().toLowerCase()
             var outBool = parseBool(rawOut, null)
             if (outBool === false || outStr === 'none' || outStr === 'off') {
+                if (outStr === 'off') reportDeprecatedUsage('outlineMode:off', 'none', '旧版外圈枚举')
                 mode = 'none'
             } else if (outStr === 'mui_stroke' || outStr === 'sdf_stroke') {
+                if (outStr === 'sdf_stroke') reportDeprecatedUsage('outlineMode:sdf_stroke', 'mui_stroke', '旧版外圈枚举')
                 mode = 'mui_stroke'
             } else if (outBool === true || outStr === 'stroke' || outStr === 'border' || outStr === 'outline' || outStr === '描边' || outStr === '外圈') {
+                if (outStr !== 'stroke') reportDeprecatedUsage('outlineMode:' + outStr, 'stroke', '旧版外圈枚举')
                 mode = 'stroke'
             } else if (outStr === 'glow' || outStr === 'halo' || outStr === '发光') {
+                if (outStr !== 'glow') reportDeprecatedUsage('outlineMode:' + outStr, 'glow', '旧版外圈枚举')
                 mode = 'glow'
             } else {
-                // 允许直接写 outline: '#000000' 或 outline: 'black'
+                // 淘汰列表：向 outline 直接传颜色码的隐式重载
+                reportDeprecatedUsage('outline:' + outStr, "outlineMode:'stroke', outlineColor:'" + rawOut + "'", '旧版外圈隐式重载')
                 mode = 'stroke'
                 if (colRaw == null) colRaw = rawOut
             }
@@ -970,10 +1039,16 @@
     // 不再预叠加 minTypeTicks + fadeTicks，由客户端 computeOverlaySchedule 单一权威计算。
     function resolveLifetime(opts) {
         var isContinuous = parseBool(opts.continuous, false) || parseBool(opts.sustained, false)
+        var isScreenSession = false
         var lmRaw = opts.lifeMode != null ? opts.lifeMode : opts.existMode
         if (lmRaw != null && String(lmRaw).trim() !== '') {
             var lm = String(lmRaw).trim().toLowerCase()
-            if (lm === 'active' || lm === 'continuous' || lm === 'sustain' || lm === 'hold' || lm === '持续' || parseBool(lmRaw, false)) {
+            if (lm === 'screen_session') {
+                isScreenSession = true
+            } else if (lm === 'active' || lm === 'continuous' || lm === 'sustain' || lm === 'hold' || lm === '持续' || parseBool(lmRaw, false)) {
+                if (lm !== 'active' && parseBool(lmRaw, null) !== true) {
+                    reportDeprecatedUsage('lifeMode:' + lm, 'active', '旧版生命周期枚举')
+                }
                 isContinuous = true
             }
         }
@@ -982,6 +1057,7 @@
         if (durRaw != null && String(durRaw).trim() !== '') {
             var ds = String(durRaw).trim().toLowerCase()
             if (ds === 'active' || ds === 'continuous' || ds === 'sustain' || ds === 'hold' || ds === '持续') {
+                reportDeprecatedUsage('duration=' + ds, "lifeMode:'active'", '旧版时长重载')
                 isContinuous = true
                 durRaw = null
             }
@@ -993,6 +1069,11 @@
         var customHoldRaw = opts.activeHold != null ? opts.activeHold : opts.holdTicks
         var parsedHold    = parseTicksOrSec(customHoldRaw)
 
+        if (isScreenSession) {
+            var sessHold = (parsedHold !== null) ? parsedHold : (hasCustomDur ? ticks : 7200)
+            var effSess  = Math.max(4, sessHold)
+            return { lifeMode: 'screen_session', stay: effSess, activeHold: effSess }
+        }
         if (isContinuous) {
             var hold = (parsedHold !== null)
                 ? parsedHold
@@ -1133,9 +1214,11 @@
             }
         }
         if (mode === 'gradient') {
-            var gDir = String(fill.dir || 'h').trim().toLowerCase() === 'v' ? 'v' : 'h'
-            var fromCol = sanitizeVarOrColor(fill.from !== undefined ? fill.from : rawNodeColor, 0xFF5555)
-            var toCol   = sanitizeVarOrColor(fill.to !== undefined ? fill.to : fromCol, 0xFFAA00)
+            var rawGDir = String(fill.dir || '').trim().toLowerCase()
+            var usedSchemaGradCols = (fill.color !== undefined || fill.colorEnd !== undefined) && fill.from === undefined && fill.to === undefined
+            var gDir = (rawGDir === 'v' || rawGDir === 'vertical' || (!rawGDir && usedSchemaGradCols)) ? 'v' : 'h'
+            var fromCol = sanitizeVarOrColor(fill.from !== undefined ? fill.from : (fill.color !== undefined ? fill.color : rawNodeColor), 0xFF5555)
+            var toCol   = sanitizeVarOrColor(fill.to !== undefined ? fill.to : (fill.colorEnd !== undefined ? fill.colorEnd : fromCol), 0xFFAA00)
             var gOut    = { mode: 'gradient', dir: gDir, from: fromCol, to: toCol }
             if (fill.mid !== undefined) {
                 gOut.mid    = sanitizeVarOrColor(fill.mid, toCol)
@@ -1146,20 +1229,33 @@
         if (mode === 'parallax') {
             var rawLayers = Array.isArray(fill.layers) ? fill.layers : []
             var layers = []
-            for (var li = 0; li < rawLayers.length && li < 8; li++) {
+            var texLayerCount = 0
+            for (var li = 0; li < rawLayers.length && layers.length < 6; li++) {
                 var rl = rawLayers[li]
                 if (rl == null || typeof rl !== 'object') continue
                 var kindStr = rl.kind ? String(rl.kind).trim().toLowerCase() : ''
                 if (kindStr && !VALID_PROC_KINDS[kindStr]) kindStr = 'texture'
+                var layerTexStr = String(rl.tex || rl.texture || '')
+                var hasTex = (layerTexStr.length > 0 || (fill.texture || fill.tex)) && (!kindStr || kindStr === 'texture')
+                if (hasTex) {
+                    if (texLayerCount >= 4) continue
+                    texLayerCount++
+                }
                 var layOut = {
-                    tex:      String(rl.tex || rl.texture || ''),
-                    speedX:   parseFiniteNum(rl.speedX, 0.0),
-                    speedY:   parseFiniteNum(rl.speedY, 0.0),
+                    tex:      layerTexStr,
+                    speedX:   parseFiniteNum(rl.speedX !== undefined ? rl.speedX : rl.scrollU, 0.0),
+                    speedY:   parseFiniteNum(rl.speedY !== undefined ? rl.speedY : rl.scrollV, 0.0),
                     scale:    Math.max(0.1, Math.min(16.0, parseFiniteNum(rl.scale, 1.0))),
                     rotSpeed: parseFiniteNum(rl.rotSpeed, 0.0),
                     alpha:    Math.max(0.0, Math.min(1.0, parseFiniteNum(rl.alpha, 1.0)))
                 }
                 if (kindStr) layOut.kind = kindStr
+                if (rl.u !== undefined) layOut.u = parseFiniteNum(rl.u, 0)
+                if (rl.v !== undefined) layOut.v = parseFiniteNum(rl.v, 0)
+                if (rl.uw !== undefined) layOut.uw = parseFiniteNum(rl.uw, 128)
+                if (rl.vh !== undefined) layOut.vh = parseFiniteNum(rl.vh, 64)
+                if (rl.parallax !== undefined) layOut.parallax = parseFiniteNum(rl.parallax, 0.0)
+                if (rl.pulseHz !== undefined) layOut.pulseHz = Math.max(0, Math.min(30, parseFiniteNum(rl.pulseHz, 0.0)))
                 if (rl.color !== undefined) layOut.color = sanitizeVarOrColor(rl.color, 0xFFFFFFFF)
                 if (rl.altColor !== undefined) layOut.altColor = sanitizeVarOrColor(rl.altColor, 0x80FFFFFF)
                 if (rl.from !== undefined) layOut.from = sanitizeVarOrColor(rl.from, 0x174A5A)
@@ -1184,6 +1280,9 @@
                 layers.push(layOut)
             }
             var pOut = { mode: 'parallax', layers: layers }
+            if (fill.texture || fill.tex) pOut.texture = String(fill.texture || fill.tex)
+            if (fill.texW !== undefined || fill.tw !== undefined) pOut.tw = Math.max(1, parseFiniteNum(fill.texW !== undefined ? fill.texW : fill.tw, 256))
+            if (fill.texH !== undefined || fill.th !== undefined) pOut.th = Math.max(1, parseFiniteNum(fill.texH !== undefined ? fill.texH : fill.th, 256))
             if (fill.maskTexture) pOut.maskTexture = String(fill.maskTexture)
             if (fill.bgColor !== undefined) pOut.bgColor = sanitizeVarOrColor(fill.bgColor, 0xFF0A0412)
             if (fill.bgAlpha !== undefined) pOut.bgAlpha = Math.max(0.0, Math.min(1.0, parseFiniteNum(fill.bgAlpha, 1.0)))
@@ -1192,9 +1291,11 @@
             return pOut
         }
         if (mode === 'shader') {
+            var shName = String(fill.shader || fill.shaderId || 'end_portal')
             var sOut = {
                 mode:          'shader',
-                shaderId:      String(fill.shaderId || 'end_portal'),
+                shader:        shName,
+                shaderId:      shName,
                 fallbackColor: sanitizeVarOrColor(fill.fallbackColor !== undefined ? fill.fallbackColor : rawNodeColor, 0x1A0033)
             }
             if (fill.maskTexture) sOut.maskTexture = String(fill.maskTexture)
@@ -1212,10 +1313,11 @@
         for (var i = 0; i < rawNodes.length; i++) {
             var rn = rawNodes[i]
             if (rn == null || typeof rn !== 'object') continue
-            var nType = String(rn.type || 'rect').trim().toLowerCase()
+            var nType = String(rn.type || rn.kind || 'rect').trim().toLowerCase()
             if (!VALID_NODE_TYPES[nType]) continue
             var rawAnc = String(rn.anchor || 'center').trim().toLowerCase()
             var anchor = VALID_ANCHORS[rawAnc] ? rawAnc : 'center'
+            var nodeColorVal = (rn.color !== undefined) ? rn.color : rn.tint
             var node = {
                 id:     rn.id != null ? String(rn.id) : ('n' + i),
                 type:   nType,
@@ -1242,8 +1344,8 @@
             if (nType === 'rect') {
                 node.w    = node.w !== undefined ? node.w : 64
                 node.h    = node.h !== undefined ? node.h : 8
-                node.fill = sanitizeRectFill(rn.fill, rn.color)
-                if (rn.color !== undefined) node.color = sanitizeVarOrColor(rn.color, 0xFF000000)
+                node.fill = sanitizeRectFill(rn.fill, nodeColorVal)
+                if (nodeColorVal !== undefined) node.color = sanitizeVarOrColor(nodeColorVal, 0xFF000000)
                 if (rn.borderColor !== undefined) node.borderColor = sanitizeVarOrColor(rn.borderColor, 0xFFFFFFFF)
                 if (rn.borderWidth !== undefined) node.borderWidth = Math.max(0, Math.min(16, parseFiniteNum(rn.borderWidth, 1)))
             } else if (nType === 'sprite') {
@@ -1254,22 +1356,32 @@
                 node.v       = parseFiniteNum(rn.v, 0)
                 node.uw      = parseFiniteNum(rn.uw, typeof node.w === 'number' ? node.w : 16)
                 node.vh      = parseFiniteNum(rn.vh, typeof node.h === 'number' ? node.h : 16)
-                node.tw      = Math.max(1, parseFiniteNum(rn.tw, 256))
-                node.th      = Math.max(1, parseFiniteNum(rn.th, 256))
-                if (rn.tint !== undefined || rn.color !== undefined) {
-                    node.tint = sanitizeVarOrColor(rn.tint !== undefined ? rn.tint : rn.color, 0xFFFFFFFF)
+                node.tw      = Math.max(1, parseFiniteNum(rn.texW !== undefined ? rn.texW : rn.tw, 256))
+                node.th      = Math.max(1, parseFiniteNum(rn.texH !== undefined ? rn.texH : rn.th, 256))
+                if (nodeColorVal !== undefined) {
+                    var normTint = sanitizeVarOrColor(nodeColorVal, 0xFFFFFFFF)
+                    node.color = normTint
+                    node.tint  = normTint
                 }
             } else if (nType === 'nine_slice') {
                 node.texture = String(rn.texture || rn.tex || '')
                 node.w       = node.w !== undefined ? node.w : 64
                 node.h       = node.h !== undefined ? node.h : 24
-                node.slice   = Math.max(1, Math.min(64, Math.round(parseFiniteNum(rn.slice, 4))))
+                if (Array.isArray(rn.slice) || (rn.slice != null && typeof rn.slice.length === 'number' && typeof rn.slice !== 'string')) {
+                    var sl0 = Math.max(1, Math.min(64, Math.round(parseFiniteNum(rn.slice[0], 4))))
+                    var sl1 = Math.max(1, Math.min(64, Math.round(parseFiniteNum(rn.slice[1], sl0))))
+                    var sl2 = Math.max(1, Math.min(64, Math.round(parseFiniteNum(rn.slice[2], sl0))))
+                    var sl3 = Math.max(1, Math.min(64, Math.round(parseFiniteNum(rn.slice[3], sl1))))
+                    node.slice = [sl0, sl1, sl2, sl3]
+                } else {
+                    node.slice = Math.max(1, Math.min(64, Math.round(parseFiniteNum(rn.slice, 4))))
+                }
                 node.u       = parseFiniteNum(rn.u, 0)
                 node.v       = parseFiniteNum(rn.v, 0)
                 node.uw      = parseFiniteNum(rn.uw, 16)
                 node.vh      = parseFiniteNum(rn.vh, 16)
-                node.tw      = Math.max(1, parseFiniteNum(rn.tw, 256))
-                node.th      = Math.max(1, parseFiniteNum(rn.th, 256))
+                node.tw      = Math.max(1, parseFiniteNum(rn.texW !== undefined ? rn.texW : rn.tw, 256))
+                node.th      = Math.max(1, parseFiniteNum(rn.texH !== undefined ? rn.texH : rn.th, 256))
             } else if (nType === 'item') {
                 node.item  = String(rn.item || 'minecraft:air')
                 node.count = Math.max(1, Math.round(parseFiniteNum(rn.count, 1)))
@@ -1277,7 +1389,7 @@
             } else if (nType === 'text') {
                 var rawNodeText = rn.text != null ? String(rn.text) : (rn.title != null ? String(rn.title) : '')
                 node.text   = truncateSafeProtoText(rawNodeText.replace(/&([0-9a-fk-or])/gi, '§$1').replace(/\\n/g, '\n'), SYSTEM_PACKET_LIMITS.maxTitleLen)
-                node.color  = sanitizeVarOrColor(rn.color !== undefined ? rn.color : DEFAULTS.color, DEFAULTS.color)
+                node.color  = sanitizeVarOrColor(nodeColorVal !== undefined ? nodeColorVal : DEFAULTS.color, DEFAULTS.color)
                 node.shadow = rn.shadow !== undefined ? parseBool(rn.shadow, true) : true
                 if (rn.outlineMode || rn.outline) node.outlineMode = String(rn.outlineMode || rn.outline).toLowerCase()
                 if (rn.outlineColor !== undefined) node.outlineColor = parseColor(rn.outlineColor, -1).color
@@ -1286,7 +1398,8 @@
                 if (rn.charMs !== undefined) node.charMs = Math.max(8, Math.min(SYSTEM_PACKET_LIMITS.maxCharMs, Math.round(parseFiniteNum(rn.charMs, 30))))
                 if (rn.perCharShake !== undefined) node.perCharShake = parseBool(rn.perCharShake, false)
             } else if (nType === 'group') {
-                node.children = sanitizeNodesList(rn.children, depth + 1)
+                var rawKids = Array.isArray(rn.children) ? rn.children : rn.items
+                node.children = sanitizeNodesList(rawKids, depth + 1)
             }
             out.push(node)
         }
@@ -1356,10 +1469,7 @@
         }
         var opts = (SPEC && typeof SPEC.normalizeDanmakuAliases === 'function')
             ? SPEC.normalizeDanmakuAliases(rawOpts, function (depKey, canonKey) {
-                deprecatedAliasHits[depKey] = (deprecatedAliasHits[depKey] || 0) + 1
-                if (CONFIG.warnDeprecatedAliases === true) {
-                    LOGGER.once('warn', 'deprecatedAlias:' + depKey, '检测到已进入淘汰列表的旧版别名字段 `' + depKey + '`（已自动映射为标准字段 `' + canonKey + '`），请迁移至标准字段或唯一官方别名。')
-                }
+                reportDeprecatedUsage(depKey, canonKey, '旧版别名字段')
             })
             : rawOpts
         var surfaceStr = String(opts.surface || 'screen').trim().toLowerCase()
@@ -1483,12 +1593,22 @@
         var wrapVal      = parseBool(opts.wrap, DEFAULTS.wrap)
         var clampVal     = parseBool(opts.clamp, DEFAULTS.clamp)
         var shadowVal    = parseBool(opts.shadow, DEFAULTS.shadow)
-        var showGuiVal   = parseBool(opts.showInGui, DEFAULTS.showInGui)
+        var showGuiVal   = parseBool(opts.showInGui, (surfaceStr === 'gui' || surfaceStr === 'slot') ? true : DEFAULTS.showInGui)
         var maxGroupVal  = Math.round(parseNonNegNum(pick(opts, ['maxGroup', 'maxGroupSize', 'groupLimit', 'maxConcurrent'], null), DEFAULTS.maxGroup, 0))
         var fadeOutVal   = parseTicksOrSec(opts.fadeOut)
         if (fadeOutVal === null) fadeOutVal = DEFAULTS.fadeOut
         fadeOutVal       = Math.min(SYSTEM_PACKET_LIMITS.maxFadeOutTicks, fadeOutVal)
         var baseShift    = parseNonNegNum(opts.charShakeShift, DEFAULTS.charShakeShift, 0.0)
+
+        var defRenderPri = (surfaceStr === 'slot')
+            ? parseFiniteNum(DEFAULTS.slotRenderPriority, 200)
+            : ((surfaceStr === 'gui')
+                ? parseFiniteNum(DEFAULTS.guiRenderPriority, 100)
+                : parseFiniteNum(DEFAULTS.screenRenderPriority, 0))
+        var rawRenderPri = pick(opts, ['renderPriority', 'zIndex'], null)
+        var renderPri    = (rawRenderPri !== null && rawRenderPri !== undefined && rawRenderPri !== '')
+            ? Math.max(-10000, Math.min(10000, parseFiniteNum(rawRenderPri, defRenderPri)))
+            : defRenderPri
 
         var pTier = (opts._sourceTier === 'player' || opts.tier === 'player' || nsStr.indexOf('u:') === 0) ? 'player' : 'system'
 
@@ -1505,10 +1625,13 @@
             normalizeKey:        normalizeKey,
             lifeMode:            lifeInfo.lifeMode,
             priority:            priority,
+            renderPriority:      renderPri,
             title:               titleStr,
             sub:                 subStr,
             rx:                  posInfo.rx,
             ry:                  posInfo.ry,
+            ox:                  opts.ox != null ? Math.max(-4096, Math.min(4096, Math.round(parseFiniteNum(opts.ox, 0)))) : 0,
+            oy:                  opts.oy != null ? Math.max(-4096, Math.min(4096, Math.round(parseFiniteNum(opts.oy, 0)))) : 0,
             movable:             allowMove,
             angle:               angleVal,
             scale:               sizeInfo.scale,
@@ -1595,6 +1718,13 @@
                 if (opts.slotMatch.tag != null) built.slotMatch.tag = String(opts.slotMatch.tag)
                 if (opts.slotMatch.slotIndex != null) built.slotMatch.slotIndex = Math.round(parseFiniteNum(opts.slotMatch.slotIndex, -1))
             }
+        } else if (surfaceStr === 'world_plane') {
+            var wp = opts.worldPos !== undefined ? opts.worldPos : opts.at
+            if (Array.isArray(wp) && wp.length >= 3) {
+                built.worldPos = [parseFiniteNum(wp[0], 0), parseFiniteNum(wp[1], 64), parseFiniteNum(wp[2], 0)]
+            }
+            built.billboard = String(opts.billboard !== undefined ? opts.billboard : (opts.facing || 'vertical')).toLowerCase()
+            built.seeThrough = parseBool(opts.seeThrough !== undefined ? opts.seeThrough : opts.xray, false)
         }
 
         if (hasDeclarativeV6 && SPEC && typeof SPEC.computeOverlayCost === 'function') {

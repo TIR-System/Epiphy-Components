@@ -241,6 +241,16 @@
                 emitFallbackConsole(level || 'warn', String(msg));
                 return true;
             },
+            isDeprecationEnabled: function () {
+                var logApi = resolveEpiphyLog();
+                if (logApi && typeof logApi.isDeprecationWarningsEnabled === 'function') {
+                    return Boolean(logApi.isDeprecationWarningsEnabled(mod));
+                }
+                if (logApi && typeof logApi.isDebug === 'function') {
+                    return Boolean(logApi.isDebug(mod) || logApi.isDebug('deprecations') || logApi.isDebug('*'));
+                }
+                return false;
+            },
             getCatchCount: function () {
                 return localCatches;
             }

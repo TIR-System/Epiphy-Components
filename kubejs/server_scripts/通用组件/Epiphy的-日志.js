@@ -30,6 +30,7 @@
     var playerBuckets       = {} // '<module>|<level>|<tag>|<playerKey>' -> { lastAt, suppressed }
     var onceKeys            = {} // '<key>' -> true
     var debugModules        = {} // '<module>' or '*' -> boolean
+    var deprecationWarnEnabled = false
 
     function evictFirstKeyIfFull(mapObj) {
         var keys = Object.keys(mapObj)
@@ -445,6 +446,24 @@
         return Boolean(mod && debugModules[mod] === true)
     }
 
+    function setDeprecationWarnings(enabled) {
+        deprecationWarnEnabled = Boolean(enabled)
+        return deprecationWarnEnabled
+    }
+
+    function isDeprecationWarningsEnabled(moduleName) {
+        if (deprecationWarnEnabled === true) return true
+        if (isDebug('deprecations')) return true
+        if (moduleName && isDebug(moduleName)) return true
+        return false
+    }
+
+    function warnDeprecatedOnce(moduleName, depKey, msg) {
+        if (!isDeprecationWarningsEnabled(moduleName)) return false
+        var mod = normKey(moduleName, 'Epiphy')
+        return once('warn', depKey, '[' + mod + ' 淘汰警告] ' + String(msg))
+    }
+
     function debug(moduleName, tag, msg) {
         if (!isDebug(moduleName)) return false
         var mod    = normKey(moduleName, 'Epiphy')
@@ -499,14 +518,17 @@
         error:               error,
         info:                info,
         catchWarn:           catchWarn,
-        once:                once,
-        setDebug:            setDebug,
-        isDebug:             isDebug,
-        debug:               debug,
-        reset:               reset,
-        configureFileSink:   configureFileSink,
-        getFileSinkConfig:   getFileSinkConfig,
-        getStats:            getStats
+        once:                         once,
+        setDeprecationWarnings:       setDeprecationWarnings,
+        isDeprecationWarningsEnabled: isDeprecationWarningsEnabled,
+        warnDeprecatedOnce:           warnDeprecatedOnce,
+        setDebug:                     setDebug,
+        isDebug:                      isDebug,
+        debug:                        debug,
+        reset:                        reset,
+        configureFileSink:            configureFileSink,
+        getFileSinkConfig:            getFileSinkConfig,
+        getStats:                     getStats
     }
 
     global.EpiphyLog    = api

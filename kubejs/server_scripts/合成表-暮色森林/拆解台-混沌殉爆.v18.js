@@ -821,7 +821,7 @@
         var c          = (cfg != null && typeof cfg === 'object') ? cfg : {}
         var pVal       = Math.max(0.0, Math.min(1.0, Number(c.progress) || 0.0))
         var subPVal    = Math.max(0.0, Math.min(1.0, c.subProgress !== undefined ? Number(c.subProgress) : pVal))
-        var barW       = Math.max(120, Math.min(360, Math.round(Number(c.barWidth) || 210)))
+        var barW       = Math.max(120, Math.min(360, Math.round(Number(c.barWidth) || 236)))
         var barH       = Math.max(6, Math.min(24, Math.round(Number(c.barHeight) || 10)))
         var barX0      = -Math.round(barW * 0.5)
         var barY0      = -Math.round(barH * 0.5)
@@ -851,6 +851,7 @@
         var rightVal   = String(c.rightVal || (Math.round(pVal * 100) + '.0%'))
         var rightSub   = String(c.rightSub || 'ACTIVE')
         var footRight  = String(c.footRight || 'PHASE_LOCK // STABLE')
+        var impulseEvt = String(c.impulseEvent !== undefined ? c.impulseEvent : efTagStr)
         var pctStr     = Math.round(pVal * 100) + '%'
 
         // 定稿方案 α：【终末地工业科研拓扑 × 搁浅 T-Pin 吊线 × 阶梯破框 × 差速星空波纹视差】
@@ -864,19 +865,20 @@
             { id: 'badge_tag',   type: 'text', anchor: 'top_left', x: badgeX, y: badgeY - 8, scale: 0.65, text: '$badgeCode', color: accentCol, shadow: false },
             { id: 'badge_mask',  type: 'rect', anchor: 'top_left', x: badgeX + 8, y: badgeY - 8, w: 8, h: 6, fill: { mode: 'solid', color: pureCol }, bind: { stepHz: 9, seed: 41, jitterX: 5, jitterW: 2 } },
 
-            // 2. 主区阶梯底衬 + 底部 4 层外部差速流动水面波纹场 + 上沿 13 段不规则阶梯动态外框 + 下沿落差折线轨
-            { id: 'panel_bg',         type: 'rect', anchor: 'top_left', x: barX0 - 4, y: barY0 - 15, w: barW + 14, h: barH + 26, fill: { mode: 'solid', color: plateBgCol } },
+            // 2. 主区阶梯底衬（延伸包覆波纹、表尾及右端读数区） + 底部 4 层外部差速流动水面波纹场 + 上沿 13 段不规则阶梯动态外框 + 下沿落差折线轨
+            { id: 'panel_bg',         type: 'rect', anchor: 'top_left', x: barX0 - 4, y: barY0 - 16, w: barW + 14, h: barH + 40, fill: { mode: 'solid', color: plateBgCol } },
+            { id: 'panel_bg_right',   type: 'rect', anchor: 'top_left', x: barX0 + barW + 6, y: barY0 - 4, w: 58, h: barH + 26, fill: { mode: 'solid', color: plateBgCol } },
             { id: 'under_ripples',    type: 'rect', anchor: 'top_left', x: barX0, y: barY0 + barH + 5, w: barW, h: 11, fill: { mode: 'parallax', bgAlpha: 0, layers: [{ kind: 'ripples', rows: 4, rowGap: 2.5, offsetY: 0.5, segments: 6, baseLen: 22, ampLen: 13, speedX: 26, thickness: 1.0, color: mosaicBCol, altColor: mosaicCCol, alpha: 0.85 }] } },
             { id: 'frame_top_steps',  type: 'rect', anchor: 'top_left', x: barX0, y: barY0 - 4, w: barW, h: 4, fill: { mode: 'parallax', bgAlpha: 0, layers: [{ kind: 'steps', count: 13, stepHz: 9, risers: true, thickness: 1.2, color: accentCol, altColor: mosaicBCol, alpha: 0.92 }] } },
             { id: 'frame_bot_left',   type: 'rect', anchor: 'top_left', x: barX0 - 4, y: barY0 + barH + 2, w: splitW + 4, h: 1, fill: { mode: 'solid', color: 0x70FFFFFF } },
             { id: 'frame_bot_right',  type: 'rect', anchor: 'top_left', x: barX0 + splitW, y: barY0 + barH + 4, w: barW - splitW + 10, h: 1.2, fill: { mode: 'solid', color: accentCol } },
 
-            // 3. 顶栏《终末地》反色工业铭牌 + 状态指示灯 + 主遥测标题
-            { id: 'ef_tag_plate', type: 'rect', anchor: 'top_left', x: barX0, y: barY0 - 14, w: 46, h: 8, fill: { mode: 'solid', color: warnCol } },
+            // 3. 顶栏《终末地》反色工业铭牌（加宽至 56px 包容全部编号） + 状态指示灯 + 主遥测标题
+            { id: 'ef_tag_plate', type: 'rect', anchor: 'top_left', x: barX0, y: barY0 - 14, w: 56, h: 8, fill: { mode: 'solid', color: warnCol } },
             { id: 'ef_tag_text',  type: 'text', anchor: 'top_left', x: barX0 + 3, y: barY0 - 13, scale: 0.65, text: '$efTag', color: 0x090C10, shadow: false },
-            { id: 'ef_pip_1',     type: 'rect', anchor: 'top_left', x: barX0 + 49, y: barY0 - 12, w: 3, h: 5, fill: { mode: 'solid', color: accentCol } },
-            { id: 'ef_pip_2',     type: 'rect', anchor: 'top_left', x: barX0 + 54, y: barY0 - 12, w: 3, h: 5, fill: { mode: 'solid', color: warnCol }, bind: { stepHz: 4, seed: 19, jitterH: 1 } },
-            { id: 'title',        type: 'text', anchor: 'top_left', x: barX0 + 60, y: barY0 - 13, scale: 0.78, text: '$title', color: pureCol, shadow: true },
+            { id: 'ef_pip_1',     type: 'rect', anchor: 'top_left', x: barX0 + 59, y: barY0 - 12, w: 3, h: 5, fill: { mode: 'solid', color: accentCol } },
+            { id: 'ef_pip_2',     type: 'rect', anchor: 'top_left', x: barX0 + 64, y: barY0 - 12, w: 3, h: 5, fill: { mode: 'solid', color: warnCol }, bind: { stepHz: 4, seed: 19, jitterH: 1 } },
+            { id: 'title',        type: 'text', anchor: 'top_left', x: barX0 + 70, y: barY0 - 13, scale: 0.78, text: '$title', color: pureCol, shadow: true },
 
             // 4. 进度槽核心：暗腔 + trail 拖影轨 + 4 层程序化视差内胆 (三色渐变 + 装甲暗肋 + 内部流动波纹 + 星空代码粒子 + 前缘辉光) + 副轨
             { id: 'bar_bg',       type: 'rect', anchor: 'top_left', x: barX0, y: barY0, w: barW, h: barH, fill: { mode: 'solid', color: 0xEE04070B } },
@@ -916,8 +918,8 @@
             { id: 'right_pin_box',  type: 'rect', anchor: 'top_left',  x: barX0 + barW + 8,  y: barY0,     w: 7, h: 7,  fill: { mode: 'outline', color: accentCol, thickness: 1 } },
             { id: 'right_pin_line', type: 'rect', anchor: 'top_left',  x: barX0 + barW + 11, y: barY0 + 7, w: 1, h: 21, fill: { mode: 'solid', color: accentCol } },
             { id: 'right_readout',  type: 'text', anchor: 'top_left',  x: barX0 + barW + 16, y: barY0 - 2, scale: 0.78, text: '$rightMetric', color: pureCol, shadow: true },
-            { id: 'sub',            type: 'text', anchor: 'top_left',  x: barX0,             y: barY0 + barH + 17, scale: 0.72, text: '$sub', color: 0xD0E4EC, shadow: true },
-            { id: 'footer_right',   type: 'text', anchor: 'top_right', x: barX0 + barW,      y: barY0 + barH + 17, scale: 0.72, text: '$footRight', color: accentCol, shadow: true }
+            { id: 'sub',            type: 'text', anchor: 'top_left',  x: barX0,             y: barY0 + barH + 17, scale: 0.70, text: '$sub', color: 0xD0E4EC, shadow: true },
+            { id: 'footer_right',   type: 'text', anchor: 'top_right', x: barX0 + barW,      y: barY0 + barH + 17, scale: 0.70, text: '$footRight', color: accentCol, shadow: true }
         ]
 
         var panelCfg = {}
@@ -936,6 +938,7 @@
             progressTrail: pVal,
             subProgress:   subPVal,
             impulse:       0.0,
+            impulseEvent:  impulseEvt,
             pctText:       pctStr,
             efTag:         efTagStr,
             badgeCode:     badgeCode,
@@ -953,7 +956,7 @@
             progress:      { mode: 'lerp', speed: 10.0, easing: 'out_cubic' },
             progressTrail: { mode: 'trail', target: '$progress', delayMs: 220, speed: 4.5 },
             subProgress:   { mode: 'lerp', speed: 12.0, easing: 'out_cubic' },
-            impulse:       { mode: 'impulse', onChange: '$progress', peak: 1.0, decayMs: 260 }
+            impulse:       { mode: 'impulse', onChange: '$impulseEvent', peak: 1.0, decayMs: 280 }
         }
         return panelCfg
     }
@@ -1746,7 +1749,7 @@
                 priority:     'active',
                 progress:     pFinal,
                 subProgress:  subLock,
-                barWidth:     212,
+                barWidth:     236,
                 barHeight:    10,
                 barColorFrom: 0x4A0714,
                 barColorMid:  0xC62828,
@@ -1760,15 +1763,17 @@
                 mosaicBColor: 0x70FF5252,
                 mosaicCColor: 0x3DC62828,
                 efTag:        job.fatalTriggered ? 'HZ-LCK // T-0' : 'CT-FAIL // T-0',
+                impulseEvent: job.fatalTriggered ? 'HZ_LCK' : 'CT_FAIL',
                 badgeCode:    'CRITICAL',
                 badgeItem:    'epiphy:ultra_uncrafting_instability_5',
                 rightVal:     'T-' + (remainTicks / 20).toFixed(1) + 's',
                 rightSub:     Math.round(pFinal * 100) + '.0% / 10s',
-                footRight:    'HORIZON_LOCK // 100.0%',
+                footRight:    'HORIZON // 100%',
                 text:         lockTag,
-                sub:          '§7核心 (' + job.x + ', ' + job.y + ', ' + job.z + ') // 奇点梯度锁死',
-                pos:          [0.24, 0.13],
-                size:         0.76,
+                sub:          '§7(' + job.x + ',' + job.y + ',' + job.z + ') §8// §c奇点梯度锁死',
+                tracks:       { impulse: { mode: 'impulse', onChange: '$impulseEvent', peak: 1.0, decayMs: 280 } },
+                pos:          [0.26, 0.13],
+                size:         0.74,
                 tilt:         0,
                 shakeMode:    'none',
                 shakeAmp:     0.0,
@@ -2213,7 +2218,7 @@
                 priority:     'active',
                 progress:     p,
                 subProgress:  stageSubProg,
-                barWidth:     210,
+                barWidth:     236,
                 barHeight:    10,
                 barColorFrom: isCritStage ? 0x5D1900 : 0x174A5A,
                 barColorMid:  meta.hex,
@@ -2227,15 +2232,17 @@
                 mosaicBColor: isCritStage ? 0x66FFD54F : 0x664DD0E1,
                 mosaicCColor: isCritStage ? 0x38FF8F00 : 0x3826A69A,
                 efTag:        'EF-TLM // S' + (stageIdx + 1),
+                impulseEvent: 'STAGE_' + (stageIdx + 1),
                 badgeCode:    isCritStage ? 'UNSTABLE' : 'DETECTED',
                 badgeItem:    'epiphy:ultra_uncrafting_instability_' + (stageIdx + 1),
                 rightVal:     pct + '.0%',
                 rightSub:     'T-' + remainSec + 's',
-                footRight:    'R_ESCAPE // ' + (16 + stageIdx * 16) + '.0m',
+                footRight:    'R_ESCAPE // ' + (16 + stageIdx * 16) + 'm',
                 text:         meta.colorCode + '§l堆芯约束失稳遥测 §f[S' + (stageIdx + 1) + '/5 · ' + meta.tag + ']',
-                sub:          '§7核心 (' + job.x + ', ' + job.y + ', ' + job.z + ') §8// §e投掷【终望珍珠】可吞噬停机',
-                pos:          [0.24, 0.13],
-                size:         0.75,
+                sub:          '§7(' + job.x + ',' + job.y + ',' + job.z + ') §8// §e终望珍珠可停机',
+                tracks:       { impulse: { mode: 'impulse', onChange: '$impulseEvent', peak: 1.0, decayMs: 280 } },
+                pos:          [0.26, 0.13],
+                size:         0.74,
                 tilt:         0,
                 shakeMode:    'none',
                 shakeAmp:     0.0,
@@ -2913,6 +2920,10 @@
 
         // 1. 左上角【300m 球状湮灭波前推进遥测面板】（定稿方案 α：终末地工业科研拓扑 × 搁浅吊线 × 寰宇星空波纹视差）
         var waveSlotId = 'annihilation_hud_' + job.x + '_' + job.y + '_' + job.z
+        if (!job._coreTelemetryClosed) {
+            job._coreTelemetryClosed = true
+            deactivateTelemetryNear(job.level, job.x, job.y, job.z, alertRange, 'core_telemetry_' + job.x + '_' + job.y + '_' + job.z, 4)
+        }
         if (shownR < maxR && job.t % 6 === 0) {
             var shellSliceProg = Math.min(1.0, ((shownR % 30) / 30))
             var stratumIdx     = Math.max(1, Math.min(30, Math.ceil(p * 30)))
@@ -2924,7 +2935,7 @@
                 priority:     'active',
                 progress:     p,
                 subProgress:  shellSliceProg,
-                barWidth:     216,
+                barWidth:     236,
                 barHeight:    10,
                 barColorFrom: 0x240B4D,
                 barColorMid:  0x651FFF,
@@ -2938,15 +2949,17 @@
                 mosaicBColor: 0x7018FFFF,
                 mosaicCColor: 0x457C4DFF,
                 efTag:        'AW-300 // R+',
+                impulseEvent: 'STRATUM_' + stratumIdx,
                 badgeCode:    'WAVEFRONT',
                 badgeItem:    'minecraft:ender_eye',
                 rightVal:     pct + '.0%',
                 rightSub:     shownR + ' / ' + maxR + 'm',
                 footRight:    'STRATUM // #' + stratumIdx + '/30',
-                text:         '§d§l球状湮灭波前推进遥测 §f[径向剥离 R = ' + shownR + ' / ' + maxR + 'm]',
-                sub:          '§7爆心 (' + job.x + ', ' + job.y + ', ' + job.z + ') §8// §b流体与岩层正在同步汽化',
-                pos:          [0.24, 0.13],
-                size:         0.76,
+                text:         '§d§l球状湮灭波前推进遥测 §f[R = ' + shownR + ' / ' + maxR + 'm]',
+                sub:          '§7(' + job.x + ',' + job.y + ',' + job.z + ') §8// §b物质层同步汽化',
+                tracks:       { impulse: { mode: 'impulse', onChange: '$impulseEvent', peak: 1.0, decayMs: 280 } },
+                pos:          [0.26, 0.13],
+                size:         0.74,
                 tilt:         0,
                 shakeMode:    'none',
                 shakeAmp:     0.0,

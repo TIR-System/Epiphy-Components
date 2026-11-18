@@ -17,12 +17,41 @@
     // 1. 共享协议常量与版本契约 (global.EpiphyProtocol)
     // ------------------------------------------------------------------------
     var PRIORITY_MAP = {
-        low: 1, minor: 1, '低': 1, '次要': 1,
-        normal: 2, medium: 2, default: 2, '中': 2, '普通': 2,
-        high: 3, major: 3, important: 3, '高': 3, '重要': 3,
-        critical: 4, fatal: 4, urgent: 4, boss: 4, '极高': 4, '致命': 4,
-        active: 5, sustain: 5, '持续': 5
+        low:      1,
+        normal:   2,
+        high:     3,
+        critical: 4,
+        active:   5
     };
+
+    var PRIORITY_CANON_NAMES = Object.freeze({
+        1: 'low',
+        2: 'normal',
+        3: 'high',
+        4: 'critical',
+        5: 'active'
+    });
+
+    var DEPRECATED_PRIORITY_ALIASES = Object.freeze({
+        minor:     1,
+        '低':      1,
+        '次要':    1,
+        medium:    2,
+        'default': 2,
+        '中':      2,
+        '普通':    2,
+        major:     3,
+        important: 3,
+        '高':      3,
+        '重要':    3,
+        fatal:     4,
+        urgent:    4,
+        boss:      4,
+        '极高':    4,
+        '致命':    4,
+        sustain:   5,
+        '持续':    5
+    });
 
     var HUD_FORBIDDEN_PRESETS = {
         minimap:   Object.freeze({ x: 0.74, y: 0.00, w: 0.26, h: 0.28 }),
@@ -71,8 +100,10 @@
         AUDIO_CHANNEL:         AUDIO_CHANNEL,
         AUDIO_PROTO_VERSION:   AUDIO_PROTO_VERSION,
         AUDIO_SEMVER:          AUDIO_SEMVER,
-        PRIORITY_MAP:          PRIORITY_MAP,
-        HUD_FORBIDDEN_PRESETS: HUD_FORBIDDEN_PRESETS,
+        PRIORITY_MAP:                PRIORITY_MAP,
+        PRIORITY_CANON_NAMES:        PRIORITY_CANON_NAMES,
+        DEPRECATED_PRIORITY_ALIASES: DEPRECATED_PRIORITY_ALIASES,
+        HUD_FORBIDDEN_PRESETS:       HUD_FORBIDDEN_PRESETS,
         isProtoCompatible:     isProtoCompatible,
         registerPriorityAlias: registerPriorityAlias,
         registerHudPreset:     registerHudPreset
@@ -263,6 +294,7 @@
         var def = (defVal !== undefined && defVal !== null) ? defVal : 0;
         if (raw === null || raw === undefined || raw === '') return def;
         var map = (opts && opts.map) ? opts.map : PRIORITY_MAP;
+        var depMap = (opts && opts.deprecatedMap !== undefined) ? opts.deprecatedMap : DEPRECATED_PRIORITY_ALIASES;
         var lo = (opts && opts.min !== undefined && opts.min !== null) ? opts.min : 0;
         var hi = (opts && opts.max !== undefined && opts.max !== null) ? opts.max : 10;
         var doRound = !(opts && opts.round === false);
@@ -272,6 +304,13 @@
             if (!s) return def;
             if (map && hasOwn(map, s)) {
                 return clampNum(map[s], lo, hi, def);
+            }
+            if (depMap && hasOwn(depMap, s)) {
+                var depLv = clampNum(depMap[s], lo, hi, def);
+                if (opts && typeof opts.onDeprecated === 'function') {
+                    opts.onDeprecated(s, PRIORITY_CANON_NAMES[depLv] || String(depLv), depLv);
+                }
+                return depLv;
             }
         }
         var n = parseFiniteNum(raw);
@@ -778,17 +817,35 @@
     // 6. 平面渲染协议 v6 别名收敛表、配额预算与 v5 -> v6 确定性适配器
     // ------------------------------------------------------------------------
     var OFFICIAL_DANMAKU_ALIASES = Object.freeze({
-        text:      'title',
-        subtitle:  'sub',
-        id:        'slotId',
-        size:      'scale',
-        tilt:      'angle',
-        duration:  'stay',
-        hold:      'activeHold',
-        fade:      'fadeStyle',
-        fadeTicks: 'fadeOut',
-        outline:   'outlineMode',
-        ns:        'namespace'
+        act:        'action',
+        carrier:    'surface',
+        layers:     'nodes',
+        texMap:     'replaceTextures',
+        bg:         'bgNodes',
+        fg:         'fgNodes',
+        at:         'worldPos',
+        facing:     'billboard',
+        xray:       'seeThrough',
+        shake:      'shakeMode',
+        zIndex:     'renderPriority',
+        text:       'title',
+        subtitle:   'sub',
+        id:         'slotId',
+        size:       'scale',
+        tilt:       'angle',
+        duration:   'stay',
+        hold:       'activeHold',
+        fade:       'fadeStyle',
+        fadeTicks:  'fadeOut',
+        outline:    'outlineMode',
+        ns:         'namespace'
+    });
+
+    var OFFICIAL_NODE_ALIASES = Object.freeze({
+        kind:  'type',
+        tint:  'color',
+        tex:   'texture',
+        items: 'children'
     });
 
     var DEPRECATED_DANMAKU_ALIASES = Object.freeze({
@@ -798,53 +855,132 @@
         subText:        'sub',
         desc:           'sub',
         slot:           'slotId',
+        position:       'pos',
+        preset:         'pos',
         fontSize:       'scale',
         rot:            'angle',
         rotation:       'angle',
         deg:            'angle',
         angleDeg:       'angle',
+        existTime:      'stay',
+        existMode:      'lifeMode',
+        life:           'lifeMode',
+        continuous:     'lifeMode',
+        sustained:      'lifeMode',
         holdTicks:      'activeHold',
         holdSec:        'activeHold',
         fadeSec:        'fadeOut',
         fadeMode:       'fadeStyle',
         spacing:        'letterSpacing',
         charSpacing:    'letterSpacing',
+        byChar:         'typewriter',
         stroke:         'outlineMode',
         glow:           'outlineMode',
+        glowColor:      'outlineColor',
+        glowWidth:      'outlineWidth',
         importance:     'priority',
         move:           'movable',
         updatePos:      'movable',
         resetAnimation: 'restart',
         maxGroupSize:   'maxGroup',
+        groupLimit:     'maxGroup',
+        maxConcurrent:  'maxGroup',
         charShake:      'perCharShake',
         randShake:      'randomShake',
         randColor:      'randomColor',
-        randScale:      'randomScale'
+        randScale:      'randomScale',
+        sourceConflict: 'conflictMode',
+        overlapMode:    'conflictMode'
     });
 
+    function normalizeDanmakuNode(rawNode, depth) {
+        if (!isObjectLike(rawNode) || (depth || 0) > 6) return rawNode;
+        var out = {};
+        var k;
+        for (k in rawNode) {
+            if (hasOwn(rawNode, k)) {
+                out[k] = rawNode[k];
+            }
+        }
+        for (k in OFFICIAL_NODE_ALIASES) {
+            if (hasOwn(OFFICIAL_NODE_ALIASES, k) && out[k] !== undefined) {
+                var canon = OFFICIAL_NODE_ALIASES[k];
+                if (out[canon] === undefined) {
+                    out[canon] = out[k];
+                }
+            }
+        }
+        if (out.texW !== undefined && out.tw === undefined) out.tw = out.texW;
+        if (out.texH !== undefined && out.th === undefined) out.th = out.texH;
+        if (isObjectLike(out.fill)) {
+            var fCopy = {};
+            for (k in out.fill) {
+                if (hasOwn(out.fill, k)) fCopy[k] = out.fill[k];
+            }
+            if (fCopy.shader !== undefined && fCopy.shaderId === undefined) fCopy.shaderId = fCopy.shader;
+            if (fCopy.tex !== undefined && fCopy.texture === undefined) fCopy.texture = fCopy.tex;
+            if (fCopy.texW !== undefined && fCopy.tw === undefined) fCopy.tw = fCopy.texW;
+            if (fCopy.texH !== undefined && fCopy.th === undefined) fCopy.th = fCopy.texH;
+            if (fCopy.mode === 'gradient') {
+                var usedSchemaGradCols = (fCopy.color !== undefined || fCopy.colorEnd !== undefined) && fCopy.from === undefined && fCopy.to === undefined;
+                if (fCopy.color !== undefined && fCopy.from === undefined) fCopy.from = fCopy.color;
+                if (fCopy.colorEnd !== undefined && fCopy.to === undefined) fCopy.to = fCopy.colorEnd;
+                if (fCopy.dir === 'vertical') fCopy.dir = 'v';
+                else if (fCopy.dir === 'horizontal') fCopy.dir = 'h';
+                else if (fCopy.dir === undefined && usedSchemaGradCols) fCopy.dir = 'v';
+            }
+            out.fill = fCopy;
+        }
+        if (Array.isArray(out.children)) {
+            var nextChildren = [];
+            for (var ci = 0; ci < out.children.length; ci++) {
+                nextChildren.push(normalizeDanmakuNode(out.children[ci], (depth || 0) + 1));
+            }
+            out.children = nextChildren;
+        }
+        return out;
+    }
+
+    function normalizeNodeArrayAliases(arr) {
+        if (!Array.isArray(arr)) return arr;
+        var res = [];
+        for (var i = 0; i < arr.length; i++) {
+            res.push(normalizeDanmakuNode(arr[i], 0));
+        }
+        return res;
+    }
+
     function normalizeDanmakuAliases(opts, warnFn) {
-        if (opts == null || typeof opts !== 'object') return {};
+        if (!isObjectLike(opts)) return {};
         var out = {};
         var k;
         for (k in opts) {
-            if (Object.prototype.hasOwnProperty.call(opts, k)) {
+            if (hasOwn(opts, k)) {
                 out[k] = opts[k];
             }
         }
         for (k in OFFICIAL_DANMAKU_ALIASES) {
-            if (Object.prototype.hasOwnProperty.call(OFFICIAL_DANMAKU_ALIASES, k) && out[k] !== undefined) {
+            if (hasOwn(OFFICIAL_DANMAKU_ALIASES, k) && out[k] !== undefined) {
                 var canon1 = OFFICIAL_DANMAKU_ALIASES[k];
                 if (out[canon1] === undefined) {
-                    out[canon1] = out[k];
+                    if (k === 'shake' && typeof out[k] === 'boolean') {
+                        if (out[k]) out[canon1] = 'constant';
+                    } else if (k === 'outline' && typeof out[k] === 'boolean') {
+                        if (out[k]) out[canon1] = 'stroke';
+                    } else {
+                        out[canon1] = out[k];
+                    }
                 }
             }
         }
         for (k in DEPRECATED_DANMAKU_ALIASES) {
-            if (Object.prototype.hasOwnProperty.call(DEPRECATED_DANMAKU_ALIASES, k) && out[k] !== undefined) {
+            if (hasOwn(DEPRECATED_DANMAKU_ALIASES, k) && out[k] !== undefined) {
                 var canon2 = DEPRECATED_DANMAKU_ALIASES[k];
                 if (out[canon2] === undefined) {
                     if ((k === 'stroke' || k === 'glow') && typeof out[k] === 'boolean') {
                         if (out[k]) out[canon2] = k;
+                    } else if (k === 'continuous' || k === 'sustained') {
+                        if (parseBoolStrict(out[k]) === true) out[canon2] = 'active';
                     } else {
                         out[canon2] = out[k];
                     }
@@ -854,6 +990,9 @@
                 }
             }
         }
+        if (Array.isArray(out.nodes)) out.nodes = normalizeNodeArrayAliases(out.nodes);
+        if (Array.isArray(out.bgNodes)) out.bgNodes = normalizeNodeArrayAliases(out.bgNodes);
+        if (Array.isArray(out.fgNodes)) out.fgNodes = normalizeNodeArrayAliases(out.fgNodes);
         return out;
     }
 
@@ -862,26 +1001,33 @@
         var cost = 0;
         for (var i = 0; i < nodes.length; i++) {
             var n = nodes[i];
-            if (n == null || typeof n !== 'object') continue;
-            var nType = String(n.type || 'rect');
+            if (!isObjectLike(n)) continue;
+            var nType = String(n.type || n.kind || 'rect');
             if (nType === 'group') {
-                cost += 1 + computeNodeListCost(n.children);
-            } else if (nType === 'rect' && n.fill != null && typeof n.fill === 'object' && n.fill.mode === 'parallax') {
+                var gKids = Array.isArray(n.children) ? n.children : n.items;
+                cost += 1 + computeNodeListCost(gKids);
+            } else if (nType === 'rect' && isObjectLike(n.fill) && n.fill.mode === 'parallax') {
                 var rawLayers = Array.isArray(n.fill.layers) ? n.fill.layers : [];
                 var texLayers = 0;
                 var procLayers = 0;
                 for (var li = 0; li < rawLayers.length; li++) {
                     var rl = rawLayers[li];
-                    if (rl != null && typeof rl === 'object' && (rl.tex || rl.texture)) {
+                    if (isObjectLike(rl) && (rl.tex || rl.texture || rl.kind === 'texture' || n.fill.texture || n.fill.tex)) {
                         texLayers++;
-                    } else if (rl != null && typeof rl === 'object') {
+                    } else if (isObjectLike(rl)) {
                         procLayers++;
                     }
                 }
                 var layerCost = (texLayers + procLayers === 0) ? 1 : (texLayers + (procLayers > 0 ? Math.min(2, Math.ceil(procLayers / 2)) : 0));
-                cost += 1 + layerCost;
+                cost += 1 + layerCost + (n.borderWidth > 0 ? 1 : 0);
+            } else if (nType === 'rect' && isObjectLike(n.fill) && n.fill.mode === 'shader') {
+                cost += 4 + (n.borderWidth > 0 ? 1 : 0);
+            } else if (nType === 'rect') {
+                cost += 1 + (n.borderWidth > 0 ? 1 : 0);
             } else if (nType === 'nine_slice') {
                 cost += 4;
+            } else if (nType === 'item') {
+                cost += 3;
             } else if (nType === 'text') {
                 var rawText = n.text != null ? String(n.text) : (n.title != null ? String(n.title) : '');
                 var isPerChar = Boolean(n.perCharShake || n.shakeMode === 'per_char');
@@ -913,14 +1059,12 @@
         try {
             if (typeof rawPkt.contains === 'function' || typeof rawPkt.getString === 'function') return rawPkt;
         } catch (eTagCheck) { }
-        var out = {};
-        for (var k in rawPkt) {
-            if (Object.prototype.hasOwnProperty.call(rawPkt, k)) {
-                out[k] = rawPkt[k];
-            }
-        }
+        var out = normalizeDanmakuAliases(rawPkt);
         out.proto   = 6;
         out.surface = out.surface ? String(out.surface) : 'screen';
+        if (out.renderPriority === undefined) {
+            out.renderPriority = (out.surface === 'slot') ? 200 : ((out.surface === 'gui') ? 100 : 0);
+        }
         var act     = out.action ? String(out.action) : 'push';
         out.action  = act;
 
@@ -1018,9 +1162,12 @@
             COLOR_PRESETS:              COLOR_PRESETS,
             SIZE_PRESETS:               SIZE_PRESETS,
             PRIORITY_MAP:               PRIORITY_MAP,
+            DEPRECATED_PRIORITY_ALIASES: DEPRECATED_PRIORITY_ALIASES,
             OFFICIAL_DANMAKU_ALIASES:   OFFICIAL_DANMAKU_ALIASES,
+            OFFICIAL_NODE_ALIASES:      OFFICIAL_NODE_ALIASES,
             DEPRECATED_DANMAKU_ALIASES: DEPRECATED_DANMAKU_ALIASES,
             isProtoCompatible:          isProtoCompatible,
+            normalizeDanmakuNode:       normalizeDanmakuNode,
             normalizeDanmakuAliases:    normalizeDanmakuAliases,
             computeNodeListCost:        computeNodeListCost,
             computeOverlayCost:         computeOverlayCost,

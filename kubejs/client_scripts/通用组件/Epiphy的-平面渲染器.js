@@ -85,7 +85,10 @@
         charShakeMaxDyPx:      5.50,   // 逐字震动垂直方向单侧安全限幅 (px)
         errorLogIntervalMs:    5000,   // 渲染/接收异常日志最小打印间隔 (ms)
         maxItemDrawErrors:     2,      // 单条弹幕连续绘制报错达到该次数后立即剔除，防止刷屏
-        debug:                 false   // 是否输出逐字渲染调试日志（也可通过单条 debug: true 或 setDebug(true) 开启）
+        debug:                 false,  // 是否输出逐字渲染调试日志（也可通过单条 debug: true 或 setDebug(true) 开启）
+        screenRenderPriority:  0,      // 屏幕弹幕默认渲染层级（先画，处于底层）
+        guiRenderPriority:     100,    // GUI 覆盖层默认渲染层级（默认高于弹幕不被覆盖，可独立调整）
+        slotRenderPriority:    200     // 容器槽位覆盖层默认渲染层级
     }
 
     var PI         = 3.141592653589793
@@ -202,32 +205,49 @@
     }
 
     var PRIORITY_MAP = (PROTO && PROTO.PRIORITY_MAP) || {
-        low: 1, minor: 1, '低': 1, '次要': 1,
-        normal: 2, medium: 2, default: 2, '中': 2, '普通': 2,
-        high: 3, major: 3, important: 3, '高': 3, '重要': 3,
-        critical: 4, fatal: 4, urgent: 4, boss: 4, '极高': 4, '致命': 4,
-        active: 5, sustain: 5, '持续': 5
+        low:      1,
+        normal:   2,
+        high:     3,
+        critical: 4,
+        active:   5
+    }
+    var LEGACY_PRIORITY_MAP = (PROTO && PROTO.DEPRECATED_PRIORITY_ALIASES) || {
+        minor: 1, '低': 1, '次要': 1,
+        medium: 2, 'default': 2, '中': 2, '普通': 2,
+        major: 3, important: 3, '高': 3, '重要': 3,
+        fatal: 4, urgent: 4, boss: 4, '极高': 4, '致命': 4,
+        sustain: 5, '持续': 5
     }
     var min2     = (SPEC && typeof SPEC.min2 === 'function') ? SPEC.min2 : function (a, b) { return a < b ? a : b }
     var max2     = (SPEC && typeof SPEC.max2 === 'function') ? SPEC.max2 : function (a, b) { return a > b ? a : b }
     var clampNum = (SPEC && typeof SPEC.clampNum === 'function')
         ? SPEC.clampNum
         : function (v, lo, hi, defVal) {
-            if (v === null || v === undefined || v === '' || typeof v === 'boolean' || Array.isArray(v)) {
+            if (v === null || v === undefined || valIsEmptyObjOrBool(v)) {
                 return defVal !== undefined ? defVal : lo
             }
             var n = Number(v)
             if (isNaN(n) || !isFinite(n)) return defVal !== undefined ? defVal : lo
             return n < lo ? lo : (n > hi ? hi : n)
         }
+    function valIsEmptyObjOrBool(v) {
+        return v === '' || typeof v === 'boolean' || Array.isArray(v)
+    }
 
     function parsePriority(val, defVal) {
         if (SPEC && typeof SPEC.parsePriority === 'function') {
-            return SPEC.parsePriority(val, defVal, { map: PRIORITY_MAP, min: 0, max: 10, round: true })
+            return SPEC.parsePriority(val, defVal, {
+                map:           PRIORITY_MAP,
+                deprecatedMap: LEGACY_PRIORITY_MAP,
+                min:           0,
+                max:           10,
+                round:         true
+            })
         }
         if (val === undefined || val === null || val === '') return defVal
         var key = String(val).trim().toLowerCase()
         if (PRIORITY_MAP[key] !== undefined) return PRIORITY_MAP[key]
+        if (LEGACY_PRIORITY_MAP[key] !== undefined) return LEGACY_PRIORITY_MAP[key]
         var n = Number(val)
         return isFinite(n) ? clampNum(Math.round(n), 0, 10) : defVal
     }
@@ -3077,6 +3097,7 @@
         if (!needMatrix && !rCtx.isSplitFade) {
             var fastCol = packArgb(rgbColor, 255)
             event.text(comp, Math.round(floatX) || 0, Math.round(floatY) || 0, fastCol, shadow)
+            GRAPHICS_TEXT_DIRTY = true
             return
         }
 
@@ -3098,6 +3119,7 @@
             setShaderAlphaSafe(event, coreAlphaS / 255.0)
             event.text(comp, rx, ry, packArgb(rgbColor, coreAlphaS), rCtx.splitCoreShd)
             resetShaderAlphaSafe(event)
+            GRAPHICS_TEXT_DIRTY = true
             return
         }
 
@@ -4310,6 +4332,14 @@
         var wrapEnabled  = readBool(raw, 'wrap', true)
         var clampBounds  = readBool(raw, 'clamp', true)
         var showInGui    = readBool(raw, 'showInGui', surface === 'gui' || surface === 'slot')
+        var defRenderPri = (surface === 'slot')
+            ? Number(CONFIG.slotRenderPriority != null ? CONFIG.slotRenderPriority : 200)
+            : ((surface === 'gui')
+                ? Number(CONFIG.guiRenderPriority != null ? CONFIG.guiRenderPriority : 100)
+                : Number(CONFIG.screenRenderPriority != null ? CONFIG.screenRenderPriority : 0))
+        var renderPriority = readNum(raw, 'renderPriority', readNum(raw, 'zIndex', defRenderPri))
+        var ox           = Math.round(readNum(raw, 'ox', 0))
+        var oy           = Math.round(readNum(raw, 'oy', 0))
         var maxGroupSize = Math.round(readNonNegNum(raw, 'maxGroup', readNonNegNum(raw, 'maxGroupSize', 0, 0), 0))
         var debugEnabled = readBool(raw, 'debug', false)
 
@@ -4324,6 +4354,9 @@
                     exist.bgNodes         = raw.bgNodes !== undefined ? raw.bgNodes : exist.bgNodes
                     exist.fgNodes         = raw.fgNodes !== undefined ? raw.fgNodes : exist.fgNodes
                     exist.slotMatch       = raw.slotMatch !== undefined ? raw.slotMatch : exist.slotMatch
+                    exist.renderPriority  = renderPriority
+                    exist.ox              = ox
+                    exist.oy              = oy
                     if (isPlainObjLike(raw.tracks)) {
                         if (exist.tracks == null) exist.tracks = {}
                         for (var trk in raw.tracks) {
@@ -4472,6 +4505,9 @@
             group:              group,
             lifeMode:           lifeMode,
             priority:           priority,
+            renderPriority:     renderPriority,
+            ox:                 ox,
+            oy:                 oy,
             holdTicks:          holdTicks,
             fadeTicks:          fadeTicks,
             title:              title,
@@ -4783,8 +4819,9 @@
                     namespace:    ov.namespace,
                     group:        ov.group,
                     lifeMode:     ov.lifeMode,
-                    priority:     ov.priority,
-                    maxGroupSize: ov.maxGroupSize,
+                    priority:       ov.priority,
+                    renderPriority: ov.renderPriority != null ? ov.renderPriority : 0,
+                    maxGroupSize:   ov.maxGroupSize,
                     lineCacheKey: ov._lineRenderCache != null ? ov._lineRenderCache.key : null
                 })
             }
@@ -4814,6 +4851,7 @@
             nbtToPlainJs:                 nbtToPlainJs,
             computeLocalClipRect:         computeLocalClipRect,
             evaluateNodeBind:             evaluateNodeBind,
+            compareOverlayDrawPriority:   compareOverlayDrawPriority,
             stepOverlayTracks:            stepOverlayTracks,
             applyVarsPatchToOverlay:      applyVarsPatchToOverlay,
             renderDeclarativeNodes:       function (event, item, nodes, varsMap, fadeAlpha, fontObj, itemBatchCtx, now) {
@@ -5034,10 +5072,16 @@
 
     var DRAW_ORDER_SCRATCH = []
     function compareOverlayDrawPriority(a, b) {
-        var dp = (b.priority || 0) - (a.priority || 0)
-        if (dp !== 0) return dp
-        return (a.born || 0) - (b.born || 0)
+        var rpa = (a && a.renderPriority != null) ? Number(a.renderPriority) : 0
+        var rpb = (b && b.renderPriority != null) ? Number(b.renderPriority) : 0
+        if (rpa !== rpb) return rpa - rpb
+        var pa = (a && a.priority != null) ? Number(a.priority) : 0
+        var pb = (b && b.priority != null) ? Number(b.priority) : 0
+        if (pb !== pa) return pb - pa
+        return (a ? (a.born || 0) : 0) - (b ? (b.born || 0) : 0)
     }
+
+    var getActiveScreen = resolveCurrentScreen
 
     // ------------------------------------------------------------------------
     // v6 2D 声明式图元树渲染器 (rect / sprite / nine_slice / item / text / group)
@@ -5117,10 +5161,22 @@
     }
 
     var ACTIVE_FRAME_BATCH_CTX = null
+    var ACTIVE_FRAME_EVENT     = null
+    var GRAPHICS_TEXT_DIRTY    = false
 
     function flushBatchedBeforeImmediate() {
         if (ACTIVE_FRAME_BATCH_CTX != null && ACTIVE_FRAME_BATCH_CTX.drawn > 0) {
             flushFrameBatchCtx(ACTIVE_FRAME_BATCH_CTX)
+        }
+        if (GRAPHICS_TEXT_DIRTY && ACTIVE_FRAME_EVENT != null && ACTIVE_FRAME_EVENT.graphics != null) {
+            try {
+                if (typeof ACTIVE_FRAME_EVENT.graphics.flush === 'function') {
+                    ACTIVE_FRAME_EVENT.graphics.flush()
+                } else if (typeof ACTIVE_FRAME_EVENT.graphics.m_280262_ === 'function') {
+                    ACTIVE_FRAME_EVENT.graphics.m_280262_()
+                }
+            } catch (eGf) { }
+            GRAPHICS_TEXT_DIRTY = false
         }
     }
 
@@ -5192,25 +5248,46 @@
         for (var i = 0; i < nodes.length; i++) {
             var n = nodes[i]
             if (!isPlainObjLike(n)) continue
-            var nType = String(n.type || 'rect').toLowerCase()
-            var nx = pOx + resolveVarNum(n.x, vMap, 0)
-            var ny = pOy + resolveVarNum(n.y, vMap, 0)
+            var nType = String(n.type || n.kind || 'rect').toLowerCase()
+            var baseNx = pOx + resolveVarNum(n.x, vMap, 0)
+            var baseNy = pOy + resolveVarNum(n.y, vMap, 0)
+            var nx = baseNx
+            var ny = baseNy
+            var minNx = baseNx, maxNx = baseNx
+            var minNy = baseNy, maxNy = baseNy
             if (isPlainObjLike(n.bind)) {
-                nx = evalAffinePropBind(nx, n.bind.x, vMap)
-                ny = evalAffinePropBind(ny, n.bind.y, vMap)
+                nx = evalAffinePropBind(baseNx, n.bind.x, vMap)
+                ny = evalAffinePropBind(baseNy, n.bind.y, vMap)
+                if (isPlainObjLike(n.bind.x)) {
+                    var xOff = Number(n.bind.x.offset || 0) || 0
+                    var xMult = Number(n.bind.x.mult !== undefined ? n.bind.x.mult : (n.bind.x.span || 0)) || 0
+                    minNx = min2(baseNx + xOff, baseNx + xOff + xMult)
+                    maxNx = max2(baseNx + xOff, baseNx + xOff + xMult)
+                }
+                if (isPlainObjLike(n.bind.y)) {
+                    var yOff = Number(n.bind.y.offset || 0) || 0
+                    var yMult = Number(n.bind.y.mult !== undefined ? n.bind.y.mult : (n.bind.y.span || 0)) || 0
+                    minNy = min2(baseNy + yOff, baseNy + yOff + yMult)
+                    maxNy = max2(baseNy + yOff, baseNy + yOff + yMult)
+                }
             }
             if (nType === 'group') {
-                computeNodesBounds(n.children, vMap, out, (depth || 0) + 1, nx, ny)
+                var gKids = Array.isArray(n.children) ? n.children : n.items
+                computeNodesBounds(gKids, vMap, out, (depth || 0) + 1, minNx, minNy)
+                if (maxNx !== minNx || maxNy !== minNy) {
+                    computeNodesBounds(gKids, vMap, out, (depth || 0) + 1, maxNx, maxNy)
+                }
                 continue
             }
             var nw = resolveVarNum(n.w, vMap, nType === 'text' ? 80 : 16)
             var nh = resolveVarNum(n.h, vMap, nType === 'text' ? 10 : 8)
             var anc = String(n.anchor || 'center').toLowerCase()
-            var orig = computeBoxAnchorOrigin(nx, ny, nw, nh, anc)
-            var lx0 = orig.x0
-            var ly0 = orig.y0
-            var lx1 = lx0 + nw
-            var ly1 = ly0 + nh
+            var origMin = computeBoxAnchorOrigin(minNx, minNy, nw, nh, anc)
+            var origMax = computeBoxAnchorOrigin(maxNx, maxNy, nw, nh, anc)
+            var lx0 = min2(origMin.x0, origMax.x0)
+            var ly0 = min2(origMin.y0, origMax.y0)
+            var lx1 = max2(origMin.x0, origMax.x0) + nw
+            var ly1 = max2(origMin.y0, origMax.y0) + nh
             if (lx0 < out.minX) out.minX = lx0
             if (ly0 < out.minY) out.minY = ly0
             if (lx1 > out.maxX) out.maxX = lx1
@@ -5402,7 +5479,7 @@
         }
     }
 
-    function drawTextureRegion(event, texPath, x, y, w, h, u, v, uw, vh, tw, th, alphaFactor) {
+    function drawTextureRegion(event, texPath, x, y, w, h, u, v, uw, vh, tw, th, alphaFactor, tintArgb) {
         if (w <= 0 || h <= 0) return
         if (!checkTextureExists(texPath)) {
             warnOnce('missingTex:' + texPath, '贴图资源不存在，已静默跳过该图层: ' + texPath)
@@ -5411,6 +5488,8 @@
         ensureItemPosePushed(event)
         flushBatchedBeforeImmediate()
         var rl = getResourceLocation(texPath)
+        var baseTintRgb = (tintArgb != null && isFinite(Number(tintArgb))) ? Number(tintArgb) : 0xFFFFFFFF
+        var tintCol = toArgbWithAlpha(baseTintRgb, alphaFactor != null ? alphaFactor : 1.0)
         if (rl != null && typeof event.setPositionColorTextureShader === 'function' && typeof event.setShaderTexture === 'function' && typeof event.beginQuads === 'function' && typeof event.rectangle === 'function' && typeof event.end === 'function') {
             var twVal = max2(1, Number(tw || 256))
             var thVal = max2(1, Number(th || 256))
@@ -5422,7 +5501,6 @@
             var v0 = vPx / thVal
             var u1 = (uPx + uSpan) / twVal
             var v1 = (vPx + vSpan) / thVal
-            var tintCol = toArgbWithAlpha(0xFFFFFFFF, alphaFactor != null ? alphaFactor : 1.0)
             var prevBlend = queryGlBlendEnabled()
             var changedBlend = false
             try {
@@ -5448,8 +5526,12 @@
         var rh = Math.max(1, Math.round(h))
         var colorAdjusted = false
         try {
-            if (alphaFactor != null && alphaFactor < 0.999 && event.graphics != null && typeof event.graphics.setColor === 'function') {
-                event.graphics.setColor(1.0, 1.0, 1.0, clampNum(alphaFactor, 0.0, 1.0))
+            if (((alphaFactor != null && alphaFactor < 0.999) || (baseTintRgb & 0xFFFFFF) !== 0xFFFFFF) && event.graphics != null && typeof event.graphics.setColor === 'function') {
+                var tR = ((baseTintRgb >>> 16) & 0xFF) / 255.0
+                var tG = ((baseTintRgb >>> 8) & 0xFF) / 255.0
+                var tB = (baseTintRgb & 0xFF) / 255.0
+                var tA = clampNum(alphaFactor != null ? alphaFactor : 1.0, 0.0, 1.0)
+                event.graphics.setColor(tR, tG, tB, tA)
                 colorAdjusted = true
             }
             if (typeof event.drawTexture === 'function') {
@@ -5503,11 +5585,12 @@
         var hasVertexGrad = (canHardwareBatch && typeof event.vertex === 'function' && typeof event.getMatrix === 'function')
 
         // 1. 先按单批次合并绘制所有程序化几何视差图层 (gradient / stripes / ripples / particles / steps + bloom)
+        var topFillTex = String(fill.texture || fill.tex || '')
         var hasProcLayers = (fill.bloomWidth > 0)
         for (var pi = 0; pi < layers.length; pi++) {
             var pLay = layers[pi]
             if (!isPlainObjLike(pLay)) continue
-            var pTex = pLay.tex || pLay.texture || ''
+            var pTex = String(pLay.tex || pLay.texture || (String(pLay.kind || '').toLowerCase() === 'texture' ? topFillTex : '') || (!pLay.kind ? topFillTex : ''))
             if (!pTex || !checkTextureExists(pTex)) {
                 hasProcLayers = true
                 break
@@ -5563,7 +5646,7 @@
                 for (var li = 0; li < layers.length; li++) {
                     var lay = layers[li]
                     if (!isPlainObjLike(lay)) continue
-                    var tex = lay.tex || lay.texture || ''
+                    var tex = String(lay.tex || lay.texture || (String(lay.kind || '').toLowerCase() === 'texture' ? topFillTex : '') || (!lay.kind ? topFillTex : ''))
                     if (tex && checkTextureExists(tex)) continue
                     var lAlpha = clampNum(Number(lay.alpha != null ? lay.alpha : 1.0) * fadeAlpha, 0.0, 1.0)
                     if (lAlpha <= 0.005) continue
@@ -5689,17 +5772,29 @@
             }
         }
 
-        // 2. 绘制具有真实外部贴图的视差层
+        // 2. 绘制具有真实外部贴图的视差层（支持顶层 fill.texture 与单层 u/v/uw/vh/scrollU/scrollV/pulseHz）
+        var topTexW = max2(1, Number(fill.texW || fill.tw || 256))
+        var topTexH = max2(1, Number(fill.texH || fill.th || 256))
         for (var ti = 0; ti < layers.length; ti++) {
             var tLay = layers[ti]
             if (!isPlainObjLike(tLay)) continue
-            var tPath = tLay.tex || tLay.texture || ''
+            var tPath = String(tLay.tex || tLay.texture || (String(tLay.kind || '').toLowerCase() === 'texture' ? topFillTex : '') || (!tLay.kind ? topFillTex : ''))
             if (tPath && checkTextureExists(tPath)) {
                 var sc = max2(0.1, Number(tLay.scale || 1.0))
-                var tuOff = ((now * Number(tLay.speedX || 0.0)) % 256 + 256) % 256
-                var tvOff = ((now * Number(tLay.speedY || 0.0)) % 256 + 256) % 256
-                var tlAlpha = clampNum(Number(tLay.alpha != null ? tLay.alpha : 1.0) * fadeAlpha, 0.0, 1.0)
-                drawTextureRegion(event, tPath, x, y, w, h, tuOff, tvOff, w / sc, h / sc, 256, 256, tlAlpha)
+                var ltw = max2(1, Number(tLay.texW || tLay.tw || topTexW))
+                var lth = max2(1, Number(tLay.texH || tLay.th || topTexH))
+                var baseU = Number(tLay.u || 0)
+                var baseV = Number(tLay.v || 0)
+                var spdX = Number(tLay.speedX !== undefined ? tLay.speedX : (tLay.scrollU || 0.0))
+                var spdY = Number(tLay.speedY !== undefined ? tLay.speedY : (tLay.scrollV || 0.0))
+                var tuOff = baseU + (((now * spdX) % ltw + ltw) % ltw)
+                var tvOff = baseV + (((now * spdY) % lth + lth) % lth)
+                var pulseHz = Number(tLay.pulseHz || 0.0)
+                var pulseMod = (pulseHz > 0 && isFinite(pulseHz)) ? (0.65 + 0.35 * Math.sin(((Number(now) || 0) * 0.001) * pulseHz * 6.2831853)) : 1.0
+                var tlAlpha = clampNum(Number(tLay.alpha != null ? tLay.alpha : 1.0) * fadeAlpha * pulseMod, 0.0, 1.0)
+                var luw = tLay.uw != null ? min2(Number(tLay.uw), w / sc) : (w / sc)
+                var lvh = tLay.vh != null ? min2(Number(tLay.vh), h / sc) : (h / sc)
+                drawTextureRegion(event, tPath, x, y, w, h, tuOff, tvOff, luw, lvh, ltw, lth, tlAlpha)
             }
         }
     }
@@ -5709,12 +5804,16 @@
         if (RenderTypeClass === null) {
             RenderTypeClass = loadJavaClass('net.minecraft.client.renderer.RenderType', true) || false
         }
-        var shaderId = String(fill.shaderId || 'end_portal').toLowerCase()
+        var shaderId = String(fill.shader || fill.shaderId || 'end_portal').toLowerCase()
         var drewShader = false
         if (RenderTypeClass && event.graphics != null && typeof event.graphics.fill === 'function') {
             try {
                 var rt = null
-                if (shaderId === 'end_portal' && typeof RenderTypeClass.endPortal === 'function') {
+                if (shaderId === 'chaos_vortex') {
+                    // KubeJS 阶段无独立混沌着色器时按 §3.3 降级矩阵回退至 endPortal，并记录一次提示
+                    warnOnce('shaderChaosFallback', 'fill.shader="chaos_vortex" 当前环境无原生混沌 Shader，已按降级矩阵回退至 end_portal')
+                    if (typeof RenderTypeClass.endPortal === 'function') rt = RenderTypeClass.endPortal()
+                } else if (shaderId === 'end_portal' && typeof RenderTypeClass.endPortal === 'function') {
                     rt = RenderTypeClass.endPortal()
                 } else if (shaderId === 'end_gateway' && typeof RenderTypeClass.endGateway === 'function') {
                     rt = RenderTypeClass.endGateway()
@@ -5748,33 +5847,45 @@
             drawRectSolid(event, x, y, w, h, toArgbWithAlpha(0xB0101018, fadeAlpha))
             return
         }
-        var s  = max2(1, min2(Math.floor(min2(w, h) * 0.5), Number(node.slice || 4)))
+        var rawSlice = node.slice
+        var halfW = max2(1, Math.floor(w * 0.5))
+        var halfH = max2(1, Math.floor(h * 0.5))
+        var sL, sT, sR, sB
+        if (Array.isArray(rawSlice) || (rawSlice != null && typeof rawSlice.length === 'number' && typeof rawSlice !== 'string')) {
+            sL = clampNum(Math.round(Number(rawSlice[0] != null ? rawSlice[0] : 4)) || 4, 1, halfW)
+            sT = clampNum(Math.round(Number(rawSlice[1] != null ? rawSlice[1] : sL)) || sL, 1, halfH)
+            sR = clampNum(Math.round(Number(rawSlice[2] != null ? rawSlice[2] : sL)) || sL, 1, halfW)
+            sB = clampNum(Math.round(Number(rawSlice[3] != null ? rawSlice[3] : sT)) || sT, 1, halfH)
+        } else {
+            var sUni = max2(1, min2(min2(halfW, halfH), Math.round(Number(rawSlice || 4)) || 4))
+            sL = sUni; sT = sUni; sR = sUni; sB = sUni
+        }
         var u0 = Number(node.u || 0)
         var v0 = Number(node.v || 0)
         var uw = Number(node.uw || 16)
         var vh = Number(node.vh || 16)
-        var tw = Number(node.tw || 256)
-        var th = Number(node.th || 256)
-        var cw = max2(0, w - s * 2)
-        var ch = max2(0, h - s * 2)
-        var cuw = max2(1, uw - s * 2)
-        var cvh = max2(1, vh - s * 2)
+        var tw = Number(node.texW !== undefined ? node.texW : (node.tw || 256))
+        var th = Number(node.texH !== undefined ? node.texH : (node.th || 256))
+        var cw = max2(0, w - sL - sR)
+        var ch = max2(0, h - sT - sB)
+        var cuw = max2(1, uw - sL - sR)
+        var cvh = max2(1, vh - sT - sB)
         // 4 角
-        drawTextureRegion(event, tex, x, y, s, s, u0, v0, s, s, tw, th, fadeAlpha)
-        drawTextureRegion(event, tex, x + w - s, y, s, s, u0 + uw - s, v0, s, s, tw, th, fadeAlpha)
-        drawTextureRegion(event, tex, x, y + h - s, s, s, u0, v0 + vh - s, s, s, tw, th, fadeAlpha)
-        drawTextureRegion(event, tex, x + w - s, y + h - s, s, s, u0 + uw - s, v0 + vh - s, s, s, tw, th, fadeAlpha)
+        drawTextureRegion(event, tex, x, y, sL, sT, u0, v0, sL, sT, tw, th, fadeAlpha)
+        drawTextureRegion(event, tex, x + w - sR, y, sR, sT, u0 + uw - sR, v0, sR, sT, tw, th, fadeAlpha)
+        drawTextureRegion(event, tex, x, y + h - sB, sL, sB, u0, v0 + vh - sB, sL, sB, tw, th, fadeAlpha)
+        drawTextureRegion(event, tex, x + w - sR, y + h - sB, sR, sB, u0 + uw - sR, v0 + vh - sB, sR, sB, tw, th, fadeAlpha)
         // 4 边与中心
         if (cw > 0) {
-            drawTextureRegion(event, tex, x + s, y, cw, s, u0 + s, v0, cuw, s, tw, th, fadeAlpha)
-            drawTextureRegion(event, tex, x + s, y + h - s, cw, s, u0 + s, v0 + vh - s, cuw, s, tw, th, fadeAlpha)
+            drawTextureRegion(event, tex, x + sL, y, cw, sT, u0 + sL, v0, cuw, sT, tw, th, fadeAlpha)
+            drawTextureRegion(event, tex, x + sL, y + h - sB, cw, sB, u0 + sL, v0 + vh - sB, cuw, sB, tw, th, fadeAlpha)
         }
         if (ch > 0) {
-            drawTextureRegion(event, tex, x, y + s, s, ch, u0, v0 + s, s, cvh, tw, th, fadeAlpha)
-            drawTextureRegion(event, tex, x + w - s, y + s, s, ch, u0 + uw - s, v0 + s, s, cvh, tw, th, fadeAlpha)
+            drawTextureRegion(event, tex, x, y + sT, sL, ch, u0, v0 + sT, sL, cvh, tw, th, fadeAlpha)
+            drawTextureRegion(event, tex, x + w - sR, y + sT, sR, ch, u0 + uw - sR, v0 + sT, sR, cvh, tw, th, fadeAlpha)
         }
         if (cw > 0 && ch > 0) {
-            drawTextureRegion(event, tex, x + s, y + s, cw, ch, u0 + s, v0 + s, cuw, cvh, tw, th, fadeAlpha)
+            drawTextureRegion(event, tex, x + sL, y + sT, cw, ch, u0 + sL, v0 + sT, cuw, cvh, tw, th, fadeAlpha)
         }
     }
 
@@ -5844,6 +5955,7 @@
                     ensureFallbackBlend(event, itemBatchCtx)
                     ensureItemPosePushed(event)
                     event.text(entry.comp, Math.round(lx) || 0, Math.round(ly) || 0, argb, shadow)
+                    GRAPHICS_TEXT_DIRTY = true
                 }
             }
         }
@@ -5894,7 +6006,7 @@
         for (var ni = 0; ni < nodes.length; ni++) {
             var node = nodes[ni]
             if (!isPlainObjLike(node)) continue
-            var nType      = String(node.type || 'rect').toLowerCase()
+            var nType      = String(node.type || node.kind || 'rect').toLowerCase()
             var baseAlpha  = resolveVarNum(node.alpha, vMap, 1.0)
             var baseX      = resolveVarNum(node.x, vMap, 0)
             var baseY      = resolveVarNum(node.y, vMap, 0)
@@ -5915,6 +6027,7 @@
             var boxOrig = computeBoxAnchorOrigin(nx, ny, nw, nh, anchor)
             var x0     = boxOrig.x0
             var y0     = boxOrig.y0
+            var nodeRawColor = (node.color !== undefined) ? node.color : node.tint
 
             var clipSpec = isPlainObjLike(node.clip) ? node.clip : null
             var effAngle = (Number(parentAngleDeg) || 0) + nAngle
@@ -5954,42 +6067,48 @@
                 if (nType === 'rect') {
                     if (node.borderWidth != null && Number(node.borderWidth) > 0 && node.borderColor != null) {
                         var bw = Math.round(Number(node.borderWidth))
-                        var bCol = resolveVarValue(node.borderColor, vMap, 0xFFFFFFFF)
-                        var bArgb = toArgbWithAlpha(bCol, nAlpha)
-                        drawRectOutline(event, x0 - bw, y0 - bw, nw + bw * 2, nh + bw * 2, bw, bArgb)
+                        if (bw > 0) {
+                            var bCol = resolveVarValue(node.borderColor, vMap, 0xFFFFFFFF)
+                            var bArgb = toArgbWithAlpha(bCol, nAlpha)
+                            drawRectOutline(event, x0 - bw, y0 - bw, nw + bw * 2, nh + bw * 2, bw, bArgb)
+                        }
                     }
                     if (clipped.w > 0.25 && clipped.h > 0.25) {
                         var fill = isPlainObjLike(node.fill)
                             ? node.fill
-                            : { mode: 'solid', color: node.color != null ? node.color : 0xFF000000 }
+                            : { mode: 'solid', color: nodeRawColor != null ? nodeRawColor : 0xFF000000 }
                         var fMode = String(fill.mode || 'solid').toLowerCase()
                         if (fMode === 'outline') {
-                            var oCol = toArgbWithAlpha(resolveVarValue(fill.color != null ? fill.color : node.color, vMap, 0xFFFFFFFF), nAlpha)
+                            var oCol = toArgbWithAlpha(resolveVarValue(fill.color != null ? fill.color : nodeRawColor, vMap, 0xFFFFFFFF), nAlpha)
                             var oThk = max2(1, Math.round(Number(fill.thickness || 1)))
                             drawRectOutline(event, clipped.x, clipped.y, clipped.w, clipped.h, oThk, oCol)
                         } else if (fMode === 'gradient') {
-                            var cFrom = toArgbWithAlpha(resolveVarValue(fill.from, vMap, 0xFF5555), nAlpha)
-                            var cTo   = toArgbWithAlpha(resolveVarValue(fill.to, vMap, 0xFFAA00), nAlpha)
+                            var cFrom = toArgbWithAlpha(resolveVarValue(fill.from !== undefined ? fill.from : fill.color, vMap, 0xFF5555), nAlpha)
+                            var cTo   = toArgbWithAlpha(resolveVarValue(fill.to !== undefined ? fill.to : fill.colorEnd, vMap, 0xFFAA00), nAlpha)
                             var cMid  = fill.mid !== undefined ? toArgbWithAlpha(resolveVarValue(fill.mid, vMap, cTo), nAlpha) : null
-                            drawRectGradient(event, clipped.x, clipped.y, clipped.w, clipped.h, cFrom, cTo, fill.dir === 'v' ? 'v' : 'h', cMid, fill.midPos)
+                            var gDirVal = (fill.dir === 'v' || fill.dir === 'vertical') ? 'v' : 'h'
+                            drawRectGradient(event, clipped.x, clipped.y, clipped.w, clipped.h, cFrom, cTo, gDirVal, cMid, fill.midPos)
                         } else if (fMode === 'parallax') {
                             drawRectParallax(event, clipped.x, clipped.y, clipped.w, clipped.h, fill, now, nAlpha, x0, y0, nw, nh, vMap)
                         } else if (fMode === 'shader') {
                             drawRectShader(event, clipped.x, clipped.y, clipped.w, clipped.h, fill, now, nAlpha)
                         } else {
-                            var sCol = toArgbWithAlpha(resolveVarValue(fill.color != null ? fill.color : node.color, vMap, 0xFF000000), nAlpha)
+                            var sCol = toArgbWithAlpha(resolveVarValue(fill.color != null ? fill.color : nodeRawColor, vMap, 0xFF000000), nAlpha)
                             drawRectSolid(event, clipped.x, clipped.y, clipped.w, clipped.h, sCol)
                         }
                     }
                 } else if (nType === 'sprite') {
                     if (clipped.w > 0.25 && clipped.h > 0.25) {
+                        var spTint = nodeRawColor != null ? resolveVarValue(nodeRawColor, vMap, 0xFFFFFFFF) : 0xFFFFFFFF
                         drawTextureRegion(
                             event,
                             node.texture || node.tex || '',
                             clipped.x, clipped.y, clipped.w, clipped.h,
                             clipped.u, clipped.v, clipped.uw, clipped.vh,
-                            node.tw || 256, node.th || 256,
-                            nAlpha
+                            node.texW !== undefined ? node.texW : (node.tw || 256),
+                            node.texH !== undefined ? node.texH : (node.th || 256),
+                            nAlpha,
+                            spTint
                         )
                     }
                 } else if (nType === 'nine_slice') {
@@ -6012,7 +6131,8 @@
                         nodePushed ? 0 : ny
                     )
                 } else if (nType === 'group') {
-                    renderDeclarativeNodes(event, item, node.children, vMap, nAlpha, fontObj, null, now, effAngle, (depth || 0) + 1)
+                    var groupKids = Array.isArray(node.children) ? node.children : node.items
+                    renderDeclarativeNodes(event, item, groupKids, vMap, nAlpha, fontObj, null, now, effAngle, (depth || 0) + 1)
                 }
             } finally {
                 if (scissorPushed) {
@@ -6053,8 +6173,23 @@
         return true
     }
 
+    var TM_BY_PATH_FAILED = false
+
+    function resolveMcTextureManager() {
+        if (TM_BY_PATH_FAILED || MinecraftClass == null || MC_INSTANCE_FAILED) return null
+        try {
+            var mc = MinecraftClass.getInstance()
+            if (mc == null) return null
+            if (typeof mc.getTextureManager === 'function') return mc.getTextureManager()
+            if (mc.textureManager != null) return mc.textureManager
+            if (mc.f_91088_ != null) return mc.f_91088_
+        } catch (eTm) { }
+        return null
+    }
+
     function applyReplacedTexturesForGui(replaceMap) {
         if (!isPlainObjLike(replaceMap)) return
+        var tm = resolveMcTextureManager()
         for (var origPath in replaceMap) {
             if (!Object.prototype.hasOwnProperty.call(replaceMap, origPath)) continue
             var repPath = String(replaceMap[origPath] || '')
@@ -6065,7 +6200,35 @@
             if (REPLACED_TEXTURE_REGISTRY[origPath] != null && REPLACED_TEXTURE_REGISTRY[origPath].replacementPath === repPath) {
                 continue
             }
+            var origRl = getResourceLocation(origPath)
+            var repRl  = getResourceLocation(repPath)
+            var origTexObj = null
+            var registeredReal = false
+            if (tm != null && origRl != null && repRl != null) {
+                try {
+                    origTexObj = typeof tm.getTexture === 'function'
+                        ? tm.getTexture(origRl)
+                        : (typeof tm.m_118506_ === 'function' ? tm.m_118506_(origRl) : null)
+                    var repTexObj = typeof tm.getTexture === 'function'
+                        ? tm.getTexture(repRl)
+                        : (typeof tm.m_118506_ === 'function' ? tm.m_118506_(repRl) : null)
+                    if (repTexObj != null) {
+                        if (typeof tm.register === 'function') {
+                            tm.register(origRl, repTexObj)
+                            registeredReal = true
+                        } else if (typeof tm.m_118495_ === 'function') {
+                            tm.m_118495_(origRl, repTexObj)
+                            registeredReal = true
+                        }
+                    }
+                } catch (eRegTex) {
+                    warnOnce('replaceTexTm:' + origPath, 'TextureManager 贴图重映射不可用，将仅执行 bgNodes 夹心层覆盖: ' + eRegTex)
+                }
+            }
             REPLACED_TEXTURE_REGISTRY[origPath] = {
+                texManager:      registeredReal ? tm : null,
+                resLoc:          origRl,
+                originalTexObj:  origTexObj,
                 originalPath:    origPath,
                 replacementPath: repPath,
                 active:          true
@@ -6082,11 +6245,23 @@
         var guiTop  = Number(ctx.guiTop != null ? ctx.guiTop : (screenObj != null && screenObj.guiTop != null ? screenObj.guiTop : 0)) || 0
         var fontObj = getClientFont(screenOrEvent, now)
         var rendered = 0
+        var prevEv = ACTIVE_FRAME_EVENT
+        var prevDirty = GRAPHICS_TEXT_DIRTY
+        ACTIVE_FRAME_EVENT = screenOrEvent
+        GRAPHICS_TEXT_DIRTY = false
 
-        for (var i = 0; i < activeOverlays.length; i++) {
-            var ov = activeOverlays[i]
-            if (ov == null || now >= ov.expire) continue
-            if (ov.surface !== 'gui' && ov.surface !== 'slot') continue
+        var passList = []
+        for (var oi = 0; oi < activeOverlays.length; oi++) {
+            var cand = activeOverlays[oi]
+            if (cand != null && now < cand.expire && (cand.surface === 'gui' || cand.surface === 'slot')) {
+                passList.push(cand)
+            }
+        }
+        if (passList.length > 1) passList.sort(compareOverlayDrawPriority)
+
+        try {
+        for (var i = 0; i < passList.length; i++) {
+            var ov = passList[i]
             if (!matchesTargetGui(screenObj, ov.targetGui)) continue
 
             stepOverlayTracks(ov, now)
@@ -6148,6 +6323,11 @@
                 }
             }
         }
+        } finally {
+            flushBatchedBeforeImmediate()
+            ACTIVE_FRAME_EVENT = prevEv
+            GRAPHICS_TEXT_DIRTY = prevDirty
+        }
         return rendered
     }
 
@@ -6178,17 +6358,27 @@
                 activeOverlays.splice(expIdx, 1)
             }
         }
-        if (activeOverlays.length === 0) return
+        if (activeOverlays.length === 0) {
+            if (Object.keys(REPLACED_TEXTURE_REGISTRY).length > 0) {
+                restoreAllReplacedTextures()
+            }
+            return
+        }
 
-        var sw          = Number(event.width) || 854
-        var sh          = Number(event.height) || 480
-        var guiBlocked  = isBlockingGuiOpen(event)
-        var fontObj     = null
-        var batchCtx    = null
-        var batchTried  = false
-        var baseFrameM  = null
-        var frameStartMs = now
-        var drawnCount   = 0
+        var sw                  = Number(event.width) || 854
+        var sh                  = Number(event.height) || 480
+        var curScreenObj        = resolveCurrentScreen(event)
+        var guiBlocked          = isBlockingGuiOpen(event)
+        var fontObj             = null
+        var batchCtx            = null
+        var batchTried          = false
+        var baseFrameM          = null
+        var frameStartMs        = now
+        var drawnCount          = 0
+        var lastRenderPri       = null
+        var anyGuiReplaceMatch  = false
+        ACTIVE_FRAME_EVENT      = event
+        GRAPHICS_TEXT_DIRTY     = false
 
         var drawListLen = activeOverlays.length
         var drawList    = activeOverlays
@@ -6206,14 +6396,30 @@
             var item = drawList[i]
             if (now >= item.expire) continue
 
+            if (item.surface === 'gui' || item.surface === 'slot') {
+                var guiMatchedNow = (curScreenObj != null) && matchesTargetGui(curScreenObj, item.targetGui)
+                if (guiMatchedNow) {
+                    item._wasGuiSessionOpen = true
+                } else if (item.lifeMode === 'screen_session' && item._wasGuiSessionOpen) {
+                    item.expire = now
+                    continue
+                }
+            }
+
             if (guiBlocked && !item.showInGui) {
                 continue
             }
 
+            var curRenderPri = item.renderPriority != null ? Number(item.renderPriority) : 0
+            if (lastRenderPri !== null && curRenderPri !== lastRenderPri) {
+                flushBatchedBeforeImmediate()
+            }
+            lastRenderPri = curRenderPri
+
             // 单帧硬防卡死熔断（每绘制 8 条采样一次 monotonicNowMs，大幅削减 System.nanoTime JNI 跨界开销）：
-            // 若极重洪泛触及该上限，将截断本帧尾部低优先级条目以保护客户端不卡死（不降级单条特效本身）。
-            if (drawnCount >= 1 && (drawnCount & 7) === 1 && (monotonicNowMs() - frameStartMs) >= CONFIG.frameBudgetMs) {
-                break
+            // 若极重洪泛触及该上限，将截断同层级/低层级尾部条目；GUI/slot 等高渲染层级 (renderPriority > 0) 始终放行。
+            if (curRenderPri <= 0 && drawnCount >= 1 && (drawnCount & 7) === 1 && (monotonicNowMs() - frameStartMs) >= CONFIG.frameBudgetMs) {
+                continue
             }
             drawnCount++
 
@@ -6371,8 +6577,8 @@
                 SHAKE_VEC_SCRATCH.y = 0.0
                 shakeVec = SHAKE_VEC_SCRATCH
             }
-            var px = sw * item.rx + shakeVec.x
-            var py = sh * item.ry + shakeVec.y
+            var px = sw * item.rx + (item.ox || 0) + shakeVec.x
+            var py = sh * item.ry + (item.oy || 0) + shakeVec.y
 
             var angDeg = item.angle || 0
             var cosR   = 1.0
@@ -6452,9 +6658,10 @@
                 if (item.hasGraphicNodes) {
                     var nodeFadeAlpha = inFade ? clampNum(1.0 - fadeProgress, 0.04, 1.0) : 1.0
                     if (item.surface === 'gui' || item.surface === 'slot') {
-                        var activeScr = getActiveScreen(event)
+                        var activeScr = curScreenObj
                         if (matchesTargetGui(activeScr, item.targetGui)) {
                             if (item.replaceTextures != null) {
+                                anyGuiReplaceMatch = true
                                 applyReplacedTexturesForGui(item.replaceTextures)
                             }
                             if (Array.isArray(item.bgNodes) && item.bgNodes.length > 0) {
@@ -6833,7 +7040,18 @@
             }
             }
         } finally {
+            for (var postExpIdx = activeOverlays.length - 1; postExpIdx >= 0; postExpIdx--) {
+                if (now >= activeOverlays[postExpIdx].expire && activeOverlays[postExpIdx].lifeMode === 'screen_session') {
+                    activeOverlays.splice(postExpIdx, 1)
+                }
+            }
+            if (!anyGuiReplaceMatch && Object.keys(REPLACED_TEXTURE_REGISTRY).length > 0) {
+                restoreAllReplacedTextures()
+            }
+            flushBatchedBeforeImmediate()
             ACTIVE_FRAME_BATCH_CTX = null
+            ACTIVE_FRAME_EVENT     = null
+            GRAPHICS_TEXT_DIRTY    = false
             DRAW_ORDER_SCRATCH.length = 0
             ITEM_RENDER_CTX_SCRATCH.event       = null
             ITEM_RENDER_CTX_SCRATCH.batchCtx    = null
