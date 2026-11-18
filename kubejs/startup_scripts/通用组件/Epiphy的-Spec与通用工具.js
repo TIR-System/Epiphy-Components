@@ -867,8 +867,19 @@
             if (nType === 'group') {
                 cost += 1 + computeNodeListCost(n.children);
             } else if (nType === 'rect' && n.fill != null && typeof n.fill === 'object' && n.fill.mode === 'parallax') {
-                var layers = Array.isArray(n.fill.layers) ? n.fill.layers.length : 1;
-                cost += 1 + layers;
+                var rawLayers = Array.isArray(n.fill.layers) ? n.fill.layers : [];
+                var texLayers = 0;
+                var procLayers = 0;
+                for (var li = 0; li < rawLayers.length; li++) {
+                    var rl = rawLayers[li];
+                    if (rl != null && typeof rl === 'object' && (rl.tex || rl.texture)) {
+                        texLayers++;
+                    } else if (rl != null && typeof rl === 'object') {
+                        procLayers++;
+                    }
+                }
+                var layerCost = (texLayers + procLayers === 0) ? 1 : (texLayers + (procLayers > 0 ? Math.min(2, Math.ceil(procLayers / 2)) : 0));
+                cost += 1 + layerCost;
             } else if (nType === 'nine_slice') {
                 cost += 4;
             } else if (nType === 'text') {

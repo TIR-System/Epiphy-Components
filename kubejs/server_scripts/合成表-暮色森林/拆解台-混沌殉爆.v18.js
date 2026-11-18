@@ -818,30 +818,144 @@
     }
 
     function buildTelemetryProgressOpts(cfg) {
-        if (typeof DANMAKU.buildProgressPanel === 'function') {
-            return DANMAKU.buildProgressPanel(cfg)
-        }
-        var pVal = Math.max(0.0, Math.min(1.0, Number(cfg.progress) || 0.0))
-        var barW = Number(cfg.barWidth) || 160
-        var barH = Number(cfg.barHeight) || 6
-        var out  = {}
-        for (var k in cfg) {
-            if (Object.prototype.hasOwnProperty.call(cfg, k)) out[k] = cfg[k]
-        }
-        out.surface = 'screen'
-        out.vars    = { progress: pVal, progressTrail: pVal, pctText: Math.round(pVal * 100) + '%' }
-        out.tracks  = {
-            progress:      { mode: 'lerp', speed: 10.0, easing: 'out_cubic' },
-            progressTrail: { mode: 'trail', target: '$progress', delayMs: 220, speed: 4.5 }
-        }
-        out.nodes = [
-            { id: 'bar_bg', type: 'rect', x: 0, y: 0, w: barW + 2, h: barH + 2, anchor: 'center', fill: { mode: 'solid', color: 0xB0120A16 }, borderColor: 0xCC552233, borderWidth: 1 },
-            { id: 'bar_trail', type: 'rect', x: 0, y: 0, w: barW, h: barH, anchor: 'center', fill: { mode: 'solid', color: cfg.trailColor || 0x77FF6644 }, clip: { dir: 'left', ratio: '$progressTrail', mode: 'local' } },
-            { id: 'bar_main', type: 'rect', x: 0, y: 0, w: barW, h: barH, anchor: 'center', fill: { mode: 'gradient', dir: 'h', from: cfg.barColorFrom || 0xFF3333, to: cfg.barColorTo || 0xFFAA22 }, clip: { dir: 'left', ratio: '$progress', mode: 'local' } },
-            { id: 'title', type: 'text', x: 0, y: -12, anchor: 'center', text: String(cfg.text || ''), color: 0xFF5555, shadow: true },
-            { id: 'sub', type: 'text', x: 0, y: 9, anchor: 'center', text: String(cfg.sub || ''), color: 0xFFCC44, shadow: true }
+        var c          = (cfg != null && typeof cfg === 'object') ? cfg : {}
+        var pVal       = Math.max(0.0, Math.min(1.0, Number(c.progress) || 0.0))
+        var subPVal    = Math.max(0.0, Math.min(1.0, c.subProgress !== undefined ? Number(c.subProgress) : pVal))
+        var barW       = Math.max(120, Math.min(360, Math.round(Number(c.barWidth) || 210)))
+        var barH       = Math.max(6, Math.min(24, Math.round(Number(c.barHeight) || 10)))
+        var barX0      = -Math.round(barW * 0.5)
+        var barY0      = -Math.round(barH * 0.5)
+
+        var fillFrom   = c.barColorFrom !== undefined ? c.barColorFrom : 0x174A5A
+        var fillMid    = c.barColorMid !== undefined ? c.barColorMid : (c.barColorFrom !== undefined ? c.barColorFrom : 0x26A69A)
+        var fillTo     = c.barColorTo !== undefined ? c.barColorTo : 0x80DEEA
+        var accentCol  = c.accentColor !== undefined ? c.accentColor : fillTo
+        var warnCol    = c.warnColor !== undefined ? c.warnColor : 0xFFD54F
+        var pureCol    = c.pureColor !== undefined ? c.pureColor : 0xFFFFFF
+        var trailCol   = c.trailColor !== undefined ? c.trailColor : 0x664DD0E1
+        var plateBgCol = c.plateBgColor !== undefined ? c.plateBgColor : 0xE60A1218
+        var mosaicACol = c.mosaicAColor !== undefined ? c.mosaicAColor : 0xD8FFFFFF
+        var mosaicBCol = c.mosaicBColor !== undefined ? c.mosaicBColor : 0x664DD0E1
+        var mosaicCCol = c.mosaicCColor !== undefined ? c.mosaicCColor : 0x3826A69A
+
+        var badgeSize  = 24
+        var badgeX     = barX0 - badgeSize - 8
+        var badgeY     = barY0 - 7
+        var splitW     = Math.round(barW * 0.56)
+
+        var titleStr   = String(c.text || c.title || '')
+        var subStr     = String(c.sub || c.subtitle || '')
+        var efTagStr   = String(c.efTag || 'EF-TLM // S1')
+        var badgeCode  = String(c.badgeCode || 'DETECTED')
+        var badgeItem  = String(c.badgeItem || 'twilightforest:uncrafting_table')
+        var rightVal   = String(c.rightVal || (Math.round(pVal * 100) + '.0%'))
+        var rightSub   = String(c.rightSub || 'ACTIVE')
+        var footRight  = String(c.footRight || 'PHASE_LOCK // STABLE')
+        var pctStr     = Math.round(pVal * 100) + '%'
+
+        // 定稿方案 α：【终末地工业科研拓扑 × 搁浅 T-Pin 吊线 × 阶梯破框 × 差速星空波纹视差】
+        var schemeAlphaNodes = [
+            // 1. 左侧双层同心回字准星徽章 + DET[██]D 离散跳变反色故障签 + 边缘变形体素块 + 物品图标
+            { id: 'badge_plate', type: 'rect', anchor: 'top_left', x: badgeX - 2, y: badgeY - 2, w: badgeSize + 4, h: badgeSize + 4, fill: { mode: 'solid', color: plateBgCol } },
+            { id: 'badge_aura',  type: 'rect', anchor: 'top_left', x: badgeX + badgeSize - 3, y: badgeY + 4, w: 6, h: 7, fill: { mode: 'solid', color: mosaicBCol }, bind: { stepHz: 9, seed: 13, jitterX: 3, jitterY: 2, jitterW: 2 } },
+            { id: 'badge_outer', type: 'rect', anchor: 'top_left', x: badgeX, y: badgeY, w: badgeSize, h: badgeSize, fill: { mode: 'outline', color: pureCol, thickness: 1 } },
+            { id: 'badge_inner', type: 'rect', anchor: 'top_left', x: badgeX + 5, y: badgeY + 5, w: badgeSize - 10, h: badgeSize - 10, fill: { mode: 'outline', color: accentCol, thickness: 1 }, bind: { seed: 29, impulseVar: 'impulse', shakeX: 1.5, shakeY: 1.5 } },
+            { id: 'badge_item',  type: 'item', anchor: 'top_left', x: badgeX + 4, y: badgeY + 4, w: 16, h: 16, item: badgeItem },
+            { id: 'badge_tag',   type: 'text', anchor: 'top_left', x: badgeX, y: badgeY - 8, scale: 0.65, text: '$badgeCode', color: accentCol, shadow: false },
+            { id: 'badge_mask',  type: 'rect', anchor: 'top_left', x: badgeX + 8, y: badgeY - 8, w: 8, h: 6, fill: { mode: 'solid', color: pureCol }, bind: { stepHz: 9, seed: 41, jitterX: 5, jitterW: 2 } },
+
+            // 2. 主区阶梯底衬 + 底部 4 层外部差速流动水面波纹场 + 上沿 13 段不规则阶梯动态外框 + 下沿落差折线轨
+            { id: 'panel_bg',         type: 'rect', anchor: 'top_left', x: barX0 - 4, y: barY0 - 15, w: barW + 14, h: barH + 26, fill: { mode: 'solid', color: plateBgCol } },
+            { id: 'under_ripples',    type: 'rect', anchor: 'top_left', x: barX0, y: barY0 + barH + 5, w: barW, h: 11, fill: { mode: 'parallax', bgAlpha: 0, layers: [{ kind: 'ripples', rows: 4, rowGap: 2.5, offsetY: 0.5, segments: 6, baseLen: 22, ampLen: 13, speedX: 26, thickness: 1.0, color: mosaicBCol, altColor: mosaicCCol, alpha: 0.85 }] } },
+            { id: 'frame_top_steps',  type: 'rect', anchor: 'top_left', x: barX0, y: barY0 - 4, w: barW, h: 4, fill: { mode: 'parallax', bgAlpha: 0, layers: [{ kind: 'steps', count: 13, stepHz: 9, risers: true, thickness: 1.2, color: accentCol, altColor: mosaicBCol, alpha: 0.92 }] } },
+            { id: 'frame_bot_left',   type: 'rect', anchor: 'top_left', x: barX0 - 4, y: barY0 + barH + 2, w: splitW + 4, h: 1, fill: { mode: 'solid', color: 0x70FFFFFF } },
+            { id: 'frame_bot_right',  type: 'rect', anchor: 'top_left', x: barX0 + splitW, y: barY0 + barH + 4, w: barW - splitW + 10, h: 1.2, fill: { mode: 'solid', color: accentCol } },
+
+            // 3. 顶栏《终末地》反色工业铭牌 + 状态指示灯 + 主遥测标题
+            { id: 'ef_tag_plate', type: 'rect', anchor: 'top_left', x: barX0, y: barY0 - 14, w: 46, h: 8, fill: { mode: 'solid', color: warnCol } },
+            { id: 'ef_tag_text',  type: 'text', anchor: 'top_left', x: barX0 + 3, y: barY0 - 13, scale: 0.65, text: '$efTag', color: 0x090C10, shadow: false },
+            { id: 'ef_pip_1',     type: 'rect', anchor: 'top_left', x: barX0 + 49, y: barY0 - 12, w: 3, h: 5, fill: { mode: 'solid', color: accentCol } },
+            { id: 'ef_pip_2',     type: 'rect', anchor: 'top_left', x: barX0 + 54, y: barY0 - 12, w: 3, h: 5, fill: { mode: 'solid', color: warnCol }, bind: { stepHz: 4, seed: 19, jitterH: 1 } },
+            { id: 'title',        type: 'text', anchor: 'top_left', x: barX0 + 60, y: barY0 - 13, scale: 0.78, text: '$title', color: pureCol, shadow: true },
+
+            // 4. 进度槽核心：暗腔 + trail 拖影轨 + 4 层程序化视差内胆 (三色渐变 + 装甲暗肋 + 内部流动波纹 + 星空代码粒子 + 前缘辉光) + 副轨
+            { id: 'bar_bg',       type: 'rect', anchor: 'top_left', x: barX0, y: barY0, w: barW, h: barH, fill: { mode: 'solid', color: 0xEE04070B } },
+            { id: 'bar_trail',    type: 'rect', anchor: 'top_left', x: barX0, y: barY0 + 1, w: barW, h: barH - 2, fill: { mode: 'solid', color: trailCol }, clip: { dir: 'left', ratio: '$progressTrail', mode: 'local' } },
+            {
+                id: 'bar_main', type: 'rect', anchor: 'top_left', x: barX0, y: barY0 + 1, w: barW, h: barH - 2,
+                clip: { dir: 'left', ratio: '$progress', mode: 'local' },
+                fill: {
+                    mode: 'parallax',
+                    bgAlpha: 0,
+                    bloomWidth: 16,
+                    bloomColor: 0xEEFFFFFF,
+                    layers: [
+                        { kind: 'gradient',  from: fillFrom, mid: fillMid, to: fillTo, midPos: 0.62, alpha: 1.0 },
+                        { kind: 'stripes',   step: 16, width: 5, speedX: 18, color: 0x3D000000, alpha: 0.9 },
+                        { kind: 'ripples',   rows: 3, rowGap: 2.3, offsetY: 1.0, segments: 6, baseLen: 20, ampLen: 12, speedX: 32, thickness: 1.0, color: 0x55FFFFFF, altColor: 0x28FFFFFF, alpha: 0.95 },
+                        { kind: 'particles', count: 20, speedX: -36, speedY: 0, minW: 1, maxW: 4, thickness: 1.0, color: pureCol, altColor: accentCol, seed: 31, alpha: 0.85 }
+                    ]
+                }
+            },
+            { id: 'bar_sub_rail', type: 'rect', anchor: 'top_left', x: barX0, y: barY0 + barH + 1, w: barW, h: 1.2, fill: { mode: 'solid', color: warnCol }, clip: { dir: 'left', ratio: '$subProgress', mode: 'local' } },
+
+            // 5. 推进前缘动态跟随组：搁浅 □─── 垂直穿透吊线 + 9Hz 变形体素代码块簇 + 底部悬浮百分比旗标
+            {
+                id: 'cursor_group', type: 'group', x: barX0, y: barY0,
+                bind: { x: { var: 'progress', mult: barW } },
+                children: [
+                    { id: 'cur_pin_box',   type: 'rect', anchor: 'top_left', x: -3, y: -8, w: 6, h: 6, fill: { mode: 'outline', color: pureCol, thickness: 1 } },
+                    { id: 'cur_drop_line', type: 'rect', anchor: 'top_left', x: 0,  y: -2, w: 1, h: barH + 16, fill: { mode: 'solid', color: pureCol } },
+                    { id: 'cur_vox_hi',    type: 'rect', anchor: 'top_left', x: -5, y: -2, w: 7, h: 4, fill: { mode: 'solid', color: mosaicACol }, bind: { stepHz: 9, seed: 7, jitterX: 2, jitterW: 2 } },
+                    { id: 'cur_vox_lo',    type: 'rect', anchor: 'top_left', x: 1,  y: barH - 4, w: 8, h: 5, fill: { mode: 'solid', color: mosaicBCol }, bind: { stepHz: 9, seed: 19, jitterX: 2, jitterW: 3 } },
+                    { id: 'cur_pct_flag',  type: 'text', anchor: 'top_left', x: 3,  y: barH + 7, scale: 0.65, text: '$pctText', color: pureCol, shadow: true }
+                ]
+            },
+
+            // 6. 右端 T-Pin 垂直吊线 (□───) + 双行遥测读数台 + 底部两端对齐表尾
+            { id: 'right_pin_box',  type: 'rect', anchor: 'top_left',  x: barX0 + barW + 8,  y: barY0,     w: 7, h: 7,  fill: { mode: 'outline', color: accentCol, thickness: 1 } },
+            { id: 'right_pin_line', type: 'rect', anchor: 'top_left',  x: barX0 + barW + 11, y: barY0 + 7, w: 1, h: 21, fill: { mode: 'solid', color: accentCol } },
+            { id: 'right_readout',  type: 'text', anchor: 'top_left',  x: barX0 + barW + 16, y: barY0 - 2, scale: 0.78, text: '$rightMetric', color: pureCol, shadow: true },
+            { id: 'sub',            type: 'text', anchor: 'top_left',  x: barX0,             y: barY0 + barH + 17, scale: 0.72, text: '$sub', color: 0xD0E4EC, shadow: true },
+            { id: 'footer_right',   type: 'text', anchor: 'top_right', x: barX0 + barW,      y: barY0 + barH + 17, scale: 0.72, text: '$footRight', color: accentCol, shadow: true }
         ]
-        return out
+
+        var panelCfg = {}
+        for (var k in c) {
+            if (Object.prototype.hasOwnProperty.call(c, k)) panelCfg[k] = c[k]
+        }
+        panelCfg.progress    = pVal
+        panelCfg.subProgress = subPVal
+        panelCfg.barWidth    = barW
+        panelCfg.barHeight   = barH
+        panelCfg.text        = titleStr
+        panelCfg.sub         = subStr
+        panelCfg.nodes       = schemeAlphaNodes
+        panelCfg.vars        = {
+            progress:      pVal,
+            progressTrail: pVal,
+            subProgress:   subPVal,
+            impulse:       0.0,
+            pctText:       pctStr,
+            efTag:         efTagStr,
+            badgeCode:     badgeCode,
+            title:         titleStr,
+            sub:           subStr,
+            footRight:     footRight,
+            rightMetric:   rightVal + '\n§e' + rightSub
+        }
+
+        if (typeof DANMAKU.buildProgressPanel === 'function') {
+            return DANMAKU.buildProgressPanel(panelCfg)
+        }
+        panelCfg.surface = 'screen'
+        panelCfg.tracks  = {
+            progress:      { mode: 'lerp', speed: 10.0, easing: 'out_cubic' },
+            progressTrail: { mode: 'trail', target: '$progress', delayMs: 220, speed: 4.5 },
+            subProgress:   { mode: 'lerp', speed: 12.0, easing: 'out_cubic' },
+            impulse:       { mode: 'impulse', onChange: '$progress', peak: 1.0, decayMs: 260 }
+        }
+        return panelCfg
     }
 
     // ------------------------------------------------------------------------
@@ -1271,7 +1385,7 @@
             { shakeMode: 'constant', shakeAmp: 4.2, fadeStyle: 'shatter', size: [1.42, 1.62] }
         )
 
-        // 新增第二条（0.8 秒后紧接着弹出）：堆芯保护锁熔断、强制跳转最后 10 秒死刑倒计时（仅当该失稳任务尚未被终望珍珠或越权终止时触发）
+        // 新增第二条（0.8 秒后紧接着弹出）：堆芯保护锁熔断、强制跳转最后 10 秒约束场崩溃·视界锁死倒计时（仅当该失稳任务尚未被终望珍珠或越权终止时触发）
         saveUnstableJobs(true)
         var server = SERVER || (level != null ? level.server : null)
         if (server != null) {
@@ -1294,7 +1408,7 @@
             '{"text":"  [AVARITIA_KERNEL // 致 命 错 误 崩 溃 报 告]","color":"red","bold":true}',
             '{"text":"  EXCEPTION   : 0xC00000FD_TAMPER_PROTECTION_FAULT (' + reason + ')","color":"gold"}',
             '{"text":"  CORE_STATUS : 强制跃迁至 epiphy:ultra_uncrafting_instability_5 (终极拆解台 [堆芯熔毁])","color":"yellow"}',
-            '{"text":"  TIME_PENALTY: 180s 缓冲保护已失效 -> 强制覆写为 10.0s 终末死刑倒计时","color":"red","bold":true}',
+            '{"text":"  TIME_PENALTY: 180s 缓冲保护已失效 -> 强制覆写为 10.0s 约束场崩溃·视界锁死倒计时","color":"red","bold":true}',
             '{"text":"  FATAL_STACK : 常规破坏被中子素死锁拦截！正在高速倾泻核心崩溃转储流... 锟斤拷烫烫烫","color":"dark_red"}',
             '{"text":"====================================================","color":"dark_red","bold":true}'
         ])
@@ -1619,10 +1733,11 @@
     function triggerRapidFinalErrorStream(job, remainTicks) {
         if (remainTicks <= 0 || remainTicks > FATAL_ERROR_TICKS) return
 
-        // 0. 左上角【终末 10 秒死刑遥测面板】（持续激活模式 lifeMode: 'active'，原生 2D 图元进度条 + 延迟拖影，每 4 tick 原地刷新）
+        // 0. 左上角【约束场崩溃 · 视界锁死倒计时遥测面板】（定稿方案 α：终末地工业科研拓扑 × 搁浅吊线 × 阶梯流动波纹，每 4 tick 原地刷新）
         if (remainTicks % 4 === 0) {
             var pFinal  = Math.max(0, Math.min(1.0, 1.0 - (remainTicks / FATAL_ERROR_TICKS)))
-            var lockTag = job.fatalTriggered ? '§4§l[防破坏锁死 · 死刑序列]' : '§c§l[堆芯熔毁 · 终末倒计时]'
+            var subLock = Math.max(0, Math.min(1.0, 1.0 - ((remainTicks % 20) / 20)))
+            var lockTag = job.fatalTriggered ? '§4§l约束场崩溃 · 视界锁死 [防破坏联锁]' : '§c§l约束场崩溃 · 视界锁死倒计时 [不可逆坍缩态]'
             sendDanmakuNear(job.level, job.x, job.y, job.z, SCREEN_ALERT_RADIUS, buildTelemetryProgressOpts({
                 group:        TELEMETRY_GROUP,
                 id:           'core_telemetry_' + job.x + '_' + job.y + '_' + job.z,
@@ -1630,15 +1745,30 @@
                 activeHold:   14,
                 priority:     'active',
                 progress:     pFinal,
-                barWidth:     164,
-                barHeight:    6,
-                barColorFrom: 0xFF1122,
-                barColorTo:   0xFFAA00,
-                trailColor:   0x88FF4422,
-                text:         lockTag + ' §fT-' + (remainTicks / 20).toFixed(1) + 's §e(' + Math.round(pFinal * 100) + '%)',
-                sub:          '§7坐标 (' + job.x + ', ' + job.y + ', ' + job.z + ') // 奇点释放临界',
-                pos:          [0.19, 0.12],
-                size:         0.78,
+                subProgress:  subLock,
+                barWidth:     212,
+                barHeight:    10,
+                barColorFrom: 0x4A0714,
+                barColorMid:  0xC62828,
+                barColorTo:   0xFF8A80,
+                accentColor:  0xFF5252,
+                warnColor:    0xFFAB00,
+                pureColor:    0xFFEBEE,
+                trailColor:   0x77FF5252,
+                plateBgColor: 0xEB12090D,
+                mosaicAColor: 0xE0FFEBEE,
+                mosaicBColor: 0x70FF5252,
+                mosaicCColor: 0x3DC62828,
+                efTag:        job.fatalTriggered ? 'HZ-LCK // T-0' : 'CT-FAIL // T-0',
+                badgeCode:    'CRITICAL',
+                badgeItem:    'epiphy:ultra_uncrafting_instability_5',
+                rightVal:     'T-' + (remainTicks / 20).toFixed(1) + 's',
+                rightSub:     Math.round(pFinal * 100) + '.0% / 10s',
+                footRight:    'HORIZON_LOCK // 100.0%',
+                text:         lockTag,
+                sub:          '§7核心 (' + job.x + ', ' + job.y + ', ' + job.z + ') // 奇点梯度锁死',
+                pos:          [0.24, 0.13],
+                size:         0.76,
                 tilt:         0,
                 shakeMode:    'none',
                 shakeAmp:     0.0,
@@ -2071,8 +2201,10 @@
             return
         }
 
-        // 每 8 tick 刷新一次左上角持续激活【堆芯失稳遥测面板】HUD（lifeMode: 'active'，原生 2D 图元进度条 + 拖影轨道，全程静止不震动）
+        // 每 8 tick 刷新一次左上角持续激活【堆芯约束失稳遥测面板】HUD（定稿方案 α：终末地工业科研拓扑 × 搁浅吊线 × 阶梯流动波纹）
         if (job.t % 8 === 0) {
+            var stageSubProg = Math.min(1.0, ((job.t % 720) / 720))
+            var isCritStage  = (stageIdx >= 3)
             sendDanmakuNear(job.level, job.x, job.y, job.z, SCREEN_ALERT_RADIUS, buildTelemetryProgressOpts({
                 group:        TELEMETRY_GROUP,
                 id:           'core_telemetry_' + job.x + '_' + job.y + '_' + job.z,
@@ -2080,14 +2212,29 @@
                 activeHold:   22,
                 priority:     'active',
                 progress:     p,
-                barWidth:     160,
-                barHeight:    6,
-                barColorFrom: meta.hex,
-                barColorTo:   0xFFCC33,
-                trailColor:   0x77FF6633,
-                text:         meta.colorCode + '§l[堆芯遥测 · 阶段 ' + (stageIdx + 1) + '/5 ' + meta.tag + '] §fT-' + remainSec + 's §7(' + pct + '%)',
-                sub:          '§7核心 (' + job.x + ', ' + job.y + ', ' + job.z + ') §8| §e投掷【终望珍珠】可吞噬停机',
-                pos:          [0.19, 0.12],
+                subProgress:  stageSubProg,
+                barWidth:     210,
+                barHeight:    10,
+                barColorFrom: isCritStage ? 0x5D1900 : 0x174A5A,
+                barColorMid:  meta.hex,
+                barColorTo:   isCritStage ? 0xFFE082 : 0x80DEEA,
+                accentColor:  isCritStage ? 0xFFD54F : 0x4DD0E1,
+                warnColor:    0xFFD54F,
+                pureColor:    0xFFFFFF,
+                trailColor:   isCritStage ? 0x66FFB300 : 0x664DD0E1,
+                plateBgColor: isCritStage ? 0xE816110B : 0xE80A1218,
+                mosaicAColor: 0xD8FFFFFF,
+                mosaicBColor: isCritStage ? 0x66FFD54F : 0x664DD0E1,
+                mosaicCColor: isCritStage ? 0x38FF8F00 : 0x3826A69A,
+                efTag:        'EF-TLM // S' + (stageIdx + 1),
+                badgeCode:    isCritStage ? 'UNSTABLE' : 'DETECTED',
+                badgeItem:    'epiphy:ultra_uncrafting_instability_' + (stageIdx + 1),
+                rightVal:     pct + '.0%',
+                rightSub:     'T-' + remainSec + 's',
+                footRight:    'R_ESCAPE // ' + (16 + stageIdx * 16) + '.0m',
+                text:         meta.colorCode + '§l堆芯约束失稳遥测 §f[S' + (stageIdx + 1) + '/5 · ' + meta.tag + ']',
+                sub:          '§7核心 (' + job.x + ', ' + job.y + ', ' + job.z + ') §8// §e投掷【终望珍珠】可吞噬停机',
+                pos:          [0.24, 0.13],
                 size:         0.75,
                 tilt:         0,
                 shakeMode:    'none',
@@ -2764,9 +2911,11 @@
         var pct = Math.min(100, Math.round(p * 100))
         var alertRange = FX_PACKET_RANGE + 80
 
-        // 1. 左上角【300m 物质湮灭实时波前监控面板】（原生 2D 图元进度条 + 拖影轨道，持续激活 HUD，始终稳定静止不震动）
+        // 1. 左上角【300m 球状湮灭波前推进遥测面板】（定稿方案 α：终末地工业科研拓扑 × 搁浅吊线 × 寰宇星空波纹视差）
         var waveSlotId = 'annihilation_hud_' + job.x + '_' + job.y + '_' + job.z
         if (shownR < maxR && job.t % 6 === 0) {
+            var shellSliceProg = Math.min(1.0, ((shownR % 30) / 30))
+            var stratumIdx     = Math.max(1, Math.min(30, Math.ceil(p * 30)))
             sendDanmakuNear(job.level, job.x, job.y, job.z, alertRange, buildTelemetryProgressOpts({
                 group:        TELEMETRY_GROUP,
                 id:           waveSlotId,
@@ -2774,15 +2923,30 @@
                 activeHold:   18,
                 priority:     'active',
                 progress:     p,
-                barWidth:     168,
-                barHeight:    6,
-                barColorFrom: 0xAA0022,
-                barColorTo:   0xFF5500,
-                trailColor:   0x88FF2244,
-                text:         '§4§l[物质湮灭波前 // REALITY WIPE] §f' + pct + '% §e(' + shownR + 'm / ' + maxR + 'm)',
-                sub:          '§7爆心 (' + job.x + ', ' + job.y + ', ' + job.z + ') §8| §6流体与岩层正在同步汽化',
-                pos:          [0.20, 0.12],
-                size:         0.78,
+                subProgress:  shellSliceProg,
+                barWidth:     216,
+                barHeight:    10,
+                barColorFrom: 0x240B4D,
+                barColorMid:  0x651FFF,
+                barColorTo:   0x18FFFF,
+                accentColor:  0x84FFFF,
+                warnColor:    0xE040FB,
+                pureColor:    0xF3E5F5,
+                trailColor:   0x777C4DFF,
+                plateBgColor: 0xEB0B0917,
+                mosaicAColor: 0xE0FFFFFF,
+                mosaicBColor: 0x7018FFFF,
+                mosaicCColor: 0x457C4DFF,
+                efTag:        'AW-300 // R+',
+                badgeCode:    'WAVEFRONT',
+                badgeItem:    'minecraft:ender_eye',
+                rightVal:     pct + '.0%',
+                rightSub:     shownR + ' / ' + maxR + 'm',
+                footRight:    'STRATUM // #' + stratumIdx + '/30',
+                text:         '§d§l球状湮灭波前推进遥测 §f[径向剥离 R = ' + shownR + ' / ' + maxR + 'm]',
+                sub:          '§7爆心 (' + job.x + ', ' + job.y + ', ' + job.z + ') §8// §b流体与岩层正在同步汽化',
+                pos:          [0.24, 0.13],
+                size:         0.76,
                 tilt:         0,
                 shakeMode:    'none',
                 shakeAmp:     0.0,

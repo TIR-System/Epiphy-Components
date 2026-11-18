@@ -1038,8 +1038,10 @@
 
     var VALID_SURFACES   = { screen: true, gui: true, slot: true, world_plane: true }
     var VALID_CLIP_DIRS  = { left: true, right: true, down: true, up: true, center_x: true }
-    var VALID_FILL_MODES = { solid: true, gradient: true, parallax: true, shader: true }
+    var VALID_FILL_MODES = { solid: true, outline: true, gradient: true, parallax: true, shader: true }
     var VALID_NODE_TYPES = { text: true, rect: true, sprite: true, nine_slice: true, item: true, group: true }
+    var VALID_ANCHORS    = { center: true, top_left: true, left: true, top_right: true, right: true }
+    var VALID_PROC_KINDS = { texture: true, gradient: true, stripes: true, ripples: true, particles: true, steps: true }
     var deprecatedAliasHits = {}
 
     function sanitizeVarOrColor(val, defColor) {
@@ -1071,6 +1073,49 @@
         }
     }
 
+    function sanitizeAffinePropBind(spec) {
+        if (spec == null || typeof spec !== 'object' || !spec.var) return null
+        var out = {
+            var:  String(spec.var).replace(/^\$/, ''),
+            mult: parseFiniteNum(spec.mult !== undefined ? spec.mult : spec.span, 0.0)
+        }
+        if (spec.offset !== undefined) out.offset = parseFiniteNum(spec.offset, 0.0)
+        if (spec.min !== undefined) out.min = parseFiniteNum(spec.min, 0.0)
+        if (spec.max !== undefined) out.max = parseFiniteNum(spec.max, 1.0)
+        return out
+    }
+
+    function sanitizeNodeBind(rawBind) {
+        if (rawBind == null || typeof rawBind !== 'object') return null
+        var out = {}
+        var hasField = false
+        var propKeys = ['x', 'y', 'w', 'h', 'alpha', 'angle']
+        for (var pi = 0; pi < propKeys.length; pi++) {
+            var pk = propKeys[pi]
+            var bSpec = sanitizeAffinePropBind(rawBind[pk])
+            if (bSpec != null) {
+                out[pk] = bSpec
+                hasField = true
+            }
+        }
+        if (rawBind.stepHz !== undefined) {
+            out.stepHz = Math.max(0, Math.min(60, parseFiniteNum(rawBind.stepHz, 0)))
+            hasField = true
+        }
+        if (rawBind.seed !== undefined) {
+            out.seed = Math.round(parseFiniteNum(rawBind.seed, 0))
+            hasField = true
+        }
+        if (rawBind.jitterX !== undefined) { out.jitterX = Math.max(-256, Math.min(256, parseFiniteNum(rawBind.jitterX, 0))); hasField = true }
+        if (rawBind.jitterY !== undefined) { out.jitterY = Math.max(-256, Math.min(256, parseFiniteNum(rawBind.jitterY, 0))); hasField = true }
+        if (rawBind.jitterW !== undefined) { out.jitterW = Math.max(-256, Math.min(256, parseFiniteNum(rawBind.jitterW, 0))); hasField = true }
+        if (rawBind.jitterH !== undefined) { out.jitterH = Math.max(-256, Math.min(256, parseFiniteNum(rawBind.jitterH, 0))); hasField = true }
+        if (rawBind.impulseVar !== undefined) { out.impulseVar = String(rawBind.impulseVar).replace(/^\$/, ''); hasField = true }
+        if (rawBind.shakeX !== undefined) { out.shakeX = Math.max(0, Math.min(64, parseFiniteNum(rawBind.shakeX, 0))); hasField = true }
+        if (rawBind.shakeY !== undefined) { out.shakeY = Math.max(0, Math.min(64, parseFiniteNum(rawBind.shakeY, 0))); hasField = true }
+        return hasField ? out : null
+    }
+
     function sanitizeRectFill(fill, rawNodeColor) {
         if (fill == null || typeof fill !== 'object') {
             return {
@@ -1080,11 +1125,23 @@
         }
         var mode = String(fill.mode || 'solid').trim().toLowerCase()
         if (!VALID_FILL_MODES[mode]) mode = 'solid'
+        if (mode === 'outline') {
+            return {
+                mode:      'outline',
+                color:     sanitizeVarOrColor(fill.color !== undefined ? fill.color : rawNodeColor, 0xFFFFFFFF),
+                thickness: Math.max(1, Math.min(16, Math.round(parseFiniteNum(fill.thickness, 1))))
+            }
+        }
         if (mode === 'gradient') {
             var gDir = String(fill.dir || 'h').trim().toLowerCase() === 'v' ? 'v' : 'h'
             var fromCol = sanitizeVarOrColor(fill.from !== undefined ? fill.from : rawNodeColor, 0xFF5555)
             var toCol   = sanitizeVarOrColor(fill.to !== undefined ? fill.to : fromCol, 0xFFAA00)
-            return { mode: 'gradient', dir: gDir, from: fromCol, to: toCol }
+            var gOut    = { mode: 'gradient', dir: gDir, from: fromCol, to: toCol }
+            if (fill.mid !== undefined) {
+                gOut.mid    = sanitizeVarOrColor(fill.mid, toCol)
+                gOut.midPos = Math.max(0.05, Math.min(0.95, parseFiniteNum(fill.midPos, 0.62)))
+            }
+            return gOut
         }
         if (mode === 'parallax') {
             var rawLayers = Array.isArray(fill.layers) ? fill.layers : []
@@ -1092,17 +1149,46 @@
             for (var li = 0; li < rawLayers.length && li < 8; li++) {
                 var rl = rawLayers[li]
                 if (rl == null || typeof rl !== 'object') continue
-                layers.push({
-                    tex:    String(rl.tex || rl.texture || ''),
-                    speedX: parseFiniteNum(rl.speedX, 0.0),
-                    speedY: parseFiniteNum(rl.speedY, 0.0),
-                    scale:  Math.max(0.1, Math.min(16.0, parseFiniteNum(rl.scale, 1.0))),
+                var kindStr = rl.kind ? String(rl.kind).trim().toLowerCase() : ''
+                if (kindStr && !VALID_PROC_KINDS[kindStr]) kindStr = 'texture'
+                var layOut = {
+                    tex:      String(rl.tex || rl.texture || ''),
+                    speedX:   parseFiniteNum(rl.speedX, 0.0),
+                    speedY:   parseFiniteNum(rl.speedY, 0.0),
+                    scale:    Math.max(0.1, Math.min(16.0, parseFiniteNum(rl.scale, 1.0))),
                     rotSpeed: parseFiniteNum(rl.rotSpeed, 0.0),
-                    alpha:  Math.max(0.0, Math.min(1.0, parseFiniteNum(rl.alpha, 1.0)))
-                })
+                    alpha:    Math.max(0.0, Math.min(1.0, parseFiniteNum(rl.alpha, 1.0)))
+                }
+                if (kindStr) layOut.kind = kindStr
+                if (rl.color !== undefined) layOut.color = sanitizeVarOrColor(rl.color, 0xFFFFFFFF)
+                if (rl.altColor !== undefined) layOut.altColor = sanitizeVarOrColor(rl.altColor, 0x80FFFFFF)
+                if (rl.from !== undefined) layOut.from = sanitizeVarOrColor(rl.from, 0x174A5A)
+                if (rl.mid !== undefined) layOut.mid = sanitizeVarOrColor(rl.mid, 0x26A69A)
+                if (rl.to !== undefined) layOut.to = sanitizeVarOrColor(rl.to, 0x80DEEA)
+                if (rl.midPos !== undefined) layOut.midPos = Math.max(0.05, Math.min(0.95, parseFiniteNum(rl.midPos, 0.62)))
+                if (rl.step !== undefined) layOut.step = Math.max(2, Math.min(256, parseFiniteNum(rl.step, 18)))
+                if (rl.width !== undefined) layOut.width = Math.max(1, Math.min(128, parseFiniteNum(rl.width, 6)))
+                if (rl.rows !== undefined) layOut.rows = Math.max(1, Math.min(16, Math.round(parseFiniteNum(rl.rows, 4))))
+                if (rl.rowGap !== undefined) layOut.rowGap = Math.max(1, Math.min(64, parseFiniteNum(rl.rowGap, 3.5)))
+                if (rl.offsetY !== undefined) layOut.offsetY = parseFiniteNum(rl.offsetY, 2.0)
+                if (rl.segments !== undefined) layOut.segments = Math.max(1, Math.min(24, Math.round(parseFiniteNum(rl.segments, 6))))
+                if (rl.baseLen !== undefined) layOut.baseLen = Math.max(2, Math.min(256, parseFiniteNum(rl.baseLen, 26)))
+                if (rl.ampLen !== undefined) layOut.ampLen = Math.max(0, Math.min(128, parseFiniteNum(rl.ampLen, 15)))
+                if (rl.thickness !== undefined) layOut.thickness = Math.max(0.5, Math.min(16, parseFiniteNum(rl.thickness, 1.2)))
+                if (rl.count !== undefined) layOut.count = Math.max(1, Math.min(64, Math.round(parseFiniteNum(rl.count, 16))))
+                if (rl.minW !== undefined) layOut.minW = Math.max(1, Math.min(32, parseFiniteNum(rl.minW, 1)))
+                if (rl.maxW !== undefined) layOut.maxW = Math.max(1, Math.min(64, parseFiniteNum(rl.maxW, 4)))
+                if (rl.stepHz !== undefined) layOut.stepHz = Math.max(0.5, Math.min(60, parseFiniteNum(rl.stepHz, 9)))
+                if (rl.risers !== undefined) layOut.risers = Boolean(rl.risers)
+                if (rl.seed !== undefined) layOut.seed = Math.round(parseFiniteNum(rl.seed, 0))
+                layers.push(layOut)
             }
             var pOut = { mode: 'parallax', layers: layers }
             if (fill.maskTexture) pOut.maskTexture = String(fill.maskTexture)
+            if (fill.bgColor !== undefined) pOut.bgColor = sanitizeVarOrColor(fill.bgColor, 0xFF0A0412)
+            if (fill.bgAlpha !== undefined) pOut.bgAlpha = Math.max(0.0, Math.min(1.0, parseFiniteNum(fill.bgAlpha, 1.0)))
+            if (fill.bloomWidth !== undefined) pOut.bloomWidth = Math.max(0, Math.min(128, parseFiniteNum(fill.bloomWidth, 0)))
+            if (fill.bloomColor !== undefined) pOut.bloomColor = sanitizeVarOrColor(fill.bloomColor, 0xD8FFFFFF)
             return pOut
         }
         if (mode === 'shader') {
@@ -1128,7 +1214,8 @@
             if (rn == null || typeof rn !== 'object') continue
             var nType = String(rn.type || 'rect').trim().toLowerCase()
             if (!VALID_NODE_TYPES[nType]) continue
-            var anchor = String(rn.anchor || 'center').trim().toLowerCase() === 'top_left' ? 'top_left' : 'center'
+            var rawAnc = String(rn.anchor || 'center').trim().toLowerCase()
+            var anchor = VALID_ANCHORS[rawAnc] ? rawAnc : 'center'
             var node = {
                 id:     rn.id != null ? String(rn.id) : ('n' + i),
                 type:   nType,
@@ -1149,6 +1236,8 @@
             }
             var clipSpec = sanitizeClipSpec(rn.clip)
             if (clipSpec != null) node.clip = clipSpec
+            var bindSpec = sanitizeNodeBind(rn.bind)
+            if (bindSpec != null) node.bind = bindSpec
 
             if (nType === 'rect') {
                 node.w    = node.w !== undefined ? node.w : 64
@@ -1884,68 +1973,91 @@
         var bgCol    = parseColor(c.bgColor !== undefined ? c.bgColor : 0xB0120A16, 0xB0120A16).color
         var borderCol= parseColor(c.borderColor !== undefined ? c.borderColor : 0xCC552233, 0xCC552233).color
 
-        var nodes = [
-            {
-                id:          'bar_bg',
-                type:        'rect',
-                x:           0,
-                y:           barY,
-                w:           barW + 2,
-                h:           barH + 2,
-                anchor:      'center',
-                fill:        { mode: 'solid', color: bgCol },
-                borderColor: borderCol,
-                borderWidth: 1
-            },
-            {
-                id:     'bar_trail',
-                type:   'rect',
-                x:      0,
-                y:      barY,
-                w:      barW,
-                h:      barH,
-                anchor: 'center',
-                fill:   { mode: 'solid', color: trailCol },
-                clip:   { dir: 'left', ratio: '$progressTrail', mode: 'local' }
-            },
-            {
-                id:     'bar_main',
-                type:   'rect',
-                x:      0,
-                y:      barY,
-                w:      barW,
-                h:      barH,
-                anchor: 'center',
-                fill:   { mode: 'gradient', dir: 'h', from: fillFrom, to: fillTo },
-                clip:   { dir: 'left', ratio: '$progress', mode: 'local' }
+        var nodes = []
+        if (Array.isArray(c.nodes) && c.nodes.length > 0) {
+            for (var cni = 0; cni < c.nodes.length; cni++) {
+                nodes.push(c.nodes[cni])
             }
-        ]
-
-        if (titleStr.length > 0) {
-            nodes.push({
-                id:     'title',
-                type:   'text',
-                x:      0,
-                y:      barY - Math.round(barH * 0.5) - 9,
-                anchor: 'center',
-                text:   titleStr,
-                color:  parseColor(c.color, DEFAULTS.color).color,
-                shadow: c.shadow !== undefined ? Boolean(c.shadow) : true
-            })
+        } else {
+            if (Array.isArray(c.preNodes)) {
+                for (var pni = 0; pni < c.preNodes.length; pni++) {
+                    nodes.push(c.preNodes[pni])
+                }
+            }
+            var mainFill = (c.barFill != null && typeof c.barFill === 'object')
+                ? c.barFill
+                : { mode: 'gradient', dir: 'h', from: fillFrom, to: fillTo }
+            if (mainFill.mode === 'gradient' && c.barColorMid !== undefined && mainFill.mid === undefined) {
+                mainFill.mid = parseColor(c.barColorMid, fillTo).color
+            }
+            nodes.push(
+                {
+                    id:          'bar_bg',
+                    type:        'rect',
+                    x:           0,
+                    y:           barY,
+                    w:           barW + 2,
+                    h:           barH + 2,
+                    anchor:      'center',
+                    fill:        { mode: 'solid', color: bgCol },
+                    borderColor: borderCol,
+                    borderWidth: 1
+                },
+                {
+                    id:     'bar_trail',
+                    type:   'rect',
+                    x:      0,
+                    y:      barY,
+                    w:      barW,
+                    h:      barH,
+                    anchor: 'center',
+                    fill:   { mode: 'solid', color: trailCol },
+                    clip:   { dir: 'left', ratio: '$progressTrail', mode: 'local' }
+                },
+                {
+                    id:     'bar_main',
+                    type:   'rect',
+                    x:      0,
+                    y:      barY,
+                    w:      barW,
+                    h:      barH,
+                    anchor: 'center',
+                    fill:   mainFill,
+                    clip:   { dir: 'left', ratio: '$progress', mode: 'local' }
+                }
+            )
+            if (Array.isArray(c.extraNodes)) {
+                for (var eni = 0; eni < c.extraNodes.length; eni++) {
+                    nodes.push(c.extraNodes[eni])
+                }
+            }
+            if (titleStr.length > 0 && c.includeDefaultTitle !== false) {
+                nodes.push({
+                    id:     'title',
+                    type:   'text',
+                    x:      0,
+                    y:      barY - Math.round(barH * 0.5) - 9,
+                    anchor: 'center',
+                    text:   titleStr,
+                    color:  parseColor(c.color, DEFAULTS.color).color,
+                    shadow: c.shadow !== undefined ? Boolean(c.shadow) : true
+                })
+            }
+            if (subStr.length > 0 && c.includeDefaultSub !== false) {
+                nodes.push({
+                    id:     'sub',
+                    type:   'text',
+                    x:      0,
+                    y:      barY + Math.round(barH * 0.5) + 9,
+                    anchor: 'center',
+                    text:   subStr,
+                    color:  parseColor(c.subColor, DEFAULTS.subColor).color,
+                    shadow: c.shadow !== undefined ? Boolean(c.shadow) : true
+                })
+            }
         }
-        if (subStr.length > 0) {
-            nodes.push({
-                id:     'sub',
-                type:   'text',
-                x:      0,
-                y:      barY + Math.round(barH * 0.5) + 9,
-                anchor: 'center',
-                text:   subStr,
-                color:  parseColor(c.subColor, DEFAULTS.subColor).color,
-                shadow: c.shadow !== undefined ? Boolean(c.shadow) : true
-            })
-        }
 
+        var subPVal = Math.max(0.0, Math.min(1.0, parseFiniteNum(c.subProgress, pVal)))
         var out = {}
         for (var k in c) {
             if (Object.prototype.hasOwnProperty.call(c, k)) {
@@ -1958,6 +2070,8 @@
         out.vars    = {
             progress:      pVal,
             progressTrail: pVal,
+            subProgress:   subPVal,
+            impulse:       0.0,
             pctText:       Math.round(pVal * 100) + '%'
         }
         if (c.vars != null && typeof c.vars === 'object') {
@@ -1969,7 +2083,9 @@
         }
         out.tracks = {
             progress:      { mode: 'lerp', speed: parseFiniteNum(c.lerpSpeed, 10.0), easing: 'out_cubic' },
-            progressTrail: { mode: 'trail', target: '$progress', delayMs: Math.round(parseFiniteNum(c.trailDelayMs, 220)), speed: parseFiniteNum(c.trailSpeed, 4.5) }
+            progressTrail: { mode: 'trail', target: '$progress', delayMs: Math.round(parseFiniteNum(c.trailDelayMs, 220)), speed: parseFiniteNum(c.trailSpeed, 4.5) },
+            subProgress:   { mode: 'lerp', speed: parseFiniteNum(c.subLerpSpeed, 12.0), easing: 'out_cubic' },
+            impulse:       { mode: 'impulse', onChange: '$progress', peak: parseFiniteNum(c.impulsePeak, 1.0), decayMs: Math.round(parseFiniteNum(c.impulseDecayMs, 260)) }
         }
         if (c.tracks != null && typeof c.tracks === 'object') {
             for (var tk in c.tracks) {

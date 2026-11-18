@@ -7545,11 +7545,35 @@ test('Epiphy2DSurface & Epiphy2DRenderer v6.0: adaptV5ToV6, aliases, quotas, tra
     var tPkt = telemetryPkts[0]
     assert.strictEqual(tPkt.proto, 6)
     assert.strictEqual(tPkt.surface, 'screen')
-    assert.ok(Array.isArray(tPkt.nodes) && tPkt.nodes.length >= 4, 'v18 telemetry packet must contain native 2D graphical progress bar nodes')
+    assert.ok(Array.isArray(tPkt.nodes) && tPkt.nodes.length >= 16, 'v18 telemetry packet must contain Scheme Alpha topological progress bar nodes')
     assert.ok(tPkt.vars != null && typeof tPkt.vars.progress === 'number', 'v18 telemetry packet must bind numeric vars.progress')
-    assert.ok(tPkt.tracks != null && tPkt.tracks.progress.mode === 'lerp' && tPkt.tracks.progressTrail.mode === 'trail', 'v18 telemetry packet must configure lerp + trail tracks')
+    assert.ok(tPkt.tracks != null && tPkt.tracks.progress.mode === 'lerp' && tPkt.tracks.progressTrail.mode === 'trail' && tPkt.tracks.impulse.mode === 'impulse', 'v18 telemetry packet must configure lerp + trail + impulse tracks')
     assert.strictEqual(String(tPkt.sub).indexOf('█'), -1, 'v18 telemetry subtitle must not contain legacy text progress bar character █')
     assert.strictEqual(String(tPkt.sub).indexOf('░'), -1, 'v18 telemetry subtitle must not contain legacy text progress bar character ░')
+    assert.ok(tPkt.nodes.some(function (n) { return n.id === 'badge_outer' && n.fill && n.fill.mode === 'outline' }), 'v18 Scheme Alpha must include concentric outline reticle badge_outer')
+    assert.ok(tPkt.nodes.some(function (n) { return n.id === 'under_ripples' && n.fill && n.fill.mode === 'parallax' && n.fill.layers[0].kind === 'ripples' }), 'v18 Scheme Alpha must include external flowing ripples layer')
+    assert.ok(tPkt.nodes.some(function (n) { return n.id === 'frame_top_steps' && n.fill && n.fill.mode === 'parallax' && n.fill.layers[0].kind === 'steps' }), 'v18 Scheme Alpha must include irregular stepped top frame layer')
+    assert.ok(tPkt.nodes.some(function (n) { return n.id === 'cursor_group' && n.type === 'group' && n.bind && n.bind.x && n.bind.x.var === 'progress' }), 'v18 Scheme Alpha must include track-bound T-pin cursor_group')
+    assert.ok(tPkt.nodes.some(function (n) { return n.id === 'footer_right' && n.anchor === 'top_right' }), 'v18 Scheme Alpha must include right-aligned footer_right text node')
+
+    // 5b. Verify evaluateNodeBind (affine track binding + discrete stepHz modulation + impulse shake)
+    var bTestNode = {
+        bind: {
+            x: { var: 'progress', mult: 210, offset: 0 },
+            stepHz: 9,
+            seed: 17,
+            jitterX: 4,
+            jitterW: 2,
+            impulseVar: 'impulse',
+            shakeY: 2.0
+        }
+    }
+    var bEval1 = Renderer._pure.evaluateNodeBind(bTestNode, -105, 0, 10, 6, 1.0, 0.0, { progress: 0.5, impulse: 0.0 }, 1000)
+    var bEval1SameStep = Renderer._pure.evaluateNodeBind(bTestNode, -105, 0, 10, 6, 1.0, 0.0, { progress: 0.5, impulse: 0.0 }, 1020)
+    assert.strictEqual(bEval1.x, bEval1SameStep.x, 'stepHz=9 discrete jitter must stay constant within the same 111ms clock step')
+    assert.ok(Math.abs(bEval1.x - 0) <= 4, 'at progress=0.5 (-105 + 105 = 0), bound x with jitterX=4 must be within [-4, 4], got ' + bEval1.x)
+    var bEvalImpulse = Renderer._pure.evaluateNodeBind(bTestNode, -105, 0, 10, 6, 1.0, 0.0, { progress: 0.5, impulse: 1.0 }, 1035)
+    assert.ok(Math.abs(bEvalImpulse.y) <= 2, 'impulse shakeY must stay bounded by amplitude')
 
     // 6. Real KubeJS CompoundTag/ListTag + PaintScreenEventJS pipeline verification (catching Rhino NBT typeof & 6-arg rectangle/quads)
     // Simulate KubeJS NBTUtils serialization (CompoundTag / ListTag / NumericTag / StringTag)
@@ -7674,6 +7698,18 @@ test('Epiphy2DSurface & Epiphy2DRenderer v6.0: adaptV5ToV6, aliases, quotas, tra
     assert.ok(Math.abs(drawnBarWidth - 80) < 0.01, 'at progress=0.5 with barWidth=160, gradient quad width must be 80px, got ' + drawnBarWidth)
     assert.ok(drawnTextStrings.some(function (s) { return s.indexOf('堆芯遥测') >= 0 }), 'title text node must draw with valid Component')
     assert.ok(drawnTextStrings.some(function (s) { return s.indexOf('正在运行') >= 0 }), 'sub text node must draw with valid Component')
+
+    // Also push the full v18 Scheme Alpha telemetry packet as a CompoundTag/ListTag and render it through PaintScreenEventJS
+    var prevRectCount = rectDraws.length
+    var prevVertCount = vertexDraws.length
+    realCliNet['epiphy:screen_danmaku']({ data: toMockNbtTag(tPkt) })
+    realCliNow += 50
+    realCliPaints[0](realPaintEv)
+    assert.strictEqual(nbtErrors.length, 0, 'v18 Scheme Alpha CompoundTag packet + PaintScreenEventJS draw must emit zero errors: ' + nbtErrors.join(' | '))
+    assert.ok(rectDraws.length > prevRectCount + 30, 'v18 Scheme Alpha procedural ripples/steps/particles/outline must emit batched hardware quads')
+    assert.ok(vertexDraws.length > prevVertCount, 'v18 Scheme Alpha procedural 3-stop gradient + plasma bloom must emit hardware vertex gradients')
+    assert.ok(drawnTextStrings.some(function (s) { return s.indexOf('EF-TLM') >= 0 }), 'v18 Scheme Alpha Endfield industrial tag must render')
+    assert.ok(drawnTextStrings.some(function (s) { return s.indexOf('R_ESCAPE') >= 0 }), 'v18 Scheme Alpha right-aligned footer must render')
 })
 
 

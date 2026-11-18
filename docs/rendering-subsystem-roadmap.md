@@ -78,33 +78,36 @@
    - **双模式比例裁剪器（`clip` —— 兼顾旋转面板与复合容器）**：
      - `mode: 'local'`（**默认**，局部几何/UV 收缩）：在 `PoseStack` 局部坐标系内直接按绑定变量比例 `[0.0, 1.0]` 收缩 `rect` / `sprite` 的绘制宽高 `(w, h)` 与终点 UV `(u1, v1)`——**零 `glScissor` 状态开销，且在面板或父容器带旋转角（`angle !== 0`）时依然能沿斜向完美裁剪**！
      - `mode: 'scissor'`（屏幕轴对齐硬件裁剪）：调用 `GuiGraphics.enableScissor`，专门用于裁剪包含 `text` / `item` / `nine_slice` 的复合 `group` 容器（注：`glScissor` 仅支持屏幕轴对齐矩形，当 `angle !== 0` 时对 `rect`/`sprite` 自动优先走 `'local'`）。
+   - **图元属性仿射绑定与离散步进调制器（`node.bind`）**：
+     - **连续轨道仿射映射**：任意图元或 `group` 容器的 `x, y, w, h, alpha, angle` 均可声明 `{ var: '<trackOrVarKey>', mult: <spanPx>, offset: <baseOffset>, min: 0, max: 1 }`，由客户端按 `base + offset + clamp(val, min, max) * mult` 60fps 实时求值；
+     - **离散时钟步进与冲击微震调制**：通过 `stepHz`（如 `9` Hz 数字信号步进时钟）+ `seed` + `jitterX / jitterY / jitterW / jitterH` 驱动确定性伪随机离散跳变；通过 `impulseVar` + `shakeX / shakeY` 驱动随脉冲轨道衰减的高频微震；
+     - **五向排版锚点（`anchor: 'center' | 'top_left' | 'left' | 'top_right' | 'right'`）**：支持盒模型与文本节点左右两端对齐及局部缩放坐标原点自动归零。
 2. **能做到什么（通用能力）**：
-   - 服务端无需高频发包驱动动画帧，客户端即可让任意图元的可见比例、宽高、坐标偏移与不透明度随逻辑数值丝滑过渡，自动呈现平滑增减、停顿残影拖尾与受击脉冲反馈。
+   - 服务端无需高频发包驱动动画帧，客户端即可让任意图元或复合子树（如游标准星、悬浮旗标、边缘故障体素块）随逻辑数值丝滑平移、伸缩、停顿残影、受击微震或以固定采样频率（如 `9Hz`）产生数字体素重构形变，且不受进度条内胆 `clip` 裁剪框截断。
 3. **已有的例子（具象应用）**：
-   - **高定 Boss 血条**：`nine_slice` 底框 + 绑定 `$hp_trail` 的掉血残影黄条 + 绑定 `$hp_cur` 的主填充条 + 绑定 `$hp_impulse` 的受击框体抖动；
-   - 机器能量槽、斜置机甲风能量尺、`v18` 物质湮灭波前推进度条。
+   - **高定 Boss 血条与 `v18` 方案 α 工业科研遥测仪**：`cursor_group` 绑定 `bind: { x: { var: 'progress', mult: barW } }` 驱动 `□───` T-Pin 垂直穿透吊线与底部百分比旗标实时跟随进度前缘；前缘体素块与徽章顶部的 `DET[██]D` 反色遮罩块通过 `bind: { stepHz: 9, jitterX: ..., jitterW: ... }` 实现离散变形；同心回字内框通过 `bind: { impulseVar: 'impulse', shakeX: 1.5, shakeY: 1.5 }` 实现阶跃微颤。
 
 ---
 
-### 功能三：统一区域填充机制（`fill` —— 纯色 / 渐变 / 单图集多层视差 / 着色器填充）
+### 功能三：统一区域填充机制（`fill` —— 纯色 / 空心线框 / 多段渐变 / 贴图与程序化几何视差 / 着色器填充）
 
 1. **通过什么（底层机制与原语 —— 将填充抽象为单一可辨识联合对象 `fill`）**：
-   - 不再将 `fillMode`、`shaderId`、`parallaxLayers`、`colorBottom` 散落为平级字段或拆分额外图元类型，而是将**「矩形区域如何被填充」**统一收敛为 `rect` 节点的 **`fill` 机制对象**（通过 `fill.mode` 区分 4 种互斥填充策略）：
+   - 不再将 `fillMode`、`shaderId`、`parallaxLayers`、`colorBottom` 散落为平级字段或拆分额外图元类型，而是将**「矩形区域如何被填充」**统一收敛为 `rect` 节点的 **`fill` 机制对象**（通过 `fill.mode` 区分 5 种互斥填充策略）：
      - **`fill.mode = 'solid'`（默认）**：纯色填充 `{ mode: 'solid', color: 0xFF... }`（支持顶层简写 `rect.color`）；
-     - **`fill.mode = 'gradient'`**：垂直或水平渐变填充 `{ mode: 'gradient', color: 0xFF..., colorEnd: 0xFF... }`；
-     - **`fill.mode = 'parallax'`（单图集多层视差合成 —— KubeJS 阶段零风险主力方案）**：
-       - `{ mode: 'parallax', texture: 'epiphy:textures/effect/atlas.png', texW: 256, texH: 256, bgColor: 0xFF090418, layers: [...] }`；
-       - **单图集与统一混合态约束**：所有 `layers` 采样同一张 `texture` 图集的不同 `(u, v, uw, vh)` 子区域，共享标准半透明混合状态（`SRC_ALPHA, ONE_MINUS_SRC_ALPHA`），每层独立计算缩放 `scale`、时间自滚动 `scrollU/V`、视角/鼠标视差偏移 `parallax` 与呼吸闪烁 `pulseHz`；
-       - **前景镂空遮盖法（规避主 FBO `DST_ALPHA` 失效与 `GL_EQUAL` 泄漏）**：底层画带 `clip` 的 `parallax` 矩形，顶层直接叠放一张外缘不透明、中间透明镂空的边框图元（`sprite` / `nine_slice`），零危险 GL 状态修改即可塑造异形视差窗口；
+     - **`fill.mode = 'outline'`（单批次空心线框）**：`{ mode: 'outline', color: 0xFF..., thickness: 1 }`，在单次 `beginQuads(false)...end()` 批次内发射上下左右 4 条边框 quad，无需拆分为 4 个独立 `rect` 节点；
+     - **`fill.mode = 'gradient'`（二段/三段硬件渐变）**：支持水平或垂直渐变 `{ mode: 'gradient', dir: 'h' | 'v', from: 0xFF..., mid: 0xFF..., to: 0xFF..., midPos: 0.62 }`，在单次 `beginQuads(false)` 内以相连四顶点硬件插值完成二段或三段色彩过渡；
+     - **`fill.mode = 'parallax'`（外部图集与零贴图程序化几何视差合成 —— KubeJS 阶段零风险主力方案）**：
+       - **外部贴图视差层**：当 `layer.tex` 指向有效纹理时，采样同一图集不同子区域并按 `speedX/Y`、`scale` 滚动；
+       - **零贴图程序化几何视差层（`layer.kind: 'gradient' | 'stripes' | 'ripples' | 'particles' | 'steps'` + `bloomWidth`）**：在无外部资源包贴图时，于**单次 `beginQuads(false)...end()` 几何批次**内按面板固定坐标系生成并精确裁切至 `clip` 可见区的程序化图层——支持 `gradient`（全幅三色基底渐变）、`stripes`（周期滚动装甲暗肋）、`ripples`（正反差速流动与正弦呼吸长度的多层水平波纹丝线）、`particles`（差速星空与短码粒子流）、`steps`（按 `stepHz` 动态错位的不规则阶梯露台与立柱）以及 `bloomWidth`（前缘等离子高光渐变带）；
+       - **前景镂空遮盖法（规避主 FBO `DST_ALPHA` 失效与 `GL_EQUAL` 泄漏）**：底层画带 `clip` 的 `parallax` 矩形，顶层直接叠放外框图元，零危险 GL 状态修改；
      - **`fill.mode = 'shader'`（内置着色器直绑填充）**：
-       - `{ mode: 'shader', shader: 'end_portal' | 'chaos_vortex', fallbackColor: 0xFF090418 }`；
-       - 由于 `fill.mode` 为互斥枚举，从 Schema 结构上天然杜绝了“同时指定外部贴图 UV 与内置 Shader”的非法组合；
-     - **独立 Kotlin/Java Mod 阶段扩展（`fill.mask`）**：进入原生 Mod 阶段后，在 `fill` 对象上解锁可选字段 `mask: 'namespace:path.png'`，由单 Pass 双采样器片元着色器（`Sampler0` 读 `mask` Alpha，`Sampler1` 跑 `parallax` 图集）1 次 DrawCall 完成任意异形剪影填充。
+       - `{ mode: 'shader', shaderId: 'end_portal' | 'end_gateway', fallbackColor: 0xFF090418 }`；
+     - **独立 Kotlin/Java Mod 阶段扩展（`fill.mask`）**：进入原生 Mod 阶段后解锁单 Pass 双采样器 `mask` 异形剪影填充。
 2. **能做到什么（通用能力）**：
-   - 用同一个 `rect` 图元结构，无缝切换从简单纯色条、渐变条到深邃多层景深视差流或原生着色器裂隙的填充表现。
+   - 用同一个 `rect` 图元结构，在单次 GPU Quad 合批内无缝切换纯色块、精密空心准星线框、三段高动态渐变、60fps 多层差速流动波纹/星空代码视差流、动态阶梯外框或原生着色器裂隙。
 3. **已有的例子（具象应用）**：
-   - **类【寰宇支配之剑】深空视差进度条/面板**：`rect` 配置 `fill: { mode: 'parallax', texture: '.../star_atlas.png', layers: [...] }` + `clip: { dir: 'left', ratio: '$hp_cur' }` + 顶层镂空金属外框；
-   - **原版【末地折跃门】/ 龙之研究【混沌晶体】裂隙窗**：`rect` 配置 `fill: { mode: 'shader', shader: 'end_portal' }`。
+   - **`v18` 方案 α 复合遥测面板**：主进度条内胆单节点合批 `gradient + stripes + ripples + particles + bloomWidth`；进度条下方铺设 4 层 `kind: 'ripples'` 外部差速流动水面波纹场；上沿采用 13 段 `kind: 'steps'` 不规则阶梯动态外框；左侧双层同心回字准星框与 T-Pin `□` 吊线锚点采用 `fill.mode = 'outline'` 单节点绘制；
+   - **原版【末地折跃门】/ 龙之研究【混沌晶体】裂隙窗**：`rect` 配置 `fill: { mode: 'shader', shaderId: 'end_portal' }`。
 
 **统一 `fill` 机制配置示例**：
 ```js
@@ -397,4 +400,10 @@ Phase 4 (Kotlin + Java 原生模组迁移：彻底移除淘汰别名 + 硬件级
   - 修复 KubeJS `NetworkEvents.dataReceived` 下 `event.data` 嵌套 `CompoundTag` / `ListTag` 在 Rhino 执行 `typeof` 报错（`InternalError: Invalid JavaScript value of type net.minecraft.nbt.CompoundTag`）的问题：新增 `nbtToPlainJs` 在接收入口与 `adaptV5ToV6` 边界将真实 NBT Tag 递归转为纯 JS 值（同时保留单测 Mock 与 `FakeCompoundTag` 兼容），并将辅助类型判断统一替换为 `isPlainObjLike`；
   - 对齐 `kubejs-forge-2001.6.5-build.26.jar` 真实 `PaintScreenEventJS` / `GuiGraphics` API：移除不存在的 `event.fill` / `event.drawTexture` / `event.hGradient` / `event.vGradient` / `event.enableScissor` / `event.raw` 调用，改为 `event.setPositionColorShader` / `event.setPositionColorTextureShader` / `event.blend` / `event.beginQuads` / 6 参及 10 参 `event.rectangle` / 四顶点硬件梯度 `event.vertex` / `event.end` 与 `event.graphics`（配合批处理预刷新 `flushBatchedBeforeImmediate` 与 `try/finally` 状态还原）；
   - 修复 `drawDeclarativeTextNode` 在 ModernUI 未命中时未调用 `ensureUnitCompSeq` 导致向 `event.text` 传 `null` 的问题，并修复 `拆解台-混沌殉爆.v18.js` `barColorFrom: meta.hex` 与 `buildProgressPanel` 副标题间距；测试第 60 条补充真机 NBT 与 `PaintScreenEventJS` 契约断言，`60/60` 通过 + Rhino 语法检查通过。
+- **2026-11-19 (`v1.1` / 泛用动态绑定、空心线框、程序化几何视差机制扩展 & `v18` 定稿方案 α 实装)**：
+  - **渲染器泛用机制扩展（以功能为导向）**：
+    1. 新增 `node.bind`（图元属性仿射绑定与离散步进调制器）：支持 `x/y/w/h/alpha/angle` 绑定至任意 `tracks`/`vars` 线性映射，支持 `stepHz`（如 `9Hz` 数字信号步进时钟）确定性伪随机抖动 `jitterX/Y/W/H` 以及 `impulseVar` 驱动的受击微震 `shakeX/Y`；
+    2. 新增 `fill.mode = 'outline'` 单批次空心线框（1 次 `beginQuads` 完成四边描边）、`fill.mode = 'gradient'` 三色硬件渐变（`from -> mid -> to`）以及五向排版锚点（`center | top_left | left | top_right | right`）与缩放文本局部原点自动归零；
+    3. 扩展 `fill.mode = 'parallax'` 支持零贴图程序化几何视差层（`layer.kind: 'gradient' | 'stripes' | 'ripples' | 'particles' | 'steps'` + `bloomWidth`），在单次 `beginQuads(false)...end()` 批次内完成多层差速流动波纹丝线、差速星空代码粒子流、滚动装甲暗肋与不规则动态阶梯外框的几何裁切与合批绘制；
+  - **`拆解台-混沌殉爆.v18.js` 定稿方案 α 落地与命名严谨化**：运用上述泛用机制组装方案 α（左侧双层同心回字准星徽章 + `DET[██]D` 离散跳变反色遮罩签 + 《终末地》反色工业铭牌 `EF-TLM` + 13 段不规则阶梯动态外框 + 底部 4 层差速流动水面波纹场 + 4 层程序化星空波纹视差内胆 + 前缘跟随 `□───` T-Pin 垂直穿透吊线与 `9Hz` 变形体素块簇 + 右端 `□───` 双行遥测读数台），并将原“终末死刑”全面修正为严谨的高能物理遥测术语 **`约束场崩溃 · 视界锁死倒计时 [不可逆坍缩态]` (`HZ-LCK // T-0`)**。
 

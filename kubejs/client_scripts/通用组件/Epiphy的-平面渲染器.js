@@ -4813,6 +4813,7 @@
             adaptV5ToV6:                  adaptV5ToV6Client,
             nbtToPlainJs:                 nbtToPlainJs,
             computeLocalClipRect:         computeLocalClipRect,
+            evaluateNodeBind:             evaluateNodeBind,
             stepOverlayTracks:            stepOverlayTracks,
             applyVarsPatchToOverlay:      applyVarsPatchToOverlay,
             renderDeclarativeNodes:       function (event, item, nodes, varsMap, fadeAlpha, fontObj, itemBatchCtx, now) {
@@ -5123,24 +5124,91 @@
         }
     }
 
-    function computeNodesBounds(nodes, varsMap, out, depth) {
+    function hashStepSigned(stepTick, seed, salt) {
+        var h = ((stepTick * 374761393) + (seed * 668265263) + (salt * 1442695041)) | 0
+        h = ((h ^ (h >>> 13)) * 1274126177) | 0
+        h = (h ^ (h >>> 16)) >>> 0
+        return ((h & 0xFFFF) / 32767.5) - 1.0
+    }
+
+    function evalAffinePropBind(baseVal, bSpec, vMap) {
+        if (!isPlainObjLike(bSpec) || !bSpec.var) return baseVal
+        var vKey = String(bSpec.var).replace(/^\$/, '')
+        var rawV = resolveVarNum('$' + vKey, vMap, 0.0)
+        var minV = bSpec.min !== undefined ? Number(bSpec.min) : 0.0
+        var maxV = bSpec.max !== undefined ? Number(bSpec.max) : 1.0
+        var clamped = clampNum(rawV, isFinite(minV) ? minV : 0.0, isFinite(maxV) ? maxV : 1.0)
+        var mult = Number(bSpec.mult !== undefined ? bSpec.mult : (bSpec.span !== undefined ? bSpec.span : 0.0)) || 0.0
+        var off  = Number(bSpec.offset || 0.0) || 0.0
+        return baseVal + off + clamped * mult
+    }
+
+    function evaluateNodeBind(node, baseX, baseY, baseW, baseH, baseAlpha, baseAngle, vMap, now) {
+        var b = node != null ? node.bind : null
+        if (!isPlainObjLike(b)) {
+            return { x: baseX, y: baseY, w: baseW, h: baseH, alpha: baseAlpha, angle: baseAngle }
+        }
+        var rx = evalAffinePropBind(baseX, b.x, vMap)
+        var ry = evalAffinePropBind(baseY, b.y, vMap)
+        var rw = max2(0, evalAffinePropBind(baseW, b.w, vMap))
+        var rh = max2(0, evalAffinePropBind(baseH, b.h, vMap))
+        var ra = clampNum(evalAffinePropBind(baseAlpha, b.alpha, vMap), 0.0, 1.0)
+        var rAng = evalAffinePropBind(baseAngle, b.angle, vMap)
+
+        var stepHz = Number(b.stepHz || 0)
+        var seed   = (Number(b.seed || 0) | 0)
+        if (stepHz > 0 && isFinite(stepHz)) {
+            var stepTick = Math.floor(((Number(now) || 0) * 0.001) * stepHz)
+            if (b.jitterX) rx += Math.round(hashStepSigned(stepTick, seed, 11) * Number(b.jitterX))
+            if (b.jitterY) ry += Math.round(hashStepSigned(stepTick, seed, 23) * Number(b.jitterY))
+            if (b.jitterW) rw = max2(1, rw + Math.round(hashStepSigned(stepTick, seed, 37) * Number(b.jitterW)))
+            if (b.jitterH) rh = max2(1, rh + Math.round(hashStepSigned(stepTick, seed, 53) * Number(b.jitterH)))
+        }
+        if (b.shakeX || b.shakeY) {
+            var impKey = b.impulseVar ? String(b.impulseVar).replace(/^\$/, '') : 'impulse'
+            var impVal = clampNum(resolveVarNum('$' + impKey, vMap, 0.0), 0.0, 2.0)
+            if (impVal > 0.005) {
+                var tSec = (Number(now) || 0) * 0.001
+                if (b.shakeX) rx += Math.round(Math.sin(tSec * 42.0 + seed) * impVal * Number(b.shakeX))
+                if (b.shakeY) ry += Math.round(Math.cos(tSec * 35.0 + seed) * impVal * Number(b.shakeY))
+            }
+        }
+        return { x: rx, y: ry, w: rw, h: rh, alpha: ra, angle: rAng }
+    }
+
+    function computeBoxAnchorOrigin(nx, ny, nw, nh, anchor) {
+        if (anchor === 'top_left') return { x0: nx, y0: ny }
+        if (anchor === 'left') return { x0: nx, y0: ny - nh * 0.5 }
+        if (anchor === 'top_right') return { x0: nx - nw, y0: ny }
+        if (anchor === 'right') return { x0: nx - nw, y0: ny - nh * 0.5 }
+        return { x0: nx - nw * 0.5, y0: ny - nh * 0.5 }
+    }
+
+    function computeNodesBounds(nodes, varsMap, out, depth, parentOffX, parentOffY) {
         if (!Array.isArray(nodes) || (depth || 0) > 4) return out
         var vMap = isPlainObjLike(varsMap) ? varsMap : {}
+        var pOx = Number(parentOffX) || 0
+        var pOy = Number(parentOffY) || 0
         for (var i = 0; i < nodes.length; i++) {
             var n = nodes[i]
             if (!isPlainObjLike(n)) continue
             var nType = String(n.type || 'rect').toLowerCase()
-            var nx = resolveVarNum(n.x, vMap, 0)
-            var ny = resolveVarNum(n.y, vMap, 0)
+            var nx = pOx + resolveVarNum(n.x, vMap, 0)
+            var ny = pOy + resolveVarNum(n.y, vMap, 0)
+            if (isPlainObjLike(n.bind)) {
+                nx = evalAffinePropBind(nx, n.bind.x, vMap)
+                ny = evalAffinePropBind(ny, n.bind.y, vMap)
+            }
             if (nType === 'group') {
-                computeNodesBounds(n.children, vMap, out, (depth || 0) + 1)
+                computeNodesBounds(n.children, vMap, out, (depth || 0) + 1, nx, ny)
                 continue
             }
             var nw = resolveVarNum(n.w, vMap, nType === 'text' ? 80 : 16)
             var nh = resolveVarNum(n.h, vMap, nType === 'text' ? 10 : 8)
             var anc = String(n.anchor || 'center').toLowerCase()
-            var lx0 = anc === 'top_left' ? nx : (nx - nw * 0.5)
-            var ly0 = anc === 'top_left' ? ny : (ny - nh * 0.5)
+            var orig = computeBoxAnchorOrigin(nx, ny, nw, nh, anc)
+            var lx0 = orig.x0
+            var ly0 = orig.y0
             var lx1 = lx0 + nw
             var ly1 = ly0 + nh
             if (lx0 < out.minX) out.minX = lx0
@@ -5199,15 +5267,56 @@
         }
     }
 
-    function drawRectGradient(event, x, y, w, h, fromArgb, toArgb, dir) {
+    function drawRectOutline(event, x, y, w, h, thickness, argbColor) {
+        if (w <= 0 || h <= 0) return
+        var t = max2(1, Math.round(Number(thickness) || 1))
+        ensureItemPosePushed(event)
+        flushBatchedBeforeImmediate()
+        if (typeof event.beginQuads === 'function' && typeof event.rectangle === 'function' && typeof event.end === 'function') {
+            var prevBlend = queryGlBlendEnabled()
+            var changedBlend = false
+            try {
+                if (typeof event.setPositionColorShader === 'function') event.setPositionColorShader()
+                if (typeof event.blend === 'function' && prevBlend !== true) {
+                    event.blend(true)
+                    changedBlend = true
+                }
+                event.beginQuads(false)
+                event.rectangle(x, y, 0.0, w, min2(t, h), argbColor)
+                if (h > t) {
+                    event.rectangle(x, y + h - t, 0.0, w, t, argbColor)
+                }
+                var innerH = h - t * 2
+                if (innerH > 0) {
+                    event.rectangle(x, y + t, 0.0, min2(t, w), innerH, argbColor)
+                    if (w > t) {
+                        event.rectangle(x + w - t, y + t, 0.0, t, innerH, argbColor)
+                    }
+                }
+                event.end()
+            } finally {
+                if (changedBlend && prevBlend === false && typeof event.blend === 'function') {
+                    try { event.blend(false) } catch (eBo) { }
+                }
+            }
+            return
+        }
+        drawRectSolid(event, x, y, w, min2(t, h), argbColor)
+        if (h > t) drawRectSolid(event, x, y + h - t, w, t, argbColor)
+        var inH = h - t * 2
+        if (inH > 0) {
+            drawRectSolid(event, x, y + t, min2(t, w), inH, argbColor)
+            if (w > t) drawRectSolid(event, x + w - t, y + t, t, inH, argbColor)
+        }
+    }
+
+    function drawRectGradient(event, x, y, w, h, fromArgb, toArgb, dir, midArgb, midPos) {
         if (w <= 0 || h <= 0) return
         ensureItemPosePushed(event)
         flushBatchedBeforeImmediate()
+        var hasMid = (midArgb !== undefined && midArgb !== null)
+        var mp = hasMid ? clampNum(Number(midPos != null ? midPos : 0.62), 0.05, 0.95) : 0.5
         if (typeof event.beginQuads === 'function' && typeof event.vertex === 'function' && typeof event.getMatrix === 'function' && typeof event.end === 'function') {
-            var tl = fromArgb
-            var tr = (dir === 'v') ? fromArgb : toArgb
-            var bl = (dir === 'v') ? toArgb : fromArgb
-            var br = toArgb
             var mat = event.getMatrix()
             var prevBlend = queryGlBlendEnabled()
             var changedBlend = false
@@ -5218,10 +5327,38 @@
                     changedBlend = true
                 }
                 event.beginQuads(false)
-                event.vertex(mat, x + w, y,     0.0, tr)
-                event.vertex(mat, x,     y,     0.0, tl)
-                event.vertex(mat, x,     y + h, 0.0, bl)
-                event.vertex(mat, x + w, y + h, 0.0, br)
+                if (hasMid && dir !== 'v') {
+                    var xm = x + w * mp
+                    event.vertex(mat, xm,    y,     0.0, midArgb)
+                    event.vertex(mat, x,     y,     0.0, fromArgb)
+                    event.vertex(mat, x,     y + h, 0.0, fromArgb)
+                    event.vertex(mat, xm,    y + h, 0.0, midArgb)
+
+                    event.vertex(mat, x + w, y,     0.0, toArgb)
+                    event.vertex(mat, xm,    y,     0.0, midArgb)
+                    event.vertex(mat, xm,    y + h, 0.0, midArgb)
+                    event.vertex(mat, x + w, y + h, 0.0, toArgb)
+                } else if (hasMid && dir === 'v') {
+                    var ym = y + h * mp
+                    event.vertex(mat, x + w, y,     0.0, fromArgb)
+                    event.vertex(mat, x,     y,     0.0, fromArgb)
+                    event.vertex(mat, x,     ym,    0.0, midArgb)
+                    event.vertex(mat, x + w, ym,    0.0, midArgb)
+
+                    event.vertex(mat, x + w, ym,    0.0, midArgb)
+                    event.vertex(mat, x,     ym,    0.0, midArgb)
+                    event.vertex(mat, x,     y + h, 0.0, toArgb)
+                    event.vertex(mat, x + w, y + h, 0.0, toArgb)
+                } else {
+                    var tl = fromArgb
+                    var tr = (dir === 'v') ? fromArgb : toArgb
+                    var bl = (dir === 'v') ? toArgb : fromArgb
+                    var br = toArgb
+                    event.vertex(mat, x + w, y,     0.0, tr)
+                    event.vertex(mat, x,     y,     0.0, tl)
+                    event.vertex(mat, x,     y + h, 0.0, bl)
+                    event.vertex(mat, x + w, y + h, 0.0, br)
+                }
                 event.end()
             } finally {
                 if (changedBlend && prevBlend === false && typeof event.blend === 'function') {
@@ -5329,24 +5466,240 @@
         }
     }
 
-    function drawRectParallax(event, x, y, w, h, fill, now, fadeAlpha) {
+    function sampleThreeStopColor(cFrom, cMid, cTo, midPos, t, alphaFactor) {
+        var tc = clampNum(t, 0.0, 1.0)
+        if (cMid == null) {
+            return toArgbWithAlpha(lerpColorRgb(cFrom, cTo, tc), alphaFactor)
+        }
+        var mp = clampNum(Number(midPos != null ? midPos : 0.62), 0.05, 0.95)
+        if (tc <= mp) {
+            return toArgbWithAlpha(lerpColorRgb(cFrom, cMid, tc / mp), alphaFactor)
+        }
+        return toArgbWithAlpha(lerpColorRgb(cMid, cTo, (tc - mp) / (1.0 - mp)), alphaFactor)
+    }
+
+    function drawRectParallax(event, x, y, w, h, fill, now, fadeAlpha, fullX, fullY, fullW, fullH, varsMap) {
+        if (w <= 0.25 || h <= 0.25) return
+        var vMap = isPlainObjLike(varsMap) ? varsMap : {}
+        var fx = (fullX !== undefined && fullX !== null) ? Number(fullX) : x
+        var fy = (fullY !== undefined && fullY !== null) ? Number(fullY) : y
+        var fw = max2(1, (fullW !== undefined && fullW !== null) ? Number(fullW) : w)
+        var fh = max2(1, (fullH !== undefined && fullH !== null) ? Number(fullH) : h)
         var layers = Array.isArray(fill.layers) ? fill.layers : []
-        drawRectSolid(event, x, y, w, h, toArgbWithAlpha(0xFF0A0412, fadeAlpha))
-        for (var i = 0; i < layers.length; i++) {
-            var lay = layers[i]
-            if (lay == null) continue
-            var tex = lay.tex || lay.texture || ''
-            var sc  = max2(0.1, Number(lay.scale || 1.0))
-            var uOff = ((now * Number(lay.speedX || 0.0)) % 256 + 256) % 256
-            var vOff = ((now * Number(lay.speedY || 0.0)) % 256 + 256) % 256
-            var lAlpha = clampNum(Number(lay.alpha != null ? lay.alpha : 1.0) * fadeAlpha, 0.0, 1.0)
-            if (tex && checkTextureExists(tex)) {
-                drawTextureRegion(event, tex, x, y, w, h, uOff, vOff, w / sc, h / sc, 256, 256, lAlpha)
-            } else {
-                var starCol = toArgbWithAlpha(i % 2 === 0 ? 0x6644AAFF : 0x55CC66FF, lAlpha * 0.45)
-                var dotX = x + ((uOff + i * 37) % max2(1, w))
-                var dotY = y + ((vOff + i * 19) % max2(1, h))
-                drawRectSolid(event, dotX, dotY, min2(2, w), min2(2, h), starCol)
+        var bgAlpha = fill.bgAlpha !== undefined ? clampNum(Number(fill.bgAlpha), 0.0, 1.0) : 1.0
+        var bgColRaw = resolveVarValue(fill.bgColor, vMap, 0xFF0A0412)
+        var hasGradLayer = false
+        for (var gi = 0; gi < layers.length; gi++) {
+            if (isPlainObjLike(layers[gi]) && String(layers[gi].kind || '').toLowerCase() === 'gradient') {
+                hasGradLayer = true
+                break
+            }
+        }
+        if (bgAlpha > 0.005 && !hasGradLayer) {
+            drawRectSolid(event, x, y, w, h, toArgbWithAlpha(bgColRaw, fadeAlpha * bgAlpha))
+        }
+
+        var canHardwareBatch = (typeof event.beginQuads === 'function' && typeof event.rectangle === 'function' && typeof event.end === 'function')
+        var hasVertexGrad = (canHardwareBatch && typeof event.vertex === 'function' && typeof event.getMatrix === 'function')
+
+        // 1. 先按单批次合并绘制所有程序化几何视差图层 (gradient / stripes / ripples / particles / steps + bloom)
+        var hasProcLayers = (fill.bloomWidth > 0)
+        for (var pi = 0; pi < layers.length; pi++) {
+            var pLay = layers[pi]
+            if (!isPlainObjLike(pLay)) continue
+            var pTex = pLay.tex || pLay.texture || ''
+            if (!pTex || !checkTextureExists(pTex)) {
+                hasProcLayers = true
+                break
+            }
+        }
+
+        if (hasProcLayers) {
+            ensureItemPosePushed(event)
+            flushBatchedBeforeImmediate()
+            var prevBlend = canHardwareBatch ? queryGlBlendEnabled() : true
+            var changedBlend = false
+            var mat = hasVertexGrad ? event.getMatrix() : null
+            try {
+                if (canHardwareBatch) {
+                    if (typeof event.setPositionColorShader === 'function') event.setPositionColorShader()
+                    if (typeof event.blend === 'function' && prevBlend !== true) {
+                        event.blend(true)
+                        changedBlend = true
+                    }
+                    event.beginQuads(false)
+                }
+
+                var emitClippedRect = function (qx, qy, qw, qh, argb) {
+                    var cx0 = max2(x, qx)
+                    var cy0 = max2(y, qy)
+                    var cx1 = min2(x + w, qx + qw)
+                    var cy1 = min2(y + h, qy + qh)
+                    var cw = cx1 - cx0
+                    var ch = cy1 - cy0
+                    if (cw <= 0.15 || ch <= 0.15) return
+                    if (canHardwareBatch) {
+                        event.rectangle(cx0, cy0, 0.0, cw, ch, argb)
+                    } else {
+                        drawRectSolid(event, cx0, cy0, cw, ch, argb)
+                    }
+                }
+
+                var emitHGradSpan = function (gx0, gy0, gw, gh, colL, colR) {
+                    if (gw <= 0.15 || gh <= 0.15) return
+                    if (hasVertexGrad && mat != null) {
+                        event.vertex(mat, gx0 + gw, gy0,      0.0, colR)
+                        event.vertex(mat, gx0,      gy0,      0.0, colL)
+                        event.vertex(mat, gx0,      gy0 + gh, 0.0, colL)
+                        event.vertex(mat, gx0 + gw, gy0 + gh, 0.0, colR)
+                    } else if (canHardwareBatch) {
+                        event.rectangle(gx0, gy0, 0.0, gw, gh, colL)
+                    } else {
+                        drawRectGradient(event, gx0, gy0, gw, gh, colL, colR, 'h')
+                    }
+                }
+
+                var tSec = (Number(now) || 0) * 0.001
+                for (var li = 0; li < layers.length; li++) {
+                    var lay = layers[li]
+                    if (!isPlainObjLike(lay)) continue
+                    var tex = lay.tex || lay.texture || ''
+                    if (tex && checkTextureExists(tex)) continue
+                    var lAlpha = clampNum(Number(lay.alpha != null ? lay.alpha : 1.0) * fadeAlpha, 0.0, 1.0)
+                    if (lAlpha <= 0.005) continue
+                    var kind = String(lay.kind || '').toLowerCase()
+                    var layColRaw = resolveVarValue(lay.color, vMap, li % 2 === 0 ? 0x6644AAFF : 0x55CC66FF)
+                    var layAltRaw = resolveVarValue(lay.altColor, vMap, layColRaw)
+
+                    if (kind === 'gradient') {
+                        var cFrom = resolveVarValue(lay.from, vMap, 0x174A5A)
+                        var cMid  = lay.mid !== undefined ? resolveVarValue(lay.mid, vMap, 0x26A69A) : null
+                        var cTo   = resolveVarValue(lay.to, vMap, 0x80DEEA)
+                        var mPos  = clampNum(Number(lay.midPos != null ? lay.midPos : 0.62), 0.05, 0.95)
+                        var t0    = clampNum((x - fx) / fw, 0.0, 1.0)
+                        var t1    = clampNum((x + w - fx) / fw, 0.0, 1.0)
+                        var col0  = sampleThreeStopColor(cFrom, cMid, cTo, mPos, t0, lAlpha)
+                        var col1  = sampleThreeStopColor(cFrom, cMid, cTo, mPos, t1, lAlpha)
+                        if (cMid != null && t0 < mPos && t1 > mPos) {
+                            var xm = fx + fw * mPos
+                            var colM = sampleThreeStopColor(cFrom, cMid, cTo, mPos, mPos, lAlpha)
+                            emitHGradSpan(x, y, xm - x, h, col0, colM)
+                            emitHGradSpan(xm, y, (x + w) - xm, h, colM, col1)
+                        } else {
+                            emitHGradSpan(x, y, w, h, col0, col1)
+                        }
+                    } else if (kind === 'stripes') {
+                        var stepPx = max2(4, Number(lay.step || 18))
+                        var sWidth = max2(1, Number(lay.width || 6))
+                        var sShift = (((tSec * Number(lay.speedX || 20)) % stepPx) + stepPx) % stepPx
+                        var sArgb  = toArgbWithAlpha(layColRaw, lAlpha)
+                        var halfH  = fh * 0.5
+                        for (var sx = fx - stepPx + sShift; sx < fx + fw + stepPx; sx += stepPx) {
+                            emitClippedRect(sx, fy, sWidth, halfH, sArgb)
+                            emitClippedRect(sx + sWidth * 0.45, fy + halfH, sWidth, fh - halfH, sArgb)
+                        }
+                    } else if (kind === 'ripples') {
+                        var rRows = max2(1, min2(16, Math.round(Number(lay.rows || 4))))
+                        var rGap  = max2(1, Number(lay.rowGap || 3.4))
+                        var rOffY = Number(lay.offsetY != null ? lay.offsetY : 2.0)
+                        var rSegs = max2(2, min2(20, Math.round(Number(lay.segments || 6))))
+                        var rBase = max2(3, Number(lay.baseLen || 26))
+                        var rAmp  = max2(0, Number(lay.ampLen != null ? lay.ampLen : 15))
+                        var rSpd  = Number(lay.speedX != null ? lay.speedX : 30)
+                        var rThk  = max2(0.8, Number(lay.thickness || 1.2))
+                        var spanW = fw + 48
+                        var stride = spanW / rSegs
+                        for (var rIdx = 0; rIdx < rRows; rIdx++) {
+                            var ry = fy + rOffY + rIdx * rGap
+                            var rDir = (rIdx % 2 === 0) ? 1.0 : -1.0
+                            var phase = tSec * (rSpd + rIdx * 9.0) * rDir + rIdx * 37.0
+                            var rCol = toArgbWithAlpha((rIdx % 2 === 0 || lay.altColor === undefined) ? layColRaw : layAltRaw, lAlpha)
+                            for (var sg = 0; sg < rSegs; sg++) {
+                                var rx = fx - 24 + (((sg * stride + phase) % spanW + spanW) % spanW)
+                                var rw = max2(3, rBase + Math.sin(tSec * 2.8 + rIdx * 1.3 + sg * 1.7) * rAmp)
+                                emitClippedRect(rx, ry, rw, rThk, rCol)
+                            }
+                        }
+                    } else if (kind === 'particles') {
+                        var pCount = max2(1, min2(64, Math.round(Number(lay.count || 20))))
+                        var pSpdX  = Number(lay.speedX != null ? lay.speedX : 18)
+                        var pSpdY  = Number(lay.speedY || 0)
+                        var pMinW  = max2(1, Number(lay.minW || 1))
+                        var pMaxW  = max2(pMinW, Number(lay.maxW || 4))
+                        var pThk   = max2(1, Number(lay.thickness || 1.2))
+                        var pSeed  = (Number(lay.seed || 0) | 0)
+                        var effFh  = max2(1, fh - pThk)
+                        for (var pIdx = 0; pIdx < pCount; pIdx++) {
+                            var px0 = (pIdx * 43 + pSeed * 17) % fw
+                            var py0 = (pIdx * 19 + pSeed * 11 + 3) % effFh
+                            var px  = fx + (((px0 + tSec * pSpdX) % fw + fw) % fw)
+                            var py  = fy + (((py0 + tSec * pSpdY) % effFh + effFh) % effFh)
+                            var pw  = (pIdx % 3 === 0) ? pMaxW : pMinW
+                            var pA  = lAlpha * (0.45 + (pIdx % 4) * 0.14)
+                            var pCol = toArgbWithAlpha((pIdx % 2 === 0 || lay.altColor === undefined) ? layColRaw : layAltRaw, pA)
+                            emitClippedRect(px, py, pw, pThk, pCol)
+                        }
+                    } else if (kind === 'steps') {
+                        var stCount = max2(2, min2(32, Math.round(Number(lay.count || 13))))
+                        var stHz    = max2(1, Number(lay.stepHz || 9))
+                        var stTick  = Math.floor(tSec * stHz)
+                        var stSeed  = (Number(lay.seed || 7) | 0)
+                        var stThk   = max2(1, Number(lay.thickness || 1.5))
+                        var stSpan  = fw / stCount
+                        var prevTier = 0
+                        for (var si = 0; si < stCount; si++) {
+                            var stX = fx + Math.round(si * stSpan)
+                            var stJit = ((stTick + si * 3 + stSeed) % 7) - 3
+                            var stW = max2(3, Math.round(stSpan - 3 + stJit))
+                            var tier = (si + ((si % 3 === 0) ? stTick : 0)) % 3
+                            var stY = fy + (tier === 0 ? 2 : (tier === 1 ? 4 : 0))
+                            var stColRaw = (tier === 0) ? layColRaw : ((tier === 1 && lay.altColor !== undefined) ? layAltRaw : 0x88FFFFFF)
+                            var stArgb = toArgbWithAlpha(stColRaw, lAlpha)
+                            emitClippedRect(stX, stY, stW, stThk, stArgb)
+                            if (lay.risers !== false && si > 0 && tier !== prevTier) {
+                                emitClippedRect(stX, fy, 1, min2(5, fh), stArgb)
+                            }
+                            prevTier = tier
+                        }
+                    } else {
+                        var uOff = ((now * Number(lay.speedX || 0.0)) % 256 + 256) % 256
+                        var vOff = ((now * Number(lay.speedY || 0.0)) % 256 + 256) % 256
+                        var starCol = toArgbWithAlpha(layColRaw, lAlpha * 0.45)
+                        var dotX = x + ((uOff + li * 37) % max2(1, w))
+                        var dotY = y + ((vOff + li * 19) % max2(1, h))
+                        emitClippedRect(dotX, dotY, min2(2, w), min2(2, h), starCol)
+                    }
+                }
+
+                if (fill.bloomWidth > 0 && w > 1.0) {
+                    var bw = min2(Number(fill.bloomWidth), w)
+                    var bColRaw = resolveVarValue(fill.bloomColor, vMap, 0xD8FFFFFF)
+                    var bColEnd = toArgbWithAlpha(bColRaw, fadeAlpha * 0.85)
+                    var bColStart = toArgbWithAlpha(bColRaw, 0.0)
+                    emitHGradSpan(x + w - bw, y, bw, h, bColStart, bColEnd)
+                }
+
+                if (canHardwareBatch) {
+                    event.end()
+                }
+            } finally {
+                if (changedBlend && prevBlend === false && typeof event.blend === 'function') {
+                    try { event.blend(false) } catch (eBp) { }
+                }
+            }
+        }
+
+        // 2. 绘制具有真实外部贴图的视差层
+        for (var ti = 0; ti < layers.length; ti++) {
+            var tLay = layers[ti]
+            if (!isPlainObjLike(tLay)) continue
+            var tPath = tLay.tex || tLay.texture || ''
+            if (tPath && checkTextureExists(tPath)) {
+                var sc = max2(0.1, Number(tLay.scale || 1.0))
+                var tuOff = ((now * Number(tLay.speedX || 0.0)) % 256 + 256) % 256
+                var tvOff = ((now * Number(tLay.speedY || 0.0)) % 256 + 256) % 256
+                var tlAlpha = clampNum(Number(tLay.alpha != null ? tLay.alpha : 1.0) * fadeAlpha, 0.0, 1.0)
+                drawTextureRegion(event, tPath, x, y, w, h, tuOff, tvOff, w / sc, h / sc, 256, 256, tlAlpha)
             }
         }
     }
@@ -5385,7 +5738,7 @@
                     { tex: 'minecraft:textures/environment/end_sky.png', speedX: 0.015, speedY: 0.008, scale: 1.0, alpha: 0.65 },
                     { tex: 'minecraft:textures/entity/end_portal.png', speedX: -0.022, speedY: 0.018, scale: 1.5, alpha: 0.50 }
                 ]
-            }, now, fadeAlpha)
+            }, now, fadeAlpha, x, y, w, h, null)
         }
     }
 
@@ -5450,7 +5803,7 @@
         }
     }
 
-    function drawDeclarativeTextNode(event, item, node, rawText, varsMap, fadeAlpha, fontObj, itemBatchCtx) {
+    function drawDeclarativeTextNode(event, item, node, rawText, varsMap, fadeAlpha, fontObj, itemBatchCtx, localX, localY) {
         var rawTemplate = rawText != null ? String(rawText) : ''
         var hasVarExpr = rawTemplate.indexOf('$') >= 0
         var resolved = interpolateVarString(rawTemplate, varsMap)
@@ -5462,11 +5815,12 @@
         }
         var argb = toArgbWithAlpha(rawCol, fadeAlpha)
         var shadow = node.shadow !== undefined ? Boolean(node.shadow) : (item.shadow !== undefined ? Boolean(item.shadow) : true)
-        var nx = resolveVarNum(node.x, varsMap, 0)
-        var ny = resolveVarNum(node.y, varsMap, 0)
+        var nx = (localX !== undefined && localX !== null) ? Number(localX) : resolveVarNum(node.x, varsMap, 0)
+        var ny = (localY !== undefined && localY !== null) ? Number(localY) : resolveVarNum(node.y, varsMap, 0)
         var anchor = String(node.anchor || 'center').toLowerCase()
         var lineStep = CONFIG.lineStepPx
-        var startY = anchor === 'top_left' ? ny : (ny - Math.floor((lines.length * lineStep) * 0.5) + 1)
+        var isTopAnchor = (anchor === 'top_left' || anchor === 'top_right')
+        var startY = isTopAnchor ? ny : (ny - Math.floor((lines.length * lineStep) * 0.5) + 1)
 
         for (var li = 0; li < lines.length; li++) {
             var lnStr = lines[li]
@@ -5476,7 +5830,9 @@
             var measuredW = invokeFontWidth(fontObj, lnStr)
             var cleanLn = lnStr.replace(/§[0-9a-fk-or]/gi, '')
             var lw    = (isFinite(measuredW) && measuredW >= 0) ? measuredW : (cleanLn.length * 6)
-            var lx    = anchor === 'top_left' ? nx : (nx - Math.floor(lw * 0.5))
+            var lx    = (anchor === 'top_left' || anchor === 'left')
+                ? nx
+                : ((anchor === 'top_right' || anchor === 'right') ? (nx - lw) : (nx - Math.floor(lw * 0.5)))
             var ly    = startY + li * lineStep
             var lay   = (itemBatchCtx != null) ? resolveUnitMuiLayout(itemBatchCtx, entry.seq, entry) : null
             var useMui = (lay != null && itemBatchCtx != null && itemBatchCtx.muiActive)
@@ -5538,19 +5894,27 @@
         for (var ni = 0; ni < nodes.length; ni++) {
             var node = nodes[ni]
             if (!isPlainObjLike(node)) continue
-            var nType  = String(node.type || 'rect').toLowerCase()
-            var nAlpha = clampNum(resolveVarNum(node.alpha, vMap, 1.0) * fadeAlpha, 0.0, 1.0)
+            var nType      = String(node.type || 'rect').toLowerCase()
+            var baseAlpha  = resolveVarNum(node.alpha, vMap, 1.0)
+            var baseX      = resolveVarNum(node.x, vMap, 0)
+            var baseY      = resolveVarNum(node.y, vMap, 0)
+            var baseW      = max2(0, resolveVarNum(node.w, vMap, nType === 'sprite' || nType === 'item' ? 16 : 64))
+            var baseH      = max2(0, resolveVarNum(node.h, vMap, nType === 'sprite' || nType === 'item' ? 16 : 8))
+            var nScale     = resolveVarNum(node.scale != null ? node.scale : node.size, vMap, 1.0)
+            var baseAngle  = resolveVarNum(node.angle != null ? node.angle : node.tilt, vMap, 0.0)
+            var boundProps = evaluateNodeBind(node, baseX, baseY, baseW, baseH, baseAlpha, baseAngle, vMap, now)
+            var nAlpha     = clampNum(boundProps.alpha * fadeAlpha, 0.0, 1.0)
             if (nAlpha <= 0.005) continue
 
-            var nx     = resolveVarNum(node.x, vMap, 0)
-            var ny     = resolveVarNum(node.y, vMap, 0)
-            var nw     = max2(0, resolveVarNum(node.w, vMap, nType === 'sprite' || nType === 'item' ? 16 : 64))
-            var nh     = max2(0, resolveVarNum(node.h, vMap, nType === 'sprite' || nType === 'item' ? 16 : 8))
-            var nScale = resolveVarNum(node.scale != null ? node.scale : node.size, vMap, 1.0)
-            var nAngle = resolveVarNum(node.angle != null ? node.angle : node.tilt, vMap, 0.0)
+            var nx     = boundProps.x
+            var ny     = boundProps.y
+            var nw     = boundProps.w
+            var nh     = boundProps.h
+            var nAngle = boundProps.angle
             var anchor = String(node.anchor || 'center').toLowerCase()
-            var x0     = anchor === 'top_left' ? nx : (nx - nw * 0.5)
-            var y0     = anchor === 'top_left' ? ny : (ny - nh * 0.5)
+            var boxOrig = computeBoxAnchorOrigin(nx, ny, nw, nh, anchor)
+            var x0     = boxOrig.x0
+            var y0     = boxOrig.y0
 
             var clipSpec = isPlainObjLike(node.clip) ? node.clip : null
             var effAngle = (Number(parentAngleDeg) || 0) + nAngle
@@ -5568,8 +5932,9 @@
                     if (Math.abs(nScale - 1.0) > 0.001 && isFinite(nScale)) {
                         applyNodeLocalScale(event, nScale, nScale)
                     }
-                    x0 = anchor === 'top_left' ? 0 : (-nw * 0.5)
-                    y0 = anchor === 'top_left' ? 0 : (-nh * 0.5)
+                    var localOrig = computeBoxAnchorOrigin(0, 0, nw, nh, anchor)
+                    x0 = localOrig.x0
+                    y0 = localOrig.y0
                 }
 
                 var clipped = computeLocalClipRect(
@@ -5591,22 +5956,24 @@
                         var bw = Math.round(Number(node.borderWidth))
                         var bCol = resolveVarValue(node.borderColor, vMap, 0xFFFFFFFF)
                         var bArgb = toArgbWithAlpha(bCol, nAlpha)
-                        drawRectSolid(event, x0 - bw, y0 - bw, nw + bw * 2, bw, bArgb)
-                        drawRectSolid(event, x0 - bw, y0 + nh, nw + bw * 2, bw, bArgb)
-                        drawRectSolid(event, x0 - bw, y0, bw, nh, bArgb)
-                        drawRectSolid(event, x0 + nw, y0, bw, nh, bArgb)
+                        drawRectOutline(event, x0 - bw, y0 - bw, nw + bw * 2, nh + bw * 2, bw, bArgb)
                     }
                     if (clipped.w > 0.25 && clipped.h > 0.25) {
                         var fill = isPlainObjLike(node.fill)
                             ? node.fill
                             : { mode: 'solid', color: node.color != null ? node.color : 0xFF000000 }
                         var fMode = String(fill.mode || 'solid').toLowerCase()
-                        if (fMode === 'gradient') {
+                        if (fMode === 'outline') {
+                            var oCol = toArgbWithAlpha(resolveVarValue(fill.color != null ? fill.color : node.color, vMap, 0xFFFFFFFF), nAlpha)
+                            var oThk = max2(1, Math.round(Number(fill.thickness || 1)))
+                            drawRectOutline(event, clipped.x, clipped.y, clipped.w, clipped.h, oThk, oCol)
+                        } else if (fMode === 'gradient') {
                             var cFrom = toArgbWithAlpha(resolveVarValue(fill.from, vMap, 0xFF5555), nAlpha)
                             var cTo   = toArgbWithAlpha(resolveVarValue(fill.to, vMap, 0xFFAA00), nAlpha)
-                            drawRectGradient(event, clipped.x, clipped.y, clipped.w, clipped.h, cFrom, cTo, fill.dir === 'v' ? 'v' : 'h')
+                            var cMid  = fill.mid !== undefined ? toArgbWithAlpha(resolveVarValue(fill.mid, vMap, cTo), nAlpha) : null
+                            drawRectGradient(event, clipped.x, clipped.y, clipped.w, clipped.h, cFrom, cTo, fill.dir === 'v' ? 'v' : 'h', cMid, fill.midPos)
                         } else if (fMode === 'parallax') {
-                            drawRectParallax(event, clipped.x, clipped.y, clipped.w, clipped.h, fill, now, nAlpha)
+                            drawRectParallax(event, clipped.x, clipped.y, clipped.w, clipped.h, fill, now, nAlpha, x0, y0, nw, nh, vMap)
                         } else if (fMode === 'shader') {
                             drawRectShader(event, clipped.x, clipped.y, clipped.w, clipped.h, fill, now, nAlpha)
                         } else {
@@ -5640,7 +6007,9 @@
                         vMap,
                         nAlpha,
                         fontObj,
-                        nodePushed ? null : itemBatchCtx
+                        nodePushed ? null : itemBatchCtx,
+                        nodePushed ? 0 : nx,
+                        nodePushed ? 0 : ny
                     )
                 } else if (nType === 'group') {
                     renderDeclarativeNodes(event, item, node.children, vMap, nAlpha, fontObj, null, now, effAngle, (depth || 0) + 1)
