@@ -87,7 +87,8 @@
         maxItemDrawErrors:     2,      // 单条弹幕连续绘制报错达到该次数后立即剔除，防止刷屏
         debug:                 false,  // 是否输出逐字渲染调试日志（也可通过单条 debug: true 或 setDebug(true) 开启）
         screenRenderPriority:  0,      // 屏幕弹幕默认渲染层级（先画，处于底层）
-        guiRenderPriority:     100,    // GUI 覆盖层默认渲染层级（默认高于弹幕不被覆盖，可独立调整）
+        hudRenderPriority:     50,     // 屏幕声明式图形 HUD/进度条默认渲染层级（默认高于弹幕不被覆盖、低于容器 GUI）
+        guiRenderPriority:     100,    // GUI 覆盖层默认渲染层级（默认高于弹幕与 HUD 不被覆盖，可独立调整）
         slotRenderPriority:    200     // 容器槽位覆盖层默认渲染层级
     }
 
@@ -2514,9 +2515,30 @@
         pushed: false,
         px:     0.0,
         py:     0.0,
+        pz:     0.0,
         angle:  0.0,
         scaleX: 1.0,
         scaleY: 1.0
+    }
+
+    function applyPoseZTranslate(event, pz) {
+        if (!pz || !isFinite(pz) || event == null) return
+        try {
+            if (typeof event['translate(float,float,float)'] === 'function') {
+                event['translate(float,float,float)'](0.0, 0.0, pz)
+                return
+            }
+            if (event.graphics != null) {
+                var ps = (typeof event.graphics.pose === 'function')
+                    ? event.graphics.pose()
+                    : ((typeof event.graphics.m_280168_ === 'function') ? event.graphics.m_280168_() : null)
+                if (ps != null) {
+                    if (typeof ps.translate === 'function') ps.translate(0.0, 0.0, pz)
+                    else if (typeof ps.m_252880_ === 'function') ps.m_252880_(0.0, 0.0, pz)
+                    else if (typeof ps.m_85837_ === 'function') ps.m_85837_(0.0, 0.0, pz)
+                }
+            }
+        } catch (ePz) { }
     }
 
     function ensureFallbackBlend(event, batchCtx) {
@@ -2535,9 +2557,12 @@
         event.blend(true)
     }
 
-    function applyItemPoseToEvent(event, px, py, angle, scaleX, scaleY) {
+    function applyItemPoseToEvent(event, px, py, angle, scaleX, scaleY, pz) {
         event.push()
         event.translate(px, py)
+        if (pz !== 0 && isFinite(pz)) {
+            applyPoseZTranslate(event, pz)
+        }
         if (angle !== 0 && isFinite(angle)) {
             event.rotateDeg(angle)
         }
@@ -2554,7 +2579,7 @@
 
     function ensureItemPosePushed(event) {
         if (ITEM_POSE_SCRATCH.needed && !ITEM_POSE_SCRATCH.pushed) {
-            applyItemPoseToEvent(event, ITEM_POSE_SCRATCH.px, ITEM_POSE_SCRATCH.py, ITEM_POSE_SCRATCH.angle, ITEM_POSE_SCRATCH.scaleX, ITEM_POSE_SCRATCH.scaleY)
+            applyItemPoseToEvent(event, ITEM_POSE_SCRATCH.px, ITEM_POSE_SCRATCH.py, ITEM_POSE_SCRATCH.angle, ITEM_POSE_SCRATCH.scaleX, ITEM_POSE_SCRATCH.scaleY, ITEM_POSE_SCRATCH.pz)
             ITEM_POSE_SCRATCH.pushed = true
         }
     }
@@ -4342,7 +4367,9 @@
             ? Number(CONFIG.slotRenderPriority != null ? CONFIG.slotRenderPriority : 200)
             : ((surface === 'gui')
                 ? Number(CONFIG.guiRenderPriority != null ? CONFIG.guiRenderPriority : 100)
-                : Number(CONFIG.screenRenderPriority != null ? CONFIG.screenRenderPriority : 0))
+                : ((surface === 'screen' && hasCustomNodes)
+                    ? Number(CONFIG.hudRenderPriority != null ? CONFIG.hudRenderPriority : 50)
+                    : Number(CONFIG.screenRenderPriority != null ? CONFIG.screenRenderPriority : 0)))
         var renderPriority = readNum(raw, 'renderPriority', readNum(raw, 'zIndex', defRenderPri))
         var ox           = Math.round(readNum(raw, 'ox', 0))
         var oy           = Math.round(readNum(raw, 'oy', 0))
@@ -5082,7 +5109,8 @@
         if (rpa !== rpb) return rpa - rpb
         var pa = (a && a.priority != null) ? Number(a.priority) : 0
         var pb = (b && b.priority != null) ? Number(b.priority) : 0
-        if (pb !== pa) return pb - pa
+        // 2D 画家算法按升序绘制：低 priority 先画垫底，高 priority 后画居上
+        if (pa !== pb) return pa - pb
         return (a ? (a.born || 0) : 0) - (b ? (b.born || 0) : 0)
     }
 
@@ -6815,6 +6843,7 @@
         var frameStartMs        = now
         var drawnCount          = 0
         var lastRenderPri       = null
+        var layerZ              = 0.0
         var anyGuiReplaceMatch  = false
         ACTIVE_FRAME_EVENT      = event
         GRAPHICS_TEXT_DIRTY     = false
@@ -6852,12 +6881,14 @@
             var curRenderPri = item.renderPriority != null ? Number(item.renderPriority) : 0
             if (lastRenderPri !== null && curRenderPri !== lastRenderPri) {
                 flushBatchedBeforeImmediate()
+                // 每跨一个更高 renderPriority 层级推进 +1.0 Z，彻底消除低层文字 +0.03 深度残影反向遮挡高层 HUD 矩形
+                layerZ = min2(200.0, layerZ + 1.0)
             }
             lastRenderPri = curRenderPri
 
             // 单帧硬防卡死熔断（每绘制 8 条采样一次 monotonicNowMs，大幅削减 System.nanoTime JNI 跨界开销）：
-            // 若极重洪泛触及该上限，将截断同层级/低层级尾部条目；GUI/slot 等高渲染层级 (renderPriority > 0) 始终放行。
-            if (curRenderPri <= 0 && drawnCount >= 1 && (drawnCount & 7) === 1 && (monotonicNowMs() - frameStartMs) >= CONFIG.frameBudgetMs) {
+            // 仅截断低优先级普通弹幕 (renderPriority <= 0 && priority <= 2)；高优先级弹幕与 HUD/GUI/slot (renderPriority > 0) 始终放行。
+            if (curRenderPri <= 0 && (item.priority || 0) <= 2 && drawnCount >= 1 && (drawnCount & 7) === 1 && (monotonicNowMs() - frameStartMs) >= CONFIG.frameBudgetMs) {
                 continue
             }
             drawnCount++
@@ -7067,7 +7098,7 @@
                 if (batchCtx != null && !BATCH_FAILED && batchCtx.canDirectMatrix && baseFrameM != null) {
                     var iMat = batchCtx._itemScratch
                     iMat.set(baseFrameM)
-                    iMat.translate(px, py, 0.0)
+                    iMat.translate(px, py, layerZ)
                     if (item.angle !== 0 && isFinite(item.angle)) {
                         iMat.rotateZ(item.angle * DEG_TO_RAD)
                     }
@@ -7078,13 +7109,15 @@
                     ITEM_POSE_SCRATCH.needed = true
                     ITEM_POSE_SCRATCH.px     = px
                     ITEM_POSE_SCRATCH.py     = py
+                    ITEM_POSE_SCRATCH.pz     = layerZ
                     ITEM_POSE_SCRATCH.angle  = item.angle
                     ITEM_POSE_SCRATCH.scaleX = scaleX
                     ITEM_POSE_SCRATCH.scaleY = scaleY
                 } else {
-                    applyItemPoseToEvent(event, px, py, item.angle, scaleX, scaleY)
+                    applyItemPoseToEvent(event, px, py, item.angle, scaleX, scaleY, layerZ)
                     ITEM_POSE_SCRATCH.needed = true
                     ITEM_POSE_SCRATCH.pushed = true
+                    ITEM_POSE_SCRATCH.pz     = layerZ
                     if (batchCtx != null && !BATCH_FAILED) {
                         batchCtx.itemMat = batchCtx.hasGetMatrixFn ? event.getMatrix() : event.matrix
                     }

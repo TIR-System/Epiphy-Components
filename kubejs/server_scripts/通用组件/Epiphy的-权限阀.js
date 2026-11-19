@@ -856,7 +856,11 @@
         if (!entry.grantsStore) return false
         try {
             var hasGrants = Object.keys(entry.grants).length > 0
-            return entry.grantsStore.save(serializeGrantsPayload(entry.grants), { force: hasGrants })
+            // 损坏锁生效时：空表严格拒绝覆写；有新授权数据落盘时先 quarantine 完整备份损坏原文件再写入
+            return entry.grantsStore.save(
+                serializeGrantsPayload(entry.grants),
+                hasGrants ? { quarantine: true } : undefined
+            )
         } catch (eWrite) {
             logError('saveWorldGrantsToDisk', '写入授权文件失败 (' + entry.filePath + '): ' + eWrite)
         }
@@ -873,7 +877,7 @@
                 version:      1,
                 updatedAt:    formatTimestampNow(),
                 revoked:      entry.revocations
-            }, { force: hasRevs })
+            }, hasRevs ? { quarantine: true } : undefined)
         } catch (eWrite) {
             logError('saveWorldRevocationsToDisk', '写入撤销墓碑失败 (' + entry.revocationsFile + '): ' + eWrite)
         }
@@ -888,7 +892,7 @@
             entry.authMode.updatedBy,
             entry.authMode.updatedAt
         )
-        return entry.authModeStore.save(payload, { force: true })
+        return entry.authModeStore.save(payload, { quarantine: true })
     }
 
     function formatTimestampNow() {

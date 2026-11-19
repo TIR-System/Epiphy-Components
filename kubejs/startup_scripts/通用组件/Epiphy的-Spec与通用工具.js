@@ -1074,7 +1074,10 @@
         out.proto   = 6;
         out.surface = out.surface ? String(out.surface) : 'screen';
         if (out.renderPriority === undefined) {
-            out.renderPriority = (out.surface === 'slot') ? 200 : ((out.surface === 'gui') ? 100 : 0);
+            var hasScreenHudNodes = (out.surface === 'screen') && Array.isArray(out.nodes) && out.nodes.length > 0;
+            out.renderPriority = (out.surface === 'slot') ? 200
+                : ((out.surface === 'gui') ? 100
+                    : (hasScreenHudNodes ? 50 : 0));
         }
         var act     = out.action ? String(out.action) : 'push';
         out.action  = act;

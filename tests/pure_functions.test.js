@@ -5550,9 +5550,11 @@ test('ScreenDanmakuClient v5.4: frame sAllowShadow cache, itemFgMat reuse, no ho
     })
     drawLogs.length = 0
     paints[0](ev)
-    // High priority renders BEFORE low priority; A gets green stroke (8 outer passes of #00FF00 -> c>>2? no outline passes exact color 0x00FF00)
+    // 2D Painter's algorithm: low priority=1 renders BEFORE high priority=9 so higher-priority text stays on top
     var firstDrawn = drawLogs[0]
-    assert.strictEqual(firstDrawn.s, 'A', 'priority=9 overlay must render before priority=1 overlay even when pushed second')
+    var lastDrawn  = drawLogs[drawLogs.length - 1]
+    assert.strictEqual(firstDrawn.s, 'LOW', 'priority=1 overlay must render before priority=9 overlay (bottom layer)')
+    assert.ok(lastDrawn.s === 'A' || lastDrawn.s === 'S', 'priority=9 overlay must render after priority=1 overlay (top layer)')
     assert.ok(drawLogs.some(function (d) { return d.s === 'A' && d.rgb === 0x00FF00 }), 'inline <outline=#00FF00> must override item outline')
     assert.ok(drawLogs.some(function (d) { return d.s === 'S' && d.rgb === 0x0000FF }), 'subColor must stay independent from title color in rCtx')
 
@@ -7903,12 +7905,14 @@ test('Schema parity, EpiphyLog deprecation control, PRIORITY_MAP pruning, GUI re
     var R2 = cliSb2.global.Epiphy2DRenderer
     var customShaderHits = 0
     R2.registerShader('custom_nebula', function () { customShaderHits++; return true })
-    // High eviction priority (10) screen danmaku still has default renderPriority = 0 (< GUI default 100)
+    // High eviction priority (10) declarative screen HUD defaults to hudRenderPriority = 50 (> plain danmaku 0, < GUI default 100)
+    var scrPktPlain   = Dm2.buildPacket({ id: 'scr_plain', surface: 'screen', priority: 10, title: 'PLAIN_DANMAKU' })
     var scrPktHighPri = Dm2.buildPacket({ id: 'scr_high_pri', surface: 'screen', priority: 10, showInGui: true, layers: [{ kind: 'text', x: 0, y: 0, scale: 0.7, text: 'DANMAKU_TEXT' }] })
     var guiPktDefPri  = Dm2.buildPacket({ id: 'gui_def_pri', surface: 'gui', lifeMode: 'screen_session', targetGui: { titleMatch: '拆解台' }, bg: [{ kind: 'nine_slice', tex: 'epiphy:textures/gui/panel.png', x: 0, y: 0, w: 60, h: 40, texW: 128, texH: 128, slice: [3, 5, 7, 9] }], layers: [{ kind: 'rect', x: 0, y: 0, w: 40, h: 20, fill: { mode: 'shader', shader: 'end_portal' } }, { kind: 'rect', x: 0, y: 20, w: 10, h: 10, fill: { mode: 'shader', shader: 'custom_nebula' } }, { kind: 'text', x: 0, y: -8, scale: 0.65, text: 'BADGE_TAG' }, { kind: 'rect', x: 8, y: -8, w: 8, h: 6, color: 0xFFFFFFFF }] })
     var scrPktTopPri  = Dm2.buildPacket({ id: 'scr_top_override', surface: 'screen', renderPriority: 300, showInGui: true, layers: [{ kind: 'rect', x: 0, y: 0, w: 12, h: 12, color: 0xFF00FF00 }] })
 
-    assert.strictEqual(scrPktHighPri.renderPriority, 0)
+    assert.strictEqual(scrPktPlain.renderPriority, 0)
+    assert.strictEqual(scrPktHighPri.renderPriority, 50)
     assert.strictEqual(guiPktDefPri.renderPriority, 100)
     assert.strictEqual(scrPktTopPri.renderPriority, 300)
 
@@ -8624,6 +8628,133 @@ test('65. v6.2.1 audit fixes: preset+action patch, progress_bar style/typo, KNOW
     assert.strictEqual(nodesToCompile[3]._c.textHasVar, true)
     assert.strictEqual(nodesToCompile[3]._c.hasVarTextCol, true)
     assert.strictEqual(nodesToCompile[3]._c.needWidthMeasure, false)
+})
+
+test('66. v6.2.2 strict corrupt lock + quarantine backup & HUD renderPriority/priority draw order + Z-layer isolation', function () {
+    var warns = []
+    var diskFiles = {}
+    var sb = {
+        console: { info: function () {}, warn: function (m) { warns.push(String(m)) }, error: function (m) { throw new Error(m) }, debug: function () {}, log: function () {} },
+        ServerEvents: { loaded: function () {}, tick: function () {}, commandRegistry: function () {} },
+        BlockEvents: { placed: function () {}, broken: function () {} },
+        PlayerEvents: { loggedIn: function () {}, loggedOut: function () {} },
+        JsonIO: {
+            readString: function (p) { return Object.prototype.hasOwnProperty.call(diskFiles, p) ? diskFiles[p] : null },
+            write: function (p, obj) { diskFiles[p] = JSON.stringify(obj) }
+        },
+        Java: { loadClass: function () { return null } },
+        global: {}
+    }
+    sb.globalThis = sb
+    vm.createContext(sb)
+    loadServerBase(sb)
+    runScriptIn(sb, TRACKER_PATH)
+    runScriptIn(sb, DANMAKU_PATH)
+
+    var Base    = sb.global.EpiphyServerCore
+    var Surface = sb.global.Epiphy2DSurface
+
+    // 1. openJsonStore strict corrupt lock & quarantine backup before write
+    diskFiles['qtest/unstable.json'] = '{ broken_original_records: [1,2,3'
+    var stStrict = Base.openJsonStore('qtest/unstable.json', { lockOnCorrupt: true })
+    assert.strictEqual(stStrict.load().status, 'corrupt')
+    assert.strictEqual(stStrict.isCorrupt(), true)
+    // Non-empty payload WITHOUT force/quarantine must STILL be refused (no silent overwrite of corrupt file)
+    assert.strictEqual(stStrict.save({ version: 2, jobs: [{ x: 1 }] }), false, 'corrupt lock must refuse even non-empty save without quarantine/force')
+    assert.strictEqual(diskFiles['qtest/unstable.json'], '{ broken_original_records: [1,2,3', 'corrupt file must remain untouched on disk')
+
+    // With { quarantine: true }, corrupt raw file must be backed up to *.corrupt.*.bak BEFORE writing new payload
+    assert.strictEqual(stStrict.save({ version: 2, jobs: [{ x: 9 }] }, { quarantine: true }), true, 'quarantine:true must backup corrupt file and save new payload')
+    assert.strictEqual(stStrict.isCorrupt(), false)
+    var qBackupKeys = Object.keys(diskFiles).filter(function (k) { return k.indexOf('qtest/unstable.json.corrupt.') === 0 && k.slice(-4) === '.bak' })
+    assert.strictEqual(qBackupKeys.length, 1, 'exactly one .corrupt.<stamp>.bak backup must be created')
+    assert.ok(diskFiles[qBackupKeys[0]].indexOf('broken_original_records') >= 0, 'quarantine backup must preserve original corrupt content')
+    assert.strictEqual(JSON.parse(diskFiles['qtest/unstable.json']).jobs[0].x, 9)
+
+    // 2. Server default renderPriority ladder: screen text (0) < screen declarative HUD (50) < gui (100) < slot (200)
+    var pText = Surface.buildPacket({ text: 'NormalDanmaku' })
+    var pHud  = Surface.buildPacket({ preset: 'progress_bar', title: 'HUD', data: { progress: 0.5 } })
+    var pGui  = Surface.buildPacket({ surface: 'gui', nodes: [{ id: 'g', type: 'rect', x: 0, y: 0, w: 10, h: 10, color: 0xFFFFFFFF }] })
+    var pSlot = Surface.buildPacket({ surface: 'slot', nodes: [{ id: 's', type: 'rect', x: 0, y: 0, w: 10, h: 10, color: 0xFFFFFFFF }] })
+    var pOv   = Surface.buildPacket({ preset: 'progress_bar', title: 'CustomZ', zIndex: 12 })
+    assert.strictEqual(pText.renderPriority, 0, 'plain screen danmaku must default to renderPriority 0')
+    assert.strictEqual(pHud.renderPriority, 50, 'declarative HUD / progress_bar must default to hudRenderPriority 50')
+    assert.strictEqual(pGui.renderPriority, 100, 'gui surface must default to renderPriority 100')
+    assert.strictEqual(pSlot.renderPriority, 200, 'slot surface must default to renderPriority 200')
+    assert.strictEqual(pOv.renderPriority, 12, 'explicit zIndex/renderPriority must still override default')
+
+    // 3. Client draw order: low-pri danmaku -> high-pri danmaku -> HUD progress bar (with flush + Z-layer translate)
+    var cliPaints = []
+    var cliNetCb  = null
+    var cNow      = 1000
+    var cliSb = {
+        console: { info: function () {}, warn: function () {}, error: function (m) { throw new Error(m) }, debug: function () {}, log: function () {} },
+        Date: { now: function () { return cNow } },
+        Client: { getCurrentScreen: function () { return null } },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function (fn) { cliPaints.push(fn) } },
+        NetworkEvents: { dataReceived: function (chName, fn) { if (chName === 'epiphy:screen_danmaku') cliNetCb = fn } },
+        Java: { loadClass: function () { return null } },
+        Text: { of: function (s) { return { string: String(s) } } },
+        global: {}
+    }
+    cliSb.globalThis = cliSb
+    vm.createContext(cliSb)
+    loadStartupBase(cliSb)
+    runScriptIn(cliSb, RENDERER_PATH)
+
+    // Push HUD bar FIRST (oldest born, active priority 5, no explicit renderPriority -> client defaults to 50)
+    cliNetCb({
+        data: {
+            proto: 6, surface: 'screen', id: 'hud_bar', lifeMode: 'active', priority: 5, activeHold: 100, rx: 0.27, ry: 0.14, scale: 0.56,
+            nodes: [{ id: 'bar_bg', type: 'rect', anchor: 'top_left', x: 0, y: 0, w: 100, h: 10, fill: { mode: 'solid', color: 0xFFAA0000 } }]
+        }
+    })
+    cNow += 100
+    // Push high-priority danmaku SECOND
+    cliNetCb({ data: { proto: 6, surface: 'screen', title: 'HI_DANMAKU', priority: 5, stay: 100, rx: 0.3, ry: 0.2 } })
+    cNow += 100
+    // Push low-priority danmaku LAST (newest born)
+    cliNetCb({ data: { proto: 6, surface: 'screen', title: 'LO_DANMAKU', priority: 2, stay: 100, rx: 0.3, ry: 0.2 } })
+
+    var drawOps = []
+    var poseZHistory = []
+    var curPoseZ = 0
+    var poseStack = []
+    var mockEv = {
+        width: 854, height: 480, level: 'minecraft:overworld',
+        font: { width: function () { return 40 } },
+        graphics: {
+            flush: function () { drawOps.push('FLUSH') },
+            pose: function () {
+                return {
+                    translate: function (x, y, z) {
+                        curPoseZ += z
+                        poseZHistory.push(curPoseZ)
+                    }
+                }
+            }
+        },
+        push: function () { poseStack.push(curPoseZ) },
+        pop: function () { curPoseZ = poseStack.length ? poseStack.pop() : 0 },
+        translate: function () {},
+        rotateDeg: function () {},
+        scale: function () {},
+        setPositionColorShader: function () {},
+        blend: function () {},
+        beginQuads: function () {},
+        end: function () {},
+        rectangle: function () { drawOps.push('HUD_RECT@z=' + curPoseZ) },
+        text: function (comp) { drawOps.push('TEXT:' + comp.string + '@z=' + curPoseZ) }
+    }
+    cliPaints[0](mockEv)
+
+    var idxLo  = drawOps.indexOf('TEXT:LO_DANMAKU@z=0')
+    var idxHi  = drawOps.indexOf('TEXT:HI_DANMAKU@z=0')
+    var idxHud = drawOps.indexOf('HUD_RECT@z=1')
+    assert.ok(idxLo >= 0, 'low-priority danmaku must draw at z=0 (ops=' + JSON.stringify(drawOps) + ')')
+    assert.ok(idxHi > idxLo, 'high-priority danmaku must draw AFTER low-priority danmaku (on top)')
+    assert.ok(idxHud > idxHi, 'HUD progress bar must draw AFTER all danmaku at elevated Z layer z=1 (ops=' + JSON.stringify(drawOps) + ')')
+    assert.ok(drawOps.slice(idxHi, idxHud).indexOf('FLUSH') >= 0, 'graphics.flush() must occur between danmaku layer and HUD layer')
 })
 
 

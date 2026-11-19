@@ -179,7 +179,8 @@
         maxWidth:       0,
         maxGroup:            0,         // 同组同屏最大并发弹幕数（0 表示不额外限制）
         showInGui:           false,
-        screenRenderPriority: 0,        // 独立画面层叠渲染优先级（默认高于低层、低于 GUI）
+        screenRenderPriority: 0,        // 独立屏幕弹幕默认渲染优先级（处于底层）
+        hudRenderPriority:    50,       // 屏幕声明式图形 HUD/进度条默认渲染优先级（默认高于弹幕、低于容器 GUI）
         guiRenderPriority:    100,      // GUI 承载面默认渲染优先级（不被 screen 弹幕覆盖，可独立调整）
         slotRenderPriority:   200       // 槽位承载面默认渲染优先级（位于 GUI 图层上方）
     }
@@ -2133,7 +2134,9 @@
             ? parseFiniteNum(DEFAULTS.slotRenderPriority, 200)
             : ((surfaceStr === 'gui')
                 ? parseFiniteNum(DEFAULTS.guiRenderPriority, 100)
-                : parseFiniteNum(DEFAULTS.screenRenderPriority, 0))
+                : ((surfaceStr === 'screen' && hasDeclarativeV6)
+                    ? parseFiniteNum(DEFAULTS.hudRenderPriority, 50)
+                    : parseFiniteNum(DEFAULTS.screenRenderPriority, 0)))
         var rawRenderPri = pick(opts, ['renderPriority', 'zIndex'], null)
         var renderPri    = (rawRenderPri !== null && rawRenderPri !== undefined && rawRenderPri !== '')
             ? Math.max(-10000, Math.min(10000, parseFiniteNum(rawRenderPri, defRenderPri)))

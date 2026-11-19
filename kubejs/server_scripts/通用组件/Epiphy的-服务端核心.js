@@ -1622,8 +1622,71 @@
         return false;
     }
 
+    var quarantineSeq = 0;
+
+    function buildQuarantineBackupPath(normPath) {
+        var d = new Date();
+        var pad = function (n) { return n < 10 ? ('0' + n) : String(n); };
+        var stamp = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '_' +
+            pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+        quarantineSeq++;
+        return normPath + '.corrupt.' + stamp + '_' + quarantineSeq + '.bak';
+    }
+
+    // 损坏文件现场隔离备份：先将磁盘原损坏文件完整保留至 <path>.corrupt.<stamp>.bak，确认成功才返回 ok:true
+    function quarantineCorruptFile(normPath, logger) {
+        if (!normPath) return { ok: false, backupPath: null, existed: false };
+        var qPath = buildQuarantineBackupPath(normPath);
+        ensureParentDir(qPath, logger);
+
+        if (JAVA_FILES_CLASS != null && JAVA_PATHS_CLASS != null) {
+            try {
+                var srcP = JAVA_PATHS_CLASS.get(String(normPath));
+                if (!Boolean(JAVA_FILES_CLASS.exists(srcP))) {
+                    return { ok: true, backupPath: null, existed: false };
+                }
+                if (typeof JAVA_FILES_CLASS.readAllBytes === 'function' && typeof JAVA_FILES_CLASS.write === 'function') {
+                    var rawBytes = JAVA_FILES_CLASS.readAllBytes(srcP);
+                    var dstP = JAVA_PATHS_CLASS.get(String(qPath));
+                    JAVA_FILES_CLASS.write(dstP, rawBytes);
+                    return { ok: true, backupPath: qPath, existed: true };
+                }
+            } catch (eNioQ) {
+                (logger || baseLogger).catchWarn('quarantineCorruptFile:nio', eNioQ);
+            }
+        }
+
+        var rawStr = null;
+        if (typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.readString === 'function') {
+            try { rawStr = JsonIO.readString(String(normPath)); } catch (eJioR) { }
+        }
+        if (rawStr == null && typeof FilesIO !== 'undefined' && FilesIO != null && typeof FilesIO.read === 'function') {
+            try { rawStr = FilesIO.read(String(normPath)); } catch (eFioR) { }
+        }
+        if (rawStr == null) {
+            return { ok: true, backupPath: null, existed: false };
+        }
+        var rawText = String(rawStr);
+        if (writeTextAtomic(qPath, rawText, false, logger)) {
+            return { ok: true, backupPath: qPath, existed: true };
+        }
+        if (typeof FilesIO !== 'undefined' && FilesIO != null && typeof FilesIO.write === 'function') {
+            try {
+                FilesIO.write(String(qPath), rawText);
+                return { ok: true, backupPath: qPath, existed: true };
+            } catch (eFioW) { }
+        }
+        if (typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.write === 'function') {
+            try {
+                JsonIO.write(String(qPath), { _corruptRaw: rawText, sourcePath: normPath });
+                return { ok: true, backupPath: qPath, existed: true };
+            } catch (eJioW) { }
+        }
+        return { ok: false, backupPath: null, existed: true };
+    }
+
     // 统一状态化 JSON 持久化门面：收口 readJsonDetailed / writeJsonAtomic 的参数顺序、
-    // .bak 恢复、缺省默认值与损坏防覆写锁（lockOnCorrupt）
+    // .bak 恢复、缺省默认值、损坏防覆写锁（lockOnCorrupt）与损坏隔离备份（quarantine）
     function openJsonStore(filePath, opts) {
         var cfg           = isObjectLike(opts) ? opts : {};
         var normPath      = filePath ? normalizeSlashPath(filePath) : '';
@@ -1632,6 +1695,26 @@
         var lockOnCorrupt = cfg.lockOnCorrupt !== false;
         var defaultData   = cfg.defaultData;
         var corruptLocked = false;
+
+        function quarantineNow() {
+            if (!normPath) return { ok: false, backupPath: null, existed: false };
+            var qRes = quarantineCorruptFile(normPath, effLogger);
+            if (qRes.ok) {
+                corruptLocked = false;
+                if (qRes.existed && qRes.backupPath) {
+                    effLogger.warn(
+                        'jsonStore:quarantined:' + normPath,
+                        '已将损坏的持久化原文件隔离备份至 "' + qRes.backupPath + '"，随后解除损坏保护锁并写入新数据。'
+                    );
+                }
+            } else {
+                effLogger.warn(
+                    'jsonStore:quarantineFailed:' + normPath,
+                    '隔离备份损坏持久化文件失败 (' + normPath + ')，维持保护锁并拒绝覆盖原文件！'
+                );
+            }
+            return qRes;
+        }
 
         return {
             path: normPath,
@@ -1662,20 +1745,27 @@
             },
             save: function (data, saveOpts) {
                 if (!normPath) return false;
-                var sCfg  = isObjectLike(saveOpts) ? saveOpts : {};
-                var force = sCfg.force === true;
+                var sCfg       = isObjectLike(saveOpts) ? saveOpts : {};
+                var force      = sCfg.force === true;
+                var quarantine = sCfg.quarantine === true;
                 if (corruptLocked && !force) {
-                    effLogger.warn(
-                        'jsonStore:corruptLocked:' + normPath,
-                        '持久化文件处于损坏保护锁状态，已拒绝覆盖写盘 (' + normPath + ')；如需强制覆盖请传 { force: true }'
-                    );
-                    return false;
+                    if (quarantine) {
+                        var qRes = quarantineNow();
+                        if (!qRes.ok) return false;
+                    } else {
+                        effLogger.warn(
+                            'jsonStore:corruptLocked:' + normPath,
+                            '持久化文件处于损坏保护锁状态，已拒绝覆盖写盘 (' + normPath + ')；请修复原文件或使用 { quarantine: true } 隔离备份后再写'
+                        );
+                        return false;
+                    }
                 }
                 var useBak = (sCfg.backup !== undefined) ? sCfg.backup : keepBackup;
                 var ok = writeJsonAtomic(normPath, data, useBak, effLogger);
                 if (ok) corruptLocked = false;
                 return ok;
             },
+            quarantineCorrupt: quarantineNow,
             isCorrupt: function () {
                 return corruptLocked;
             },

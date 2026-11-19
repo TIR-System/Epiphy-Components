@@ -319,7 +319,7 @@
 
 ## 6. 测试验证方案与性能帧预算（Verification & Performance Budget）
 
-所有新增能力必须同步扩展 [`tests/pure_functions.test.js`](../tests/pure_functions.test.js)（当前基线 **65/65 passed**），并在实机通过帧耗时预算核验：
+所有新增能力必须同步扩展 [`tests/pure_functions.test.js`](../tests/pure_functions.test.js)（当前基线 **66/66 passed**），并在实机通过帧耗时预算核验：
 
 ### 6.1 沙盒单元测试必测项（`npm test` 新增用例清单）
 1. **`adaptV5ToV6` 无损往返与等价性测试**：遍历全部 45 个 `v5` 字段输入，断言转换后的 `v6` 包在顶层 Envelope 与 `nodes[0]` 上数值 100% 精确对齐，且 `ScreenDanmakuClient` 对 `proto: 5` 与 `proto: 6` 包产生完全相同的内部 Overlay 状态与渲染调用序列；
@@ -383,7 +383,7 @@ Phase 4 (Kotlin + Java 原生模组迁移：彻底移除淘汰别名 + 硬件级
 | [x] | **P1-3** | **状态变量字典 (`vars`)、`action: 'patch'` 队列合并与 `tracks` 插值器**：实现同 `slotId` 队列合并、孤儿包丢弃、`lerp`/`trail`/`impulse`（`dt <= 100ms` 钳制）及 `node.bind` 仿射/步进绑定 | `Epiphy的-平面渲染组件.js`<br>`Epiphy的-平面渲染器.js` | 时间序列插值与 `evaluateNodeBind` 单测 | 已完成 |
 | [x] | **P1-4** | **声明式 2D 图元树与独立层级调度**：实现 6 类图元、`nine_slice.slice` 4 元数组与标量、`5` 向 `anchor`、双模 `clip`、`renderPriority` 独立于 `priority` 的层叠排序（GUI 默认置顶）及 `flushBatchedBeforeImmediate` 双缓冲刷新修复 | `Epiphy的-平面渲染器.js` | 异常注入状态零泄漏 + 层叠排序与遮罩单测 | 已完成 |
 | [x] | **P1-5** | **`rect.fill` 统一填充机制**：完成 `solid` / `outline` / 三色 `gradient` / 外部贴图与程序化几何 `parallax`（`ripples`/`steps`/`particles`/`stripes`）/ `shader`（原版 `end_portal`/`end_gateway`/`glint` + `registerShader` 可扩展机制）与 `TEXTURE_EXIST_CACHE` 防缺贴图 | `Epiphy的-平面渲染器.js` | 视差 UV 计算 + Shader 降级 + 缺贴图单测 | 已完成 |
-| [x] | **P1-6** | **Phase 1 预设封装、向上自定义注册与 `v18` 方案 α 实装**：移除特例 `buildProgressPanel`，归位为内置 `'progress_bar'` 预设 + `progressTracks`；落地分组配置深合并、`channel`/`slot` 句柄、`ui()` `id` 前置 + `.texts()`/`.region()` 与端侧节点预编译；`v18` 三幕遥测全面采用方案 α（`472x16@0.56`、零重叠阶梯切角玻璃底衬、同心旋转方格徽章、4 层立体底流与 `slot.syncNear` 自动全量/增量 `patch`） | `Epiphy的-Spec与通用工具.js`<br>`Epiphy的-平面渲染组件.js`<br>`Epiphy的-平面渲染器.js`<br>`拆解台-混沌殉爆.v18.js` | `v18` NBT 序列化 + 真 `PaintScreenEventJS` + 预设/`channel`/`slot`/预编译/`KNOWN_PACKET_KEYS` 静态一致性断言 (65/65) | 已完成 |
+| [x] | **P1-6** | **Phase 1 预设封装、向上自定义注册与 `v18` 方案 α 实装**：移除特例 `buildProgressPanel`，归位为内置 `'progress_bar'` 预设 + `progressTracks`；落地分组配置深合并、`channel`/`slot` 句柄、`ui()` `id` 前置 + `.texts()`/`.region()` 与端侧节点预编译；`v18` 三幕遥测全面采用方案 α（`472x16@0.56`、零重叠阶梯切角玻璃底衬、同心旋转方格徽章、4 层立体底流与 `slot.syncNear` 自动全量/增量 `patch`） | `Epiphy的-Spec与通用工具.js`<br>`Epiphy的-平面渲染组件.js`<br>`Epiphy的-平面渲染器.js`<br>`拆解台-混沌殉爆.v18.js` | `v18` NBT 序列化 + 真 `PaintScreenEventJS` + 预设/`channel`/`slot`/预编译/`KNOWN_PACKET_KEYS` 静态一致性/HUD 分层与 Z 隔离断言 (66/66) | 已完成 |
 | [~] | **P2-1** | **承载面 `surface: 'gui'` 夹心层与会话寿命**：已实现 `renderGuiSurfacePass`、`lifeMode: 'screen_session'` 与 `renderPriority: 100` 默认不被弹幕覆盖；注：KubeJS 侧 `ClientEvents.paintScreen` 无容器原生槽位前后阶段，完整 `renderBg/renderSlots` 夹心挂钩需 Phase 2B 事件桥或 Phase 4 Mixin | `Epiphy的-平面渲染组件.js`<br>`Epiphy的-平面渲染器.js` | `screen_session` / `renderGuiSurfacePass` 单测 | 部分完成（PaintScreen 阶段可用，原版 Screen 夹心事件待桥接） |
 | [x] | **P2-2** | **会话级纹理重映射与 `fill.mode: 'shader'`**：`applyReplacedTexturesForGui` 接入 `Minecraft.getTextureManager().register` 真替换并在界面关闭/`loggedOut`/`clear` 自动还原；支持原版内置及外部注册自定义 Shader 与降级回退 | `Epiphy的-平面渲染器.js` | 纹理还原防污染单测 + Shader 降级单测 | 已完成 |
 | [~] | **P2-3** | **承载面 `surface: 'slot'` 物品槽位 2D 叠加层**：完成 `slotMatch` 与局部偏移绘制（`renderPriority: 200`）及单测；实机自动跟随每个槽位绘制待容器 `Screen` 绘制钩子接入 | `Epiphy的-平面渲染器.js` | 槽位匹配与局部坐标裁剪单测 | 部分完成（接口就绪，自动槽位事件待桥接） |
@@ -437,5 +437,5 @@ Phase 4 (Kotlin + Java 原生模组迁移：彻底移除淘汰别名 + 硬件级
     2. 收包入口新增 `compileDeclarativeNodes`（整型 `type`/`fillMode` 枚举、静态几何/颜色/坐标预算、`isStaticFastRect` 极速直绘轨）与 `stepHz` 离散抖动微缓存；
     3. 批处理状态机 `openRectBatch`/`closeRectBatch`/`emitOutlineIntoOpenBatch` 提升至模块顶层（每帧 0 闭包分配），新增帧内 `resolveEventCaps(event)` 消除 5 处 `drawRect*` 重复 `typeof` JNI 探测；
     4. 真正的声明式节点树整树 / 静态子树离屏缓存（`TextureTarget` FBO，默认关闭）正式记入 Phase 4 原生模组路线图。
-  - **`EpiphyServerCore v2.6` & 业务收口**：新增状态化 JSON 持久化门面 `openJsonStore(filePath, opts)`（统一 `load`/`save`/`isCorrupt` 与 `lockOnCorrupt` 防损坏覆写，根治底层的读/写参数反序问题），迁移 `方块与区块组件`、`权限阀`、`v18`；`v18` 同步修复 `DANMAKU_NAMESPACE` 声明顺序并全面迁至 `HUD_CH`/`slot`/`id` 前置 `ui()` + `.region()`；单测扩至 `65/65` 且全过真实 Rhino 编译检查。
+  - **`EpiphyServerCore v2.6` & 业务收口**：新增状态化 JSON 持久化门面 `openJsonStore(filePath, opts)`（统一 `load`/`save`/`isCorrupt` 与 `lockOnCorrupt` 防损坏覆写，根治底层的读/写参数反序问题），迁移 `方块与区块组件`、`权限阀`、`v18`；`v18` 同步修复 `DANMAKU_NAMESPACE` 声明顺序并全面迁至 `HUD_CH`/`slot`/`id` 前置 `ui()` + `.region()`；单测扩至 `66/66` 且全过真实 Rhino 编译检查。
 

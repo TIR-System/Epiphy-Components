@@ -173,7 +173,7 @@
                 migratedLegacy: migratedLegacyFlag,
                 blocks:         arr
             }
-            var wroteDisk = Boolean(store.save(payload, { force: arr.length > 0 }))
+            var wroteDisk = Boolean(store.save(payload))
             try {
                 if (SERVER_REF.persistentData != null && typeof SERVER_REF.persistentData.putString === 'function') {
                     SERVER_REF.persistentData.putString(PERSIST_KEY, JSON.stringify(arr))
@@ -183,6 +183,11 @@
                 persistDirty  = false
                 lastFlushTick = tickCounter
                 return true
+            }
+            if (store.isCorrupt()) {
+                // 损坏锁生效期间外部 JSON 不覆盖，运行态已由 persistentData 兜底，清空脏标记避免每 tick 空转刷告警
+                persistDirty  = false
+                lastFlushTick = tickCounter
             }
         } catch (eSave) {
             logCatch('flushTrackedBlocks', eSave)

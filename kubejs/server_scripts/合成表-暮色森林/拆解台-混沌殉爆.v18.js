@@ -479,9 +479,18 @@
             }
             var payload = { version: 2, jobs: records }
             var store   = ensureUnstableJsonStore(info.filePath)
-            var okDisk  = store.save(payload, { force: records.length > 0 })
+            // 绝不绕过 corruptLocked：外部 JSON 损坏时保留现场不覆写，运行态继续由 persistentData 安全持久化
+            var okDisk  = store.save(payload)
             if (!okDisk) {
-                LOGGER.warn('saveUnstableJobs', '外部 JSON 落盘失败或处于损坏保护锁，暂依赖 persistentData 持久化: ' + info.filePath)
+                if (store.isCorrupt()) {
+                    LOGGER.once(
+                        'warn',
+                        'saveUnstableJobs:corruptLocked:' + store.path,
+                        '外部 JSON 处于损坏保护锁，已保留原损坏文件未覆写，当前失稳进度暂由 persistentData 持久化: ' + info.filePath
+                    )
+                } else {
+                    LOGGER.warn('saveUnstableJobs', '外部 JSON 落盘失败，暂依赖 persistentData 持久化: ' + info.filePath)
+                }
             }
             if (SERVER.persistentData != null && typeof SERVER.persistentData.putString === 'function') {
                 SERVER.persistentData.putString(UNSTABLE_PDATA_KEY, JSON.stringify(payload))
