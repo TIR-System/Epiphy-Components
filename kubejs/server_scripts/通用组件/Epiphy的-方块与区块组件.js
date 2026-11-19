@@ -146,7 +146,16 @@
     var toSeqArray              = BASE.toSeqArray
     var resolveWorldStorageInfo = (server) => BASE.resolveWorldStorageInfo(server || SERVER_REF, WORLD_FILE_NAME, FALLBACK_DIR)
 
-    var storageReadFailed = false
+    var storageReadFailed  = false
+    var loadedStorageStore = null
+
+    function ensureStorageStore(filePath) {
+        if (loadedStorageStore != null && loadedStorageStore.path === filePath) {
+            return loadedStorageStore
+        }
+        loadedStorageStore = BASE.openJsonStore(filePath, { logger: LOGGER, backup: true, lockOnCorrupt: true })
+        return loadedStorageStore
+    }
 
     function flushTrackedBlocks() {
         if (SERVER_REF == null || !persistDirty) return false
@@ -166,7 +175,7 @@
                 migratedLegacy: migratedLegacyFlag,
                 blocks:         arr
             }
-            var wroteDisk = Boolean(BASE.writeJsonAtomic(targetPath, payload, true, LOGGER))
+            var wroteDisk = Boolean(ensureStorageStore(targetPath).save(payload, { force: arr.length > 0 }))
             try {
                 if (SERVER_REF.persistentData != null && typeof SERVER_REF.persistentData.putString === 'function') {
                     SERVER_REF.persistentData.putString(PERSIST_KEY, JSON.stringify(arr))
@@ -329,8 +338,9 @@
 
         var storageInfo    = resolveWorldStorageInfo(SERVER_REF)
         loadedStoragePath  = storageInfo.filePath
+        loadedStorageStore = BASE.openJsonStore(loadedStoragePath, { logger: LOGGER, backup: true, lockOnCorrupt: true })
 
-        var detailRes  = BASE.readJsonDetailed(loadedStoragePath, LOGGER, true)
+        var detailRes  = loadedStorageStore.load()
         var diskStatus = detailRes.status
         var rawObj     = detailRes.data
 

@@ -1,11 +1,11 @@
 // ============================================================================
-//  通用平面渲染与屏幕弹幕组件 —— 客户端渲染引擎 (Epiphy2DRenderer / ScreenDanmakuClient v6.1)
+//  通用平面渲染与屏幕弹幕组件 —— 客户端渲染引擎 (Epiphy2DRenderer / ScreenDanmakuClient v6.2)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 <repo-root> 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-平面渲染器.js
 //  配套服务端组件：
-//    - kubejs/server_scripts/通用组件/Epiphy的-平面渲染组件.js（服务端调度器 Epiphy2DSurface / ScreenDanmaku v6.1）
+//    - kubejs/server_scripts/通用组件/Epiphy的-平面渲染组件.js（服务端调度器 Epiphy2DSurface / ScreenDanmaku v6.2）
 //    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀 EpiphyPermissionValve v5.4）
 //
 //  依赖与缺失降级：
@@ -107,11 +107,57 @@
     var TextLayoutEngineClass   = null
     var ModernTextRendererClass = null
     var SheetsClass             = null
-    function createLocalBoundedCache(maxSize) {
+    function createLocalBoundedCache(maxSize, policy) {
         if (SPEC && typeof SPEC.createBoundedCache === 'function') {
-            return SPEC.createBoundedCache(maxSize)
+            return SPEC.createBoundedCache(maxSize, policy)
         }
         var lim = (typeof maxSize === 'number' && maxSize >= 1) ? Math.floor(maxSize) : 512
+        var isLru = (String(policy || 'fifo').toLowerCase() === 'lru')
+        if (isLru) {
+            var lMap = Object.create(null)
+            var hN = null, tN = null, lCnt = 0
+            var detachN = function (nd) {
+                if (nd.prev != null) nd.prev.next = nd.next; else hN = nd.next
+                if (nd.next != null) nd.next.prev = nd.prev; else tN = nd.prev
+                nd.prev = null; nd.next = null
+            }
+            var prependN = function (nd) {
+                nd.prev = null; nd.next = hN
+                if (hN != null) hN.prev = nd; else tN = nd
+                hN = nd
+            }
+            return {
+                get: function (k) {
+                    var s = String(k), nd = lMap[s]
+                    if (nd === undefined) return undefined
+                    if (nd !== hN) { detachN(nd); prependN(nd) }
+                    return nd.v
+                },
+                has: function (k) { return String(k) in lMap },
+                set: function (k, v) {
+                    var s = String(k), nd = lMap[s]
+                    if (nd !== undefined) {
+                        nd.v = v
+                        if (nd !== hN) { detachN(nd); prependN(nd) }
+                        return v
+                    }
+                    while (lCnt >= lim && tN != null) {
+                        var ev = tN; detachN(ev); delete lMap[ev.k]; lCnt--
+                    }
+                    var fn = { k: s, v: v, prev: null, next: null }
+                    lMap[s] = fn; prependN(fn); lCnt++
+                    return v
+                },
+                delete: function (k) {
+                    var s = String(k), nd = lMap[s]
+                    if (nd === undefined) return false
+                    detachN(nd); delete lMap[s]; lCnt--
+                    return true
+                },
+                clear: function () { lMap = Object.create(null); hN = null; tN = null; lCnt = 0 },
+                size:  function () { return lCnt }
+            }
+        }
         var map = Object.create(null)
         var ks  = []
         var hd  = 0
@@ -1297,8 +1343,8 @@
         return frags
     }
 
-    var SHARED_TEXT_SEQ_CACHE    = createLocalBoundedCache(512)
-    var TRANSIENT_TEXT_SEQ_CACHE = createLocalBoundedCache(256)
+    var SHARED_TEXT_SEQ_CACHE    = createLocalBoundedCache(512, 'lru')
+    var TRANSIENT_TEXT_SEQ_CACHE = createLocalBoundedCache(256, 'fifo')
 
     function getCachedTextCompSeq(rawStr, eagerCompSeq, isTransient) {
         var key   = String(rawStr || '')
@@ -4307,12 +4353,12 @@
                     exist.proto           = 6
                     exist.surface         = surface
                     exist.hasGraphicNodes = hasCustomNodes
-                    exist.nodes           = Array.isArray(raw.nodes) ? raw.nodes : exist.nodes
+                    exist.nodes           = Array.isArray(raw.nodes) ? compileDeclarativeNodes(raw.nodes, 0) : exist.nodes
                     exist.clip            = raw.clip !== undefined ? raw.clip : exist.clip
                     exist.targetGui       = raw.targetGui !== undefined ? raw.targetGui : exist.targetGui
                     exist.replaceTextures = raw.replaceTextures !== undefined ? raw.replaceTextures : exist.replaceTextures
-                    exist.bgNodes         = raw.bgNodes !== undefined ? raw.bgNodes : exist.bgNodes
-                    exist.fgNodes         = raw.fgNodes !== undefined ? raw.fgNodes : exist.fgNodes
+                    exist.bgNodes         = raw.bgNodes !== undefined ? compileDeclarativeNodes(raw.bgNodes, 0) : exist.bgNodes
+                    exist.fgNodes         = raw.fgNodes !== undefined ? compileDeclarativeNodes(raw.fgNodes, 0) : exist.fgNodes
                     exist.slotMatch       = raw.slotMatch !== undefined ? raw.slotMatch : exist.slotMatch
                     exist.renderPriority  = renderPriority
                     exist.ox              = ox
@@ -4446,7 +4492,7 @@
             proto:              6,
             surface:            surface,
             hasGraphicNodes:    hasCustomNodes,
-            nodes:              Array.isArray(raw.nodes) ? raw.nodes : [],
+            nodes:              Array.isArray(raw.nodes) ? compileDeclarativeNodes(raw.nodes, 0) : [],
             vars:               initVars,
             displayVars:        trBundle.displayVars,
             tracks:             initTracks,
@@ -4455,8 +4501,8 @@
             clip:               raw.clip || null,
             targetGui:          raw.targetGui || null,
             replaceTextures:    raw.replaceTextures || null,
-            bgNodes:            Array.isArray(raw.bgNodes) ? raw.bgNodes : null,
-            fgNodes:            Array.isArray(raw.fgNodes) ? raw.fgNodes : null,
+            bgNodes:            Array.isArray(raw.bgNodes) ? compileDeclarativeNodes(raw.bgNodes, 0) : null,
+            fgNodes:            Array.isArray(raw.fgNodes) ? compileDeclarativeNodes(raw.fgNodes, 0) : null,
             slotMatch:          raw.slotMatch || null,
             key:                key,
             slotId:             slotId,
@@ -4710,7 +4756,7 @@
     })
 
     global.ScreenDanmakuClient = {
-        VERSION:    '6.1.0',
+        VERSION:    '6.2.0',
         CONFIG:     CONFIG,
         setDebug:   function (enabled) { CONFIG.debug = Boolean(enabled); return CONFIG.debug },
         push:       enqueueDanmaku,
@@ -4815,6 +4861,7 @@
             compareOverlayDrawPriority:   compareOverlayDrawPriority,
             stepOverlayTracks:            stepOverlayTracks,
             applyVarsPatchToOverlay:      applyVarsPatchToOverlay,
+            compileDeclarativeNodes:      compileDeclarativeNodes,
             renderDeclarativeNodes:       function (event, item, nodes, varsMap, fadeAlpha, fontObj, itemBatchCtx, now) {
                 return renderDeclarativeNodes(event, item, nodes, varsMap, fadeAlpha, fontObj, itemBatchCtx, now != null ? now : monotonicNowMs(), 0.0, 0)
             },
@@ -5173,10 +5220,18 @@
         var seed    = (Number(b.seed || 0) | 0)
         if (stepHz > 0 && isFinite(stepHz)) {
             var stepTick = Math.floor(animSec * stepHz)
-            if (b.jitterX) rx += Math.round(hashStepSigned(stepTick, seed, 11) * Number(b.jitterX))
-            if (b.jitterY) ry += Math.round(hashStepSigned(stepTick, seed, 23) * Number(b.jitterY))
-            if (b.jitterW) rw = max2(1, rw + Math.round(hashStepSigned(stepTick, seed, 37) * Number(b.jitterW)))
-            if (b.jitterH) rh = max2(1, rh + Math.round(hashStepSigned(stepTick, seed, 53) * Number(b.jitterH)))
+            if (b._lastStepTick !== stepTick || b._lastStepSeed !== seed) {
+                b._lastStepTick = stepTick
+                b._lastStepSeed = seed
+                b._stepDx = b.jitterX ? Math.round(hashStepSigned(stepTick, seed, 11) * Number(b.jitterX)) : 0
+                b._stepDy = b.jitterY ? Math.round(hashStepSigned(stepTick, seed, 23) * Number(b.jitterY)) : 0
+                b._stepDw = b.jitterW ? Math.round(hashStepSigned(stepTick, seed, 37) * Number(b.jitterW)) : 0
+                b._stepDh = b.jitterH ? Math.round(hashStepSigned(stepTick, seed, 53) * Number(b.jitterH)) : 0
+            }
+            if (b._stepDx) rx += b._stepDx
+            if (b._stepDy) ry += b._stepDy
+            if (b._stepDw) rw = max2(1, rw + b._stepDw)
+            if (b._stepDh) rh = max2(1, rh + b._stepDh)
         }
         if (b.shakeX || b.shakeY) {
             var impKey = b.impulseVar ? String(b.impulseVar).replace(/^\$/, '') : 'impulse'
@@ -5281,16 +5336,92 @@
         }
     }
 
+    // 帧内事件能力位缓存（同帧内对同一 PaintScreenEventJS 只探测 1 次，消除 drawRect* 重复 typeof JNI 探测）
+    var LAST_CAPS_EVENT = null
+    var EVENT_CAPS = {
+        canRectBatch:  false,
+        canVertexGrad: false,
+        hasPosCol:     false,
+        hasBlend:      false,
+        hasRectangle:  false,
+        hasFill:       false,
+        hasVGrad:      false
+    }
+
+    function resolveEventCaps(event) {
+        if (event === LAST_CAPS_EVENT) return EVENT_CAPS
+        LAST_CAPS_EVENT = event
+        var hasBegin  = (event != null && typeof event.beginQuads === 'function')
+        var hasRect   = (event != null && typeof event.rectangle === 'function')
+        var hasEnd    = (event != null && typeof event.end === 'function')
+        EVENT_CAPS.canRectBatch  = (hasBegin && hasRect && hasEnd)
+        EVENT_CAPS.canVertexGrad = (hasBegin && hasEnd && typeof event.vertex === 'function' && typeof event.getMatrix === 'function')
+        EVENT_CAPS.hasPosCol     = (event != null && typeof event.setPositionColorShader === 'function')
+        EVENT_CAPS.hasBlend      = (event != null && typeof event.blend === 'function')
+        EVENT_CAPS.hasRectangle  = hasRect
+        EVENT_CAPS.hasFill       = (event != null && typeof event.fill === 'function')
+        EVENT_CAPS.hasVGrad      = (event != null && typeof event.vGradient === 'function')
+        return EVENT_CAPS
+    }
+
+    // 顶层复用矩形合批状态机（每帧 0 闭包分配；递归 group 前已强关闭，无重入冲突）
+    var RECT_BATCH_STATE = { open: false, prevBlend: null, changedBlend: false }
+
+    function openRectBatch(event, caps) {
+        if (RECT_BATCH_STATE.open) return
+        ensureItemPosePushed(event)
+        flushBatchedBeforeImmediate()
+        RECT_BATCH_STATE.prevBlend    = queryGlBlendEnabled()
+        RECT_BATCH_STATE.changedBlend = false
+        if (caps.hasPosCol) event.setPositionColorShader()
+        if (caps.hasBlend && RECT_BATCH_STATE.prevBlend !== true) {
+            event.blend(true)
+            RECT_BATCH_STATE.changedBlend = true
+        }
+        event.beginQuads(false)
+        RECT_BATCH_STATE.open = true
+    }
+
+    function closeRectBatch(event, caps) {
+        if (!RECT_BATCH_STATE.open) return
+        RECT_BATCH_STATE.open = false
+        try {
+            event.end()
+        } finally {
+            if (RECT_BATCH_STATE.changedBlend && RECT_BATCH_STATE.prevBlend === false && caps.hasBlend) {
+                try { event.blend(false) } catch (eBEnd) { }
+            }
+            RECT_BATCH_STATE.changedBlend = false
+        }
+    }
+
+    function emitOutlineIntoOpenBatch(event, ox, oy, ow, oh, thickness, argbColor) {
+        if (ow <= 0 || oh <= 0) return
+        var t = max2(1, Math.round(Number(thickness) || 1))
+        event.rectangle(ox, oy, 0.0, ow, min2(t, oh), argbColor)
+        if (oh > t) {
+            event.rectangle(ox, oy + oh - t, 0.0, ow, t, argbColor)
+        }
+        var innerH = oh - t * 2
+        if (innerH > 0) {
+            event.rectangle(ox, oy + t, 0.0, min2(t, ow), innerH, argbColor)
+            if (ow > t) {
+                event.rectangle(ox + ow - t, oy + t, 0.0, t, innerH, argbColor)
+            }
+        }
+    }
+
     function drawRectSolid(event, x, y, w, h, argbColor) {
         if (w <= 0 || h <= 0) return
         ensureItemPosePushed(event)
         flushBatchedBeforeImmediate()
-        if (typeof event.beginQuads === 'function' && typeof event.rectangle === 'function' && typeof event.end === 'function') {
+        var caps = resolveEventCaps(event)
+        if (caps.canRectBatch) {
             var prevBlend = queryGlBlendEnabled()
             var changedBlend = false
             try {
-                if (typeof event.setPositionColorShader === 'function') event.setPositionColorShader()
-                if (typeof event.blend === 'function' && prevBlend !== true) {
+                if (caps.hasPosCol) event.setPositionColorShader()
+                if (caps.hasBlend && prevBlend !== true) {
                     event.blend(true)
                     changedBlend = true
                 }
@@ -5298,7 +5429,7 @@
                 event.rectangle(x, y, 0.0, w, h, argbColor)
                 event.end()
             } finally {
-                if (changedBlend && prevBlend === false && typeof event.blend === 'function') {
+                if (changedBlend && prevBlend === false && caps.hasBlend) {
                     try { event.blend(false) } catch (eB) { }
                 }
             }
@@ -5308,13 +5439,13 @@
         var ry0 = Math.round(y)
         var rw = Math.max(1, Math.round(w))
         var rh = Math.max(1, Math.round(h))
-        if (typeof event.fill === 'function') {
+        if (caps.hasFill) {
             event.fill(rx0, ry0, rx0 + rw, ry0 + rh, argbColor)
         } else if (event.graphics != null && typeof event.graphics.fill === 'function') {
             event.graphics.fill(rx0, ry0, rx0 + rw, ry0 + rh, argbColor)
         } else if (event.graphics != null && typeof event.graphics.m_280509_ === 'function') {
             event.graphics.m_280509_(rx0, ry0, rx0 + rw, ry0 + rh, argbColor)
-        } else if (typeof event.rectangle === 'function') {
+        } else if (caps.hasRectangle) {
             event.rectangle(rx0, ry0, 0.0, rw, rh, argbColor)
         }
     }
@@ -5324,30 +5455,21 @@
         var t = max2(1, Math.round(Number(thickness) || 1))
         ensureItemPosePushed(event)
         flushBatchedBeforeImmediate()
-        if (typeof event.beginQuads === 'function' && typeof event.rectangle === 'function' && typeof event.end === 'function') {
+        var caps = resolveEventCaps(event)
+        if (caps.canRectBatch) {
             var prevBlend = queryGlBlendEnabled()
             var changedBlend = false
             try {
-                if (typeof event.setPositionColorShader === 'function') event.setPositionColorShader()
-                if (typeof event.blend === 'function' && prevBlend !== true) {
+                if (caps.hasPosCol) event.setPositionColorShader()
+                if (caps.hasBlend && prevBlend !== true) {
                     event.blend(true)
                     changedBlend = true
                 }
                 event.beginQuads(false)
-                event.rectangle(x, y, 0.0, w, min2(t, h), argbColor)
-                if (h > t) {
-                    event.rectangle(x, y + h - t, 0.0, w, t, argbColor)
-                }
-                var innerH = h - t * 2
-                if (innerH > 0) {
-                    event.rectangle(x, y + t, 0.0, min2(t, w), innerH, argbColor)
-                    if (w > t) {
-                        event.rectangle(x + w - t, y + t, 0.0, t, innerH, argbColor)
-                    }
-                }
+                emitOutlineIntoOpenBatch(event, x, y, w, h, t, argbColor)
                 event.end()
             } finally {
-                if (changedBlend && prevBlend === false && typeof event.blend === 'function') {
+                if (changedBlend && prevBlend === false && caps.hasBlend) {
                     try { event.blend(false) } catch (eBo) { }
                 }
             }
@@ -5368,13 +5490,14 @@
         flushBatchedBeforeImmediate()
         var hasMid = (midArgb !== undefined && midArgb !== null)
         var mp = hasMid ? clampNum(Number(midPos != null ? midPos : 0.62), 0.05, 0.95) : 0.5
-        if (typeof event.beginQuads === 'function' && typeof event.vertex === 'function' && typeof event.getMatrix === 'function' && typeof event.end === 'function') {
+        var caps = resolveEventCaps(event)
+        if (caps.canVertexGrad) {
             var mat = event.getMatrix()
             var prevBlend = queryGlBlendEnabled()
             var changedBlend = false
             try {
-                if (typeof event.setPositionColorShader === 'function') event.setPositionColorShader()
-                if (typeof event.blend === 'function' && prevBlend !== true) {
+                if (caps.hasPosCol) event.setPositionColorShader()
+                if (caps.hasBlend && prevBlend !== true) {
                     event.blend(true)
                     changedBlend = true
                 }
@@ -5556,8 +5679,9 @@
             drawRectSolid(event, x, y, w, h, toArgbWithAlpha(bgColRaw, fadeAlpha * bgAlpha))
         }
 
-        var canHardwareBatch = (typeof event.beginQuads === 'function' && typeof event.rectangle === 'function' && typeof event.end === 'function')
-        var hasVertexGrad = (canHardwareBatch && typeof event.vertex === 'function' && typeof event.getMatrix === 'function')
+        var pCaps = resolveEventCaps(event)
+        var canHardwareBatch = pCaps.canRectBatch
+        var hasVertexGrad = (canHardwareBatch && pCaps.canVertexGrad)
 
         // 1. 先按单批次合并绘制所有程序化几何视差图层 (gradient / stripes / ripples / particles / steps + bloom)
         var topFillTex = String(fill.texture || fill.tex || '')
@@ -5580,8 +5704,8 @@
             var mat = hasVertexGrad ? event.getMatrix() : null
             try {
                 if (canHardwareBatch) {
-                    if (typeof event.setPositionColorShader === 'function') event.setPositionColorShader()
-                    if (typeof event.blend === 'function' && prevBlend !== true) {
+                    if (pCaps.hasPosCol) event.setPositionColorShader()
+                    if (pCaps.hasBlend && prevBlend !== true) {
                         event.blend(true)
                         changedBlend = true
                     }
@@ -6026,123 +6150,237 @@
         }
     }
 
+    // ------------------------------------------------------------------------
+    // 声明式节点树收包预编译（整型枚举 + 静态位标 + 静态几何/颜色预算）
+    // ------------------------------------------------------------------------
+    var NT_RECT = 0, NT_TEXT = 1, NT_SPRITE = 2, NT_NINE = 3, NT_ITEM = 4, NT_GROUP = 5
+    var FM_SOLID = 0, FM_OUTLINE = 1, FM_GRADIENT = 2, FM_PARALLAX = 3, FM_SHADER = 4
+
+    function isNodeVarRef(v) {
+        return typeof v === 'string' && v.length > 1 && v.charAt(0) === '$'
+    }
+
+    function compileDeclarativeNode(node, depth) {
+        if (!isPlainObjLike(node)) return null
+        var typeStr = String(node.type || node.kind || 'rect').toLowerCase()
+        var nType   = (typeStr === 'rect') ? NT_RECT
+            : (typeStr === 'text' ? NT_TEXT
+                : (typeStr === 'sprite' ? NT_SPRITE
+                    : (typeStr === 'nine_slice' ? NT_NINE
+                        : (typeStr === 'item' ? NT_ITEM
+                            : (typeStr === 'group' ? NT_GROUP : NT_RECT)))))
+
+        var rawScale  = node.scale != null ? node.scale : node.size
+        var rawAngle  = node.angle != null ? node.angle : node.tilt
+        var defW      = (nType === NT_SPRITE || nType === NT_ITEM) ? 16 : 64
+        var defH      = (nType === NT_SPRITE || nType === NT_ITEM) ? 16 : 8
+        var hasVarGeom = isNodeVarRef(node.alpha) || isNodeVarRef(node.x) || isNodeVarRef(node.y) ||
+            isNodeVarRef(node.w) || isNodeVarRef(node.h) || isNodeVarRef(rawScale) || isNodeVarRef(rawAngle)
+
+        var alpha = hasVarGeom ? 1.0 : ((node.alpha != null && isFinite(Number(node.alpha))) ? Number(node.alpha) : 1.0)
+        var x     = hasVarGeom ? 0 : ((node.x != null && isFinite(Number(node.x))) ? Number(node.x) : 0)
+        var y     = hasVarGeom ? 0 : ((node.y != null && isFinite(Number(node.y))) ? Number(node.y) : 0)
+        var w     = hasVarGeom ? defW : max2(0, (node.w != null && isFinite(Number(node.w))) ? Number(node.w) : defW)
+        var h     = hasVarGeom ? defH : max2(0, (node.h != null && isFinite(Number(node.h))) ? Number(node.h) : defH)
+        var scale = hasVarGeom ? 1.0 : ((rawScale != null && isFinite(Number(rawScale))) ? Number(rawScale) : 1.0)
+        var angle = hasVarGeom ? 0.0 : ((rawAngle != null && isFinite(Number(rawAngle))) ? Number(rawAngle) : 0.0)
+
+        var anchor   = String(node.anchor || 'center').toLowerCase()
+        var hasBind  = isPlainObjLike(node.bind)
+        var clipSpec = isPlainObjLike(node.clip) ? node.clip : null
+        var orig     = computeBoxAnchorOrigin(x, y, w, h, anchor)
+        var rawColor = (node.color !== undefined) ? node.color : node.tint
+
+        var fillObj = null, fillMode = FM_SOLID, hasVarFillCol = false, staticFillArgb = 0xFF000000 | 0, outlineThk = 1
+        var borderW = 0, hasBorder = false, hasVarBorderCol = false, staticBorderArgb = 0xFFFFFFFF | 0
+        var isStaticFastRect = false
+
+        if (nType === NT_RECT) {
+            fillObj = isPlainObjLike(node.fill) ? node.fill : null
+            var fmStr = fillObj != null ? String(fillObj.mode || 'solid').toLowerCase() : 'solid'
+            fillMode = (fmStr === 'outline') ? FM_OUTLINE
+                : (fmStr === 'gradient' ? FM_GRADIENT
+                    : (fmStr === 'parallax' ? FM_PARALLAX
+                        : (fmStr === 'shader' ? FM_SHADER : FM_SOLID)))
+            var fcSrc = (fillObj != null && fillObj.color != null) ? fillObj.color : rawColor
+            hasVarFillCol = isNodeVarRef(fcSrc)
+            if (!hasVarFillCol) {
+                var defFc = (fillMode === FM_OUTLINE) ? 0xFFFFFFFF : 0xFF000000
+                staticFillArgb = toArgbWithAlpha(fcSrc != null ? fcSrc : defFc, 1.0)
+            }
+            outlineThk = max2(1, Math.round(Number((fillObj != null && fillObj.thickness) || 1)))
+            if (node.borderWidth != null && Number(node.borderWidth) > 0 && node.borderColor != null) {
+                borderW = Math.round(Number(node.borderWidth))
+                if (borderW > 0) {
+                    hasBorder = true
+                    hasVarBorderCol = isNodeVarRef(node.borderColor)
+                    if (!hasVarBorderCol) staticBorderArgb = toArgbWithAlpha(node.borderColor, 1.0)
+                }
+            }
+            var staticNeedsPush = (angle !== 0 || Math.abs(scale - 1.0) > 0.001)
+            isStaticFastRect = (!hasVarGeom && !hasBind && !staticNeedsPush && clipSpec == null && !hasBorder && !hasVarFillCol &&
+                (fillMode === FM_SOLID || fillMode === FM_OUTLINE) && w > 0.25 && h > 0.25)
+        } else if (nType === NT_GROUP && (depth || 0) < 4) {
+            var kids = Array.isArray(node.children) ? node.children : node.items
+            if (Array.isArray(kids)) compileDeclarativeNodes(kids, (depth || 0) + 1)
+        }
+
+        var compiled = {
+            nType:            nType,
+            anchor:           anchor,
+            hasVarGeom:       hasVarGeom,
+            hasBind:          hasBind,
+            clipSpec:         clipSpec,
+            x:                x,
+            y:                y,
+            w:                w,
+            h:                h,
+            x0:               orig.x0,
+            y0:               orig.y0,
+            scale:            scale,
+            angle:            angle,
+            alpha:            alpha,
+            rawColor:         rawColor,
+            fillObj:          fillObj,
+            fillMode:         fillMode,
+            hasVarFillCol:    hasVarFillCol,
+            staticFillArgb:   staticFillArgb,
+            outlineThk:       outlineThk,
+            borderW:          borderW,
+            hasBorder:        hasBorder,
+            hasVarBorderCol:  hasVarBorderCol,
+            staticBorderArgb: staticBorderArgb,
+            isStaticFastRect: isStaticFastRect
+        }
+        node._c = compiled
+        return compiled
+    }
+
+    function compileDeclarativeNodes(nodes, depth) {
+        if (!Array.isArray(nodes) || (depth || 0) > 4) return nodes
+        for (var ci = 0; ci < nodes.length; ci++) {
+            compileDeclarativeNode(nodes[ci], depth || 0)
+        }
+        return nodes
+    }
+
     function renderDeclarativeNodes(event, item, nodes, varsMap, fadeAlpha, fontObj, itemBatchCtx, now, parentAngleDeg, depth) {
         if (!Array.isArray(nodes) || nodes.length === 0 || (depth || 0) > 4) return
         var vMap = isPlainObjLike(varsMap) ? varsMap : {}
-        var canRectBatch = (typeof event.beginQuads === 'function' && typeof event.rectangle === 'function' && typeof event.end === 'function')
-        var rectBatchOpen = false
-        var rectBatchPrevBlend = null
-        var rectBatchChangedBlend = false
-
-        var openRectBatch = function () {
-            if (rectBatchOpen) return
-            ensureItemPosePushed(event)
-            flushBatchedBeforeImmediate()
-            rectBatchPrevBlend = queryGlBlendEnabled()
-            rectBatchChangedBlend = false
-            if (typeof event.setPositionColorShader === 'function') event.setPositionColorShader()
-            if (typeof event.blend === 'function' && rectBatchPrevBlend !== true) {
-                event.blend(true)
-                rectBatchChangedBlend = true
-            }
-            event.beginQuads(false)
-            rectBatchOpen = true
-        }
-
-        var closeRectBatch = function () {
-            if (!rectBatchOpen) return
-            rectBatchOpen = false
-            try {
-                event.end()
-            } finally {
-                if (rectBatchChangedBlend && rectBatchPrevBlend === false && typeof event.blend === 'function') {
-                    try { event.blend(false) } catch (eBEnd) { }
-                }
-                rectBatchChangedBlend = false
-            }
-        }
-
-        var emitOutlineIntoOpenBatch = function (ox, oy, ow, oh, thickness, argbColor) {
-            if (ow <= 0 || oh <= 0) return
-            var t = max2(1, Math.round(Number(thickness) || 1))
-            event.rectangle(ox, oy, 0.0, ow, min2(t, oh), argbColor)
-            if (oh > t) {
-                event.rectangle(ox, oy + oh - t, 0.0, ow, t, argbColor)
-            }
-            var innerH = oh - t * 2
-            if (innerH > 0) {
-                event.rectangle(ox, oy + t, 0.0, min2(t, ow), innerH, argbColor)
-                if (ow > t) {
-                    event.rectangle(ox + ow - t, oy + t, 0.0, t, innerH, argbColor)
-                }
-            }
-        }
+        var caps = resolveEventCaps(event)
+        var canRectBatch = caps.canRectBatch
+        var pAngle = Number(parentAngleDeg) || 0
 
         try {
             for (var ni = 0; ni < nodes.length; ni++) {
                 var node = nodes[ni]
                 if (!isPlainObjLike(node)) continue
-                var nType      = String(node.type || node.kind || 'rect').toLowerCase()
-                var baseAlpha  = resolveVarNum(node.alpha, vMap, 1.0)
-                var baseX      = resolveVarNum(node.x, vMap, 0)
-                var baseY      = resolveVarNum(node.y, vMap, 0)
-                var baseW      = max2(0, resolveVarNum(node.w, vMap, nType === 'sprite' || nType === 'item' ? 16 : 64))
-                var baseH      = max2(0, resolveVarNum(node.h, vMap, nType === 'sprite' || nType === 'item' ? 16 : 8))
-                var nScale     = resolveVarNum(node.scale != null ? node.scale : node.size, vMap, 1.0)
-                var baseAngle  = resolveVarNum(node.angle != null ? node.angle : node.tilt, vMap, 0.0)
-                var boundProps = evaluateNodeBind(node, baseX, baseY, baseW, baseH, baseAlpha, baseAngle, vMap, now, NODE_BIND_SCRATCH)
-                var nAlpha     = clampNum(boundProps.alpha * fadeAlpha, 0.0, 1.0)
-                if (nAlpha <= 0.005) continue
+                var c = node._c || compileDeclarativeNode(node, depth || 0)
+                if (c == null) continue
 
-                var nx     = boundProps.x
-                var ny     = boundProps.y
-                var nw     = boundProps.w
-                var nh     = boundProps.h
-                var nAngle = boundProps.angle
-                var anchor = String(node.anchor || 'center').toLowerCase()
-                var boxOrig = computeBoxAnchorOrigin(nx, ny, nw, nh, anchor, BOX_ORIG_SCRATCH)
-                var x0     = boxOrig.x0
-                var y0     = boxOrig.y0
-                var nodeRawColor = (node.color !== undefined) ? node.color : node.tint
-
-                var clipSpec = isPlainObjLike(node.clip) ? node.clip : null
-                var effAngle = (Number(parentAngleDeg) || 0) + nAngle
-                var useScissor = (clipSpec != null && clipSpec.mode === 'scissor' && Math.abs(effAngle) < 0.01)
-                var needsPush  = (nType === 'group' || nAngle !== 0 || Math.abs(nScale - 1.0) > 0.001)
-
-                // 快速连续合批轨：相邻无局部变换/无 Scissor 的 solid/outline rect 共用单次 beginQuads 批次与单次 GL_BLEND 检查
-                if (canRectBatch && !needsPush && !useScissor && nType === 'rect') {
-                    var fastFill = isPlainObjLike(node.fill) ? node.fill : null
-                    var fastMode = fastFill != null ? String(fastFill.mode || 'solid').toLowerCase() : 'solid'
-                    if (fastMode === 'solid' || fastMode === 'outline') {
-                        var fastClip = computeLocalClipRect(x0, y0, nw, nh, 0, 0, nw, nh, clipSpec, vMap, LOCAL_CLIP_SCRATCH)
-                        var hasBorder = (node.borderWidth != null && Number(node.borderWidth) > 0 && node.borderColor != null)
-                        var hasBody   = (fastClip.w > 0.25 && fastClip.h > 0.25)
-                        if (hasBorder || hasBody) {
-                            openRectBatch()
-                            if (hasBorder) {
-                                var fbw = Math.round(Number(node.borderWidth))
-                                if (fbw > 0) {
-                                    var fbCol = toArgbWithAlpha(resolveVarValue(node.borderColor, vMap, 0xFFFFFFFF), nAlpha)
-                                    emitOutlineIntoOpenBatch(x0 - fbw, y0 - fbw, nw + fbw * 2, nh + fbw * 2, fbw, fbCol)
-                                }
-                            }
-                            if (hasBody) {
-                                if (fastMode === 'outline') {
-                                    var foCol = toArgbWithAlpha(resolveVarValue((fastFill != null && fastFill.color != null) ? fastFill.color : nodeRawColor, vMap, 0xFFFFFFFF), nAlpha)
-                                    var foThk = max2(1, Math.round(Number((fastFill != null && fastFill.thickness) || 1)))
-                                    emitOutlineIntoOpenBatch(fastClip.x, fastClip.y, fastClip.w, fastClip.h, foThk, foCol)
-                                } else {
-                                    var fsCol = toArgbWithAlpha(resolveVarValue((fastFill != null && fastFill.color != null) ? fastFill.color : nodeRawColor, vMap, 0xFF000000), nAlpha)
-                                    event.rectangle(fastClip.x, fastClip.y, 0.0, fastClip.w, fastClip.h, fsCol)
-                                }
-                            }
-                        }
-                        continue
+                // 极速静态纯色/线框合批快路径（覆盖绝大多数静态背板/边框/刻度：零 resolveVarNum / 零 bind / 零 clip / 零字符串分配）
+                if (canRectBatch && c.isStaticFastRect) {
+                    var sAlpha = clampNum(c.alpha * fadeAlpha, 0.0, 1.0)
+                    if (sAlpha <= 0.005) continue
+                    var sArgb = (sAlpha >= 0.999) ? c.staticFillArgb : toArgbWithAlpha(c.staticFillArgb, sAlpha)
+                    openRectBatch(event, caps)
+                    if (c.fillMode === FM_OUTLINE) {
+                        emitOutlineIntoOpenBatch(event, c.x0, c.y0, c.w, c.h, c.outlineThk, sArgb)
+                    } else {
+                        event.rectangle(c.x0, c.y0, 0.0, c.w, c.h, sArgb)
                     }
+                    continue
                 }
 
-                closeRectBatch()
+                var nType = c.nType
+                var baseAlpha, baseX, baseY, baseW, baseH, nScale, baseAngle
+                if (c.hasVarGeom) {
+                    var defDimW = (nType === NT_SPRITE || nType === NT_ITEM) ? 16 : 64
+                    var defDimH = (nType === NT_SPRITE || nType === NT_ITEM) ? 16 : 8
+                    baseAlpha = resolveVarNum(node.alpha, vMap, 1.0)
+                    baseX     = resolveVarNum(node.x, vMap, 0)
+                    baseY     = resolveVarNum(node.y, vMap, 0)
+                    baseW     = max2(0, resolveVarNum(node.w, vMap, defDimW))
+                    baseH     = max2(0, resolveVarNum(node.h, vMap, defDimH))
+                    nScale    = resolveVarNum(node.scale != null ? node.scale : node.size, vMap, 1.0)
+                    baseAngle = resolveVarNum(node.angle != null ? node.angle : node.tilt, vMap, 0.0)
+                } else {
+                    baseAlpha = c.alpha
+                    baseX     = c.x
+                    baseY     = c.y
+                    baseW     = c.w
+                    baseH     = c.h
+                    nScale    = c.scale
+                    baseAngle = c.angle
+                }
+
+                var nx, ny, nw, nh, nAngle, effAlphaBase
+                if (c.hasBind) {
+                    var boundProps = evaluateNodeBind(node, baseX, baseY, baseW, baseH, baseAlpha, baseAngle, vMap, now, NODE_BIND_SCRATCH)
+                    nx           = boundProps.x
+                    ny           = boundProps.y
+                    nw           = boundProps.w
+                    nh           = boundProps.h
+                    nAngle       = boundProps.angle
+                    effAlphaBase = boundProps.alpha
+                } else {
+                    nx           = baseX
+                    ny           = baseY
+                    nw           = baseW
+                    nh           = baseH
+                    nAngle       = baseAngle
+                    effAlphaBase = baseAlpha
+                }
+                var nAlpha = clampNum(effAlphaBase * fadeAlpha, 0.0, 1.0)
+                if (nAlpha <= 0.005) continue
+
+                var x0, y0
+                if (!c.hasVarGeom && !c.hasBind) {
+                    x0 = c.x0
+                    y0 = c.y0
+                } else {
+                    var boxOrig = computeBoxAnchorOrigin(nx, ny, nw, nh, c.anchor, BOX_ORIG_SCRATCH)
+                    x0 = boxOrig.x0
+                    y0 = boxOrig.y0
+                }
+
+                var clipSpec   = c.clipSpec
+                var effAngle   = pAngle + nAngle
+                var useScissor = (clipSpec != null && clipSpec.mode === 'scissor' && Math.abs(effAngle) < 0.01)
+                var needsPush  = (nType === NT_GROUP || nAngle !== 0 || Math.abs(nScale - 1.0) > 0.001)
+
+                // 动态但无局部变换/无 Scissor 的 solid/outline rect 合批轨
+                if (canRectBatch && !needsPush && !useScissor && nType === NT_RECT && (c.fillMode === FM_SOLID || c.fillMode === FM_OUTLINE)) {
+                    var fx0 = x0, fy0 = y0, fw = nw, fh = nh
+                    if (clipSpec != null) {
+                        var fastClip = computeLocalClipRect(x0, y0, nw, nh, 0, 0, nw, nh, clipSpec, vMap, LOCAL_CLIP_SCRATCH)
+                        fx0 = fastClip.x; fy0 = fastClip.y; fw = fastClip.w; fh = fastClip.h
+                    }
+                    var hasBody = (fw > 0.25 && fh > 0.25)
+                    if (c.hasBorder || hasBody) {
+                        openRectBatch(event, caps)
+                        if (c.hasBorder) {
+                            var fbw = c.borderW
+                            var fbCol = c.hasVarBorderCol
+                                ? toArgbWithAlpha(resolveVarValue(node.borderColor, vMap, 0xFFFFFFFF), nAlpha)
+                                : ((nAlpha >= 0.999) ? c.staticBorderArgb : toArgbWithAlpha(c.staticBorderArgb, nAlpha))
+                            emitOutlineIntoOpenBatch(event, x0 - fbw, y0 - fbw, nw + fbw * 2, nh + fbw * 2, fbw, fbCol)
+                        }
+                        if (hasBody) {
+                            var fmCol = c.hasVarFillCol
+                                ? toArgbWithAlpha(resolveVarValue((c.fillObj != null && c.fillObj.color != null) ? c.fillObj.color : c.rawColor, vMap, c.fillMode === FM_OUTLINE ? 0xFFFFFFFF : 0xFF000000), nAlpha)
+                                : ((nAlpha >= 0.999) ? c.staticFillArgb : toArgbWithAlpha(c.staticFillArgb, nAlpha))
+                            if (c.fillMode === FM_OUTLINE) {
+                                emitOutlineIntoOpenBatch(event, fx0, fy0, fw, fh, c.outlineThk, fmCol)
+                            } else {
+                                event.rectangle(fx0, fy0, 0.0, fw, fh, fmCol)
+                            }
+                        }
+                    }
+                    continue
+                }
+
+                closeRectBatch(event, caps)
 
                 var nodePushed    = false
                 var scissorPushed = false
@@ -6156,7 +6394,7 @@
                         if (Math.abs(nScale - 1.0) > 0.001 && isFinite(nScale)) {
                             applyNodeLocalScale(event, nScale, nScale)
                         }
-                        var localOrig = computeBoxAnchorOrigin(0, 0, nw, nh, anchor, BOX_ORIG_SCRATCH)
+                        var localOrig = computeBoxAnchorOrigin(0, 0, nw, nh, c.anchor, BOX_ORIG_SCRATCH)
                         x0 = localOrig.x0
                         y0 = localOrig.y0
                     }
@@ -6176,42 +6414,41 @@
                         scissorPushed = enableEventScissor(event, scRect.x, scRect.y, scRect.x + scRect.w, scRect.y + scRect.h)
                     }
 
-                    if (nType === 'rect') {
-                        if (node.borderWidth != null && Number(node.borderWidth) > 0 && node.borderColor != null) {
-                            var bw = Math.round(Number(node.borderWidth))
-                            if (bw > 0) {
-                                var bCol = resolveVarValue(node.borderColor, vMap, 0xFFFFFFFF)
-                                var bArgb = toArgbWithAlpha(bCol, nAlpha)
-                                drawRectOutline(event, x0 - bw, y0 - bw, nw + bw * 2, nh + bw * 2, bw, bArgb)
-                            }
+                    if (nType === NT_RECT) {
+                        if (c.hasBorder) {
+                            var bw = c.borderW
+                            var bArgb = c.hasVarBorderCol
+                                ? toArgbWithAlpha(resolveVarValue(node.borderColor, vMap, 0xFFFFFFFF), nAlpha)
+                                : ((nAlpha >= 0.999) ? c.staticBorderArgb : toArgbWithAlpha(c.staticBorderArgb, nAlpha))
+                            drawRectOutline(event, x0 - bw, y0 - bw, nw + bw * 2, nh + bw * 2, bw, bArgb)
                         }
                         if (clipped.w > 0.25 && clipped.h > 0.25) {
-                            var fill = isPlainObjLike(node.fill)
-                                ? node.fill
-                                : { mode: 'solid', color: nodeRawColor != null ? nodeRawColor : 0xFF000000 }
-                            var fMode = String(fill.mode || 'solid').toLowerCase()
-                            if (fMode === 'outline') {
-                                var oCol = toArgbWithAlpha(resolveVarValue(fill.color != null ? fill.color : nodeRawColor, vMap, 0xFFFFFFFF), nAlpha)
-                                var oThk = max2(1, Math.round(Number(fill.thickness || 1)))
-                                drawRectOutline(event, clipped.x, clipped.y, clipped.w, clipped.h, oThk, oCol)
-                            } else if (fMode === 'gradient') {
+                            var fill = c.fillObj
+                            if (c.fillMode === FM_OUTLINE) {
+                                var oCol = c.hasVarFillCol
+                                    ? toArgbWithAlpha(resolveVarValue((fill != null && fill.color != null) ? fill.color : c.rawColor, vMap, 0xFFFFFFFF), nAlpha)
+                                    : ((nAlpha >= 0.999) ? c.staticFillArgb : toArgbWithAlpha(c.staticFillArgb, nAlpha))
+                                drawRectOutline(event, clipped.x, clipped.y, clipped.w, clipped.h, c.outlineThk, oCol)
+                            } else if (c.fillMode === FM_GRADIENT && fill != null) {
                                 var cFrom = toArgbWithAlpha(resolveVarValue(fill.from !== undefined ? fill.from : fill.color, vMap, 0xFF5555), nAlpha)
                                 var cTo   = toArgbWithAlpha(resolveVarValue(fill.to !== undefined ? fill.to : fill.colorEnd, vMap, 0xFFAA00), nAlpha)
                                 var cMid  = fill.mid !== undefined ? toArgbWithAlpha(resolveVarValue(fill.mid, vMap, cTo), nAlpha) : null
                                 var gDirVal = (fill.dir === 'v' || fill.dir === 'vertical') ? 'v' : 'h'
                                 drawRectGradient(event, clipped.x, clipped.y, clipped.w, clipped.h, cFrom, cTo, gDirVal, cMid, fill.midPos)
-                            } else if (fMode === 'parallax') {
+                            } else if (c.fillMode === FM_PARALLAX && fill != null) {
                                 drawRectParallax(event, clipped.x, clipped.y, clipped.w, clipped.h, fill, now, nAlpha, x0, y0, nw, nh, vMap)
-                            } else if (fMode === 'shader') {
+                            } else if (c.fillMode === FM_SHADER && fill != null) {
                                 drawRectShader(event, clipped.x, clipped.y, clipped.w, clipped.h, fill, now, nAlpha)
                             } else {
-                                var sCol = toArgbWithAlpha(resolveVarValue(fill.color != null ? fill.color : nodeRawColor, vMap, 0xFF000000), nAlpha)
+                                var sCol = c.hasVarFillCol
+                                    ? toArgbWithAlpha(resolveVarValue((fill != null && fill.color != null) ? fill.color : c.rawColor, vMap, 0xFF000000), nAlpha)
+                                    : ((nAlpha >= 0.999) ? c.staticFillArgb : toArgbWithAlpha(c.staticFillArgb, nAlpha))
                                 drawRectSolid(event, clipped.x, clipped.y, clipped.w, clipped.h, sCol)
                             }
                         }
-                    } else if (nType === 'sprite') {
+                    } else if (nType === NT_SPRITE) {
                         if (clipped.w > 0.25 && clipped.h > 0.25) {
-                            var spTint = nodeRawColor != null ? resolveVarValue(nodeRawColor, vMap, 0xFFFFFFFF) : 0xFFFFFFFF
+                            var spTint = c.rawColor != null ? resolveVarValue(c.rawColor, vMap, 0xFFFFFFFF) : 0xFFFFFFFF
                             drawTextureRegion(
                                 event,
                                 node.texture || node.tex || '',
@@ -6223,13 +6460,13 @@
                                 spTint
                             )
                         }
-                    } else if (nType === 'nine_slice') {
+                    } else if (nType === NT_NINE) {
                         if (clipped.w > 0.25 && clipped.h > 0.25) {
                             drawNineSliceNode(event, node, clipped.x, clipped.y, clipped.w, clipped.h, nAlpha)
                         }
-                    } else if (nType === 'item') {
+                    } else if (nType === NT_ITEM) {
                         drawItemNode(event, node, clipped.x, clipped.y)
-                    } else if (nType === 'text') {
+                    } else if (nType === NT_TEXT) {
                         drawDeclarativeTextNode(
                             event,
                             item,
@@ -6242,7 +6479,7 @@
                             nodePushed ? 0 : nx,
                             nodePushed ? 0 : ny
                         )
-                    } else if (nType === 'group') {
+                    } else if (nType === NT_GROUP) {
                         var groupKids = Array.isArray(node.children) ? node.children : node.items
                         renderDeclarativeNodes(event, item, groupKids, vMap, nAlpha, fontObj, null, now, effAngle, (depth || 0) + 1)
                     }
@@ -6256,7 +6493,7 @@
                 }
             }
         } finally {
-            closeRectBatch()
+            closeRectBatch(event, caps)
         }
     }
 

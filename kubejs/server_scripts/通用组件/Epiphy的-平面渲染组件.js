@@ -1,11 +1,11 @@
 // priority: 500
 // ============================================================================
-//  通用平面渲染与屏幕弹幕组件 —— 服务端调度器 (Epiphy2DSurface / ScreenDanmaku v6.1)
+//  通用平面渲染与屏幕弹幕组件 —— 服务端调度器 (Epiphy2DSurface / ScreenDanmaku v6.2)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 <repo-root> 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/server_scripts/通用组件/Epiphy的-平面渲染组件.js
-//  配套客户端渲染器：kubejs/client_scripts/通用组件/Epiphy的-平面渲染器.js (Epiphy2DRenderer / ScreenDanmakuClient v6.1)
+//  配套客户端渲染器：kubejs/client_scripts/通用组件/Epiphy的-平面渲染器.js (Epiphy2DRenderer / ScreenDanmakuClient v6.2)
 //  配套权限阀组件：kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（管理 /epiphy 根命令、执行权限与 actorTier 资源分级）
 //
 //  依赖与缺失降级行为：
@@ -1376,9 +1376,23 @@
                     nodes:  nodes
                 })
             },
-            rect: function (x, y, w, h, color, extra) {
+            // 零渲染节点开销的局部坐标作用域块（返回当前 builder，自动回到原坐标原点）
+            region: function (dx, dy, fnOrAnchor, maybeFn) {
+                var fn  = (typeof fnOrAnchor === 'function') ? fnOrAnchor : maybeFn
+                var anc = (typeof fnOrAnchor === 'string') ? fnOrAnchor : defAnc
+                if (typeof fn === 'function') {
+                    fn(createUiBuilder({
+                        ox:     ox + (Number(dx) || 0),
+                        oy:     oy + (Number(dy) || 0),
+                        anchor: anc,
+                        nodes:  nodes
+                    }))
+                }
+                return builder
+            },
+            rect: function (id, x, y, w, h, color, extra) {
                 var n = {
-                    id:     nextId('r'),
+                    id:     (id != null && String(id) !== '') ? String(id) : nextId('r'),
                     type:   'rect',
                     anchor: defAnc,
                     x:      ox + (Number(x) || 0),
@@ -1390,9 +1404,9 @@
                 nodes.push(mergeExtraProps(n, extra))
                 return builder
             },
-            outline: function (x, y, w, h, color, thk, extra) {
+            outline: function (id, x, y, w, h, color, thk, extra) {
                 var n = {
-                    id:     nextId('o'),
+                    id:     (id != null && String(id) !== '') ? String(id) : nextId('o'),
                     type:   'rect',
                     anchor: defAnc,
                     x:      ox + (Number(x) || 0),
@@ -1404,9 +1418,9 @@
                 nodes.push(mergeExtraProps(n, extra))
                 return builder
             },
-            text: function (x, y, str, scale, color, extra) {
+            text: function (id, x, y, str, scale, color, extra) {
                 var n = {
-                    id:     nextId('t'),
+                    id:     (id != null && String(id) !== '') ? String(id) : nextId('t'),
                     type:   'text',
                     anchor: defAnc,
                     x:      ox + (Number(x) || 0),
@@ -1419,10 +1433,10 @@
                 nodes.push(mergeExtraProps(n, extra))
                 return builder
             },
-            parallax: function (x, y, w, h, layers, extra) {
+            parallax: function (id, x, y, w, h, layers, extra) {
                 var fillObj = { mode: 'parallax', bgAlpha: 0, layers: Array.isArray(layers) ? layers : [] }
                 var n = {
-                    id:     nextId('p'),
+                    id:     (id != null && String(id) !== '') ? String(id) : nextId('p'),
                     type:   'rect',
                     anchor: defAnc,
                     x:      ox + (Number(x) || 0),
@@ -1445,13 +1459,13 @@
                 nodes.push(n)
                 return builder
             },
-            group: function (x, y, extra, buildFn) {
+            group: function (id, x, y, extra, buildFn) {
                 var fn = (typeof extra === 'function') ? extra : buildFn
                 var optsObj = (typeof extra === 'function') ? null : extra
                 var sub = createUiBuilder({ anchor: defAnc, ox: 0, oy: 0 })
                 if (typeof fn === 'function') fn(sub)
                 var g = {
-                    id:       nextId('g'),
+                    id:       (id != null && String(id) !== '') ? String(id) : nextId('g'),
                     type:     'group',
                     x:        ox + (Number(x) || 0),
                     y:        oy + (Number(y) || 0),
@@ -1467,20 +1481,27 @@
                 nodes.push(wn)
                 return builder
             },
-            // 零重叠连续阶梯玻璃底衬：segs 为 [[w, topY, botY], ...] 或 [{ w, top, bottom, id? }, ...]，自动首尾严密衔接无叠色暗斑
-            steppedPlate: function (x0, color, segs, idsOrPrefix) {
+            // 零重叠连续阶梯玻璃底衬：segs 为 [[id, w, topY, botY, optColor?], ...]，自动首尾严密衔接无叠色暗斑
+            steppedPlate: function (x0, color, segs) {
                 if (!Array.isArray(segs) || segs.length === 0) return builder
                 var curX = ox + Math.round(Number(x0) || 0)
-                var prefix = (typeof idsOrPrefix === 'string') ? idsOrPrefix : 'plate'
                 for (var si = 0; si < segs.length; si++) {
                     var s = segs[si]
                     if (s == null) continue
-                    var sw   = Math.round(Number(Array.isArray(s) ? s[0] : s.w) || 0)
-                    var topY = Number(Array.isArray(s) ? s[1] : s.top) || 0
-                    var botY = Number(Array.isArray(s) ? s[2] : s.bottom) || 0
-                    var sid  = (Array.isArray(idsOrPrefix) && idsOrPrefix[si])
-                        ? String(idsOrPrefix[si])
-                        : ((!Array.isArray(s) && s.id) ? String(s.id) : (prefix + '_' + si))
+                    var sid, sw, topY, botY, sCol
+                    if (Array.isArray(s)) {
+                        sid  = (s[0] != null && String(s[0]) !== '') ? String(s[0]) : nextId('plate')
+                        sw   = Math.round(Number(s[1]) || 0)
+                        topY = Number(s[2]) || 0
+                        botY = Number(s[3]) || 0
+                        sCol = s[4] !== undefined ? s[4] : color
+                    } else {
+                        sid  = (s.id != null && String(s.id) !== '') ? String(s.id) : nextId('plate')
+                        sw   = Math.round(Number(s.w) || 0)
+                        topY = Number(s.top) || 0
+                        botY = Number(s.bottom) || 0
+                        sCol = s.color !== undefined ? s.color : color
+                    }
                     if (sw > 0 && botY > topY) {
                         nodes.push({
                             id:     sid,
@@ -1490,7 +1511,7 @@
                             y:      oy + topY,
                             w:      sw,
                             h:      botY - topY,
-                            fill:   { mode: 'solid', color: (!Array.isArray(s) && s.color !== undefined) ? s.color : color }
+                            fill:   { mode: 'solid', color: sCol }
                         })
                     }
                     curX += sw
@@ -1575,24 +1596,34 @@
                 }
                 return builder
             },
-            // 紧凑装饰块矩阵：items 为 [[x, y, w, h, color, bind?, id?], ...]
+            // 紧凑装饰块矩阵（id 前置，与 .rect 同序）：items 为 [[id, x, y, w, h, color, bind?], ...]
             boxes: function (items) {
                 if (!Array.isArray(items)) return builder
                 for (var bi = 0; bi < items.length; bi++) {
                     var it = items[bi]
-                    if (!Array.isArray(it) || it.length < 5) continue
+                    if (!Array.isArray(it) || it.length < 6) continue
                     var bn = {
-                        id:     it[6] != null ? String(it[6]) : nextId('bx'),
+                        id:     (it[0] != null && String(it[0]) !== '') ? String(it[0]) : nextId('bx'),
                         type:   'rect',
                         anchor: defAnc,
-                        x:      ox + (Number(it[0]) || 0),
-                        y:      oy + (Number(it[1]) || 0),
-                        w:      it[2],
-                        h:      it[3],
-                        fill:   { mode: 'solid', color: it[4] }
+                        x:      ox + (Number(it[1]) || 0),
+                        y:      oy + (Number(it[2]) || 0),
+                        w:      it[3],
+                        h:      it[4],
+                        fill:   { mode: 'solid', color: it[5] }
                     }
-                    if (it[5] != null && typeof it[5] === 'object') bn.bind = it[5]
+                    if (it[6] != null && typeof it[6] === 'object') bn.bind = it[6]
                     nodes.push(bn)
+                }
+                return builder
+            },
+            // 对称文本矩阵（id 前置，与 .text 同序）：items 为 [[id, x, y, str, scale, color, extra?], ...]
+            texts: function (items) {
+                if (!Array.isArray(items)) return builder
+                for (var ti = 0; ti < items.length; ti++) {
+                    var it = items[ti]
+                    if (!Array.isArray(it) || it.length < 4) continue
+                    builder.text(it[0], it[1], it[2], it[3], it[4], it[5], it[6])
                 }
                 return builder
             },
@@ -1609,8 +1640,8 @@
 
     function resolvePreset(name, overrides) {
         return SURFACE_PRESETS.resolve(name, overrides, {
-            ui:                 createUiBuilder,
-            buildProgressPanel: buildProgressPanel
+            ui:             createUiBuilder,
+            progressTracks: progressTracks
         })
     }
 
@@ -1792,6 +1823,138 @@
         return cut
     }
 
+    // ------------------------------------------------------------------------
+    // 分组选项展平（仅存在于输入/预设层，出口统一归一为 PROTO v6 标准字段）+ 未知键拼写校验
+    // ------------------------------------------------------------------------
+    var GROUPED_FIELD_MAPS = {
+        layout: {
+            pos: 'pos', rx: 'rx', ry: 'ry', ox: 'ox', oy: 'oy',
+            scale: 'scale', size: 'size', tilt: 'tilt', angle: 'angle',
+            movable: 'movable', maxWidth: 'maxWidth', wrap: 'wrap', clamp: 'clamp',
+            avoidHud: 'avoidHud', avoid: 'avoid', avoidOverlap: 'avoidOverlap',
+            minSepX: 'minSepX', minSepY: 'minSepY',
+            renderPriority: 'renderPriority', zIndex: 'zIndex'
+        },
+        life: {
+            mode: 'lifeMode', lifeMode: 'lifeMode',
+            hold: 'activeHold', activeHold: 'activeHold',
+            stay: 'stay', duration: 'duration',
+            fade: 'fadeStyle', fadeStyle: 'fadeStyle', fadeOut: 'fadeOut',
+            priority: 'priority', restart: 'restart',
+            showInGui: 'showInGui', maxGroup: 'maxGroup'
+        },
+        motion: {
+            shake: 'shakeMode', shakeMode: 'shakeMode',
+            amp: 'shakeAmp', shakeAmp: 'shakeAmp',
+            freq: 'shakeFreq', shakeFreq: 'shakeFreq',
+            charShakeStyle: 'charShakeStyle', charShakeShift: 'charShakeShift',
+            charShakeShiftX: 'charShakeShiftX', charShakeShiftY: 'charShakeShiftY',
+            charShakeSwayX: 'charShakeSwayX', charShakeSwayY: 'charShakeSwayY',
+            charShakeRotDeg: 'charShakeRotDeg', charShakeWin: 'charShakeWin',
+            charShakeSnap: 'charShakeSnap', charShakeTransition: 'charShakeTransition'
+        },
+        style: {
+            color: 'color', subColor: 'subColor', shadow: 'shadow',
+            outline: 'outlineMode', outlineMode: 'outlineMode',
+            outlineColor: 'outlineColor', outlineWidth: 'outlineWidth',
+            letterSpacing: 'letterSpacing', letterSpacingMode: 'letterSpacingMode',
+            mode: 'mode', typewriter: 'typewriter', charMs: 'charMs', cursor: 'cursor'
+        }
+    }
+
+    var KNOWN_PACKET_KEYS = (function () {
+        var map = Object.create(null)
+        var baseList = [
+            'proto', 'action', 'surface', 'tier', '_sourceTier', 'key', 'slotId', 'namespace', 'group',
+            'posTag', 'normalizeKey', 'lifeMode', 'priority', 'importance', 'renderPriority',
+            'title', 'sub', 'pos', 'rx', 'ry', 'ox', 'oy', 'movable', 'angle', 'scale',
+            'color', 'subColor', 'typewriter', 'mode', 'charMs', 'cursor', 'shadow',
+            'letterSpacing', 'letterSpacingMode', 'outlineMode', 'outlineColor', 'outlineWidth',
+            'shakeMode', 'shakeStyle', 'shakeAmp', 'shakeFreq', 'shakeFreqMin', 'shakeFreqMax',
+            'charShakeStyle', 'charShakeShift', 'charShakeShiftX', 'charShakeShiftY',
+            'charShakeSwayX', 'charShakeSwayY', 'charShakeRotDeg', 'charShakeWin', 'charShakeSnap', 'charShakeTransition',
+            'stay', 'activeHold', 'fadeStyle', 'fadeOut', 'maxWidth', 'wrap', 'clamp', 'showInGui', 'maxGroup', 'restart', 'debug',
+            'avoidHud', 'avoid', 'avoidOverlap', 'minSepX', 'minSepY',
+            'vars', 'tracks', 'clip', 'nodes', 'bgNodes', 'fgNodes', 'targetGui', 'replaceTextures', 'slotMatch',
+            'worldPos', 'billboard', 'seeThrough',
+            'maxPriority', 'includeOnce', 'radius', 'server', 'preset',
+            'sourceConflict', 'conflictMode', 'overlapMode', 'sourceScope', 'sourceKey', 'conflictScope',
+            'sourceCooldownTicks', 'conflictCooldownTicks',
+            'target', 'targetText', 'targetStyle', 'targetScale', 'targetColor', 'targetShake', 'targetOutline',
+            'targetBold', 'bold', 'italic', 'colorMode', 'style'
+        ]
+        var i
+        for (i = 0; i < baseList.length; i++) map[baseList[i]] = true
+        if (SPEC && SPEC.OFFICIAL_DANMAKU_ALIASES) {
+            for (var ok in SPEC.OFFICIAL_DANMAKU_ALIASES) {
+                if (Object.prototype.hasOwnProperty.call(SPEC.OFFICIAL_DANMAKU_ALIASES, ok)) map[ok] = true
+            }
+        }
+        if (SPEC && SPEC.DEPRECATED_DANMAKU_ALIASES) {
+            for (var dk in SPEC.DEPRECATED_DANMAKU_ALIASES) {
+                if (Object.prototype.hasOwnProperty.call(SPEC.DEPRECATED_DANMAKU_ALIASES, dk)) map[dk] = true
+            }
+        }
+        return map
+    })()
+
+    function flattenGroupedOptions(rawOpts) {
+        if (rawOpts == null || typeof rawOpts !== 'object') return rawOpts
+        var hasGrouped = (rawOpts.layout != null && typeof rawOpts.layout === 'object') ||
+            (rawOpts.life != null && typeof rawOpts.life === 'object') ||
+            (rawOpts.motion != null && typeof rawOpts.motion === 'object') ||
+            (rawOpts.style != null && typeof rawOpts.style === 'object') ||
+            (rawOpts.data != null && typeof rawOpts.data === 'object')
+        if (!hasGrouped) return rawOpts
+
+        var out = {}
+        var gName, fMap, gObj, fk, tk, topK
+        for (gName in GROUPED_FIELD_MAPS) {
+            if (!Object.prototype.hasOwnProperty.call(GROUPED_FIELD_MAPS, gName)) continue
+            gObj = rawOpts[gName]
+            if (gObj == null || typeof gObj !== 'object' || Array.isArray(gObj)) continue
+            fMap = GROUPED_FIELD_MAPS[gName]
+            for (fk in gObj) {
+                if (!Object.prototype.hasOwnProperty.call(gObj, fk) || gObj[fk] === undefined) continue
+                tk = fMap[fk]
+                if (tk) {
+                    out[tk] = gObj[fk]
+                } else {
+                    LOGGER.once('warn', 'unknownGroupKey:' + gName + '.' + fk, '检测到未知分组渲染参数 `' + gName + '.' + fk + '`（请检查拼写），已忽略。')
+                }
+            }
+        }
+        if (rawOpts.data != null && typeof rawOpts.data === 'object' && !Array.isArray(rawOpts.data)) {
+            out.vars = {}
+            for (var dk in rawOpts.data) {
+                if (Object.prototype.hasOwnProperty.call(rawOpts.data, dk)) out.vars[dk] = rawOpts.data[dk]
+            }
+        }
+        // 顶层显式字段优先覆盖分组默认值
+        for (topK in rawOpts) {
+            if (!Object.prototype.hasOwnProperty.call(rawOpts, topK) || rawOpts[topK] === undefined) continue
+            if (topK === 'layout' || topK === 'life' || topK === 'motion' || topK === 'data') continue
+            if (topK === 'style' && typeof rawOpts.style === 'object') continue
+            if (topK === 'vars' && out.vars != null && rawOpts.vars != null && typeof rawOpts.vars === 'object') {
+                for (var vk in rawOpts.vars) {
+                    if (Object.prototype.hasOwnProperty.call(rawOpts.vars, vk)) out.vars[vk] = rawOpts.vars[vk]
+                }
+                continue
+            }
+            out[topK] = rawOpts[topK]
+        }
+        return out
+    }
+
+    function warnUnknownPacketKeys(opts) {
+        if (opts == null || typeof opts !== 'object') return
+        for (var k in opts) {
+            if (!Object.prototype.hasOwnProperty.call(opts, k)) continue
+            if (k.charAt(0) === '_' || KNOWN_PACKET_KEYS[k] === true) continue
+            LOGGER.once('warn', 'unknownPacketKey:' + k, '检测到未知渲染参数 `' + k + '`（请检查是否拼写错误），已忽略。')
+        }
+    }
+
     function buildValidatedPacket(optsOrText, notifyPlayer) {
         var rawOpts = normalizeOptionsObject(optsOrText)
         if (rawOpts == null || typeof rawOpts !== 'object') {
@@ -1804,6 +1967,8 @@
             }
             rawOpts = resolvedPreset
         }
+        rawOpts = flattenGroupedOptions(rawOpts)
+        warnUnknownPacketKeys(rawOpts)
         var opts = (SPEC && typeof SPEC.normalizeDanmakuAliases === 'function')
             ? SPEC.normalizeDanmakuAliases(rawOpts, function (depKey, canonKey) {
                 reportDeprecatedUsage(depKey, canonKey, '旧版别名字段')
@@ -2424,145 +2589,240 @@
     }
 
     // ------------------------------------------------------------------------
-    // 原生 2D 图形进度条面板构造器（基于 v6 图元树 nodes + vars + tracks + rect.fill + clip）
+    // 标准进度轨道生成原语 + 内置 'progress_bar' 标准预设（单真相默认表）
     // ------------------------------------------------------------------------
-    function buildProgressPanel(cfg) {
-        var c = (cfg != null && typeof cfg === 'object') ? cfg : {}
-        var pVal = Math.max(0.0, Math.min(1.0, parseFiniteNum(c.progress, 0.0)))
-        var barW = Math.max(24, Math.min(600, Math.round(parseFiniteNum(c.barWidth, 152))))
-        var barH = Math.max(3, Math.min(48, Math.round(parseFiniteNum(c.barHeight, 6))))
-        var barY = Math.round(parseFiniteNum(c.barY, 0))
+    var PROGRESS_PANEL_DEFAULTS = Object.freeze({
+        barWidth:     152,
+        barHeight:    6,
+        barY:         0,
+        barColorFrom: 0xFF3333,
+        barColorTo:   0xFFAA22,
+        trailColor:   0x77FF6644,
+        bgColor:      0xB0120A16,
+        borderColor:  0xCC552233,
+        lerpSpeed:    10.0,
+        trailDelayMs: 220,
+        trailSpeed:   4.5,
+        subLerpSpeed: 12.0,
+        impulsePeak:  1.0,
+        impulseDecay: 260
+    })
+
+    function progressTracks(overrides) {
+        var base = {
+            progress:      { mode: 'lerp',    speed: PROGRESS_PANEL_DEFAULTS.lerpSpeed, easing: 'out_cubic' },
+            progressTrail: { mode: 'trail',   target: '$progress', delayMs: PROGRESS_PANEL_DEFAULTS.trailDelayMs, speed: PROGRESS_PANEL_DEFAULTS.trailSpeed },
+            subProgress:   { mode: 'lerp',    speed: PROGRESS_PANEL_DEFAULTS.subLerpSpeed, easing: 'out_cubic' },
+            impulse:       { mode: 'impulse', onChange: '$progress', peak: PROGRESS_PANEL_DEFAULTS.impulsePeak, decayMs: PROGRESS_PANEL_DEFAULTS.impulseDecay }
+        }
+        return (overrides != null && typeof overrides === 'object')
+            ? SPEC.mergeTracksMap(base, overrides)
+            : base
+    }
+
+    // 内置标准简易进度条预设：通过 { preset: 'progress_bar', data: { progress: 0.6 }, title: '...' } 一步开箱即用
+    registerPreset('progress_bar', function (c, h) {
+        var d        = PROGRESS_PANEL_DEFAULTS
+        var rawData  = (c.data != null && typeof c.data === 'object') ? c.data : (c.vars != null && typeof c.vars === 'object' ? c.vars : {})
+        var pVal     = Math.max(0.0, Math.min(1.0, parseFiniteNum(rawData.progress !== undefined ? rawData.progress : c.progress, 0.0)))
+        var subPVal  = Math.max(0.0, Math.min(1.0, parseFiniteNum(rawData.subProgress !== undefined ? rawData.subProgress : c.subProgress, pVal)))
+        var barW     = Math.max(24, Math.min(600, Math.round(parseFiniteNum(c.barWidth, d.barWidth))))
+        var barH     = Math.max(3, Math.min(48, Math.round(parseFiniteNum(c.barHeight, d.barHeight))))
+        var barY     = Math.round(parseFiniteNum(c.barY, d.barY))
         var titleStr = String(pick(c, ['title', 'text'], ''))
         var subStr   = String(pick(c, ['sub', 'subtitle'], ''))
-        var fillFrom = parseColor(c.barColorFrom !== undefined ? c.barColorFrom : (c.barColor !== undefined ? c.barColor : 0xFF3333), 0xFF3333).color
-        var fillTo   = parseColor(c.barColorTo !== undefined ? c.barColorTo : (c.barAccentColor !== undefined ? c.barAccentColor : 0xFFAA22), 0xFFAA22).color
-        var trailCol = parseArgbColor(c.trailColor !== undefined ? c.trailColor : 0x77FF6644, 0x77FF6644).color
-        var bgCol    = parseArgbColor(c.bgColor !== undefined ? c.bgColor : 0xB0120A16, 0xB0120A16).color
-        var borderCol= parseArgbColor(c.borderColor !== undefined ? c.borderColor : 0xCC552233, 0xCC552233).color
-
-        var nodes = []
-        if (Array.isArray(c.nodes) && c.nodes.length > 0) {
-            for (var cni = 0; cni < c.nodes.length; cni++) {
-                nodes.push(c.nodes[cni])
-            }
-        } else {
-            if (Array.isArray(c.preNodes)) {
-                for (var pni = 0; pni < c.preNodes.length; pni++) {
-                    nodes.push(c.preNodes[pni])
-                }
-            }
-            var mainFill = (c.barFill != null && typeof c.barFill === 'object')
-                ? c.barFill
-                : { mode: 'gradient', dir: 'h', from: fillFrom, to: fillTo }
-            if (mainFill.mode === 'gradient' && c.barColorMid !== undefined && mainFill.mid === undefined) {
-                mainFill.mid = parseColor(c.barColorMid, fillTo).color
-            }
-            nodes.push(
-                {
-                    id:          'bar_bg',
-                    type:        'rect',
-                    x:           0,
-                    y:           barY,
-                    w:           barW + 2,
-                    h:           barH + 2,
-                    anchor:      'center',
-                    fill:        { mode: 'solid', color: bgCol },
-                    borderColor: borderCol,
-                    borderWidth: 1
-                },
-                {
-                    id:     'bar_trail',
-                    type:   'rect',
-                    x:      0,
-                    y:      barY,
-                    w:      barW,
-                    h:      barH,
-                    anchor: 'center',
-                    fill:   { mode: 'solid', color: trailCol },
-                    clip:   { dir: 'left', ratio: '$progressTrail', mode: 'local' }
-                },
-                {
-                    id:     'bar_main',
-                    type:   'rect',
-                    x:      0,
-                    y:      barY,
-                    w:      barW,
-                    h:      barH,
-                    anchor: 'center',
-                    fill:   mainFill,
-                    clip:   { dir: 'left', ratio: '$progress', mode: 'local' }
-                }
-            )
-            if (Array.isArray(c.extraNodes)) {
-                for (var eni = 0; eni < c.extraNodes.length; eni++) {
-                    nodes.push(c.extraNodes[eni])
-                }
-            }
-            if (titleStr.length > 0 && c.includeDefaultTitle !== false) {
-                nodes.push({
-                    id:     'title',
-                    type:   'text',
-                    x:      0,
-                    y:      barY - Math.round(barH * 0.5) - 9,
-                    anchor: 'center',
-                    text:   titleStr,
-                    color:  parseColor(c.color, DEFAULTS.color).color,
-                    shadow: c.shadow !== undefined ? Boolean(c.shadow) : true
-                })
-            }
-            if (subStr.length > 0 && c.includeDefaultSub !== false) {
-                nodes.push({
-                    id:     'sub',
-                    type:   'text',
-                    x:      0,
-                    y:      barY + Math.round(barH * 0.5) + 9,
-                    anchor: 'center',
-                    text:   subStr,
-                    color:  parseColor(c.subColor, DEFAULTS.subColor).color,
-                    shadow: c.shadow !== undefined ? Boolean(c.shadow) : true
-                })
-            }
+        var fillFrom = parseColor(c.barColorFrom !== undefined ? c.barColorFrom : (c.barColor !== undefined ? c.barColor : d.barColorFrom), d.barColorFrom).color
+        var fillTo   = parseColor(c.barColorTo !== undefined ? c.barColorTo : (c.barAccentColor !== undefined ? c.barAccentColor : d.barColorTo), d.barColorTo).color
+        var trailCol = parseArgbColor(c.trailColor !== undefined ? c.trailColor : d.trailColor, d.trailColor).color
+        var bgCol    = parseArgbColor(c.bgColor !== undefined ? c.bgColor : d.bgColor, d.bgColor).color
+        var borderCol = parseArgbColor(c.borderColor !== undefined ? c.borderColor : d.borderColor, d.borderColor).color
+        var mainFill = (c.barFill != null && typeof c.barFill === 'object')
+            ? c.barFill
+            : { mode: 'gradient', dir: 'h', from: fillFrom, to: fillTo }
+        if (mainFill.mode === 'gradient' && c.barColorMid !== undefined && mainFill.mid === undefined) {
+            mainFill.mid = parseColor(c.barColorMid, fillTo).color
         }
 
-        var subPVal = Math.max(0.0, Math.min(1.0, parseFiniteNum(c.subProgress, pVal)))
-        var out = {}
-        for (var k in c) {
-            if (Object.prototype.hasOwnProperty.call(c, k)) {
-                out[k] = c[k]
-            }
+        var u = h.ui({ anchor: 'center' })
+        if (Array.isArray(c.preNodes)) u.push(c.preNodes)
+        u.rect('bar_bg',    0, barY, barW + 2, barH + 2, bgCol, { borderColor: borderCol, borderWidth: 1 })
+            .rect('bar_trail', 0, barY, barW, barH, trailCol, { clip: { dir: 'left', ratio: '$progressTrail', mode: 'local' } })
+            .rect('bar_main',  0, barY, barW, barH, 0xFFFFFFFF, { fill: mainFill, clip: { dir: 'left', ratio: '$progress', mode: 'local' } })
+        if (Array.isArray(c.extraNodes)) u.push(c.extraNodes)
+        if (titleStr.length > 0 && c.includeDefaultTitle !== false) {
+            u.text('title', 0, barY - Math.round(barH * 0.5) - 9, titleStr, 1.0, parseColor(c.color, DEFAULTS.color).color, { shadow: c.shadow !== undefined ? Boolean(c.shadow) : true })
         }
-        out.surface = c.surface || 'screen'
-        out.text    = titleStr
-        out.sub     = subStr
-        out.vars    = {
+        if (subStr.length > 0 && c.includeDefaultSub !== false) {
+            u.text('sub', 0, barY + Math.round(barH * 0.5) + 9, subStr, 1.0, parseColor(c.subColor, DEFAULTS.subColor).color, { shadow: c.shadow !== undefined ? Boolean(c.shadow) : true })
+        }
+
+        var vars = {
             progress:      pVal,
             progressTrail: pVal,
             subProgress:   subPVal,
             impulse:       0.0,
             pctText:       Math.round(pVal * 100) + '%'
         }
-        if (c.vars != null && typeof c.vars === 'object') {
-            for (var vk in c.vars) {
-                if (Object.prototype.hasOwnProperty.call(c.vars, vk)) {
-                    out.vars[vk] = c.vars[vk]
-                }
-            }
+        for (var dk in rawData) {
+            if (Object.prototype.hasOwnProperty.call(rawData, dk)) vars[dk] = rawData[dk]
         }
-        out.tracks = {
-            progress:      { mode: 'lerp', speed: parseFiniteNum(c.lerpSpeed, 10.0), easing: 'out_cubic' },
-            progressTrail: { mode: 'trail', target: '$progress', delayMs: Math.round(parseFiniteNum(c.trailDelayMs, 220)), speed: parseFiniteNum(c.trailSpeed, 4.5) },
-            subProgress:   { mode: 'lerp', speed: parseFiniteNum(c.subLerpSpeed, 12.0), easing: 'out_cubic' },
-            impulse:       { mode: 'impulse', onChange: '$progress', peak: parseFiniteNum(c.impulsePeak, 1.0), decayMs: Math.round(parseFiniteNum(c.impulseDecayMs, 260)) }
+
+        var out = {}
+        var envelopeKeep = [
+            'surface', 'namespace', 'ns', 'group', 'slotId', 'id', 'key', 'tier', '_sourceTier',
+            'layout', 'life', 'motion', 'style',
+            'pos', 'rx', 'ry', 'ox', 'oy', 'scale', 'size', 'angle', 'tilt', 'movable',
+            'lifeMode', 'stay', 'duration', 'activeHold', 'hold', 'fadeStyle', 'fade', 'fadeOut',
+            'priority', 'renderPriority', 'zIndex', 'shakeMode', 'shake', 'shakeAmp', 'showInGui', 'maxGroup', 'restart', 'debug'
+        ]
+        for (var ei = 0; ei < envelopeKeep.length; ei++) {
+            var ek = envelopeKeep[ei]
+            if (c[ek] !== undefined) out[ek] = c[ek]
         }
-        if (c.tracks != null && typeof c.tracks === 'object') {
-            for (var tk in c.tracks) {
-                if (Object.prototype.hasOwnProperty.call(c.tracks, tk)) {
-                    out.tracks[tk] = c.tracks[tk]
-                }
-            }
-        }
-        out.nodes = nodes
+        out.surface = c.surface || 'screen'
+        out.text    = titleStr
+        out.sub     = subStr
+        out.nodes   = u.build()
+        out.vars    = vars
+        out.tracks  = h.progressTracks(c.tracks)
         return out
+    })
+
+    // ------------------------------------------------------------------------
+    // 作用域通道 (channel) 与有状态槽位句柄 (slot)：
+    //   - channel 绑定静态 namespace / group / 发送前钩子，消灭下游重复包壳
+    //   - slot 由调用方持有（自动随业务对象 GC），内置首次 / variant 变更 / 周期保活全量发包
+    //     与常规刷新 action:'patch' 增量补丁的自动决策
+    // ------------------------------------------------------------------------
+    function createChannel(channelCfg) {
+        var cc        = (channelCfg != null && typeof channelCfg === 'object') ? channelCfg : {}
+        var nsStr     = String(cc.namespace || cc.ns || '')
+        var defGroup  = String(cc.group || DEFAULTS.group)
+        var defResync = Math.max(8, Math.round(parseFiniteNum(cc.resyncTicks, 48)))
+        var beforeFn  = (typeof cc.beforeSend === 'function') ? cc.beforeSend : null
+
+        function decorateOpts(rawOpts, groupOverride) {
+            var copy = {}
+            if (rawOpts != null && typeof rawOpts === 'object') {
+                for (var k in rawOpts) {
+                    if (Object.prototype.hasOwnProperty.call(rawOpts, k)) copy[k] = rawOpts[k]
+                }
+            }
+            if (nsStr && !copy.namespace && !copy.ns) copy.namespace = nsStr
+            if (!copy.group) copy.group = groupOverride || defGroup
+            if (beforeFn != null) {
+                var hooked = beforeFn(copy)
+                if (hooked != null && typeof hooked === 'object') copy = hooked
+            }
+            return copy
+        }
+
+        return {
+            namespace: nsStr,
+            group:     defGroup,
+            pushNear: function (levelOrDim, x, y, z, radius, opts) {
+                return inDimension(levelOrDim, x, y, z, radius, decorateOpts(opts, null))
+            },
+            pushPlayer: function (playerOrPlayers, opts) {
+                return toPlayer(playerOrPlayers, decorateOpts(opts, null))
+            },
+            patchNear: function (levelOrDim, x, y, z, radius, slotId, vars, holdTicks, groupOverride) {
+                return patchNear(levelOrDim, x, y, z, radius, {
+                    namespace:  nsStr,
+                    group:      groupOverride || defGroup,
+                    id:         String(slotId || ''),
+                    vars:       vars || {},
+                    activeHold: holdTicks
+                })
+            },
+            deactivateNear: function (levelOrDim, x, y, z, radius, slotId, fadeOutTicks, groupOverride) {
+                return deactivateNear(levelOrDim, x, y, z, radius, {
+                    namespace: nsStr,
+                    group:     groupOverride || defGroup,
+                    id:        String(slotId || ''),
+                    fadeOut:   fadeOutTicks != null ? fadeOutTicks : 16
+                })
+            },
+            clearNear: function (levelOrDim, x, y, z, radius, maxPriority, groupOverride) {
+                return clearNear(levelOrDim, x, y, z, radius, {
+                    namespace:   nsStr,
+                    group:       groupOverride || '*',
+                    maxPriority: maxPriority != null ? maxPriority : 10
+                })
+            },
+            slot: function (slotId, slotCfg) {
+                var sc          = (slotCfg != null && typeof slotCfg === 'object') ? slotCfg : {}
+                var sid         = String(slotId || '')
+                var sGroup      = String(sc.group || defGroup)
+                var sPreset     = sc.preset != null ? String(sc.preset) : ''
+                var resyncEvery = Math.max(8, Math.round(parseFiniteNum(sc.resyncTicks, defResync)))
+                var patchVarsFn = (typeof sc.buildPatchVars === 'function') ? sc.buildPatchVars : null
+                var lastVariant = null
+                var lastFullAt  = null
+
+                return {
+                    id:     sid,
+                    group:  sGroup,
+                    preset: sPreset,
+                    syncNear: function (levelOrDim, x, y, z, radius, syncCfg) {
+                        var cfg      = (syncCfg != null && typeof syncCfg === 'object') ? syncCfg : {}
+                        var variant  = cfg.variant !== undefined ? String(cfg.variant) : ''
+                        var curTick  = (typeof cfg.tick === 'number' && isFinite(cfg.tick)) ? cfg.tick : danmakuTickCounter
+                        var needFull = (lastFullAt === null) || (lastVariant !== variant) || ((curTick - lastFullAt) >= resyncEvery)
+                        if (needFull) {
+                            lastVariant = variant
+                            lastFullAt  = curTick
+                            var full = {}
+                            for (var fk in cfg) {
+                                if (!Object.prototype.hasOwnProperty.call(cfg, fk)) continue
+                                if (fk === 'variant' || fk === 'tick') continue
+                                full[fk] = cfg[fk]
+                            }
+                            if (sPreset && !full.preset) full.preset = sPreset
+                            full.id    = sid
+                            full.group = sGroup
+                            return inDimension(levelOrDim, x, y, z, radius, decorateOpts(full, sGroup))
+                        }
+                        var pVars = patchVarsFn != null
+                            ? patchVarsFn(cfg)
+                            : ((cfg.data != null && typeof cfg.data === 'object') ? cfg.data : (cfg.vars || {}))
+                        var holdVal = (cfg.life != null && typeof cfg.life === 'object' && cfg.life.hold != null)
+                            ? cfg.life.hold
+                            : (cfg.activeHold != null ? cfg.activeHold : (cfg.hold != null ? cfg.hold : undefined))
+                        return patchNear(levelOrDim, x, y, z, radius, {
+                            namespace:  nsStr,
+                            group:      sGroup,
+                            id:         sid,
+                            activeHold: holdVal,
+                            vars:       pVars
+                        })
+                    },
+                    patchNear: function (levelOrDim, x, y, z, radius, vars, holdTicks) {
+                        return patchNear(levelOrDim, x, y, z, radius, {
+                            namespace:  nsStr,
+                            group:      sGroup,
+                            id:         sid,
+                            activeHold: holdTicks,
+                            vars:       vars || {}
+                        })
+                    },
+                    closeNear: function (levelOrDim, x, y, z, radius, fadeOutTicks) {
+                        lastVariant = null
+                        lastFullAt  = null
+                        return deactivateNear(levelOrDim, x, y, z, radius, {
+                            namespace: nsStr,
+                            group:     sGroup,
+                            id:        sid,
+                            fadeOut:   fadeOutTicks != null ? fadeOutTicks : 16
+                        })
+                    },
+                    reset: function () {
+                        lastVariant = null
+                        lastFullAt  = null
+                    }
+                }
+            }
+        }
     }
 
 
@@ -3264,10 +3524,12 @@
     }
 
     global.ScreenDanmaku = {
-        VERSION:            '6.1.0',
+        VERSION:            '6.2.0',
         CHANNEL:            CHANNEL,
         configure:          configure,
         ui:                 createUiBuilder,
+        channel:            createChannel,
+        progressTracks:     progressTracks,
         registerPreset:     registerPreset,
         preset:             resolvePreset,
         listPresets:        function () { return SURFACE_PRESETS.list() },
@@ -3282,9 +3544,9 @@
         scanBlocksNow:      scanBlocksNow,
         CONFIG:             CONFIG,
         DEFAULTS:           DEFAULTS,
+        PROGRESS_DEFAULTS:  PROGRESS_PANEL_DEFAULTS,
         HUD_FORBIDDEN:      HUD_FORBIDDEN_PRESETS,
         buildPacket:        buildValidatedPacket,
-        buildProgressPanel: buildProgressPanel,
         safeSend:           safeSend,
         send:               send,
         toPlayer:           toPlayer,

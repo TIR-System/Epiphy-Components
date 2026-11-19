@@ -1167,10 +1167,101 @@
     }
 
     // ------------------------------------------------------------------------
-    // 5. 统一轻量有界 FIFO 缓存池（供双端组件收敛复用，避免散落手写淘汰逻辑）
+    // 5. 统一轻量有界缓存池（支持 'fifo' 默认零 get 写开销 | 'lru' 纯 ES5 双向链表 O(1) 热点保活）
     // ------------------------------------------------------------------------
-    function createBoundedCache(maxSize) {
-        var limit = (typeof maxSize === 'number' && isFinite(maxSize) && maxSize >= 1) ? Math.floor(maxSize) : 512;
+    function createBoundedCache(maxSize, policy) {
+        var limit   = (typeof maxSize === 'number' && isFinite(maxSize) && maxSize >= 1) ? Math.floor(maxSize) : 512;
+        var modeStr = (policy != null && typeof policy === 'object')
+            ? String(policy.policy || policy.eviction || 'fifo').toLowerCase()
+            : String(policy || 'fifo').toLowerCase();
+
+        if (modeStr === 'lru') {
+            var map   = Object.create(null);
+            var headN = null; // 最近使用 (MRU)
+            var tailN = null; // 最久未使用 (LRU)
+            var lCnt  = 0;
+
+            var detachNode = function (node) {
+                if (node.prev != null) node.prev.next = node.next;
+                else headN = node.next;
+                if (node.next != null) node.next.prev = node.prev;
+                else tailN = node.prev;
+                node.prev = null;
+                node.next = null;
+            };
+
+            var prependNode = function (node) {
+                node.prev = null;
+                node.next = headN;
+                if (headN != null) headN.prev = node;
+                else tailN = node;
+                headN = node;
+            };
+
+            return {
+                get: function (key) {
+                    var k = String(key);
+                    var node = map[k];
+                    if (node === undefined) return undefined;
+                    if (node !== headN) {
+                        detachNode(node);
+                        prependNode(node);
+                    }
+                    return node.v;
+                },
+                has: function (key) {
+                    return String(key) in map;
+                },
+                set: function (key, val) {
+                    var k = String(key);
+                    var node = map[k];
+                    if (node !== undefined) {
+                        node.v = val;
+                        if (node !== headN) {
+                            detachNode(node);
+                            prependNode(node);
+                        }
+                        return val;
+                    }
+                    while (lCnt >= limit && tailN != null) {
+                        var ev = tailN;
+                        detachNode(ev);
+                        delete map[ev.k];
+                        lCnt--;
+                    }
+                    var fresh = { k: k, v: val, prev: null, next: null };
+                    map[k] = fresh;
+                    prependNode(fresh);
+                    lCnt++;
+                    return val;
+                },
+                delete: function (key) {
+                    var k = String(key);
+                    var node = map[k];
+                    if (node === undefined) return false;
+                    detachNode(node);
+                    delete map[k];
+                    lCnt--;
+                    return true;
+                },
+                clear: function () {
+                    map   = Object.create(null);
+                    headN = null;
+                    tailN = null;
+                    lCnt  = 0;
+                },
+                size: function () {
+                    return lCnt;
+                },
+                limit: function () {
+                    return limit;
+                },
+                policy: function () {
+                    return 'lru';
+                }
+            };
+        }
+
         var store = Object.create(null);
         var keys  = [];
         var head  = 0;
@@ -1226,13 +1317,25 @@
             },
             limit: function () {
                 return limit;
+            },
+            policy: function () {
+                return 'fifo';
             }
         };
     }
 
     // ------------------------------------------------------------------------
-    // 6. 统一跨阶段预设/模板注册表（支持 startup_scripts 预先向上提交，server_scripts 自动承接）
+    // 6. 统一受控深合并（tracks 轨道级合并 + 分组选项合并）与跨阶段预设注册表
     // ------------------------------------------------------------------------
+    var GROUPED_MERGE_KEYS = {
+        layout: true,
+        life:   true,
+        motion: true,
+        style:  true,
+        data:   true,
+        vars:   true
+    };
+
     function mergeShallowObj(baseObj, overObj) {
         var out = {};
         var k;
@@ -1247,6 +1350,53 @@
             }
         }
         return out;
+    }
+
+    // 受控 2 层轨道合并：
+    //   - over[k] === null || false -> 显式删除/禁用默认轨道
+    //   - over[k].mode 变更 -> 整条替换（防止旧模式残留字段污染）
+    //   - 同模式或未传 mode -> 合并字段（保留默认 mode/easing/peak 等）
+    function mergeTracksMap(baseTracks, overTracks) {
+        var out = {};
+        var k;
+        if (isObjectLike(baseTracks)) {
+            for (k in baseTracks) {
+                if (!hasOwn(baseTracks, k)) continue;
+                var bt = baseTracks[k];
+                out[k] = isObjectLike(bt) ? mergeShallowObj(bt, null) : bt;
+            }
+        }
+        if (isObjectLike(overTracks)) {
+            for (k in overTracks) {
+                if (!hasOwn(overTracks, k) || overTracks[k] === undefined) continue;
+                var ot = overTracks[k];
+                if (ot === null || ot === false) {
+                    delete out[k];
+                    continue;
+                }
+                if (isObjectLike(out[k]) && isObjectLike(ot) && (ot.mode === undefined || ot.mode === out[k].mode)) {
+                    out[k] = mergeShallowObj(out[k], ot);
+                } else {
+                    out[k] = isObjectLike(ot) ? mergeShallowObj(ot, null) : ot;
+                }
+            }
+        }
+        return out;
+    }
+
+    function mergeGroupedOptions(baseObj, overObj) {
+        var merged = mergeShallowObj(baseObj, overObj);
+        if (!isObjectLike(baseObj) || !isObjectLike(overObj)) return merged;
+        for (var gk in GROUPED_MERGE_KEYS) {
+            if (!hasOwn(GROUPED_MERGE_KEYS, gk)) continue;
+            if (isObjectLike(baseObj[gk]) && isObjectLike(overObj[gk])) {
+                merged[gk] = mergeShallowObj(baseObj[gk], overObj[gk]);
+            }
+        }
+        if (isObjectLike(baseObj.tracks) || isObjectLike(overObj.tracks)) {
+            merged.tracks = mergeTracksMap(baseObj.tracks, overObj.tracks);
+        }
+        return merged;
     }
 
     function getSharedPresetBucket(domainName) {
@@ -1322,14 +1472,8 @@
                 delete resFn.preset;
                 return resFn;
             }
-            var merged = mergeShallowObj(entry, ov);
+            var merged = mergeGroupedOptions(entry, ov);
             delete merged.preset;
-            if (isObjectLike(entry.vars) && isObjectLike(ov.vars)) {
-                merged.vars = mergeShallowObj(entry.vars, ov.vars);
-            }
-            if (isObjectLike(entry.tracks) && isObjectLike(ov.tracks)) {
-                merged.tracks = mergeShallowObj(entry.tracks, ov.tracks);
-            }
             return merged;
         }
 
@@ -1371,6 +1515,8 @@
             computeOverlayCost:         computeOverlayCost,
             adaptV5ToV6:                adaptV5ToV6,
             createBoundedCache:         createBoundedCache,
+            mergeTracksMap:             mergeTracksMap,
+            mergeGroupedOptions:        mergeGroupedOptions,
             createPresetRegistry:       createPresetRegistry,
             registerPreset:             registerPresetGlobal,
             resolvePreset:              resolvePresetGlobal,

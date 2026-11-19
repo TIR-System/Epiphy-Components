@@ -7078,7 +7078,7 @@ test('Uncrafting Chaos & EpiphyServerCore/EpiphyWorldOps: anti-rename relic spoo
         loadStartupBase(cliSb)
         runScriptIn(cliSb, RENDERER_PATH)
         var CliV57 = cliSb.global.ScreenDanmakuClient
-        assert.strictEqual(CliV57.VERSION, '6.1.0', 'ScreenDanmakuClient must expose VERSION 6.1.0')
+        assert.strictEqual(CliV57.VERSION, '6.2.0', 'ScreenDanmakuClient must expose VERSION 6.2.0')
         assert.strictEqual(cliSb.global.Epiphy2DRenderer, CliV57, 'Epiphy2DRenderer must alias ScreenDanmakuClient')
         assert.strictEqual(CliV57._pure.isPotentialSpanTagHead('<AVARITIA_BIOS>', 0), false, '<AVARITIA_BIOS> must be fast-rejected in O(1)')
         assert.strictEqual(CliV57._pure.hasRichSpanTags('<AVARITIA_BIOS> :: [0x00F8_DEADC0DE] >>'), false, 'non-tag brackets must not trigger regex or span tag mode')
@@ -7177,7 +7177,7 @@ test('Epiphy2DSurface & Epiphy2DRenderer v6.0: adaptV5ToV6, aliases, quotas, tra
 
     // 1. P2-4 & P1-2: Dual export and protocol compatibility (v6 accepts 5 and 6, rejects 4)
     assert.strictEqual(Surface, Dm, 'Epiphy2DSurface must alias ScreenDanmaku')
-    assert.strictEqual(Dm.VERSION, '6.1.0', 'ScreenDanmaku VERSION must be 6.1.0')
+    assert.strictEqual(Dm.VERSION, '6.2.0', 'ScreenDanmaku VERSION must be 6.2.0')
     assert.strictEqual(Proto.DANMAKU_PROTO_VERSION, 6, 'DANMAKU_PROTO_VERSION must be 6')
     assert.strictEqual(Spec.isProtoCompatible(6, 6), true)
     assert.strictEqual(Spec.isProtoCompatible(6, 5), true)
@@ -7310,12 +7310,12 @@ test('Epiphy2DSurface & Epiphy2DRenderer v6.0: adaptV5ToV6, aliases, quotas, tra
     cliPaints[0](mockEv)
     assert.strictEqual(Renderer.count(), 0, 'orphan patch must be dropped without creating an overlay')
 
-    // 4b. Push progress panel, queue multiple patches (in-queue coalescing), verify lerp + trail + impulse + dt <= 100ms clamp
-    var panelPkt = Dm.buildPacket(Dm.buildProgressPanel({
+    // 4b. Push built-in 'progress_bar' preset, queue multiple patches (in-queue coalescing), verify lerp + trail + impulse + dt <= 100ms clamp
+    var panelPkt = Dm.buildPacket({
+        preset: 'progress_bar',
         id: 'boss_hp',
-        lifeMode: 'active',
-        activeHold: 20,
-        progress: 1.0,
+        life: { mode: 'active', hold: 20 },
+        data: { progress: 1.0 },
         barWidth: 100,
         barHeight: 6,
         text: 'BOSS $pctText',
@@ -7323,7 +7323,7 @@ test('Epiphy2DSurface & Epiphy2DRenderer v6.0: adaptV5ToV6, aliases, quotas, tra
         tracks: {
             hitFlash: { mode: 'impulse', onChange: '$progress', peak: 1.0, decayMs: 200 }
         }
-    }))
+    })
     cliNetHandlers['epiphy:screen_danmaku']({ data: panelPkt })
     cliPaints[0](mockEv)
     assert.strictEqual(Renderer.count(), 1)
@@ -7665,18 +7665,18 @@ test('Epiphy2DSurface & Epiphy2DRenderer v6.0: adaptV5ToV6, aliases, quotas, tra
     loadStartupBase(realCliSb)
     runScriptIn(realCliSb, RENDERER_PATH)
 
-    var progressedPkt = Dm.buildPacket(Dm.buildProgressPanel({
+    var progressedPkt = Dm.buildPacket({
+        preset: 'progress_bar',
         id: 'real_nbt_bar',
-        lifeMode: 'active',
-        activeHold: 24,
-        progress: 0.5,
+        life: { mode: 'active', hold: 24 },
+        data: { progress: 0.5 },
         barWidth: 160,
         barHeight: 6,
         barColorFrom: 0xFF3333,
         barColorTo: 0xFFAA22,
         text: '§c§l[堆芯遥测] §f50%',
         sub: '§7正在运行'
-    }))
+    })
     var mockRealCompound = toMockNbtTag(progressedPkt)
     realCliNet['epiphy:screen_danmaku']({ data: mockRealCompound })
 
@@ -8135,20 +8135,30 @@ test('63. v6.1/v5.8/v2.5 preset & widget registry, UI DSL, bounded cache pool, a
 
     assert.strictEqual(Surface.registerWidget('test_badge', function (n, ui) {
         return ui({ ox: n.x, oy: n.y })
-            .outline(0, 0, n.size || 20, n.size || 20, n.color || 0xFFFFFF, 1, { id: 'tb_outer' })
+            .outline('tb_outer', 0, 0, n.size || 20, n.size || 20, n.color || 0xFFFFFF, 1)
             .corners(0, 0, n.size || 20, n.size || 20, 4, 1, 0xFFD54F, 'tl,br')
             .build()
     }), true)
 
     assert.strictEqual(Surface.registerPreset('hud_demo', function (c, h) {
         var nodes = h.ui()
-            .steppedPlate(-100, 0x80102030, [[60, -10, 20], [80, -8, 18], [60, -6, 16]], ['p0', 'p1', 'p2'])
+            .steppedPlate(-100, 0x80102030, [
+                ['p0', 60, -10, 20],
+                ['p1', 80, -8,  18],
+                ['p2', 60, -6,  16]
+            ])
             .steppedLine(-100, 22, [[90, 0, 0xFFFFFF, 1], [110, 4, 0x4DD0E1, 1]])
             .ticks(-100, 0, 200, 12, [0.25, 0.5, 0.75], 0x44FFFFFF, 1, 'tk')
             .widget('test_badge', { x: -130, y: -6, size: 24, color: 0x00FFFF })
             .push({ id: 'raw_out', type: 'rect', x: 10, y: 0, w: 12, h: 12, outline: 0xFF5555, thickness: 2 })
             .build()
-        return h.buildProgressPanel({ id: c.id || 'demo', progress: c.progress || 0.5, nodes: nodes })
+        return {
+            surface: 'screen',
+            id:      c.id || 'demo',
+            data:    { progress: c.progress || 0.5 },
+            nodes:   nodes,
+            tracks:  h.progressTracks()
+        }
     }), true)
 
     var demoPkt = Surface.buildPacket({ preset: 'hud_demo', id: 'hud_1', progress: 0.75 })
@@ -8274,6 +8284,194 @@ test('63. v6.1/v5.8/v2.5 preset & widget registry, UI DSL, bounded cache pool, a
     nowVal += 50
     cliPaints[0](mkParallaxEv(function () { fullQuads++ }))
     assert.ok(lowQuads > 0 && lowQuads * 4 < fullQuads, 'parallax early-cull at 2% width must emit <25% of full-bar quads (low=' + lowQuads + ', full=' + fullQuads + ')')
+})
+
+test('64. v6.2 LRU cache, controlled deep merge, grouped options, unknown-key warn, channel/slot, openJsonStore & node precompilation', function () {
+    var warns = []
+    var sentPkts = []
+    var mockPlayer = {
+        username: 'tester',
+        x: 0, y: 64, z: 0,
+        sendData: function (ch, pkt) { sentPkts.push({ ch: ch, pkt: pkt }) }
+    }
+    var mockLevel = {
+        dimension: 'minecraft:overworld',
+        players: [mockPlayer]
+    }
+    var srvObj = {
+        getLevel: function () { return mockLevel },
+        getAllLevels: function () { return [mockLevel] }
+    }
+    var diskFiles = {}
+    var sb = {
+        console: { info: function () {}, warn: function (m) { warns.push(String(m)) }, error: function (m) { throw new Error(m) }, debug: function () {}, log: function () {} },
+        ServerEvents: { loaded: function (fn) { fn({ server: srvObj }) }, tick: function () {}, commandRegistry: function () {} },
+        BlockEvents: { placed: function () {}, broken: function () {} },
+        PlayerEvents: { loggedIn: function () {}, loggedOut: function () {} },
+        JsonIO: {
+            readString: function (p) { return Object.prototype.hasOwnProperty.call(diskFiles, p) ? diskFiles[p] : null },
+            write: function (p, obj) { diskFiles[p] = JSON.stringify(obj) }
+        },
+        Java: { loadClass: function () { return null } },
+        global: {}
+    }
+    sb.globalThis = sb
+    vm.createContext(sb)
+    loadServerBase(sb)
+    runScriptIn(sb, TRACKER_PATH)
+    runScriptIn(sb, DANMAKU_PATH)
+
+    var Spec    = sb.global.EpiphySpec
+    var Base    = sb.global.EpiphyServerCore
+    var Surface = sb.global.Epiphy2DSurface
+
+    // 1. LRU cache eviction vs FIFO
+    var lru = Spec.createBoundedCache(3, 'lru')
+    assert.strictEqual(lru.policy(), 'lru')
+    lru.set('a', 1); lru.set('b', 2); lru.set('c', 3)
+    assert.strictEqual(lru.get('a'), 1) // refreshes 'a' to MRU -> 'b' is now LRU
+    lru.set('d', 4)
+    assert.strictEqual(lru.has('a'), true, 'LRU must retain recently accessed key a')
+    assert.strictEqual(lru.has('b'), false, 'LRU must evict least-recently-used key b')
+    assert.strictEqual(lru.size(), 3)
+
+    // 2. mergeTracksMap (same-mode merge, mode-switch replace, explicit disable) & mergeGroupedOptions
+    var trMerged = Spec.mergeTracksMap(
+        {
+            progress:    { mode: 'lerp', speed: 10, easing: 'out_cubic' },
+            subProgress: { mode: 'lerp', speed: 12, easing: 'out_cubic' },
+            impulse:     { mode: 'impulse', onChange: '$progress', peak: 1.0, decayMs: 260 }
+        },
+        {
+            progress:    { speed: 25 },
+            subProgress: false,
+            impulse:     { mode: 'trail', target: '$progress', speed: 5 }
+        }
+    )
+    assert.strictEqual(trMerged.progress.mode, 'lerp', 'same-mode track override must preserve mode')
+    assert.strictEqual(trMerged.progress.easing, 'out_cubic', 'same-mode track override must preserve easing')
+    assert.strictEqual(trMerged.progress.speed, 25, 'same-mode track override must update speed')
+    assert.strictEqual(trMerged.subProgress, undefined, 'false/null track override must disable track')
+    assert.strictEqual(trMerged.impulse.mode, 'trail', 'mode-switch override must replace track')
+    assert.strictEqual(trMerged.impulse.decayMs, undefined, 'mode-switch override must not leak old mode fields')
+
+    // 3. buildProgressPanel removed; built-in 'progress_bar' preset + grouped options + unknown-key warn
+    assert.strictEqual(Surface.buildProgressPanel, undefined, 'legacy buildProgressPanel must be removed in v6.2')
+    assert.ok(Surface.listPresets().indexOf('progress_bar') >= 0, 'progress_bar built-in preset must be registered')
+
+    Surface.registerPreset('grouped_card', {
+        layout: { pos: [0.3, 0.2], scale: 0.8 },
+        life:   { mode: 'active', hold: 30, fade: 'blur', fadeOut: 12 },
+        data:   { hp: 1.0, label: 'INIT' },
+        tracks: Surface.progressTracks()
+    })
+    var gPkt = Surface.buildPacket({
+        preset: 'grouped_card',
+        title:  'Card',
+        life:   { hold: 50 },
+        data:   { hp: 0.5 },
+        tracks: { progress: { speed: 18 } }
+    })
+    assert.strictEqual(gPkt.rx, 0.3, 'grouped preset layout.pos must flatten to rx')
+    assert.strictEqual(gPkt.scale, 0.8, 'grouped preset layout.scale must flatten to scale')
+    assert.strictEqual(gPkt.lifeMode, 'active', 'grouped preset life.mode must be preserved across sparse life override')
+    assert.strictEqual(gPkt.activeHold, 50, 'sparse life.hold override must win')
+    assert.strictEqual(gPkt.vars.hp, 0.5, 'sparse data override must merge into vars')
+    assert.strictEqual(gPkt.vars.label, 'INIT', 'preset data.label must be preserved on sparse data merge')
+    assert.strictEqual(gPkt.tracks.progress.mode, 'lerp', 'sparse track override must preserve mode')
+    assert.strictEqual(gPkt.tracks.progress.speed, 18, 'sparse track override must apply speed')
+
+    warns.length = 0
+    var typoPkt = Surface.buildPacket({ text: 'Hello', barWdith: 999 })
+    assert.ok(typoPkt && typoPkt.barWdith === undefined, 'unknown key must not enter network packet')
+    assert.ok(warns.some(function (w) { return w.indexOf('barWdith') >= 0 }), 'unknown packet key must emit one-time typo warning')
+
+    // 4. ui() id-first + .texts() + .region() returning to parent origin
+    var uNodes = Surface.ui({ ox: 10, oy: 20 })
+        .boxes([['b1', 0, 0, 10, 5, 0xFFFFFFFF]])
+        .region(100, 50, function (r) {
+            r.texts([['r_txt', 5, 2, 'SUB', 1.0, 0xFF00FF00]])
+        })
+        .text('after_reg', 1, 2, 'BACK', 1.0, 0xFFFFFFFF)
+        .build()
+    assert.strictEqual(uNodes[0].id, 'b1')
+    assert.strictEqual(uNodes[1].id, 'r_txt')
+    assert.strictEqual(uNodes[1].x, 115, 'region must offset child x by ox+dx+x')
+    assert.strictEqual(uNodes[2].id, 'after_reg')
+    assert.strictEqual(uNodes[2].x, 11, 'after region, parent builder must remain at original ox')
+
+    // 5. channel() + stateful slot() auto full/patch/variant/resync/close
+    sentPkts.length = 0
+    var ch = Surface.channel({ namespace: 'test_ns', group: 'test_grp', resyncTicks: 20 })
+    var sl = ch.slot('hud_a', { preset: 'progress_bar', resyncTicks: 20 })
+    sl.syncNear(mockLevel, 0, 64, 0, 32, { variant: 'v1', tick: 0, data: { progress: 0.2 }, text: 'A', life: { mode: 'active', hold: 20 } })
+    sl.syncNear(mockLevel, 0, 64, 0, 32, { variant: 'v1', tick: 5, data: { progress: 0.4 }, life: { hold: 20 } })
+    sl.syncNear(mockLevel, 0, 64, 0, 32, { variant: 'v2', tick: 10, data: { progress: 0.6 }, text: 'B', life: { mode: 'active', hold: 20 } })
+    sl.syncNear(mockLevel, 0, 64, 0, 32, { variant: 'v2', tick: 35, data: { progress: 0.8 }, text: 'C', life: { mode: 'active', hold: 20 } })
+    sl.closeNear(mockLevel, 0, 64, 0, 32, 10)
+    assert.strictEqual(sentPkts.length, 5)
+    assert.strictEqual(sentPkts[0].pkt.action, 'push', 'first slot.syncNear must emit full push')
+    assert.strictEqual(sentPkts[0].pkt.namespace, 'test_ns')
+    assert.strictEqual(sentPkts[1].pkt.action, 'patch', 'same-variant within resyncTicks must emit lightweight patch')
+    assert.strictEqual(sentPkts[1].pkt.vars.progress, 0.4)
+    assert.strictEqual(sentPkts[2].pkt.action, 'push', 'variant change must re-emit full push')
+    assert.strictEqual(sentPkts[3].pkt.action, 'push', 'elapsed >= resyncTicks must re-emit full push')
+    assert.strictEqual(sentPkts[4].pkt.action, 'deactivate', 'slot.closeNear must emit deactivate')
+
+    // 6. EpiphyServerCore.openJsonStore missing default + corrupt write-lock
+    var stMissing = Base.openJsonStore('test/missing.json', { defaultData: function () { return { v: 1 } } })
+    var mRes = stMissing.load()
+    assert.strictEqual(mRes.status, 'missing')
+    assert.strictEqual(mRes.data.v, 1)
+    assert.strictEqual(stMissing.save({ v: 2 }), true)
+    assert.strictEqual(stMissing.load().data.v, 2)
+
+    diskFiles['test/corrupt.json'] = '{ broken json'
+    var stCorrupt = Base.openJsonStore('test/corrupt.json', { lockOnCorrupt: true })
+    var cRes = stCorrupt.load()
+    assert.strictEqual(cRes.status, 'corrupt')
+    assert.strictEqual(stCorrupt.isCorrupt(), true)
+    assert.strictEqual(stCorrupt.save({ v: 0 }), false, 'corrupt lock must refuse non-forced overwrite')
+    assert.strictEqual(stCorrupt.save({ v: 9 }, { force: true }), true, 'force:true must override corrupt lock')
+    assert.strictEqual(stCorrupt.isCorrupt(), false)
+
+    // 7. Client node tree precompilation + stepHz micro-cache + SHARED_TEXT_SEQ_CACHE LRU
+    var cliPaints = []
+    var cliNetCb  = null
+    var cNow      = 5000
+    var cliSb = {
+        console: { info: function () {}, warn: function () {}, error: function (m) { throw new Error(m) }, debug: function () {}, log: function () {} },
+        Date: { now: function () { return cNow } },
+        Client: { getCurrentScreen: function () { return null } },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function (fn) { cliPaints.push(fn) } },
+        NetworkEvents: { dataReceived: function (chName, fn) { if (chName === 'epiphy:screen_danmaku') cliNetCb = fn } },
+        Java: { loadClass: function () { return null } },
+        Text: { of: function (s) { return { string: String(s) } } },
+        global: {}
+    }
+    cliSb.globalThis = cliSb
+    vm.createContext(cliSb)
+    loadStartupBase(cliSb)
+    runScriptIn(cliSb, RENDERER_PATH)
+    var R62 = cliSb.global.Epiphy2DRenderer
+
+    var rawStaticNodes = [
+        { id: 's1', type: 'rect', anchor: 'top_left', x: 10, y: 20, w: 40, h: 10, fill: { mode: 'solid', color: 0x8026A69A } },
+        { id: 's2', type: 'rect', anchor: 'center',   x: 50, y: 50, w: 20, h: 10, fill: { mode: 'outline', color: 0xFFFFFFFF, thickness: 1 } },
+        { id: 'd1', type: 'rect', anchor: 'top_left', x: 0,  y: 0,  w: 8,  h: 8,  fill: { mode: 'solid', color: 0xFFFFFFFF }, bind: { stepHz: 9, seed: 17, jitterX: 4 } }
+    ]
+    R62._pure.compileDeclarativeNodes(rawStaticNodes, 0)
+    assert.strictEqual(rawStaticNodes[0]._c.isStaticFastRect, true, 'static solid rect must compile to isStaticFastRect fast path')
+    assert.strictEqual(rawStaticNodes[1]._c.isStaticFastRect, true, 'static outline rect must compile to isStaticFastRect fast path')
+    assert.strictEqual(rawStaticNodes[1]._c.x0, 40, 'center-anchored static rect must precompute x0 = x - w/2')
+    assert.strictEqual(rawStaticNodes[2]._c.isStaticFastRect, false, 'bound node must not take static fast path')
+
+    // Verify stepHz micro-cache populates and updates across step boundaries
+    var evStep1 = R62._pure.evaluateNodeBind(rawStaticNodes[2], 0, 0, 8, 8, 1.0, 0.0, {}, 1000)
+    var cachedTick = rawStaticNodes[2].bind._lastStepTick
+    var evStep2 = R62._pure.evaluateNodeBind(rawStaticNodes[2], 0, 0, 8, 8, 1.0, 0.0, {}, 1010)
+    assert.strictEqual(rawStaticNodes[2].bind._lastStepTick, cachedTick, 'same 9Hz step must hit stepHz micro-cache')
+    assert.strictEqual(evStep1.x, evStep2.x)
 })
 
 

@@ -468,7 +468,8 @@
                 })
             }
             var payload = { version: 2, jobs: records }
-            var okDisk = BASE.writeJsonAtomic(info.filePath, payload, true, LOGGER)
+            var store  = BASE.openJsonStore(info.filePath, { logger: LOGGER, backup: true, lockOnCorrupt: false })
+            var okDisk = store.save(payload)
             if (!okDisk) {
                 LOGGER.warn('saveUnstableJobs', '外部 JSON 落盘失败，暂依赖 persistentData 持久化: ' + info.filePath)
             }
@@ -494,7 +495,8 @@
                 }
             }
             if (data == null) {
-                data = BASE.readJsonSafe(info.filePath, LOGGER)
+                var loadRes = BASE.openJsonStore(info.filePath, { logger: LOGGER, backup: true, lockOnCorrupt: false }).load()
+                if (loadRes.ok) data = loadRes.data
             }
             var list = (data != null && Array.isArray(data.jobs)) ? data.jobs : []
             for (var i = 0; i < list.length; i++) {
@@ -880,8 +882,8 @@
         var sl  = Number(n.stemLen) || 34
         var pfx = String(n.idPrefix || 'pin')
         return ui({ ox: n.x, oy: n.y })
-            .outline(-bs * 0.5, 0, bs, bs, n.color, 1, { id: pfx + '_box' })
-            .rect(n.stemX !== undefined ? n.stemX : 0, bs, 1, sl, n.color, { id: pfx + '_line' })
+            .outline(pfx + '_box',  -bs * 0.5, 0,  bs, bs, n.color, 1)
+            .rect   (pfx + '_line', n.stemX !== undefined ? n.stemX : 0, bs, 1, sl, n.color)
             .build()
     })
 
@@ -892,23 +894,23 @@
         var coreBind = { seed: 29, impulseVar: 'impulse', shakeX: 1.5, shakeY: 1.5, vibX: 0.45, vibY: 0.40, vibHz: 22 }
         var rotBind  = { rotSpeed: 86, seed: 29, impulseVar: 'impulse', shakeX: 1.5, shakeY: 1.5, vibX: 0.45, vibY: 0.40, vibHz: 22 }
         return ui({ ox: n.x, oy: n.y })
-            .rect(0, 0, sz, sz, th.badgeBg, { id: 'badge_plate' })
+            .rect('badge_plate', 0, 0, sz, sz, th.badgeBg)
             .boxes([
-                [sz + 1, 5, 6, 6, th.mC, { stepHz: 9, seed: 13, jitterX: 2, jitterY: 2, jitterW: 1 }, 'badge_aura_r'],
-                [-6, sz - 13, 5, 8, th.mC, { stepHz: 9, seed: 23, jitterX: 1, jitterY: 2 }, 'badge_aura_l'],
-                [sz + 1, sz - 7, 5, 5, th.mB, null, 'badge_aura_br']
+                ['badge_aura_r',  sz + 1, 5,       6, 6, th.mC, { stepHz: 9, seed: 13, jitterX: 2, jitterY: 2, jitterW: 1 }],
+                ['badge_aura_l',  -6,     sz - 13, 5, 8, th.mC, { stepHz: 9, seed: 23, jitterX: 1, jitterY: 2 }],
+                ['badge_aura_br', sz + 1, sz - 7,  5, 5, th.mB]
             ])
-            .outline(0, 0, sz, sz, th.pure, 1, { id: 'badge_outer' })
+            .outline('badge_outer', 0, 0, sz, sz, th.pure, 1)
             .corners(0, 0, sz, sz, 5, 2, th.warn, 'tl,br')
-            .outline(10, 10, sz - 20, sz - 20, th.accent, 1, { id: 'badge_inner', bind: coreBind })
-            .rect(hc, hc, 11, 11, th.mid, { id: 'badge_rot_sq', anchor: 'center', bind: rotBind })
-            .rect(hc, hc, 7, 7, th.pure, { id: 'badge_rot_dia', anchor: 'center', angle: 45, bind: rotBind })
-            .text(-1, -10, '$badgeCode', 0.80, th.accent, { id: 'badge_tag' })
+            .outline('badge_inner', 10, 10, sz - 20, sz - 20, th.accent, 1, { bind: coreBind })
+            .rect('badge_rot_sq',  hc, hc, 11, 11, th.mid,  { anchor: 'center', bind: rotBind })
+            .rect('badge_rot_dia', hc, hc, 7,  7,  th.pure, { anchor: 'center', angle: 45, bind: rotBind })
+            .text('badge_tag', -1, -10, '$badgeCode', 0.80, th.accent)
             .boxes([
-                [11, -10, 11, 8, th.pure, { stepHz: 9, seed: 41, jitterX: 7, jitterW: 3 }, 'badge_mask'],
-                [22, -10, 6, 8, th.mB, { stepHz: 9, seed: 41, jitterX: 7 }, 'badge_mask_tr']
+                ['badge_mask',    11, -10, 11, 8, th.pure, { stepHz: 9, seed: 41, jitterX: 7, jitterW: 3 }],
+                ['badge_mask_tr', 22, -10, 6,  8, th.mB,   { stepHz: 9, seed: 41, jitterX: 7 }]
             ])
-            .text(0, sz + 4, 'ID//0x4F', 0.74, 0x99FFFFFF, { id: 'badge_idx' })
+            .text('badge_idx', 0, sz + 4, 'ID//0x4F', 0.74, 0x99FFFFFF)
             .build()
     })
 
@@ -924,126 +926,152 @@
         var w4      = barW - w1 - w2 - w3 + 10
         var impBind = { seed: 5, impulseVar: 'impulse', shakeX: 1.4 }
 
-        var nodes = h.ui()
+        // 以进度条左上角 (bx, by) 为局部原点 (0, 0)，彻底消除坐标表达式中的重复 bx+/by+ 噪音
+        var nodes = h.ui({ ox: bx, oy: by })
             // 1. 左侧同心双框旋转准星徽章（自定义复合单元）
-            .widget('v18_reticle_badge', { x: bx - 57, y: by - 12, size: 42, theme: th })
+            .widget('v18_reticle_badge', { x: -57, y: -12, size: 42, theme: th })
             // 2. 四段严丝合缝零重叠阶梯切角玻璃底衬 + 顶栏铭牌/状态灯 + 舱壁与下沿阶梯底轨（连续 solid/outline 便于客户端合批）
-            .steppedPlate(bx - 6, th.plateBg, [
-                [w1 + 6, by - 20, by + barH + 26],
-                [w2,     by - 18, by + barH + 27],
-                [w3,     by - 13, by + barH + 26],
-                [w4,     by - 9,  by + barH + 24]
-            ], ['panel_bg_l', 'panel_bg_m', 'panel_bg_m2', 'panel_bg_r'])
-            .boxes([
-                [bx - 5, by - 4, 1.5, barH + 10, th.accent, null, 'bulkhead_v'],
-                [bx - 5, by - 4, 22, 1.5, th.accent, null, 'bulkhead_cap'],
-                [bx, by - 18.5, 69, 11, th.warn, null, 'ef_tag_plate'],
-                [bx + 73, by - 15.5, 3.5, 6, th.accent, null, 'ef_pip_1'],
-                [bx + 79, by - 15.5, 3.5, 6, th.warn, { stepHz: 4, seed: 19, jitterH: 1.5 }, 'ef_pip_2'],
-                [bx + 85, by - 15.5, 3.5, 6, 0x44FFFFFF, null, 'ef_pip_3']
+            .steppedPlate(-6, th.plateBg, [
+                ['panel_bg_l',  w1 + 6, -20, barH + 26],
+                ['panel_bg_m',  w2,     -18, barH + 27],
+                ['panel_bg_m2', w3,     -13, barH + 26],
+                ['panel_bg_r',  w4,     -9,  barH + 24]
             ])
-            .steppedLine(bx - 5, by + barH + 3, [
-                [s1 + 5, 0, 0x6BFFFFFF, 1.2],
-                [s2 - s1, 4, th.accent, 1.2],
-                [barW - s2 + 16, 0, th.mB, 1.5]
+            .boxes([
+                ['bulkhead_v',   -5, -4,    1.5, barH + 10, th.accent],
+                ['bulkhead_cap', -5, -4,    22,  1.5,       th.accent],
+                ['ef_tag_plate',  0, -18.5, 69,  11,        th.warn],
+                ['ef_pip_1',     73, -15.5, 3.5, 6,         th.accent],
+                ['ef_pip_2',     79, -15.5, 3.5, 6,         th.warn,    { stepHz: 4, seed: 19, jitterH: 1.5 }],
+                ['ef_pip_3',     85, -15.5, 3.5, 6,         0x44FFFFFF]
+            ])
+            .steppedLine(-5, barH + 3, [
+                [s1 + 5,         0, 0x6BFFFFFF, 1.2],
+                [s2 - s1,        4, th.accent,  1.2],
+                [barW - s2 + 16, 0, th.mB,      1.5]
             ])
             // 3. 三层立体景深下方流动数据波纹场 + 上沿 13 段细锐悬空阶梯框
-            .parallax(bx, by + barH + 9, barW, 16, [
+            .parallax('under_ripples', 0, barH + 9, barW, 16, [
                 { kind: 'ripples',   rows: 3, rowGap: 5.0, offsetY: 1.5, segments: 7, baseLen: 38, ampLen: 22, speedX: 11,  thickness: 0.75, seed: 7,   color: 0x3826A69A, altColor: 0x2626A69A, alpha: 0.90 },
                 { kind: 'ripples',   rows: 4, rowGap: 3.6, offsetY: 0.5, segments: 6, baseLen: 22, ampLen: 14, speedX: -27, thickness: 1.0,  seed: 43,  color: th.mB,      altColor: th.mC,      alpha: 0.95 },
                 { kind: 'particles', count: 22, speedX: 52,  speedY: 0, minW: 1.5, maxW: 6.0, thickness: 1.0, seed: 89,  color: th.accent, altColor: th.pure, alpha: 0.88 },
                 { kind: 'particles', count: 14, speedX: -38, speedY: 0, minW: 1.0, maxW: 3.0, thickness: 0.9, seed: 131, color: th.warn,   altColor: th.pure, alpha: 0.72 }
-            ], { id: 'under_ripples' })
-            .parallax(bx, by - 6, barW, 4.5, [
+            ])
+            .parallax('frame_top_steps', 0, -6, barW, 4.5, [
                 { kind: 'steps', count: 13, stepHz: 9, risers: true, thickness: 1.2, color: th.accent, altColor: th.mB, alpha: 0.92 }
-            ], { id: 'frame_top_steps' })
+            ])
             // 4. 进度槽核心 + 5 层视差内胆 + 刻度细线 + 副轨 + 右端 T-Pin 吊线
-            .rect(bx, by, barW, barH, 0xEA04070B, { id: 'bar_bg', bind: impBind })
-            .rect(bx, by + 1, barW, barH - 2, th.trail, { id: 'bar_trail', clip: { dir: 'left', ratio: '$progressTrail', mode: 'local' } })
-            .parallax(bx, by + 1, barW, barH - 2, [
+            .rect('bar_bg',    0, 0, barW, barH,     0xEA04070B, { bind: impBind })
+            .rect('bar_trail', 0, 1, barW, barH - 2, th.trail,   { clip: { dir: 'left', ratio: '$progressTrail', mode: 'local' } })
+            .parallax('bar_main', 0, 1, barW, barH - 2, [
                 { kind: 'gradient',  from: th.from, mid: th.mid, to: th.to, midPos: 0.62, alpha: 1.0 },
                 { kind: 'stripes',   step: 18, width: 7, skew: 7, speedX: 20, color: 0x3D000000, alpha: 0.95 },
                 { kind: 'ripples',   rows: 4, rowGap: 3.4, offsetY: 1.2, segments: 7, baseLen: 26, ampLen: 14, speedX: 34, thickness: 1.1, seed: 23, color: 0x52FFFFFF, altColor: 0x2BFFFFFF, alpha: 0.95 },
                 { kind: 'particles', count: 24, speedX: 15,  speedY: 0, minW: 1,   maxW: 2, thickness: 1.3, color: 0x7AFFFFFF, seed: 11, alpha: 0.85 },
                 { kind: 'particles', count: 20, speedX: -44, speedY: 0, minW: 1.5, maxW: 5, thickness: 1.2, color: th.pure, altColor: th.accent, seed: 31, alpha: 0.92 }
-            ], { id: 'bar_main', clip: { dir: 'left', ratio: '$progress', mode: 'local' }, bind: impBind, bloomWidth: 24, bloomColor: 0xE0FFFFFF })
-            .ticks(bx, by - 2, barW, barH + 8, [0.25, 0.50, 0.75], 0x38FFFFFF, 1, 'ms')
-            .rect(bx, by + barH + 1, barW, 1.5, th.warn, { id: 'bar_sub_rail', clip: { dir: 'left', ratio: '$subProgress', mode: 'local' } })
-            .widget('v18_t_pin', { x: bx + barW + 17.25, y: by + 1, boxSize: 8.5, stemLen: 34, stemX: -0.25, color: th.accent, idPrefix: 'right_pin' })
+            ], { clip: { dir: 'left', ratio: '$progress', mode: 'local' }, bind: impBind, bloomWidth: 24, bloomColor: 0xE0FFFFFF })
+            .ticks(0, -2, barW, barH + 8, [0.25, 0.50, 0.75], 0x38FFFFFF, 1, 'ms')
+            .rect('bar_sub_rail', 0, barH + 1, barW, 1.5, th.warn, { clip: { dir: 'left', ratio: '$subProgress', mode: 'local' } })
+            .widget('v18_t_pin', { x: barW + 17.25, y: 1, boxSize: 8.5, stemLen: 34, stemX: -0.25, color: th.accent, idPrefix: 'right_pin' })
             // 5. 推进前缘动态跟随组（搁浅 T-Pin + 5 块 9Hz 体素簇 + 悬浮百分比）
-            .group(bx, by, { id: 'cursor_group', bind: { x: { var: 'progress', mult: barW }, seed: 5, impulseVar: 'impulse', shakeX: 1.4 } }, function (g) {
+            .group('cursor_group', 0, 0, { bind: { x: { var: 'progress', mult: barW }, seed: 5, impulseVar: 'impulse', shakeX: 1.4 } }, function (g) {
                 g.widget('v18_t_pin', { x: 0, y: -12, boxSize: 7, stemLen: barH + 26, color: th.pure, idPrefix: 'cur_pin' })
                     .boxes([
-                        [-6, -4, 8, 4.5, th.mA, { stepHz: 9, seed: 7, jitterX: 2, jitterW: 2 }, 'cur_vox_hi'],
-                        [2, 2, 9, 5.5, th.mB, { stepHz: 9, seed: 13, jitterX: 2, jitterW: 2 }, 'cur_vox_mid'],
-                        [-11, barH - 3, 10, 4.5, th.mB, { stepHz: 9, seed: 19, jitterX: 2, jitterW: 2 }, 'cur_vox_lo'],
-                        [3, barH - 5, 7, 6.5, th.mC, { stepHz: 9, seed: 29, jitterX: 1, jitterW: 2 }, 'cur_vox_lo2'],
-                        [10, 5, 5, 4.5, th.mA, { stepHz: 9, seed: 37, jitterX: 1 }, 'cur_vox_tr']
+                        ['cur_vox_hi',  -6,  -4,       8,  4.5, th.mA, { stepHz: 9, seed: 7,  jitterX: 2, jitterW: 2 }],
+                        ['cur_vox_mid',  2,   2,       9,  5.5, th.mB, { stepHz: 9, seed: 13, jitterX: 2, jitterW: 2 }],
+                        ['cur_vox_lo',  -11, barH - 3, 10, 4.5, th.mB, { stepHz: 9, seed: 19, jitterX: 2, jitterW: 2 }],
+                        ['cur_vox_lo2',  3,  barH - 5, 7,  6.5, th.mC, { stepHz: 9, seed: 29, jitterX: 1, jitterW: 2 }],
+                        ['cur_vox_tr',   10,  5,       5,  4.5, th.mA, { stepHz: 9, seed: 37, jitterX: 1 }]
                     ])
-                    .text(4, barH + 12, '$pctText', 0.80, th.pure, { id: 'cur_pct_flag' })
+                    .text('cur_pct_flag', 4, barH + 12, '$pctText', 0.80, th.pure)
             })
             // 6. 所有非遮挡文字集中放在末端，最大化减少渲染器 graphics.flush() 次数
-            .text(bx + 4,         by - 16.5,      '$efTag',     0.85, 0x090C10,   { id: 'ef_tag_text', shadow: false })
-            .text(bx + 93,        by - 17,        '$title',     0.96, th.pure,    { id: 'title' })
-            .text(bx + barW + 25, by - 6,         '$unitLabel', 0.72, 0xAAFFFFFF, { id: 'right_unit' })
-            .text(bx + barW + 25, by + 2,         '$rightVal',  1.24, th.pure,    { id: 'right_readout' })
-            .text(bx + barW + 25, by + 15,        '$rightSub',  0.90, th.warn,    { id: 'right_sub' })
-            .text(bx,             by + barH + 28, '$sub',       0.88, 0xD4FFFFFF, { id: 'sub' })
-            .text(bx + barW,      by + barH + 28, '$footRight', 0.88, th.accent,  { id: 'footer_right', anchor: 'top_right' })
+            .texts([
+                ['ef_tag_text',   4,    -16.5,     '$efTag',     0.85, 0x090C10,   { shadow: false }],
+                ['title',         93,   -17,       '$title',     0.96, th.pure],
+                ['sub',           0,    barH + 28, '$sub',       0.88, 0xD4FFFFFF],
+                ['footer_right',  barW, barH + 28, '$footRight', 0.88, th.accent,  { anchor: 'top_right' }]
+            ])
+            .region(barW + 25, 0, function (r) {
+                r.texts([
+                    ['right_unit',    0, -6, '$unitLabel', 0.72, 0xAAFFFFFF],
+                    ['right_readout', 0,  2, '$rightVal',  1.24, th.pure],
+                    ['right_sub',     0, 15, '$rightSub',  0.90, th.warn]
+                ])
+            })
             .build()
 
-        return h.buildProgressPanel({
-            group:       c.group || TELEMETRY_GROUP,
-            namespace:   c.namespace || DANMAKU_NAMESPACE,
-            id:          c.id,
-            lifeMode:    c.lifeMode || 'active',
-            activeHold:  c.activeHold != null ? c.activeHold : 22,
-            priority:    c.priority || 'active',
-            pos:         c.pos || [0.27, 0.14],
-            size:        c.size != null ? c.size : 0.56,
-            tilt:        c.tilt != null ? c.tilt : 0,
-            shakeMode:   c.shakeMode || 'none',
-            shakeAmp:    c.shakeAmp != null ? c.shakeAmp : 0.0,
-            fadeStyle:   c.fadeStyle || 'char_last',
-            fadeOut:     c.fadeOut != null ? c.fadeOut : 14,
-            progress:    vars.progress,
-            subProgress: vars.subProgress,
-            barWidth:    barW,
-            barHeight:   barH,
-            text:        vars.title,
-            sub:         vars.sub,
-            nodes:       nodes,
-            vars:        vars,
-            tracks:      c.tracks || {
-                impulse: { mode: 'impulse', onChange: '$impulseEvent', peak: 1.0, initPeak: c.initPeak !== undefined ? c.initPeak : 0.90, decayMs: 420 }
-            }
-        })
+        return {
+            surface:   'screen',
+            namespace: c.namespace || DANMAKU_NAMESPACE,
+            group:     c.group || TELEMETRY_GROUP,
+            id:        c.id,
+            text:      vars.title,
+            sub:       vars.sub,
+            layout: {
+                pos:   c.pos || [0.27, 0.14],
+                scale: c.size != null ? c.size : 0.56,
+                tilt:  c.tilt != null ? c.tilt : 0
+            },
+            life: {
+                mode:     c.lifeMode || 'active',
+                priority: c.priority || 'active',
+                hold:     c.activeHold != null ? c.activeHold : 22,
+                fade:     c.fadeStyle || 'char_last',
+                fadeOut:  c.fadeOut != null ? c.fadeOut : 14
+            },
+            motion: {
+                shake: c.shakeMode || 'none',
+                amp:   c.shakeAmp != null ? c.shakeAmp : 0.0
+            },
+            data:   vars,
+            nodes:  nodes,
+            tracks: h.progressTracks(c.tracks || {
+                impulse: {
+                    onChange: '$impulseEvent',
+                    initPeak: c.initPeak !== undefined ? c.initPeak : 0.90,
+                    decayMs:  420
+                }
+            })
+        }
     })
 
-    // 遥测 HUD 智能推送：首次/阶段或主题切换/每 48 tick 推送全量预设包，其余同阶段刷新发送极简 action:'patch'
-    function emitTelemetryHud(job, radius, slotId, stageKey, fullCfg) {
-        var curTick  = (job && typeof job.t === 'number') ? job.t : tickCounter
-        var needFull = !job || job._tlmSlotId !== slotId || job._tlmStageKey !== stageKey ||
-            job._tlmLastFullTick == null || (curTick - job._tlmLastFullTick) >= 48
-        if (needFull) {
-            if (job) {
-                job._tlmSlotId       = slotId
-                job._tlmStageKey     = stageKey
-                job._tlmLastFullTick = curTick
+    var DANMAKU_NAMESPACE = 'uncrafting_chaos'
+    var DANMAKU_GROUP     = 'uncrafting_chaos'
+    var TELEMETRY_GROUP   = 'uncrafting_telemetry'
+
+    // 绑定命名空间、默认分组与 HUD 禁区防线的作用域通道（消除手动透传 namespace/group 与 _tlm* 状态字段）
+    var HUD_CH = DANMAKU.channel({
+        namespace:   DANMAKU_NAMESPACE,
+        group:       DANMAKU_GROUP,
+        resyncTicks: 48,
+        beforeSend: function (pktOpts) {
+            if (Array.isArray(pktOpts.pos) && pktOpts.pos.length >= 2 && isInHudForbiddenZone(pktOpts.pos[0], pktOpts.pos[1])) {
+                pktOpts.pos = [pktOpts.pos[0], 0.43 + Math.random() * 0.35]
             }
-            fullCfg.preset = 'v18_telemetry'
-            fullCfg.group  = TELEMETRY_GROUP
-            fullCfg.id     = slotId
-            sendDanmakuNear(job.level, job.x, job.y, job.z, radius, fullCfg)
-            return
+            return pktOpts
         }
-        DANMAKU.patchNear(job.level, job.x, job.y, job.z, radius, {
-            namespace:  DANMAKU_NAMESPACE,
-            group:      TELEMETRY_GROUP,
-            id:         slotId,
-            activeHold: fullCfg.activeHold != null ? fullCfg.activeHold : 22,
-            vars:       buildTelemetryVars(fullCfg, false)
+    })
+
+    // 遥测 HUD 智能推送：委托给 HUD_CH.slot 自动管理首次/切阶段/每 48 tick 全量与同阶段 action:'patch' 增量更新
+    function emitTelemetryHud(job, radius, slotId, stageKey, fullCfg) {
+        if (job && (job._tlmSlot == null || job._tlmSlot.id !== slotId)) {
+            job._tlmSlot = HUD_CH.slot(slotId, {
+                preset:         'v18_telemetry',
+                group:          TELEMETRY_GROUP,
+                resyncTicks:    48,
+                buildPatchVars: function (cfg) { return buildTelemetryVars(cfg, false) }
+            })
+        }
+        var slot = (job && job._tlmSlot) ? job._tlmSlot : HUD_CH.slot(slotId, {
+            preset:         'v18_telemetry',
+            group:          TELEMETRY_GROUP,
+            resyncTicks:    48,
+            buildPatchVars: function (cfg) { return buildTelemetryVars(cfg, false) }
         })
+        fullCfg.variant = stageKey
+        fullCfg.tick    = (job && typeof job.t === 'number') ? job.t : tickCounter
+        slot.syncNear(job.level, job.x, job.y, job.z, radius, fullCfg)
     }
 
     // ------------------------------------------------------------------------
@@ -1738,9 +1766,6 @@
     }
 
     // 统一挂载到新版 global.ScreenDanmaku v5（支持独立 namespace 隔离、持续激活 HUD 遥测面板、逐字碎片崩解与优先级保护）
-    var DANMAKU_NAMESPACE = 'uncrafting_chaos'
-    var DANMAKU_GROUP     = 'uncrafting_chaos'
-    var TELEMETRY_GROUP   = 'uncrafting_telemetry'
     var spreadCellCursor  = 0
 
     // HUD 禁区检测：仅避让右上角小地图（rx > 0.68 且 ry < 0.36）与底部玩家快捷栏/生命饥饿盔甲栏（rx 在 0.25~0.75 且 ry > 0.80），其余全屏区域完全开放！
@@ -1791,31 +1816,15 @@
     }
 
     function sendDanmakuNear(level, x, y, z, radius, opts) {
-        var pktOpts = Object.assign({}, opts || {})
-        if (!pktOpts.namespace) pktOpts.namespace = DANMAKU_NAMESPACE
-        if (!pktOpts.group) pktOpts.group = DANMAKU_GROUP
-        // 全局防线：若显式传入的坐标意外落入 HUD 禁区（小地图/底部快捷栏），自动移至安全区
-        if (Array.isArray(pktOpts.pos) && pktOpts.pos.length >= 2 && isInHudForbiddenZone(pktOpts.pos[0], pktOpts.pos[1])) {
-            pktOpts.pos = [pktOpts.pos[0], 0.43 + Math.random() * 0.35]
-        }
-        DANMAKU.inDimension(level, x, y, z, radius, pktOpts)
+        HUD_CH.pushNear(level, x, y, z, radius, opts)
     }
 
     function deactivateTelemetryNear(level, x, y, z, radius, slotId, fadeOutTicks) {
-        DANMAKU.deactivateNear(level, x, y, z, radius, {
-            namespace: DANMAKU_NAMESPACE,
-            group:     TELEMETRY_GROUP,
-            id:        slotId || '',
-            fadeOut:   fadeOutTicks || 16
-        })
+        HUD_CH.deactivateNear(level, x, y, z, radius, slotId, fadeOutTicks, TELEMETRY_GROUP)
     }
 
     function clearDanmakuNear(level, x, y, z, radius, maxPriority) {
-        DANMAKU.clearNear(level, x, y, z, radius, {
-            namespace:   DANMAKU_NAMESPACE,
-            group:       '*',
-            maxPriority: maxPriority != null ? maxPriority : 10
-        })
+        HUD_CH.clearNear(level, x, y, z, radius, maxPriority)
     }
 
     function triggerRapidFinalErrorStream(job, remainTicks) {

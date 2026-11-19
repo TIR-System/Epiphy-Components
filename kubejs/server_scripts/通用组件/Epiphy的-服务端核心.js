@@ -1,6 +1,6 @@
 // priority: 1080
 // ============================================================================
-// Epiphy 服务端核心与世界工具 (EpiphyServerCore / EpiphyServerBase v2.5)
+// Epiphy 服务端核心与世界工具 (EpiphyServerCore / EpiphyServerBase v2.6)
 //   许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //   放置位置：kubejs/server_scripts/通用组件/Epiphy的-服务端核心.js
 //   所属阶段：server_scripts
@@ -1622,6 +1622,69 @@
         return false;
     }
 
+    // 统一状态化 JSON 持久化门面：收口 readJsonDetailed / writeJsonAtomic 的参数顺序、
+    // .bak 恢复、缺省默认值与损坏防覆写锁（lockOnCorrupt）
+    function openJsonStore(filePath, opts) {
+        var cfg           = isObjectLike(opts) ? opts : {};
+        var normPath      = filePath ? normalizeSlashPath(filePath) : '';
+        var effLogger     = cfg.logger || baseLogger;
+        var keepBackup    = cfg.backup !== false;
+        var lockOnCorrupt = cfg.lockOnCorrupt !== false;
+        var defaultData   = cfg.defaultData;
+        var corruptLocked = false;
+
+        return {
+            path: normPath,
+            load: function (loadOpts) {
+                if (!normPath) {
+                    return { ok: false, status: 'missing', data: null, fromBackup: false, error: null };
+                }
+                var lCfg = isObjectLike(loadOpts) ? loadOpts : {};
+                var allowBak = (lCfg.backup !== undefined) ? lCfg.backup : keepBackup;
+                var res = readJsonDetailed(normPath, effLogger, allowBak);
+                if (res.status === 'ok') {
+                    corruptLocked = false;
+                    return { ok: true, status: 'ok', data: res.data, fromBackup: Boolean(res.fromBackup), error: null };
+                }
+                if (res.status === 'corrupt') {
+                    if (lockOnCorrupt) corruptLocked = true;
+                    return { ok: false, status: 'corrupt', data: null, fromBackup: false, error: res.error };
+                }
+                corruptLocked = false;
+                var defVal = (typeof defaultData === 'function') ? defaultData() : defaultData;
+                return {
+                    ok:         false,
+                    status:     'missing',
+                    data:       defVal !== undefined ? defVal : null,
+                    fromBackup: false,
+                    error:      null
+                };
+            },
+            save: function (data, saveOpts) {
+                if (!normPath) return false;
+                var sCfg  = isObjectLike(saveOpts) ? saveOpts : {};
+                var force = sCfg.force === true;
+                if (corruptLocked && !force) {
+                    effLogger.warn(
+                        'jsonStore:corruptLocked:' + normPath,
+                        '持久化文件处于损坏保护锁状态，已拒绝覆盖写盘 (' + normPath + ')；如需强制覆盖请传 { force: true }'
+                    );
+                    return false;
+                }
+                var useBak = (sCfg.backup !== undefined) ? sCfg.backup : keepBackup;
+                var ok = writeJsonAtomic(normPath, data, useBak, effLogger);
+                if (ok) corruptLocked = false;
+                return ok;
+            },
+            isCorrupt: function () {
+                return corruptLocked;
+            },
+            unlock: function () {
+                corruptLocked = false;
+            }
+        };
+    }
+
     function readWorldNameFromServer(srv) {
         var worldName = 'world';
         if (srv != null) {
@@ -2806,6 +2869,7 @@
             readJsonSafe:                 readJsonSafe,
             canWritePersistentFiles:      canWritePersistentFiles,
             writeJsonAtomic:              writeJsonAtomic,
+            openJsonStore:                openJsonStore,
             resolveEpiphyWorldContext:    resolveEpiphyWorldContext,
             clearEpiphyWorldContextCache: clearEpiphyWorldContextCache,
             consumePendingWorldForkNotices: consumePendingWorldForkNotices,

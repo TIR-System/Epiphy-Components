@@ -435,13 +435,12 @@
     var readMapField = BASE.readMapField
 
     function readJsonFileDetailed(filePath) {
-        if (!filePath) return { status: 'missing', data: null }
-        return BASE.readJsonDetailed(filePath, LOGGER, true)
+        return BASE.openJsonStore(filePath, { logger: LOGGER, backup: true, lockOnCorrupt: false }).load()
     }
 
     function readJsonFile(filePath) {
         var res = readJsonFileDetailed(filePath)
-        return res.status === 'ok' ? res.data : null
+        return res.ok ? res.data : null
     }
 
     function canPersistValveFiles(entry) {
@@ -449,8 +448,7 @@
     }
 
     function writeJsonFile(filePath, payload) {
-        if (!filePath) return false
-        return BASE.writeJsonAtomic(filePath, payload, true, LOGGER)
+        return BASE.openJsonStore(filePath, { logger: LOGGER, backup: true, lockOnCorrupt: false }).save(payload)
     }
 
     function isUuidKeyFormat(keyStr) {
