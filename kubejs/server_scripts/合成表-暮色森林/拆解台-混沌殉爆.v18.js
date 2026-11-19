@@ -437,10 +437,20 @@
     var internalReplace    = {}  // 标记脚本自身正在替换阶段方块，避免误判为外部破坏
     var tickCounter        = 0
     var SERVER             = null
-    var unstableStoreLoaded = false
-    var unstableStoreDirty  = false
+    var unstableStoreLoaded  = false
+    var unstableStoreDirty   = false
     var lastUnstableSaveTick = -9999
-    var uncraftingTracker   = null
+    var unstableJsonStore    = null
+    var uncraftingTracker    = null
+
+    function ensureUnstableJsonStore(filePath) {
+        var normTarget = filePath ? String(filePath).replace(/\\/g, '/') : ''
+        if (unstableJsonStore != null && unstableJsonStore.path === normTarget) {
+            return unstableJsonStore
+        }
+        unstableJsonStore = BASE.openJsonStore(normTarget, { logger: LOGGER, backup: true, lockOnCorrupt: true })
+        return unstableJsonStore
+    }
 
     var resolveLevelByDim = (dim, fallbackLevel) => (fallbackLevel != null) ? fallbackLevel : BASE.resolveLevel(dim, SERVER)
 
@@ -468,10 +478,10 @@
                 })
             }
             var payload = { version: 2, jobs: records }
-            var store  = BASE.openJsonStore(info.filePath, { logger: LOGGER, backup: true, lockOnCorrupt: false })
-            var okDisk = store.save(payload)
+            var store   = ensureUnstableJsonStore(info.filePath)
+            var okDisk  = store.save(payload, { force: records.length > 0 })
             if (!okDisk) {
-                LOGGER.warn('saveUnstableJobs', '外部 JSON 落盘失败，暂依赖 persistentData 持久化: ' + info.filePath)
+                LOGGER.warn('saveUnstableJobs', '外部 JSON 落盘失败或处于损坏保护锁，暂依赖 persistentData 持久化: ' + info.filePath)
             }
             if (SERVER.persistentData != null && typeof SERVER.persistentData.putString === 'function') {
                 SERVER.persistentData.putString(UNSTABLE_PDATA_KEY, JSON.stringify(payload))
@@ -485,7 +495,8 @@
         if (unstableStoreLoaded || SERVER == null) return
         unstableStoreLoaded = true
         try {
-            var info = BASE.resolveWorldStorageInfo(SERVER, UNSTABLE_STORE_FILE, UNSTABLE_STORE_DIR)
+            var info  = BASE.resolveWorldStorageInfo(SERVER, UNSTABLE_STORE_FILE, UNSTABLE_STORE_DIR)
+            var store = ensureUnstableJsonStore(info.filePath)
             // 优先读取随 level.dat 同步保存的 persistentData，确保崩溃/回档后与区块存档时间戳一致；外部 JSON 仅作跨存储兜底
             var data = null
             if (SERVER.persistentData != null && typeof SERVER.persistentData.getString === 'function') {
@@ -495,7 +506,7 @@
                 }
             }
             if (data == null) {
-                var loadRes = BASE.openJsonStore(info.filePath, { logger: LOGGER, backup: true, lockOnCorrupt: false }).load()
+                var loadRes = store.load()
                 if (loadRes.ok) data = loadRes.data
             }
             var list = (data != null && Array.isArray(data.jobs)) ? data.jobs : []
@@ -1048,6 +1059,13 @@
         beforeSend: function (pktOpts) {
             if (Array.isArray(pktOpts.pos) && pktOpts.pos.length >= 2 && isInHudForbiddenZone(pktOpts.pos[0], pktOpts.pos[1])) {
                 pktOpts.pos = [pktOpts.pos[0], 0.43 + Math.random() * 0.35]
+            } else if (pktOpts.layout != null && typeof pktOpts.layout === 'object' && Array.isArray(pktOpts.layout.pos) && pktOpts.layout.pos.length >= 2 && isInHudForbiddenZone(pktOpts.layout.pos[0], pktOpts.layout.pos[1])) {
+                var layoutCopy = {}
+                for (var lk in pktOpts.layout) {
+                    if (Object.prototype.hasOwnProperty.call(pktOpts.layout, lk)) layoutCopy[lk] = pktOpts.layout[lk]
+                }
+                layoutCopy.pos = [pktOpts.layout.pos[0], 0.43 + Math.random() * 0.35]
+                pktOpts.layout = layoutCopy
             }
             return pktOpts
         }
@@ -2835,6 +2853,7 @@
                 internalReplace      = {}
                 unstableStoreLoaded  = false
                 unstableStoreDirty   = false
+                unstableJsonStore    = null
                 SERVER               = null
             })
         }

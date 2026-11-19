@@ -434,21 +434,14 @@
 
     var readMapField = BASE.readMapField
 
-    function readJsonFileDetailed(filePath) {
-        return BASE.openJsonStore(filePath, { logger: LOGGER, backup: true, lockOnCorrupt: false }).load()
-    }
-
-    function readJsonFile(filePath) {
-        var res = readJsonFileDetailed(filePath)
-        return res.ok ? res.data : null
+    function readLegacyJsonFile(filePath) {
+        if (!filePath) return null
+        var res = BASE.readJsonDetailed(filePath, LOGGER, true)
+        return (res && res.status === 'ok') ? res.data : null
     }
 
     function canPersistValveFiles(entry) {
         return Boolean(entry && entry.filePath && BASE.canWritePersistentFiles())
-    }
-
-    function writeJsonFile(filePath, payload) {
-        return BASE.openJsonStore(filePath, { logger: LOGGER, backup: true, lockOnCorrupt: false }).save(payload)
     }
 
     function isUuidKeyFormat(keyStr) {
@@ -771,32 +764,40 @@
             return entry
         }
 
-        // 1. 先加载外置撤销墓碑 (revocations.json) —— 绝不随 saves/ 回滚而消失
-        var revocations        = {}
-        var revocationsCorrupt = false
-        if (info.revocationsFile) {
-            var revRes = readJsonFileDetailed(info.revocationsFile)
+        // 1. 先加载外置撤销墓碑 (revocations.json) —— 绝不随 saves/ 回滚而消失（持有状态化 store，损坏自动挂锁防覆写）
+        var revocations      = {}
+        var revocationsStore = info.revocationsFile
+            ? BASE.openJsonStore(info.revocationsFile, { logger: LOGGER, backup: true, lockOnCorrupt: true })
+            : null
+        if (revocationsStore != null) {
+            var revRes = revocationsStore.load()
             if (revRes.status === 'ok' && revRes.data != null) {
                 revocations = parseRevocationsMap(revRes.data)
             } else if (revRes.status === 'corrupt') {
-                revocationsCorrupt = true
                 logError('getOrLoadWorldGrants', '撤销墓碑文件损坏且无可用备份 (' + info.revocationsFile + ')，已禁止旧档导入以防已撤销权限复活。')
             }
         }
+        var revocationsCorrupt = Boolean(revocationsStore && revocationsStore.isCorrupt())
 
-        // 2. 加载世界按名授权模式开关 (auth_mode.json, Fail-Closed 默认 false；仅当文件确实缺失时初始化落盘，损坏时不盲目覆写)
-        var modeRes = info.authModeFile ? readJsonFileDetailed(info.authModeFile) : { status: 'missing', data: null }
+        // 2. 加载世界按名授权模式开关 (auth_mode.json, Fail-Closed 默认 false；仅当文件确实缺失时初始化落盘，损坏时由 store 自动锁保护)
+        var authModeStore = info.authModeFile
+            ? BASE.openJsonStore(info.authModeFile, { logger: LOGGER, backup: true, lockOnCorrupt: true })
+            : null
+        var modeRes  = authModeStore != null ? authModeStore.load() : { status: 'missing', data: null }
         var authMode = parseAuthModeFile(modeRes.status === 'ok' ? modeRes.data : null)
-        if (modeRes.status === 'missing' && !authMode.exists && info.authModeFile) {
-            writeJsonFile(info.authModeFile, buildDefaultAuthModePayload(false, 'SYSTEM', authMode.updatedAt))
+        if (modeRes.status === 'missing' && !authMode.exists && authModeStore != null) {
+            authModeStore.save(buildDefaultAuthModePayload(false, 'SYSTEM', authMode.updatedAt))
         } else if (modeRes.status === 'corrupt') {
             logWarn('getOrLoadWorldGrants', 'auth_mode.json 损坏 (' + info.authModeFile + ')，已按 Fail-Closed 维持严格 UUID 模式且不覆盖原损坏文件。')
         }
 
         // 3. 加载主授权表 (permissions.json)；仅当主文件确属首次缺失 (missing) 且墓碑未损坏时才执行旧位置一次性迁移
         var grants       = {}
-        var mainRes      = info.filePath ? readJsonFileDetailed(info.filePath) : { status: 'missing', data: null }
-        var mainCorrupt  = (mainRes.status === 'corrupt')
+        var grantsStore  = info.filePath
+            ? BASE.openJsonStore(info.filePath, { logger: LOGGER, backup: true, lockOnCorrupt: true })
+            : null
+        var mainRes      = grantsStore != null ? grantsStore.load() : { status: 'missing', data: null }
+        var mainCorrupt  = Boolean(grantsStore && grantsStore.isCorrupt())
         var needSaveMain = false
         if (mainRes.status === 'ok' && mainRes.data != null) {
             parseUsersMapInto(readMapField(mainRes.data, 'users'), grants)
@@ -807,7 +808,7 @@
             // 一旦命中优先级更高、按世界精准隔离的旧文件，必须立即 break，绝不继续合并后续旧共享目录文件，防止跨同名存档权限污染或覆盖已变更状态。
             for (var lf = 0; lf < info.legacyFiles.length; lf++) {
                 var legPath = info.legacyFiles[lf]
-                var legRaw = readJsonFile(legPath)
+                var legRaw = readLegacyJsonFile(legPath)
                 if (legRaw != null) {
                     var legUsers = readMapField(legRaw, 'users')
                     if (legUsers != null) {
@@ -828,36 +829,34 @@
         }
 
         entry = {
-            worldKey:           info.worldKey,
-            worldId:            info.worldId || info.worldKey,
-            filePath:           info.filePath,
-            revocationsFile:    info.revocationsFile || '',
-            authModeFile:       info.authModeFile || '',
-            ctxInfo:            info,
-            loaded:             true,
-            grantsCorrupt:      mainCorrupt,
-            revocationsCorrupt: revocationsCorrupt,
-            grants:             grants,
-            revocations:        revocations,
-            authMode:           authMode
+            worldKey:         info.worldKey,
+            worldId:          info.worldId || info.worldKey,
+            filePath:         info.filePath,
+            revocationsFile:  info.revocationsFile || '',
+            authModeFile:     info.authModeFile || '',
+            ctxInfo:          info,
+            loaded:           true,
+            grantsStore:      grantsStore,
+            revocationsStore: revocationsStore,
+            authModeStore:    authModeStore,
+            grants:           grants,
+            revocations:      revocations,
+            authMode:         authMode
         }
         worldAuthStore[info.worldKey] = entry
 
-        if (needSaveMain && !mainCorrupt && info.filePath) {
-            writeJsonFile(info.filePath, serializeGrantsPayload(entry.grants))
+        if (needSaveMain && grantsStore != null) {
+            grantsStore.save(serializeGrantsPayload(entry.grants))
         }
         return entry
     }
 
     function saveWorldGrantsToDisk(server) {
         var entry = getOrLoadWorldGrants(server)
-        if (entry.grantsCorrupt && Object.keys(entry.grants).length === 0) {
-            return false
-        }
+        if (!entry.grantsStore) return false
         try {
-            var ok = writeJsonFile(entry.filePath, serializeGrantsPayload(entry.grants))
-            if (ok) entry.grantsCorrupt = false
-            return ok
+            var hasGrants = Object.keys(entry.grants).length > 0
+            return entry.grantsStore.save(serializeGrantsPayload(entry.grants), { force: hasGrants })
         } catch (eWrite) {
             logError('saveWorldGrantsToDisk', '写入授权文件失败 (' + entry.filePath + '): ' + eWrite)
         }
@@ -866,19 +865,15 @@
 
     function saveWorldRevocationsToDisk(server) {
         var entry = getOrLoadWorldGrants(server)
-        if (!entry.revocationsFile) return false
-        if (entry.revocationsCorrupt && Object.keys(entry.revocations).length === 0) {
-            return false
-        }
+        if (!entry.revocationsStore) return false
         try {
-            var ok = writeJsonFile(entry.revocationsFile, {
+            var hasRevs = Object.keys(entry.revocations).length > 0
+            return entry.revocationsStore.save({
                 _description: 'Epiphy 外置授权撤销墓碑（独立于 saves/ 存档目录，防止世界回滚复活已撤销授权）',
                 version:      1,
                 updatedAt:    formatTimestampNow(),
                 revoked:      entry.revocations
-            })
-            if (ok) entry.revocationsCorrupt = false
-            return ok
+            }, { force: hasRevs })
         } catch (eWrite) {
             logError('saveWorldRevocationsToDisk', '写入撤销墓碑失败 (' + entry.revocationsFile + '): ' + eWrite)
         }
@@ -887,13 +882,13 @@
 
     function saveWorldAuthModeToDisk(server) {
         var entry = getOrLoadWorldGrants(server)
-        if (!entry.authModeFile) return false
+        if (!entry.authModeStore) return false
         var payload = buildDefaultAuthModePayload(
             entry.authMode.allowNameGrant === true,
             entry.authMode.updatedBy,
             entry.authMode.updatedAt
         )
-        return writeJsonFile(entry.authModeFile, payload)
+        return entry.authModeStore.save(payload, { force: true })
     }
 
     function formatTimestampNow() {

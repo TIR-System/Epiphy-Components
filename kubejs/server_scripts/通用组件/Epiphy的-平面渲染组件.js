@@ -1862,37 +1862,54 @@
         }
     }
 
+    // 仅记录不属于 GROUPED_FIELD_MAPS / DEFAULTS / SPEC 别名表的信封、声明式与控制字段，避免手抄重复大名单
+    var ENVELOPE_AND_EXTRA_KEYS = [
+        'proto', 'action', 'surface', 'tier', 'key', 'slotId', 'namespace', 'group',
+        'posTag', 'normalizeKey', 'preset', 'server', 'radius', 'maxPriority', 'includeOnce',
+        'title', 'sub', 'debug',
+        'vars', 'tracks', 'clip', 'nodes', 'bgNodes', 'fgNodes', 'targetGui', 'replaceTextures', 'slotMatch',
+        'worldPos', 'billboard', 'seeThrough',
+        'boldTarget', 'scaleTarget', 'shakeTarget', 'targetScale', 'bold', 'italic', 'colorMode', 'style',
+        'jitter', 'perCharShake', 'randomShake', 'randomColor', 'randomScale',
+        'shakeStyle', 'charShakeFreq', 'shakeInterval',
+        'conflictMode', 'sourceScope', 'sourceKey', 'conflictScope',
+        'sourceCooldownTicks', 'conflictCooldownTicks'
+    ]
+
     var KNOWN_PACKET_KEYS = (function () {
         var map = Object.create(null)
-        var baseList = [
-            'proto', 'action', 'surface', 'tier', '_sourceTier', 'key', 'slotId', 'namespace', 'group',
-            'posTag', 'normalizeKey', 'lifeMode', 'priority', 'importance', 'renderPriority',
-            'title', 'sub', 'pos', 'rx', 'ry', 'ox', 'oy', 'movable', 'angle', 'scale',
-            'color', 'subColor', 'typewriter', 'mode', 'charMs', 'cursor', 'shadow',
-            'letterSpacing', 'letterSpacingMode', 'outlineMode', 'outlineColor', 'outlineWidth',
-            'shakeMode', 'shakeStyle', 'shakeAmp', 'shakeFreq', 'shakeFreqMin', 'shakeFreqMax',
-            'charShakeStyle', 'charShakeShift', 'charShakeShiftX', 'charShakeShiftY',
-            'charShakeSwayX', 'charShakeSwayY', 'charShakeRotDeg', 'charShakeWin', 'charShakeSnap', 'charShakeTransition',
-            'stay', 'activeHold', 'fadeStyle', 'fadeOut', 'maxWidth', 'wrap', 'clamp', 'showInGui', 'maxGroup', 'restart', 'debug',
-            'avoidHud', 'avoid', 'avoidOverlap', 'minSepX', 'minSepY',
-            'vars', 'tracks', 'clip', 'nodes', 'bgNodes', 'fgNodes', 'targetGui', 'replaceTextures', 'slotMatch',
-            'worldPos', 'billboard', 'seeThrough',
-            'maxPriority', 'includeOnce', 'radius', 'server', 'preset',
-            'sourceConflict', 'conflictMode', 'overlapMode', 'sourceScope', 'sourceKey', 'conflictScope',
-            'sourceCooldownTicks', 'conflictCooldownTicks',
-            'target', 'targetText', 'targetStyle', 'targetScale', 'targetColor', 'targetShake', 'targetOutline',
-            'targetBold', 'bold', 'italic', 'colorMode', 'style'
-        ]
-        var i
-        for (i = 0; i < baseList.length; i++) map[baseList[i]] = true
+        var i, gName, fMap, fk, dk, ok
+        // 1. 派生自 GROUPED_FIELD_MAPS（含所有分组子键与目标标准键）
+        for (gName in GROUPED_FIELD_MAPS) {
+            if (!Object.prototype.hasOwnProperty.call(GROUPED_FIELD_MAPS, gName)) continue
+            fMap = GROUPED_FIELD_MAPS[gName]
+            for (fk in fMap) {
+                if (!Object.prototype.hasOwnProperty.call(fMap, fk)) continue
+                map[fk] = true
+                map[fMap[fk]] = true
+            }
+        }
+        // 2. 派生自 DEFAULTS
+        for (dk in DEFAULTS) {
+            if (Object.prototype.hasOwnProperty.call(DEFAULTS, dk)) map[dk] = true
+        }
+        // 3. 补齐非分组的信封、声明式图元与控制字段
+        for (i = 0; i < ENVELOPE_AND_EXTRA_KEYS.length; i++) map[ENVELOPE_AND_EXTRA_KEYS[i]] = true
+        // 4. 派生自 SPEC 官方与废弃别名表（同时纳入源别名键与规范目标键）
         if (SPEC && SPEC.OFFICIAL_DANMAKU_ALIASES) {
-            for (var ok in SPEC.OFFICIAL_DANMAKU_ALIASES) {
-                if (Object.prototype.hasOwnProperty.call(SPEC.OFFICIAL_DANMAKU_ALIASES, ok)) map[ok] = true
+            for (ok in SPEC.OFFICIAL_DANMAKU_ALIASES) {
+                if (Object.prototype.hasOwnProperty.call(SPEC.OFFICIAL_DANMAKU_ALIASES, ok)) {
+                    map[ok] = true
+                    map[SPEC.OFFICIAL_DANMAKU_ALIASES[ok]] = true
+                }
             }
         }
         if (SPEC && SPEC.DEPRECATED_DANMAKU_ALIASES) {
-            for (var dk in SPEC.DEPRECATED_DANMAKU_ALIASES) {
-                if (Object.prototype.hasOwnProperty.call(SPEC.DEPRECATED_DANMAKU_ALIASES, dk)) map[dk] = true
+            for (dk in SPEC.DEPRECATED_DANMAKU_ALIASES) {
+                if (Object.prototype.hasOwnProperty.call(SPEC.DEPRECATED_DANMAKU_ALIASES, dk)) {
+                    map[dk] = true
+                    map[SPEC.DEPRECATED_DANMAKU_ALIASES[dk]] = true
+                }
             }
         }
         return map
@@ -1960,12 +1977,22 @@
         if (rawOpts == null || typeof rawOpts !== 'object') {
             return reportConfigWarning('调用时必须传入弹幕配置对象或文本字符串！', notifyPlayer)
         }
+        var earlyAct = String(rawOpts.action || rawOpts.act || '').trim().toLowerCase()
+        var isControlAction = (earlyAct === 'clear' || earlyAct === 'deactivate' || earlyAct === 'stop' || earlyAct === 'patch')
         if (typeof rawOpts.preset === 'string' && rawOpts.preset.trim() !== '') {
-            var resolvedPreset = resolvePreset(rawOpts.preset, rawOpts)
-            if (resolvedPreset == null || typeof resolvedPreset !== 'object') {
-                return reportConfigWarning('未找到已注册的平面渲染预设: ' + rawOpts.preset, notifyPlayer)
+            if (isControlAction) {
+                LOGGER.once(
+                    'warn',
+                    'presetWithControlAction:' + earlyAct + ':' + rawOpts.preset,
+                    '控制/增量动作 action="' + earlyAct + '" 不应展开 preset="' + rawOpts.preset + '"，已自动跳过预设构建并直接下发 ' + earlyAct + ' 报文（建议改用 patchNear/channel.slot）。'
+                )
+            } else {
+                var resolvedPreset = resolvePreset(rawOpts.preset, rawOpts)
+                if (resolvedPreset == null || typeof resolvedPreset !== 'object') {
+                    return reportConfigWarning('未找到已注册的平面渲染预设: ' + rawOpts.preset, notifyPlayer)
+                }
+                rawOpts = resolvedPreset
             }
-            rawOpts = resolvedPreset
         }
         rawOpts = flattenGroupedOptions(rawOpts)
         warnUnknownPacketKeys(rawOpts)
@@ -2620,10 +2647,25 @@
             : base
     }
 
+    var PROGRESS_BAR_OWN_KEYS = {
+        barWidth: true, barHeight: true, barY: true,
+        barColor: true, barColorFrom: true, barColorTo: true, barColorMid: true, barAccentColor: true,
+        barFill: true, trailColor: true, bgColor: true, borderColor: true,
+        preNodes: true, extraNodes: true, includeDefaultTitle: true, includeDefaultSub: true,
+        progress: true, subProgress: true
+    }
+
     // 内置标准简易进度条预设：通过 { preset: 'progress_bar', data: { progress: 0.6 }, title: '...' } 一步开箱即用
-    registerPreset('progress_bar', function (c, h) {
+    registerPreset('progress_bar', function (rawC, h) {
+        // 先展平分组选项，确保 style:{ color, subColor, shadow }、layout、life、data 全部在预设内部生效
+        var c = flattenGroupedOptions(rawC) || {}
+        for (var ck in c) {
+            if (!Object.prototype.hasOwnProperty.call(c, ck)) continue
+            if (ck.charAt(0) === '_' || KNOWN_PACKET_KEYS[ck] === true || PROGRESS_BAR_OWN_KEYS[ck] === true) continue
+            LOGGER.once('warn', 'unknownPacketKey:' + ck, '检测到未知 progress_bar 渲染参数 `' + ck + '`（请检查是否拼写错误），已忽略。')
+        }
         var d        = PROGRESS_PANEL_DEFAULTS
-        var rawData  = (c.data != null && typeof c.data === 'object') ? c.data : (c.vars != null && typeof c.vars === 'object' ? c.vars : {})
+        var rawData  = (c.vars != null && typeof c.vars === 'object') ? c.vars : {}
         var pVal     = Math.max(0.0, Math.min(1.0, parseFiniteNum(rawData.progress !== undefined ? rawData.progress : c.progress, 0.0)))
         var subPVal  = Math.max(0.0, Math.min(1.0, parseFiniteNum(rawData.subProgress !== undefined ? rawData.subProgress : c.subProgress, pVal)))
         var barW     = Math.max(24, Math.min(600, Math.round(parseFiniteNum(c.barWidth, d.barWidth))))
@@ -2667,17 +2709,14 @@
             if (Object.prototype.hasOwnProperty.call(rawData, dk)) vars[dk] = rawData[dk]
         }
 
+        // 复用单一数据源 KNOWN_PACKET_KEYS 自动透传所有合法报文信封字段，淘汰独立手抄白名单
         var out = {}
-        var envelopeKeep = [
-            'surface', 'namespace', 'ns', 'group', 'slotId', 'id', 'key', 'tier', '_sourceTier',
-            'layout', 'life', 'motion', 'style',
-            'pos', 'rx', 'ry', 'ox', 'oy', 'scale', 'size', 'angle', 'tilt', 'movable',
-            'lifeMode', 'stay', 'duration', 'activeHold', 'hold', 'fadeStyle', 'fade', 'fadeOut',
-            'priority', 'renderPriority', 'zIndex', 'shakeMode', 'shake', 'shakeAmp', 'showInGui', 'maxGroup', 'restart', 'debug'
-        ]
-        for (var ei = 0; ei < envelopeKeep.length; ei++) {
-            var ek = envelopeKeep[ei]
-            if (c[ek] !== undefined) out[ek] = c[ek]
+        for (var ek in c) {
+            if (!Object.prototype.hasOwnProperty.call(c, ek) || c[ek] === undefined) continue
+            if (ek === 'preset' || ek === 'action' || ek === 'act') continue
+            if (ek.charAt(0) === '_' || KNOWN_PACKET_KEYS[ek] === true) {
+                out[ek] = c[ek]
+            }
         }
         out.surface = c.surface || 'screen'
         out.text    = titleStr
@@ -2768,7 +2807,7 @@
                         var cfg      = (syncCfg != null && typeof syncCfg === 'object') ? syncCfg : {}
                         var variant  = cfg.variant !== undefined ? String(cfg.variant) : ''
                         var curTick  = (typeof cfg.tick === 'number' && isFinite(cfg.tick)) ? cfg.tick : danmakuTickCounter
-                        var needFull = (lastFullAt === null) || (lastVariant !== variant) || ((curTick - lastFullAt) >= resyncEvery)
+                        var needFull = (lastFullAt === null) || (lastVariant !== variant) || (curTick < lastFullAt) || ((curTick - lastFullAt) >= resyncEvery)
                         if (needFull) {
                             lastVariant = variant
                             lastFullAt  = curTick
@@ -3571,6 +3610,7 @@
             sanitizeClipSpec:       sanitizeClipSpec,
             sanitizeRectFill:       sanitizeRectFill,
             sanitizeNodesList:      sanitizeNodesList,
+            KNOWN_PACKET_KEYS:      KNOWN_PACKET_KEYS,
             getDeprecatedAliasHits: function () { return deprecatedAliasHits }
         })
     }

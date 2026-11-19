@@ -4364,10 +4364,14 @@
                     exist.ox              = ox
                     exist.oy              = oy
                     if (isPlainObjLike(raw.tracks)) {
-                        if (exist.tracks == null) exist.tracks = {}
-                        for (var trk in raw.tracks) {
-                            if (Object.prototype.hasOwnProperty.call(raw.tracks, trk)) {
-                                exist.tracks[trk] = raw.tracks[trk]
+                        if (SPEC && typeof SPEC.mergeTracksMap === 'function') {
+                            exist.tracks = SPEC.mergeTracksMap(exist.tracks, raw.tracks)
+                        } else {
+                            if (exist.tracks == null) exist.tracks = {}
+                            for (var trk in raw.tracks) {
+                                if (Object.prototype.hasOwnProperty.call(raw.tracks, trk)) {
+                                    exist.tracks[trk] = raw.tracks[trk]
+                                }
                             }
                         }
                     }
@@ -5336,16 +5340,20 @@
         }
     }
 
-    // 帧内事件能力位缓存（同帧内对同一 PaintScreenEventJS 只探测 1 次，消除 drawRect* 重复 typeof JNI 探测）
+    // 帧内事件能力位缓存（同帧内对同一 PaintScreenEventJS 只探测 1 次，消除 drawRect*/drawTexture/drawItem 重复 typeof JNI 探测）
     var LAST_CAPS_EVENT = null
     var EVENT_CAPS = {
         canRectBatch:  false,
         canVertexGrad: false,
+        canTexBatch:   false,
         hasPosCol:     false,
         hasBlend:      false,
         hasRectangle:  false,
         hasFill:       false,
-        hasVGrad:      false
+        hasVGrad:      false,
+        hasHGrad:      false,
+        hasDrawTex:    false,
+        hasRenderItem: false
     }
 
     function resolveEventCaps(event) {
@@ -5354,13 +5362,18 @@
         var hasBegin  = (event != null && typeof event.beginQuads === 'function')
         var hasRect   = (event != null && typeof event.rectangle === 'function')
         var hasEnd    = (event != null && typeof event.end === 'function')
-        EVENT_CAPS.canRectBatch  = (hasBegin && hasRect && hasEnd)
+        var hasBatch  = (hasBegin && hasRect && hasEnd)
+        EVENT_CAPS.canRectBatch  = hasBatch
         EVENT_CAPS.canVertexGrad = (hasBegin && hasEnd && typeof event.vertex === 'function' && typeof event.getMatrix === 'function')
+        EVENT_CAPS.canTexBatch   = (hasBatch && typeof event.setPositionColorTextureShader === 'function' && typeof event.setShaderTexture === 'function')
         EVENT_CAPS.hasPosCol     = (event != null && typeof event.setPositionColorShader === 'function')
         EVENT_CAPS.hasBlend      = (event != null && typeof event.blend === 'function')
         EVENT_CAPS.hasRectangle  = hasRect
         EVENT_CAPS.hasFill       = (event != null && typeof event.fill === 'function')
         EVENT_CAPS.hasVGrad      = (event != null && typeof event.vGradient === 'function')
+        EVENT_CAPS.hasHGrad      = (event != null && typeof event.hGradient === 'function')
+        EVENT_CAPS.hasDrawTex    = (event != null && typeof event.drawTexture === 'function')
+        EVENT_CAPS.hasRenderItem = (event != null && typeof event.renderItem === 'function')
         return EVENT_CAPS
     }
 
@@ -5536,7 +5549,7 @@
                 }
                 event.end()
             } finally {
-                if (changedBlend && prevBlend === false && typeof event.blend === 'function') {
+                if (changedBlend && prevBlend === false && caps.hasBlend) {
                     try { event.blend(false) } catch (eB) { }
                 }
             }
@@ -5547,7 +5560,7 @@
         var rw  = Math.max(1, Math.round(w))
         var rh  = Math.max(1, Math.round(h))
         if (dir === 'v') {
-            if (typeof event.vGradient === 'function') {
+            if (caps.hasVGrad) {
                 event.vGradient(rx0, ry0, rw, rh, fromArgb, toArgb)
                 return
             }
@@ -5564,7 +5577,7 @@
             }
             return
         }
-        if (typeof event.hGradient === 'function') {
+        if (caps.hasHGrad) {
             event.hGradient(rx0, ry0, rw, rh, fromArgb, toArgb)
             return
         }
@@ -5585,10 +5598,11 @@
         }
         ensureItemPosePushed(event)
         flushBatchedBeforeImmediate()
+        var tCaps = resolveEventCaps(event)
         var rl = getResourceLocation(texPath)
         var baseTintRgb = (tintArgb != null && isFinite(Number(tintArgb))) ? Number(tintArgb) : 0xFFFFFFFF
         var tintCol = toArgbWithAlpha(baseTintRgb, alphaFactor != null ? alphaFactor : 1.0)
-        if (rl != null && typeof event.setPositionColorTextureShader === 'function' && typeof event.setShaderTexture === 'function' && typeof event.beginQuads === 'function' && typeof event.rectangle === 'function' && typeof event.end === 'function') {
+        if (rl != null && tCaps.canTexBatch) {
             var twVal = max2(1, Number(tw || 256))
             var thVal = max2(1, Number(th || 256))
             var uPx = Number(u || 0)
@@ -5604,7 +5618,7 @@
             try {
                 event.setPositionColorTextureShader()
                 event.setShaderTexture(rl)
-                if (typeof event.blend === 'function' && prevBlend !== true) {
+                if (tCaps.hasBlend && prevBlend !== true) {
                     event.blend(true)
                     changedBlend = true
                 }
@@ -5612,7 +5626,7 @@
                 event.rectangle(x, y, 0.0, w, h, tintCol, u0, v0, u1, v1)
                 event.end()
             } finally {
-                if (changedBlend && prevBlend === false && typeof event.blend === 'function') {
+                if (changedBlend && prevBlend === false && tCaps.hasBlend) {
                     try { event.blend(false) } catch (eBt) { }
                 }
             }
@@ -5632,7 +5646,7 @@
                 event.graphics.setColor(tR, tG, tB, tA)
                 colorAdjusted = true
             }
-            if (typeof event.drawTexture === 'function') {
+            if (tCaps.hasDrawTex) {
                 event.drawTexture(texPath, rx0, ry0, rw, rh, u || 0, v || 0, uw != null ? uw : rw, vh != null ? vh : rh, tw || 256, th || 256)
             } else if (rl != null && event.graphics != null && typeof event.graphics.blit === 'function') {
                 event.graphics.blit(rl, rx0, ry0, rw, rh, u || 0, v || 0, uw != null ? uw : rw, vh != null ? vh : rh, tw || 256, th || 256)
@@ -5890,7 +5904,7 @@
                     event.end()
                 }
             } finally {
-                if (changedBlend && prevBlend === false && typeof event.blend === 'function') {
+                if (changedBlend && prevBlend === false && pCaps.hasBlend) {
                     try { event.blend(false) } catch (eBp) { }
                 }
             }
@@ -6029,7 +6043,7 @@
         if (!itemId || itemId === 'minecraft:air') return
         ensureItemPosePushed(event)
         flushBatchedBeforeImmediate()
-        if (typeof event.renderItem === 'function') {
+        if (resolveEventCaps(event).hasRenderItem) {
             event.renderItem(itemId, Math.round(x), Math.round(y))
             return
         }
@@ -6050,29 +6064,37 @@
     }
 
     function drawDeclarativeTextNode(event, item, node, rawText, varsMap, fadeAlpha, fontObj, itemBatchCtx, localX, localY) {
-        var rawTemplate = rawText != null ? String(rawText) : ''
-        var hasVarExpr = rawTemplate.indexOf('$') >= 0
-        var resolved = interpolateVarString(rawTemplate, varsMap)
+        var c = node._c
+        var rawTemplate = (c != null && rawText === undefined) ? c.textRaw : (rawText != null ? String(rawText) : '')
+        var hasVarExpr = (c != null && rawTemplate === c.textRaw) ? c.textHasVar : (rawTemplate.indexOf('$') >= 0)
+        var resolved = hasVarExpr ? interpolateVarString(rawTemplate, varsMap) : rawTemplate
         if (!resolved) return
-        var lines = resolved.split('\n')
-        var rawCol = resolveVarValue(node.color, varsMap, item.color != null ? item.color : 0xFFFFFF)
-        if (typeof rawCol === 'string' && SPEC) {
-            if (typeof SPEC.parseArgbColor === 'function') {
-                rawCol = SPEC.parseArgbColor(rawCol, 0xFFFFFF).color
-            } else if (typeof SPEC.parseColor === 'function') {
-                rawCol = SPEC.parseColor(rawCol, 0xFFFFFF).color
-            }
+        var lines = resolved.indexOf('\n') >= 0 ? resolved.split('\n') : [resolved]
+        var argb
+        if (c != null && c.hasExplicitColor && !c.hasVarTextCol) {
+            argb = (fadeAlpha >= 0.999) ? c.staticTextArgb : toArgbWithAlpha(c.staticTextArgb, fadeAlpha)
+        } else {
+            var rawCol = resolveVarValue(node.color, varsMap, item.color != null ? item.color : 0xFFFFFF)
+            rawCol = parseStaticColorValue(rawCol, 0xFFFFFF)
+            argb = toArgbWithAlpha(rawCol, fadeAlpha)
         }
-        var argb = toArgbWithAlpha(rawCol, fadeAlpha)
         var shadow = node.shadow !== undefined ? Boolean(node.shadow) : (item.shadow !== undefined ? Boolean(item.shadow) : true)
         var nx = (localX !== undefined && localX !== null) ? Number(localX) : resolveVarNum(node.x, varsMap, 0)
         var ny = (localY !== undefined && localY !== null) ? Number(localY) : resolveVarNum(node.y, varsMap, 0)
-        var anchor = String(node.anchor || 'center').toLowerCase()
         var lineStep = CONFIG.lineStepPx
-        var isTopAnchor = (anchor === 'top_left' || anchor === 'top_right')
+        var isTopAnchor, needWidthMeasure, isRightAnchor
+        if (c != null) {
+            isTopAnchor      = c.isTopAnchor
+            needWidthMeasure = c.needWidthMeasure
+            isRightAnchor    = c.isRightAnchor
+        } else {
+            var anchor = String(node.anchor || 'center').toLowerCase()
+            isTopAnchor      = (anchor === 'top_left' || anchor === 'top_right')
+            needWidthMeasure = !(anchor === 'top_left' || anchor === 'left')
+            isRightAnchor    = (anchor === 'top_right' || anchor === 'right')
+        }
         var startY = isTopAnchor ? ny : (ny - Math.floor((lines.length * lineStep) * 0.5) + 1)
 
-        var needWidthMeasure = !(anchor === 'top_left' || anchor === 'left')
         var curFontEpoch = needWidthMeasure ? (FONT_SIGNATURE + '|' + MUI_EPOCH) : ''
         for (var li = 0; li < lines.length; li++) {
             var lnStr = lines[li]
@@ -6093,7 +6115,7 @@
                         node._txtCacheW     = lw
                     }
                 }
-                lx = (anchor === 'top_right' || anchor === 'right') ? (nx - lw) : (nx - Math.floor(lw * 0.5))
+                lx = isRightAnchor ? (nx - lw) : (nx - Math.floor(lw * 0.5))
             }
             var ly    = startY + li * lineStep
             var lay   = (itemBatchCtx != null) ? resolveUnitMuiLayout(itemBatchCtx, entry.seq, entry) : null
@@ -6160,6 +6182,19 @@
         return typeof v === 'string' && v.length > 1 && v.charAt(0) === '$'
     }
 
+    function parseStaticColorValue(rawCol, fallback) {
+        if (rawCol === undefined || rawCol === null) return fallback
+        if (typeof rawCol === 'string' && SPEC) {
+            if (typeof SPEC.parseArgbColor === 'function') {
+                return SPEC.parseArgbColor(rawCol, fallback).color
+            }
+            if (typeof SPEC.parseColor === 'function') {
+                return SPEC.parseColor(rawCol, fallback).color
+            }
+        }
+        return rawCol
+    }
+
     function compileDeclarativeNode(node, depth) {
         if (!isPlainObjLike(node)) return null
         var typeStr = String(node.type || node.kind || 'rect').toLowerCase()
@@ -6193,6 +6228,12 @@
 
         var fillObj = null, fillMode = FM_SOLID, hasVarFillCol = false, staticFillArgb = 0xFF000000 | 0, outlineThk = 1
         var borderW = 0, hasBorder = false, hasVarBorderCol = false, staticBorderArgb = 0xFFFFFFFF | 0
+        var gradDir = 'h', gradHasVarFrom = false, gradStaticFrom = 0, gradHasVarTo = false, gradStaticTo = 0
+        var gradHasMid = false, gradHasVarMid = false, gradStaticMid = 0
+        var textRaw = '', textHasVar = false, hasExplicitColor = false, hasVarTextCol = false, staticTextArgb = 0xFFFFFFFF | 0
+        var isTopAnchor = (anchor === 'top_left' || anchor === 'top_right')
+        var needWidthMeasure = !(anchor === 'top_left' || anchor === 'left')
+        var isRightAnchor = (anchor === 'top_right' || anchor === 'right')
         var isStaticFastRect = false
 
         if (nType === NT_RECT) {
@@ -6206,20 +6247,42 @@
             hasVarFillCol = isNodeVarRef(fcSrc)
             if (!hasVarFillCol) {
                 var defFc = (fillMode === FM_OUTLINE) ? 0xFFFFFFFF : 0xFF000000
-                staticFillArgb = toArgbWithAlpha(fcSrc != null ? fcSrc : defFc, 1.0)
+                staticFillArgb = toArgbWithAlpha(parseStaticColorValue(fcSrc, defFc), 1.0)
             }
             outlineThk = max2(1, Math.round(Number((fillObj != null && fillObj.thickness) || 1)))
+            if (fillMode === FM_GRADIENT && fillObj != null) {
+                gradDir = (fillObj.dir === 'v' || fillObj.dir === 'vertical') ? 'v' : 'h'
+                var gFromSrc = fillObj.from !== undefined ? fillObj.from : fillObj.color
+                var gToSrc   = fillObj.to !== undefined ? fillObj.to : fillObj.colorEnd
+                gradHasVarFrom = isNodeVarRef(gFromSrc)
+                gradHasVarTo   = isNodeVarRef(gToSrc)
+                if (!gradHasVarFrom) gradStaticFrom = toArgbWithAlpha(parseStaticColorValue(gFromSrc, 0xFF5555), 1.0)
+                if (!gradHasVarTo)   gradStaticTo   = toArgbWithAlpha(parseStaticColorValue(gToSrc, 0xFFAA00), 1.0)
+                if (fillObj.mid !== undefined) {
+                    gradHasMid    = true
+                    gradHasVarMid = isNodeVarRef(fillObj.mid)
+                    if (!gradHasVarMid) gradStaticMid = toArgbWithAlpha(parseStaticColorValue(fillObj.mid, gradStaticTo), 1.0)
+                }
+            }
             if (node.borderWidth != null && Number(node.borderWidth) > 0 && node.borderColor != null) {
                 borderW = Math.round(Number(node.borderWidth))
                 if (borderW > 0) {
                     hasBorder = true
                     hasVarBorderCol = isNodeVarRef(node.borderColor)
-                    if (!hasVarBorderCol) staticBorderArgb = toArgbWithAlpha(node.borderColor, 1.0)
+                    if (!hasVarBorderCol) staticBorderArgb = toArgbWithAlpha(parseStaticColorValue(node.borderColor, 0xFFFFFFFF), 1.0)
                 }
             }
             var staticNeedsPush = (angle !== 0 || Math.abs(scale - 1.0) > 0.001)
             isStaticFastRect = (!hasVarGeom && !hasBind && !staticNeedsPush && clipSpec == null && !hasBorder && !hasVarFillCol &&
                 (fillMode === FM_SOLID || fillMode === FM_OUTLINE) && w > 0.25 && h > 0.25)
+        } else if (nType === NT_TEXT) {
+            textRaw          = node.text != null ? String(node.text) : (node.title != null ? String(node.title) : '')
+            textHasVar       = textRaw.indexOf('$') >= 0
+            hasExplicitColor = (node.color !== undefined)
+            hasVarTextCol    = hasExplicitColor && isNodeVarRef(node.color)
+            if (hasExplicitColor && !hasVarTextCol) {
+                staticTextArgb = toArgbWithAlpha(parseStaticColorValue(node.color, 0xFFFFFF), 1.0)
+            }
         } else if (nType === NT_GROUP && (depth || 0) < 4) {
             var kids = Array.isArray(node.children) ? node.children : node.items
             if (Array.isArray(kids)) compileDeclarativeNodes(kids, (depth || 0) + 1)
@@ -6228,6 +6291,9 @@
         var compiled = {
             nType:            nType,
             anchor:           anchor,
+            isTopAnchor:      isTopAnchor,
+            needWidthMeasure: needWidthMeasure,
+            isRightAnchor:    isRightAnchor,
             hasVarGeom:       hasVarGeom,
             hasBind:          hasBind,
             clipSpec:         clipSpec,
@@ -6250,6 +6316,19 @@
             hasBorder:        hasBorder,
             hasVarBorderCol:  hasVarBorderCol,
             staticBorderArgb: staticBorderArgb,
+            gradDir:          gradDir,
+            gradHasVarFrom:   gradHasVarFrom,
+            gradStaticFrom:   gradStaticFrom,
+            gradHasVarTo:     gradHasVarTo,
+            gradStaticTo:     gradStaticTo,
+            gradHasMid:       gradHasMid,
+            gradHasVarMid:    gradHasVarMid,
+            gradStaticMid:    gradStaticMid,
+            textRaw:          textRaw,
+            textHasVar:       textHasVar,
+            hasExplicitColor: hasExplicitColor,
+            hasVarTextCol:    hasVarTextCol,
+            staticTextArgb:   staticTextArgb,
             isStaticFastRect: isStaticFastRect
         }
         node._c = compiled
@@ -6430,11 +6509,18 @@
                                     : ((nAlpha >= 0.999) ? c.staticFillArgb : toArgbWithAlpha(c.staticFillArgb, nAlpha))
                                 drawRectOutline(event, clipped.x, clipped.y, clipped.w, clipped.h, c.outlineThk, oCol)
                             } else if (c.fillMode === FM_GRADIENT && fill != null) {
-                                var cFrom = toArgbWithAlpha(resolveVarValue(fill.from !== undefined ? fill.from : fill.color, vMap, 0xFF5555), nAlpha)
-                                var cTo   = toArgbWithAlpha(resolveVarValue(fill.to !== undefined ? fill.to : fill.colorEnd, vMap, 0xFFAA00), nAlpha)
-                                var cMid  = fill.mid !== undefined ? toArgbWithAlpha(resolveVarValue(fill.mid, vMap, cTo), nAlpha) : null
-                                var gDirVal = (fill.dir === 'v' || fill.dir === 'vertical') ? 'v' : 'h'
-                                drawRectGradient(event, clipped.x, clipped.y, clipped.w, clipped.h, cFrom, cTo, gDirVal, cMid, fill.midPos)
+                                var cFrom = c.gradHasVarFrom
+                                    ? toArgbWithAlpha(parseStaticColorValue(resolveVarValue(fill.from !== undefined ? fill.from : fill.color, vMap, 0xFF5555), 0xFF5555), nAlpha)
+                                    : ((nAlpha >= 0.999) ? c.gradStaticFrom : toArgbWithAlpha(c.gradStaticFrom, nAlpha))
+                                var cTo = c.gradHasVarTo
+                                    ? toArgbWithAlpha(parseStaticColorValue(resolveVarValue(fill.to !== undefined ? fill.to : fill.colorEnd, vMap, 0xFFAA00), 0xFFAA00), nAlpha)
+                                    : ((nAlpha >= 0.999) ? c.gradStaticTo : toArgbWithAlpha(c.gradStaticTo, nAlpha))
+                                var cMid = c.gradHasMid
+                                    ? (c.gradHasVarMid
+                                        ? toArgbWithAlpha(parseStaticColorValue(resolveVarValue(fill.mid, vMap, cTo), cTo), nAlpha)
+                                        : ((nAlpha >= 0.999) ? c.gradStaticMid : toArgbWithAlpha(c.gradStaticMid, nAlpha)))
+                                    : null
+                                drawRectGradient(event, clipped.x, clipped.y, clipped.w, clipped.h, cFrom, cTo, c.gradDir, cMid, fill.midPos)
                             } else if (c.fillMode === FM_PARALLAX && fill != null) {
                                 drawRectParallax(event, clipped.x, clipped.y, clipped.w, clipped.h, fill, now, nAlpha, x0, y0, nw, nh, vMap)
                             } else if (c.fillMode === FM_SHADER && fill != null) {
@@ -6679,6 +6765,7 @@
             flushBatchedBeforeImmediate()
             ACTIVE_FRAME_EVENT = prevEv
             GRAPHICS_TEXT_DIRTY = prevDirty
+            if (prevEv == null) LAST_CAPS_EVENT = null
         }
         return rendered
     }
@@ -7403,6 +7490,7 @@
             flushBatchedBeforeImmediate()
             ACTIVE_FRAME_BATCH_CTX = null
             ACTIVE_FRAME_EVENT     = null
+            LAST_CAPS_EVENT        = null
             GRAPHICS_TEXT_DIRTY    = false
             DRAW_ORDER_SCRATCH.length = 0
             ITEM_RENDER_CTX_SCRATCH.event       = null

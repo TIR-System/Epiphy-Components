@@ -8474,6 +8474,158 @@ test('64. v6.2 LRU cache, controlled deep merge, grouped options, unknown-key wa
     assert.strictEqual(evStep1.x, evStep2.x)
 })
 
+test('65. v6.2.1 audit fixes: preset+action patch, progress_bar style/typo, KNOWN_PACKET_KEYS source parity, slot tick rewind & text/gradient precompile', function () {
+    var warns = []
+    var sentPkts = []
+    var mockPlayer = {
+        username: 'audit_tester',
+        x: 0, y: 64, z: 0,
+        sendData: function (ch, pkt) { sentPkts.push({ ch: ch, pkt: pkt }) }
+    }
+    var mockLevel = { dimension: 'minecraft:overworld', players: [mockPlayer] }
+    var srvObj = {
+        getLevel: function () { return mockLevel },
+        getAllLevels: function () { return [mockLevel] }
+    }
+    var sb = {
+        console: { info: function () {}, warn: function (m) { warns.push(String(m)) }, error: function (m) { throw new Error(m) }, debug: function () {}, log: function () {} },
+        ServerEvents: { loaded: function (fn) { fn({ server: srvObj }) }, tick: function () {}, commandRegistry: function () {} },
+        BlockEvents: { placed: function () {}, broken: function () {} },
+        PlayerEvents: { loggedIn: function () {}, loggedOut: function () {} },
+        Java: { loadClass: function () { return null } },
+        global: {}
+    }
+    sb.globalThis = sb
+    vm.createContext(sb)
+    loadServerBase(sb)
+    runScriptIn(sb, TRACKER_PATH)
+    runScriptIn(sb, DANMAKU_PATH)
+
+    var Surface = sb.global.Epiphy2DSurface
+
+    // 1. preset + action:'patch' skips preset expansion, preserves action:'patch', flattens data & life.hold, and warns once
+    warns.length = 0
+    var patchWithPreset = Surface.buildPacket({
+        preset: 'progress_bar',
+        action: 'patch',
+        id:     'hp_bar',
+        life:   { hold: 40 },
+        data:   { progress: 0.55 }
+    })
+    assert.strictEqual(patchWithPreset.action, 'patch', 'preset + action:patch must NOT silently drop action and turn into push')
+    assert.strictEqual(patchWithPreset.slotId, 'hp_bar')
+    assert.strictEqual(patchWithPreset.vars.progress, 0.55)
+    assert.strictEqual(patchWithPreset.activeHold, 40)
+    assert.strictEqual(patchWithPreset.nodes, undefined, 'patch packet must not carry preset nodes')
+    assert.ok(warns.some(function (w) { return w.indexOf('preset="progress_bar"') >= 0 }), 'passing preset with control action must emit clear warning')
+
+    // 2. progress_bar honors grouped style:{ color, shadow } on title node & catches barWdith typo
+    warns.length = 0
+    var styledBar = Surface.buildPacket({
+        preset:   'progress_bar',
+        title:    'SHIELD',
+        style:    { color: 0x00FF00, shadow: false },
+        data:     { progress: 0.7 },
+        barWdith: 320
+    })
+    assert.strictEqual(styledBar.action, 'push')
+    var titleNode = styledBar.nodes.filter(function (n) { return n.id === 'title' })[0]
+    assert.ok(titleNode, 'progress_bar must generate title text node')
+    assert.strictEqual(titleNode.color, 0x00FF00, 'progress_bar title node must inherit style.color')
+    assert.strictEqual(titleNode.shadow, false, 'progress_bar title node must inherit style.shadow')
+    assert.ok(warns.some(function (w) { return w.indexOf('barWdith') >= 0 }), 'typo passed to progress_bar preset must trigger warning')
+
+    // 3. Previously missing valid keys must NOT trigger unknownPacketKey warnings + static source parity check
+    warns.length = 0
+    var legitPkt = Surface.buildPacket({
+        text:          'Bold Scale Shake',
+        boldTarget:    'Bold',
+        scaleTarget:   'Scale',
+        shakeTarget:   'Shake',
+        charShakeFreq: 120,
+        jitter:        true,
+        perCharShake:  true
+    })
+    assert.ok(legitPkt && legitPkt.title.indexOf('<b>Bold</b>') >= 0, 'boldTarget must still wrap target substring')
+    assert.strictEqual(warns.filter(function (w) { return w.indexOf('未知渲染参数') >= 0 }).length, 0, 'valid parser keys must not trigger unknownPacketKey warnings')
+
+    var surfaceSrc = fs.readFileSync(DANMAKU_PATH, 'utf8')
+    var knownKeys = Surface._pure.KNOWN_PACKET_KEYS
+    var fnSection = surfaceSrc.slice(surfaceSrc.indexOf('function resolvePosition(opts)'), surfaceSrc.indexOf('function sendSinglePlayerPacket('))
+    var missingKeys = []
+    var seenChecked = Object.create(null)
+    var dotRe = /\bopts\.([A-Za-z][A-Za-z0-9_]*)\b/g
+    var m
+    while ((m = dotRe.exec(fnSection)) !== null) {
+        var k = m[1]
+        if (seenChecked[k] || k.charAt(0) === '_') continue
+        seenChecked[k] = true
+        if (!knownKeys[k]) missingKeys.push(k)
+    }
+    var pickRe = /\bpick(?:NonEmpty)?\s*\(\s*opts\s*,\s*\[([^\]]+)\]/g
+    while ((m = pickRe.exec(fnSection)) !== null) {
+        var listStr = m[1]
+        var strRe = /'([A-Za-z][A-Za-z0-9_]*)'/g
+        var sm
+        while ((sm = strRe.exec(listStr)) !== null) {
+            var pk = sm[1]
+            if (seenChecked[pk] || pk.charAt(0) === '_') continue
+            seenChecked[pk] = true
+            if (!knownKeys[pk]) missingKeys.push(pk)
+        }
+    }
+    assert.deepStrictEqual(missingKeys, [], 'every opts.* / pick(opts, [...]) key read by packet builder must be present in KNOWN_PACKET_KEYS')
+
+    // 4. channel.slot().syncNear() triggers full push on tick rewind
+    sentPkts.length = 0
+    var ch = Surface.channel({ namespace: 'ns_rw', group: 'g_rw', resyncTicks: 30 })
+    var sl = ch.slot('s_rw', { preset: 'progress_bar', resyncTicks: 30 })
+    sl.syncNear(mockLevel, 0, 64, 0, 32, { variant: 'v1', tick: 100, data: { progress: 0.5 }, text: 'T1' })
+    sl.syncNear(mockLevel, 0, 64, 0, 32, { variant: 'v1', tick: 110, data: { progress: 0.6 } })
+    sl.syncNear(mockLevel, 0, 64, 0, 32, { variant: 'v1', tick: 5,   data: { progress: 0.1 }, text: 'T2' })
+    assert.strictEqual(sentPkts[0].pkt.action, 'push')
+    assert.strictEqual(sentPkts[1].pkt.action, 'patch')
+    assert.strictEqual(sentPkts[2].pkt.action, 'push', 'tick rewind (5 < 100) must re-emit full push instead of stalling resync')
+
+    // 5. Client precompiler parses string colors and precompiles NT_TEXT & FM_GRADIENT
+    var cliSb = {
+        console: { info: function () {}, warn: function () {}, error: function (m) { throw new Error(m) }, debug: function () {}, log: function () {} },
+        Date: { now: function () { return 1000 } },
+        Client: { getCurrentScreen: function () { return null } },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function () {} },
+        NetworkEvents: { dataReceived: function () {} },
+        Java: { loadClass: function () { return null } },
+        Text: { of: function (s) { return { string: String(s) } } },
+        global: {}
+    }
+    cliSb.globalThis = cliSb
+    vm.createContext(cliSb)
+    loadStartupBase(cliSb)
+    runScriptIn(cliSb, RENDERER_PATH)
+    var R = cliSb.global.Epiphy2DRenderer
+
+    var nodesToCompile = [
+        { id: 'hex_rect', type: 'rect', anchor: 'top_left', x: 0, y: 0, w: 20, h: 10, fill: { mode: 'solid', color: '#FFAA22' } },
+        { id: 'grad_rect', type: 'rect', anchor: 'top_left', x: 0, y: 0, w: 100, h: 10, fill: { mode: 'gradient', dir: 'v', from: '#112233', mid: '#445566', to: 'gold' } },
+        { id: 'txt_static', type: 'text', anchor: 'top_right', x: 50, y: 10, text: 'STATIC', color: '#00FF88' },
+        { id: 'txt_dyn', type: 'text', anchor: 'top_left', x: 0, y: 0, text: '$pct', color: '$col' }
+    ]
+    R._pure.compileDeclarativeNodes(nodesToCompile, 0)
+    assert.strictEqual(nodesToCompile[0]._c.staticFillArgb >>> 0, 0xFFFFAA22, 'hex string color must compile to 0xFFFFAA22 instead of white')
+    assert.strictEqual(nodesToCompile[1]._c.gradDir, 'v')
+    assert.strictEqual(nodesToCompile[1]._c.gradStaticFrom >>> 0, 0xFF112233)
+    assert.strictEqual(nodesToCompile[1]._c.gradStaticMid >>> 0, 0xFF445566)
+    assert.strictEqual(nodesToCompile[1]._c.gradStaticTo >>> 0, 0xFFFFAA00, 'named color gold in gradient must compile to 0xFFFFAA00')
+    assert.strictEqual(nodesToCompile[2]._c.textHasVar, false)
+    assert.strictEqual(nodesToCompile[2]._c.isTopAnchor, true)
+    assert.strictEqual(nodesToCompile[2]._c.isRightAnchor, true)
+    assert.strictEqual(nodesToCompile[2]._c.needWidthMeasure, true)
+    assert.strictEqual(nodesToCompile[2]._c.staticTextArgb >>> 0, 0xFF00FF88)
+    assert.strictEqual(nodesToCompile[3]._c.textHasVar, true)
+    assert.strictEqual(nodesToCompile[3]._c.hasVarTextCol, true)
+    assert.strictEqual(nodesToCompile[3]._c.needWidthMeasure, false)
+})
+
 
 var passed = 0
 for (var i = 0; i < tests.length; i++) {

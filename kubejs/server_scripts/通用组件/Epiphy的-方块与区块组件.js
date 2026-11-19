@@ -146,22 +146,19 @@
     var toSeqArray              = BASE.toSeqArray
     var resolveWorldStorageInfo = (server) => BASE.resolveWorldStorageInfo(server || SERVER_REF, WORLD_FILE_NAME, FALLBACK_DIR)
 
-    var storageReadFailed  = false
     var loadedStorageStore = null
 
     function ensureStorageStore(filePath) {
-        if (loadedStorageStore != null && loadedStorageStore.path === filePath) {
+        var normTarget = filePath ? String(filePath).replace(/\\/g, '/') : ''
+        if (loadedStorageStore != null && loadedStorageStore.path === normTarget) {
             return loadedStorageStore
         }
-        loadedStorageStore = BASE.openJsonStore(filePath, { logger: LOGGER, backup: true, lockOnCorrupt: true })
+        loadedStorageStore = BASE.openJsonStore(normTarget, { logger: LOGGER, backup: true, lockOnCorrupt: true })
         return loadedStorageStore
     }
 
     function flushTrackedBlocks() {
         if (SERVER_REF == null || !persistDirty) return false
-        if (storageReadFailed && trackedBlocks.size === 0) {
-            return false
-        }
         try {
             var arr = []
             trackedBlocks.forEach(function (item) {
@@ -169,22 +166,22 @@
             })
             var targetPath = loadedStoragePath || resolveWorldStorageInfo(SERVER_REF).filePath
             loadedStoragePath = targetPath
+            var store = ensureStorageStore(targetPath)
             var payload = {
                 version:        2,
                 updatedAt:      formatTimestampNow(),
                 migratedLegacy: migratedLegacyFlag,
                 blocks:         arr
             }
-            var wroteDisk = Boolean(ensureStorageStore(targetPath).save(payload, { force: arr.length > 0 }))
+            var wroteDisk = Boolean(store.save(payload, { force: arr.length > 0 }))
             try {
                 if (SERVER_REF.persistentData != null && typeof SERVER_REF.persistentData.putString === 'function') {
                     SERVER_REF.persistentData.putString(PERSIST_KEY, JSON.stringify(arr))
                 }
             } catch (ePData) { }
             if (wroteDisk) {
-                storageReadFailed = false
-                persistDirty      = false
-                lastFlushTick     = tickCounter
+                persistDirty  = false
+                lastFlushTick = tickCounter
                 return true
             }
         } catch (eSave) {
@@ -331,7 +328,6 @@
         resetScanQueue()
         migratedKeys.clear()
         persistDirty       = false
-        storageReadFailed  = false
         lastFlushTick      = -9999
         migratedLegacyFlag = false
         nextVerifySlot     = 0
@@ -358,11 +354,11 @@
                 }
             }
         } else if (diskStatus === 'corrupt') {
-            storageReadFailed = true
             LOGGER.warn('ensureLoaded:corrupt', '追踪方块持久化文件损坏且无可用 .bak 备份 (' + loadedStoragePath + ')，尝试从 persistentData 恢复并挂起空表覆盖保护')
         }
 
-        if (!migratedLegacyFlag || storageReadFailed) {
+        var diskCorrupt = loadedStorageStore.isCorrupt()
+        if (!migratedLegacyFlag || diskCorrupt) {
             var loadKeys = [PERSIST_KEY, 'epiphy_danmaku_bound_blocks_v1', 'epiphy_audio_bound_blocks_v1']
             var importedLegacy = 0
             for (var kIdx = 0; kIdx < loadKeys.length; kIdx++) {
@@ -376,11 +372,10 @@
                     logCatch('ensureLoaded:' + loadKeys[kIdx], eLoad)
                 }
             }
-            if (!storageReadFailed || importedLegacy > 0) {
+            if (!diskCorrupt || importedLegacy > 0) {
                 migratedLegacyFlag = true
             }
             if (importedLegacy > 0) {
-                storageReadFailed = false
                 saveTrackedBlocks(true)
             }
         }
@@ -1735,7 +1730,7 @@
                 SERVER_REF         = null
                 loadedPersistSrv   = null
                 loadedStoragePath  = null
-                storageReadFailed  = false
+                loadedStorageStore = null
                 persistDirty       = false
                 migratedLegacyFlag = false
                 trackedBlocks.clear()
