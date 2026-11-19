@@ -420,7 +420,7 @@ Phase 4 (Kotlin + Java 原生模组迁移：彻底移除淘汰别名 + 硬件级
     2. `Epiphy2DSurface v6.1` 新增 `ui()` 紧凑链式构造器（内置 `steppedPlate` 零重叠阶梯底衬、`corners` 四角加固折角、`steppedLine` 自动立柱折线、`ticks` 刻度线、`boxes`、`group`、`widget` 泛用原语及 `rect.outline` 简写）与 `registerPreset` / `registerWidget`，支持下游玩法脚本向上提交专属复合单元（如 `v18_t_pin`、`v18_reticle_badge`）与参数化预设（`v18_telemetry`）；
     3. `EpiphyAudio v5.8`（含 `bindBlock` 扫描/启播）与 `EpiphyWorldOps v2.5` 同步落地 `registerPreset` / `preset` / `{ preset: '...' }` 自动解析；`Epiphy的小玩意_功能测试.js` 升级为启动期向上提交 `rnfmabj_test_bgm` / `rnfmabj_test_prescript` 预设。
   - **客户端零视觉变化热路径优化 (`Epiphy2DRenderer v6.1`)**：
-    1. 将 `GLYPH_WIDTH_CACHE` 与 `TEXTURE_EXIST_CACHE`（上限 512）统一收敛至 `EpiphySpec.createBoundedCache`（缺 `SPEC` 时平滑降级本地有界实现）；
+    1. 将 `GLYPH_WIDTH_CACHE`、`TEXTURE_EXIST_CACHE`（上限 512）、`SHARED_TEXT_SEQ_CACHE`（512）、`TRANSIENT_TEXT_SEQ_CACHE`（256）以及 `EpiphyServerCore` 的 `LAST_WRITTEN_JSON_CACHE`（64）统一收敛至 `EpiphySpec.createBoundedCache`（消除散落手写 `Array.shift()` 淘汰，缺 `SPEC` 时平滑降级本地有界实现）；
     2. 新增连续 `solid`/`outline` `rect` 自动合批（相邻几何节点合并为单次 `beginQuads`/`end`，外层 `finally` 强关闭保证异常安全）；
     3. 为 `evaluateNodeBind` / `computeBoxAnchorOrigin` / `computeLocalClipRect` 补充热路径 Scratch 复用参数（未传时仍返回纯新对象）；
     4. `drawRectParallax` 增加 `stripes`/`ripples` 视口早期剔除与斜肋分段上限（`3..8`）；`drawDeclarativeTextNode` 左对齐零 `font.width` 跳过 + 右/中对齐单行节点宽度缓存（绑定 `FONT_SIGNATURE|MUI_EPOCH` 失效）；

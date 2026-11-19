@@ -132,6 +132,12 @@
                 map[s] = v
                 return v
             },
+            delete: function (k) {
+                var s = String(k)
+                if (!(s in map)) return false
+                delete map[s]; cnt--
+                return true
+            },
             clear: function () { map = Object.create(null); ks = []; hd = 0; cnt = 0 },
             size:  function () { return cnt }
         }
@@ -1291,63 +1297,37 @@
         return frags
     }
 
-    var SHARED_TEXT_SEQ_CACHE    = {}
-    var SHARED_TEXT_SEQ_KEYS     = []
-    var MAX_TEXT_SEQ_CACHE       = 512
-    var TRANSIENT_TEXT_SEQ_CACHE = {}
-    var TRANSIENT_TEXT_SEQ_KEYS  = []
-    var MAX_TRANSIENT_SEQ_CACHE  = 256
+    var SHARED_TEXT_SEQ_CACHE    = createLocalBoundedCache(512)
+    var TRANSIENT_TEXT_SEQ_CACHE = createLocalBoundedCache(256)
 
     function getCachedTextCompSeq(rawStr, eagerCompSeq, isTransient) {
-        var key = String(rawStr || '')
-        var entry
-        if (Object.prototype.hasOwnProperty.call(SHARED_TEXT_SEQ_CACHE, key)) {
-            entry = SHARED_TEXT_SEQ_CACHE[key]
-        } else if (Object.prototype.hasOwnProperty.call(TRANSIENT_TEXT_SEQ_CACHE, key)) {
-            entry = TRANSIENT_TEXT_SEQ_CACHE[key]
-            // 当曾作为过渡态前缀缓存的条目被正式静态行请求时，将其晋升至持久共享缓存池，防止被后续打字机前缀淘汰
-            if (isTransient !== true) {
-                delete TRANSIENT_TEXT_SEQ_CACHE[key]
-                entry._isTransient = false
-                if (SHARED_TEXT_SEQ_KEYS.length >= MAX_TEXT_SEQ_CACHE) {
-                    var oldestPromote = SHARED_TEXT_SEQ_KEYS.shift()
-                    if (oldestPromote !== undefined) delete SHARED_TEXT_SEQ_CACHE[oldestPromote]
+        var key   = String(rawStr || '')
+        var entry = SHARED_TEXT_SEQ_CACHE.get(key)
+        if (entry === undefined) {
+            entry = TRANSIENT_TEXT_SEQ_CACHE.get(key)
+            if (entry !== undefined) {
+                // 当曾作为过渡态前缀缓存的条目被正式静态行请求时，将其晋升至持久共享缓存池，防止被后续打字机前缀淘汰
+                if (isTransient !== true) {
+                    TRANSIENT_TEXT_SEQ_CACHE.delete(key)
+                    entry._isTransient = false
+                    SHARED_TEXT_SEQ_CACHE.set(key, entry)
                 }
-                SHARED_TEXT_SEQ_CACHE[key] = entry
-                SHARED_TEXT_SEQ_KEYS.push(key)
+            } else {
+                entry = {
+                    rawText:      key,
+                    comp:         null,
+                    seq:          null,
+                    _isTransient: isTransient === true,
+                    _muiLayout:   null,
+                    _muiEpoch:    -1,
+                    _muiHasEmoji: false
+                }
+                if (isTransient === true) {
+                    TRANSIENT_TEXT_SEQ_CACHE.set(key, entry)
+                } else {
+                    SHARED_TEXT_SEQ_CACHE.set(key, entry)
+                }
             }
-        } else if (isTransient === true) {
-            if (TRANSIENT_TEXT_SEQ_KEYS.length >= MAX_TRANSIENT_SEQ_CACHE) {
-                var oldTrans = TRANSIENT_TEXT_SEQ_KEYS.shift()
-                if (oldTrans !== undefined) delete TRANSIENT_TEXT_SEQ_CACHE[oldTrans]
-            }
-            entry = {
-                rawText:      key,
-                comp:         null,
-                seq:          null,
-                _isTransient: true,
-                _muiLayout:   null,
-                _muiEpoch:    -1,
-                _muiHasEmoji: false
-            }
-            TRANSIENT_TEXT_SEQ_CACHE[key] = entry
-            TRANSIENT_TEXT_SEQ_KEYS.push(key)
-        } else {
-            if (SHARED_TEXT_SEQ_KEYS.length >= MAX_TEXT_SEQ_CACHE) {
-                var oldest = SHARED_TEXT_SEQ_KEYS.shift()
-                if (oldest !== undefined) delete SHARED_TEXT_SEQ_CACHE[oldest]
-            }
-            entry = {
-                rawText:      key,
-                comp:         null,
-                seq:          null,
-                _isTransient: false,
-                _muiLayout:   null,
-                _muiEpoch:    -1,
-                _muiHasEmoji: false
-            }
-            SHARED_TEXT_SEQ_CACHE[key] = entry
-            SHARED_TEXT_SEQ_KEYS.push(key)
         }
         if (eagerCompSeq === true && (entry.comp == null || entry.seq == null)) {
             ensureUnitCompSeq(entry)
@@ -1365,8 +1345,8 @@
         if (unit.seq == null && unit.comp != null) {
             unit.seq = resolveVisualSeq(unit.comp)
         }
-        if (raw.length > 0 && Object.prototype.hasOwnProperty.call(SHARED_TEXT_SEQ_CACHE, raw)) {
-            var cached = SHARED_TEXT_SEQ_CACHE[raw]
+        var cached = raw.length > 0 ? SHARED_TEXT_SEQ_CACHE.get(raw) : undefined
+        if (cached !== undefined) {
             if (cached.comp == null && unit.comp != null) cached.comp = unit.comp
             if (cached.seq == null && unit.seq != null) cached.seq = unit.seq
         }
@@ -1707,18 +1687,16 @@
         }
         var raw = (ownerObj != null && ownerObj.rawText != null) ? String(ownerObj.rawText) : ''
         var isTransOwner = Boolean(ownerObj != null && ownerObj._isTransient)
-        var hasSharedKey = (raw.length > 0 && Object.prototype.hasOwnProperty.call(SHARED_TEXT_SEQ_CACHE, raw))
-        var hasTransKey  = (!hasSharedKey && raw.length > 0 && Object.prototype.hasOwnProperty.call(TRANSIENT_TEXT_SEQ_CACHE, raw))
-        if (hasSharedKey || hasTransKey) {
-            var sharedEntry = hasSharedKey ? SHARED_TEXT_SEQ_CACHE[raw] : TRANSIENT_TEXT_SEQ_CACHE[raw]
-            if (sharedEntry._muiLayout != null && sharedEntry._muiEpoch === MUI_EPOCH) {
-                if (ownerObj != null) {
-                    ownerObj._muiLayout   = sharedEntry._muiLayout
-                    ownerObj._muiEpoch    = MUI_EPOCH
-                    ownerObj._muiHasEmoji = sharedEntry._muiHasEmoji
-                }
-                return sharedEntry._muiLayout
+        var sharedEntry = raw.length > 0
+            ? (SHARED_TEXT_SEQ_CACHE.get(raw) || TRANSIENT_TEXT_SEQ_CACHE.get(raw) || null)
+            : null
+        if (sharedEntry != null && sharedEntry._muiLayout != null && sharedEntry._muiEpoch === MUI_EPOCH) {
+            if (ownerObj != null) {
+                ownerObj._muiLayout   = sharedEntry._muiLayout
+                ownerObj._muiEpoch    = MUI_EPOCH
+                ownerObj._muiHasEmoji = sharedEntry._muiHasEmoji
             }
+            return sharedEntry._muiLayout
         }
         try {
             var layout = null
@@ -1741,9 +1719,7 @@
                     ownerObj._muiHasEmoji = hasEm
                 }
                 if (raw.length > 0) {
-                    var targetCache = hasSharedKey
-                        ? SHARED_TEXT_SEQ_CACHE[raw]
-                        : (hasTransKey ? TRANSIENT_TEXT_SEQ_CACHE[raw] : getCachedTextCompSeq(raw, false, isTransOwner))
+                    var targetCache = sharedEntry || getCachedTextCompSeq(raw, false, isTransOwner)
                     targetCache._muiLayout   = layout
                     targetCache._muiEpoch    = MUI_EPOCH
                     targetCache._muiHasEmoji = hasEm
@@ -4846,10 +4822,10 @@
             getReplacedTextures:          function () { return REPLACED_TEXTURE_REGISTRY },
             getSeqCacheStats:             function () {
                 return {
-                    sharedCount:    SHARED_TEXT_SEQ_KEYS.length,
-                    transientCount: TRANSIENT_TEXT_SEQ_KEYS.length,
-                    hasShared:      function (k) { return Object.prototype.hasOwnProperty.call(SHARED_TEXT_SEQ_CACHE, k) },
-                    hasTransient:   function (k) { return Object.prototype.hasOwnProperty.call(TRANSIENT_TEXT_SEQ_CACHE, k) }
+                    sharedCount:    SHARED_TEXT_SEQ_CACHE.size(),
+                    transientCount: TRANSIENT_TEXT_SEQ_CACHE.size(),
+                    hasShared:      function (k) { return SHARED_TEXT_SEQ_CACHE.has(k) },
+                    hasTransient:   function (k) { return TRANSIENT_TEXT_SEQ_CACHE.has(k) }
                 }
             },
             inspectOverlays:              function () { return activeOverlays }
@@ -4857,22 +4833,15 @@
     }
     global.Epiphy2DRenderer = global.ScreenDanmakuClient
 
-    ClientEvents.loggedOut(function () {
+    function resetClientSessionState() {
         activeOverlays.length = 0
         pendingActions.length = 0
-        TRANSIENT_TEXT_SEQ_CACHE = {}
-        TRANSIENT_TEXT_SEQ_KEYS.length = 0
+        TRANSIENT_TEXT_SEQ_CACHE.clear()
         LAST_LEVEL_KEY = ''
         restoreAllReplacedTextures()
-    })
-    ClientEvents.loggedIn(function () {
-        activeOverlays.length = 0
-        pendingActions.length = 0
-        TRANSIENT_TEXT_SEQ_CACHE = {}
-        TRANSIENT_TEXT_SEQ_KEYS.length = 0
-        LAST_LEVEL_KEY = ''
-        restoreAllReplacedTextures()
-    })
+    }
+    ClientEvents.loggedOut(resetClientSessionState)
+    ClientEvents.loggedIn(resetClientSessionState)
 
     // 判定当前是否打开了需要遮挡 HUD 弹幕的交互式 GUI：
     //   注意：HUD 的 PaintScreenEventJS 构造时不传入 Screen（event.screen 恒为 null），

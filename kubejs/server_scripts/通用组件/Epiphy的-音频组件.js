@@ -2456,6 +2456,13 @@
         stopKey(audioKey, fadeOut)
     }
 
+    var resolveAudioSpecIfPreset = (specObj) => {
+        if (specObj == null || typeof specObj !== 'object') return specObj
+        if (specObj.preset == null || String(specObj.preset).trim() === '') return specObj
+        var resolved = resolvePreset(specObj.preset, specObj)
+        return (resolved != null && typeof resolved === 'object') ? resolved : specObj
+    }
+
     var startBoundBlockAudio = (rec, binding, lv, curBlock, foundSource) => {
         if (binding == null) binding = audioBlockTracker != null ? audioBlockTracker.getBinding(rec.blockId) : null
         if (binding == null) return false
@@ -2468,12 +2475,7 @@
             ? safeCall(binding.specOrFn, [{ block: curBlock, level: lv, server: serverRef, dim: rec.dim, x: rec.x, y: rec.y, z: rec.z }], 'bindBlock')
             : binding.specOrFn
         if (rawSpec == null || typeof rawSpec !== 'object') return false
-        if (rawSpec.preset != null && String(rawSpec.preset).trim() !== '') {
-            var resolvedBlockSpec = resolvePreset(rawSpec.preset, rawSpec)
-            if (resolvedBlockSpec != null && typeof resolvedBlockSpec === 'object') {
-                rawSpec = resolvedBlockSpec
-            }
-        }
+        rawSpec = resolveAudioSpecIfPreset(rawSpec)
 
         var effMode = normalizeConflictMode(rawSpec.conflictMode !== undefined ? rawSpec.conflictMode : 'nearest', 'nearest')
         var playSpec = withFields(rawSpec, {
@@ -2579,13 +2581,7 @@
         var tracker = ensureAudioBlockTracker()
         if (tracker == null) return false
         var idStr = String(blockId).trim()
-        var effectiveSpecObj = specOrFn
-        if (typeof specOrFn === 'object' && specOrFn.preset != null && String(specOrFn.preset).trim() !== '') {
-            var resolvedForScan = resolvePreset(specOrFn.preset, specOrFn)
-            if (resolvedForScan != null && typeof resolvedForScan === 'object') {
-                effectiveSpecObj = resolvedForScan
-            }
-        }
+        var effectiveSpecObj = resolveAudioSpecIfPreset(specOrFn)
         var range = (typeof effectiveSpecObj === 'object' && effectiveSpecObj.range != null) ? Number(effectiveSpecObj.range) : 32
         var metaEntry = {
             blockId:    idStr,

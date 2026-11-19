@@ -1510,19 +1510,32 @@
         return { status: 'missing', data: null, error: null };
     }
 
-    var LAST_WRITTEN_JSON_CACHE = {};
-    var LAST_WRITTEN_JSON_KEYS  = [];
+    var LAST_WRITTEN_JSON_CACHE = (spec && typeof spec.createBoundedCache === 'function')
+        ? spec.createBoundedCache(64)
+        : (function () {
+            var m = Object.create(null);
+            var ks = [];
+            var hd = 0;
+            var cnt = 0;
+            return {
+                get: function (k) { return (k in m) ? m[k] : undefined; },
+                set: function (k, v) {
+                    if (!(k in m)) {
+                        while (cnt >= 64 && hd < ks.length) {
+                            var ok = ks[hd++];
+                            if (ok in m) { delete m[ok]; cnt--; }
+                        }
+                        if (hd > 32 && hd * 2 >= ks.length) { ks = ks.slice(hd); hd = 0; }
+                        ks.push(k); cnt++;
+                    }
+                    m[k] = v;
+                }
+            };
+        })();
 
     function cacheLastWrittenJson(normPath, obj) {
         if (!normPath || !isObjectLike(obj)) return;
-        if (!Object.prototype.hasOwnProperty.call(LAST_WRITTEN_JSON_CACHE, normPath)) {
-            if (LAST_WRITTEN_JSON_KEYS.length >= 64) {
-                var evicted = LAST_WRITTEN_JSON_KEYS.shift();
-                if (evicted !== undefined) delete LAST_WRITTEN_JSON_CACHE[evicted];
-            }
-            LAST_WRITTEN_JSON_KEYS.push(normPath);
-        }
-        LAST_WRITTEN_JSON_CACHE[normPath] = obj;
+        LAST_WRITTEN_JSON_CACHE.set(normPath, obj);
     }
 
     function readJsonDetailed(filePath, logger, allowBackupRecovery) {
@@ -1587,9 +1600,7 @@
                 ensureParentDir(normPath, logger);
                 if (keepBackup !== false && normPath.slice(-4) !== '.bak') {
                     try {
-                        var prevObj = Object.prototype.hasOwnProperty.call(LAST_WRITTEN_JSON_CACHE, normPath)
-                            ? LAST_WRITTEN_JSON_CACHE[normPath]
-                            : null;
+                        var prevObj = LAST_WRITTEN_JSON_CACHE.get(normPath) || null;
                         if (prevObj == null) {
                             var prevRes = readJsonSingleTarget(normPath, null);
                             if (prevRes.status === 'ok' && prevRes.data != null && isObjectLike(prevRes.data)) {

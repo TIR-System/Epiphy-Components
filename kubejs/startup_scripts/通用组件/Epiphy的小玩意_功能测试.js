@@ -178,11 +178,11 @@
 
     // ======================================================================== 3. 向上提交音频/渲染预设并绑定到通用组件 bindBlock 接口
     // 渐进式区块分段扫描、坐标持久化、放置与破坏事件生命周期均由通用组件的 bindBlock 接口统一托管
-    var AUDIO_PRESET_ID    = 'rnfmabj_test_bgm'
-    var DANMAKU_PRESET_ID  = 'rnfmabj_test_prescript'
-    var hasSpecPresetApi   = (typeof global !== 'undefined' && global.EpiphySpec != null && typeof global.EpiphySpec.registerPreset === 'function')
+    var AUDIO_PRESET_ID   = 'rnfmabj_test_bgm'
+    var DANMAKU_PRESET_ID = 'rnfmabj_test_prescript'
+    var SPEC              = global.EpiphySpec
 
-    var audioPresetSpec = {
+    SPEC.registerPreset('audio', AUDIO_PRESET_ID, {
         sound:            SOUND_ID,
         category:         'records',
         range:            EFFECT_RADIUS,
@@ -196,9 +196,9 @@
         conflictMode:     'merge',       // 多块相邻合并：以最先放置的方块为准、其余静默不单独建句柄，范围取并集并在敲掉时重算
         conflictScope:    'sound',
         stopOnBlockBreak: true
-    }
+    })
 
-    var danmakuPresetSpec = {
+    SPEC.registerPreset('surface', DANMAKU_PRESET_ID, {
         scale:             [1.15, 1.60],    // 原先 small_random (~0.76) 的 1.5~2.0 倍随机缩放
         color:             0x8CE6FF,        // 冰青蓝主字色（保留明显青色调，与红色外圈形成对比）
         outline:           'glow',          // 柔和发光外圈
@@ -231,26 +231,15 @@
         group:             DANMAKU_GROUP,
         maxGroup:          3,               // 同屏最多 3 条
         debug:             false            // 调试日志默认关闭
-    }
+    })
 
-    if (hasSpecPresetApi) {
-        global.EpiphySpec.registerPreset('audio', AUDIO_PRESET_ID, audioPresetSpec)
-        global.EpiphySpec.registerPreset('surface', DANMAKU_PRESET_ID, danmakuPresetSpec)
-    }
-
-    var audioBindingSpec = hasSpecPresetApi ? { preset: AUDIO_PRESET_ID } : audioPresetSpec
+    var audioBindingSpec = { preset: AUDIO_PRESET_ID }
 
     function buildDanmakuSpec(ctx) {
-        var srv = ctx != null ? ctx.server : null
-        var lv  = ctx != null ? ctx.level : null
-        var txt = pickPrescriptForOnlinePlayer(srv, lv)
-        if (hasSpecPresetApi) {
-            return { preset: DANMAKU_PRESET_ID, text: txt }
+        return {
+            preset: DANMAKU_PRESET_ID,
+            text:   pickPrescriptForOnlinePlayer(ctx != null ? ctx.server : null, ctx != null ? ctx.level : null)
         }
-        var copy = {}
-        for (var k in danmakuPresetSpec) copy[k] = danmakuPresetSpec[k]
-        copy.text = txt
-        return copy
     }
 
     var danmakuBindingExtra = {

@@ -673,9 +673,20 @@
         return ''
     }
 
-    var AUDIO_HAS_PRESET = (AUDIO != null && typeof AUDIO.registerPreset === 'function')
-    if (AUDIO_HAS_PRESET) {
+    if (AUDIO != null) {
         AUDIO.registerPreset('v18_spatial_sfx', { category: 'MASTER', priority: 'high' })
+    }
+
+    function playVanillaSoundNear(level, x, y, z, limit, soundObj, volume, pitch, minFactor, falloffMult) {
+        if (soundObj == null) return
+        forEachPlayerNear(level, x, y, z, limit, function (p, distSq) {
+            var factor = Math.max(minFactor, 1.0 - Math.sqrt(distSq) / (limit * falloffMult))
+            var vol = Math.max(0.15, Math.round(volume * factor * 100) * 0.01)
+            var pit = Math.max(0.5, Math.min(2.0, Math.round(pitch * 100) * 0.01))
+            try {
+                p.playSound(soundObj, vol, pit)
+            } catch (e) { }
+        })
     }
 
     function playAt(level, x, y, z, sound, volume, pitch, maxDist) {
@@ -684,30 +695,27 @@
         var sndId  = resolveSoundIdStr(sound)
         var dimStr = BASE.dimOfLevel(level) || 'minecraft:overworld'
 
-        if (AUDIO != null && typeof AUDIO.play === 'function' && sndId) {
+        if (AUDIO != null && sndId) {
             try {
-                AUDIO.play(AUDIO_HAS_PRESET
-                    ? { preset: 'v18_spatial_sfx', sound: sndId, dim: dimStr, at: [x + 0.5, y + 0.5, z + 0.5], range: limit, volume: volume, pitch: pitch }
-                    : { sound: sndId, dim: dimStr, at: [x + 0.5, y + 0.5, z + 0.5], range: limit, volume: volume, pitch: pitch, category: 'MASTER', priority: 'high' })
+                AUDIO.playPreset('v18_spatial_sfx', {
+                    sound:  sndId,
+                    dim:    dimStr,
+                    at:     [x + 0.5, y + 0.5, z + 0.5],
+                    range:  limit,
+                    volume: volume,
+                    pitch:  pitch
+                })
                 return
             } catch (eAud) { }
         }
-
-        forEachPlayerNear(level, x, y, z, limit, function (p, distSq) {
-            var factor = Math.max(0.20, 1.0 - Math.sqrt(distSq) / (limit * 1.25))
-            var vol = Math.max(0.15, Math.round(volume * factor * 100) * 0.01)
-            var pit = Math.max(0.5, Math.min(2.0, Math.round(pitch * 100) * 0.01))
-            try {
-                p.playSound(sound, vol, pit)
-            } catch (e) { }
-        })
+        playVanillaSoundNear(level, x, y, z, limit, sound, volume, pitch, 0.20, 1.25)
     }
 
     // 播放 kubejs/assets/epiphy/sounds.json 中定义的自定义音效（优先挂载到 EpiphyAudio 句柄，支持随时精准切断）
     function playCustomSoundAt(level, dim, x, y, z, soundId, volume, pitch, maxDist) {
         if (!soundId || level == null) return
         var limit = maxDist != null ? maxDist : SOUND_RANGE
-        if (AUDIO != null && typeof AUDIO.play === 'function') {
+        if (AUDIO != null) {
             try {
                 var keyTag = (soundId === CUSTOM_SND_SIREN)
                     ? `uncrafting_siren_${x}_${y}_${z}`
@@ -721,24 +729,13 @@
                     pitch:    pitch,
                     priority: soundId === CUSTOM_SND_ATOMIC_EXP ? 'critical' : 'high'
                 }
-                if (AUDIO_HAS_PRESET) playOpts.preset = 'v18_spatial_sfx'
-                else playOpts.category = 'MASTER'
                 if (keyTag) playOpts.key = keyTag
-                AUDIO.play(playOpts)
+                AUDIO.playPreset('v18_spatial_sfx', playOpts)
                 return
             } catch (eAud2) { }
         }
         var regSound = CUSTOM_SND_OBJECTS[soundId] != null ? CUSTOM_SND_OBJECTS[soundId] : reg(SOUND_REG, soundId)
-        forEachPlayerNear(level, x, y, z, limit, function (p, distSq) {
-            var factor = Math.max(0.25, 1.0 - Math.sqrt(distSq) / (limit * 1.3))
-            var vol = Math.max(0.15, Math.round(volume * factor * 100) * 0.01)
-            var pit = Math.max(0.5, Math.min(2.0, Math.round(pitch * 100) * 0.01))
-            if (regSound != null) {
-                try {
-                    p.playSound(regSound, vol, pit)
-                } catch (e) { }
-            }
-        })
+        playVanillaSoundNear(level, x, y, z, limit, regSound, volume, pitch, 0.25, 1.30)
     }
 
     // 当终望珍珠吞噬或创造模式强行终止时，立即停止周围玩家的自定义长音频
@@ -823,187 +820,211 @@
     //   - 同阶段刷新自动走 action:'patch' 增量补丁，仅在首次/切阶段/周期保活时发全量节点树
     // ------------------------------------------------------------------------
     var TELEMETRY_THEMES = {
-        cyan:    { from: 0x174A5A, mid: 0x26A69A, to: 0x80DEEA, accent: 0x4DD0E1, warn: 0xFFD54F, pure: 0xFFFFFF, trail: 0x6E4DD0E1, plateBg: 0x840A1318, badgeBg: 0x7A0A1318, mA: 0xD8FFFFFF, mB: 0x6E4DD0E1, mC: 0x3F26A69A },
-        amber:   { from: 0x5D1900, mid: 0xFF8F00, to: 0xFFE082, accent: 0xFFD54F, warn: 0xFFD54F, pure: 0xFFFFFF, trail: 0x66FFB300, plateBg: 0x88140E08, badgeBg: 0x7E140E08, mA: 0xD8FFFFFF, mB: 0x6EFFD54F, mC: 0x3FFF8F00 },
-        crimson: { from: 0x4A0714, mid: 0xC62828, to: 0xFF8A80, accent: 0xFF5252, warn: 0xFFAB00, pure: 0xFFEBEE, trail: 0x70FF5252, plateBg: 0x8A140B0E, badgeBg: 0x80140B0E, mA: 0xE0FFEBEE, mB: 0x70FF5252, mC: 0x40C62828 },
-        void:    { from: 0x240B4D, mid: 0x651FFF, to: 0x18FFFF, accent: 0x84FFFF, warn: 0xE040FB, pure: 0xF3E5F5, trail: 0x6E7C4DFF, plateBg: 0x8A0B0917, badgeBg: 0x800B0917, mA: 0xD8FFFFFF, mB: 0x6E18FFFF, mC: 0x407C4DFF }
+        cyan: {
+            from:    0x174A5A, mid:     0x26A69A, to:      0x80DEEA,
+            accent:  0x4DD0E1, warn:    0xFFD54F, pure:    0xFFFFFF,
+            trail:   0x6E4DD0E1,
+            plateBg: 0x840A1318, badgeBg: 0x7A0A1318,
+            mA:      0xD8FFFFFF, mB:      0x6E4DD0E1, mC: 0x3F26A69A
+        },
+        amber: {
+            from:    0x5D1900, mid:     0xFF8F00, to:      0xFFE082,
+            accent:  0xFFD54F, warn:    0xFFD54F, pure:    0xFFFFFF,
+            trail:   0x66FFB300,
+            plateBg: 0x88140E08, badgeBg: 0x7E140E08,
+            mA:      0xD8FFFFFF, mB:      0x6EFFD54F, mC: 0x3FFF8F00
+        },
+        crimson: {
+            from:    0x4A0714, mid:     0xC62828, to:      0xFF8A80,
+            accent:  0xFF5252, warn:    0xFFAB00, pure:    0xFFEBEE,
+            trail:   0x70FF5252,
+            plateBg: 0x8A140B0E, badgeBg: 0x80140B0E,
+            mA:      0xE0FFEBEE, mB:      0x70FF5252, mC: 0x40C62828
+        },
+        void: {
+            from:    0x240B4D, mid:     0x651FFF, to:      0x18FFFF,
+            accent:  0x84FFFF, warn:    0xE040FB, pure:    0xF3E5F5,
+            trail:   0x6E7C4DFF,
+            plateBg: 0x8A0B0917, badgeBg: 0x800B0917,
+            mA:      0xD8FFFFFF, mB:      0x6E18FFFF, mC: 0x407C4DFF
+        }
     }
 
-    if (typeof DANMAKU.registerWidget === 'function') {
-        DANMAKU.registerWidget('v18_t_pin', function (n, ui) {
-            var bs = Number(n.boxSize) || 7
-            var sl = Number(n.stemLen) || 34
-            var pfx = String(n.idPrefix || 'pin')
-            return ui({ ox: n.x, oy: n.y })
-                .outline(-bs * 0.5, 0, bs, bs, n.color, 1, { id: pfx + '_box' })
-                .rect(n.stemX !== undefined ? n.stemX : 0, bs, 1, sl, n.color, { id: pfx + '_line' })
-                .build()
-        })
-
-        DANMAKU.registerWidget('v18_reticle_badge', function (n, ui) {
-            var sz = Number(n.size) || 42
-            var hc = Math.round(sz * 0.5)
-            var th = n.theme || TELEMETRY_THEMES.cyan
-            var coreBind = { seed: 29, impulseVar: 'impulse', shakeX: 1.5, shakeY: 1.5, vibX: 0.45, vibY: 0.40, vibHz: 22 }
-            var rotBind  = { rotSpeed: 86, seed: 29, impulseVar: 'impulse', shakeX: 1.5, shakeY: 1.5, vibX: 0.45, vibY: 0.40, vibHz: 22 }
-            return ui({ ox: n.x, oy: n.y })
-                .rect(0, 0, sz, sz, th.badgeBg, { id: 'badge_plate' })
-                .boxes([
-                    [sz + 1, 5, 6, 6, th.mC, { stepHz: 9, seed: 13, jitterX: 2, jitterY: 2, jitterW: 1 }, 'badge_aura_r'],
-                    [-6, sz - 13, 5, 8, th.mC, { stepHz: 9, seed: 23, jitterX: 1, jitterY: 2 }, 'badge_aura_l'],
-                    [sz + 1, sz - 7, 5, 5, th.mB, null, 'badge_aura_br']
-                ])
-                .outline(0, 0, sz, sz, th.pure, 1, { id: 'badge_outer' })
-                .corners(0, 0, sz, sz, 5, 2, th.warn, 'tl,br')
-                .outline(10, 10, sz - 20, sz - 20, th.accent, 1, { id: 'badge_inner', bind: coreBind })
-                .rect(hc, hc, 11, 11, th.mid, { id: 'badge_rot_sq', anchor: 'center', bind: rotBind })
-                .rect(hc, hc, 7, 7, th.pure, { id: 'badge_rot_dia', anchor: 'center', angle: 45, bind: rotBind })
-                .text(-1, -10, '$badgeCode', 0.80, th.accent, { id: 'badge_tag' })
-                .boxes([
-                    [11, -10, 11, 8, th.pure, { stepHz: 9, seed: 41, jitterX: 7, jitterW: 3 }, 'badge_mask'],
-                    [22, -10, 6, 8, th.mB, { stepHz: 9, seed: 41, jitterX: 7 }, 'badge_mask_tr']
-                ])
-                .text(0, sz + 4, 'ID//0x4F', 0.74, 0x99FFFFFF, { id: 'badge_idx' })
-                .build()
-        })
+    function buildTelemetryVars(c, isFullInit) {
+        var pVal    = Math.max(0.0, Math.min(1.0, Number(c.progress) || 0.0))
+        var subPVal = Math.max(0.0, Math.min(1.0, c.subProgress !== undefined ? Number(c.subProgress) : pVal))
+        var efTag   = String(c.efTag || 'EF-TLM // S1')
+        var vars    = {
+            progress:     pVal,
+            subProgress:  subPVal,
+            impulseEvent: String(c.impulseEvent !== undefined ? c.impulseEvent : efTag),
+            pctText:      Math.round(pVal * 100) + '%',
+            efTag:        efTag,
+            badgeCode:    String(c.badgeCode || 'DETECTED'),
+            unitLabel:    String(c.unitLabel || 'STABILITY_RATIO'),
+            title:        String(c.text || c.title || ''),
+            sub:          String(c.sub || c.subtitle || ''),
+            footRight:    String(c.footRight || 'PHASE_LOCK // STABLE'),
+            rightVal:     String(c.rightVal || (Math.round(pVal * 100) + '.0%')),
+            rightSub:     String(c.rightSub || 'ACTIVE')
+        }
+        if (isFullInit) {
+            vars.progressTrail = pVal
+            vars.impulse       = 0.0
+        }
+        return vars
     }
 
-    if (typeof DANMAKU.registerPreset === 'function') {
-        DANMAKU.registerPreset('v18_telemetry', function (c, h) {
-            var th      = (typeof c.theme === 'string' && TELEMETRY_THEMES[c.theme]) ? TELEMETRY_THEMES[c.theme] : (c.theme || TELEMETRY_THEMES.cyan)
-            var pVal    = Math.max(0.0, Math.min(1.0, Number(c.progress) || 0.0))
-            var subPVal = Math.max(0.0, Math.min(1.0, c.subProgress !== undefined ? Number(c.subProgress) : pVal))
-            var barW    = Math.max(200, Math.min(540, Math.round(Number(c.barWidth) || 472)))
-            var barH    = Math.max(8, Math.min(24, Math.round(Number(c.barHeight) || 16)))
-            var bx      = -Math.round(barW * 0.5)
-            var by      = -Math.round(barH * 0.5)
-            var s1      = Math.round(barW * 0.44), s2 = Math.round(barW * 0.78)
-            var w1      = Math.round(barW * 0.30), w2 = Math.round(barW * 0.30), w3 = Math.round(barW * 0.24)
-            var w4      = barW - w1 - w2 - w3 + 10
-            var impBind = { seed: 5, impulseVar: 'impulse', shakeX: 1.4 }
+    DANMAKU.registerWidget('v18_t_pin', function (n, ui) {
+        var bs  = Number(n.boxSize) || 7
+        var sl  = Number(n.stemLen) || 34
+        var pfx = String(n.idPrefix || 'pin')
+        return ui({ ox: n.x, oy: n.y })
+            .outline(-bs * 0.5, 0, bs, bs, n.color, 1, { id: pfx + '_box' })
+            .rect(n.stemX !== undefined ? n.stemX : 0, bs, 1, sl, n.color, { id: pfx + '_line' })
+            .build()
+    })
 
-            var nodes = h.ui()
-                // 1. 左侧同心双框旋转准星徽章（自定义复合单元）
-                .widget('v18_reticle_badge', { x: bx - 57, y: by - 12, size: 42, theme: th })
-                // 2. 四段严丝合缝零重叠阶梯切角玻璃底衬 + 顶栏铭牌/状态灯 + 舱壁与下沿阶梯底轨（连续 solid/outline 便于客户端合批）
-                .steppedPlate(bx - 6, th.plateBg, [
-                    [w1 + 6, by - 20, by + barH + 26],
-                    [w2,     by - 18, by + barH + 27],
-                    [w3,     by - 13, by + barH + 26],
-                    [w4,     by - 9,  by + barH + 24]
-                ], ['panel_bg_l', 'panel_bg_m', 'panel_bg_m2', 'panel_bg_r'])
-                .boxes([
-                    [bx - 5, by - 4, 1.5, barH + 10, th.accent, null, 'bulkhead_v'],
-                    [bx - 5, by - 4, 22, 1.5, th.accent, null, 'bulkhead_cap'],
-                    [bx, by - 18.5, 69, 11, th.warn, null, 'ef_tag_plate'],
-                    [bx + 73, by - 15.5, 3.5, 6, th.accent, null, 'ef_pip_1'],
-                    [bx + 79, by - 15.5, 3.5, 6, th.warn, { stepHz: 4, seed: 19, jitterH: 1.5 }, 'ef_pip_2'],
-                    [bx + 85, by - 15.5, 3.5, 6, 0x44FFFFFF, null, 'ef_pip_3']
-                ])
-                .steppedLine(bx - 5, by + barH + 3, [
-                    [s1 + 5, 0, 0x6BFFFFFF, 1.2],
-                    [s2 - s1, 4, th.accent, 1.2],
-                    [barW - s2 + 16, 0, th.mB, 1.5]
-                ])
-                // 3. 三层立体景深下方流动数据波纹场 + 上沿 13 段细锐悬空阶梯框
-                .parallax(bx, by + barH + 9, barW, 16, [
-                    { kind: 'ripples',   rows: 3, rowGap: 5.0, offsetY: 1.5, segments: 7, baseLen: 38, ampLen: 22, speedX: 11,  thickness: 0.75, seed: 7,   color: 0x3826A69A, altColor: 0x2626A69A, alpha: 0.90 },
-                    { kind: 'ripples',   rows: 4, rowGap: 3.6, offsetY: 0.5, segments: 6, baseLen: 22, ampLen: 14, speedX: -27, thickness: 1.0,  seed: 43,  color: th.mB,      altColor: th.mC,      alpha: 0.95 },
-                    { kind: 'particles', count: 22, speedX: 52,  speedY: 0, minW: 1.5, maxW: 6.0, thickness: 1.0, seed: 89,  color: th.accent, altColor: th.pure, alpha: 0.88 },
-                    { kind: 'particles', count: 14, speedX: -38, speedY: 0, minW: 1.0, maxW: 3.0, thickness: 0.9, seed: 131, color: th.warn,   altColor: th.pure, alpha: 0.72 }
-                ], { id: 'under_ripples' })
-                .parallax(bx, by - 6, barW, 4.5, [
-                    { kind: 'steps', count: 13, stepHz: 9, risers: true, thickness: 1.2, color: th.accent, altColor: th.mB, alpha: 0.92 }
-                ], { id: 'frame_top_steps' })
-                // 4. 进度槽核心 + 5 层视差内胆 + 刻度细线 + 副轨 + 右端 T-Pin 吊线
-                .rect(bx, by, barW, barH, 0xEA04070B, { id: 'bar_bg', bind: impBind })
-                .rect(bx, by + 1, barW, barH - 2, th.trail, { id: 'bar_trail', clip: { dir: 'left', ratio: '$progressTrail', mode: 'local' } })
-                .parallax(bx, by + 1, barW, barH - 2, [
-                    { kind: 'gradient',  from: th.from, mid: th.mid, to: th.to, midPos: 0.62, alpha: 1.0 },
-                    { kind: 'stripes',   step: 18, width: 7, skew: 7, speedX: 20, color: 0x3D000000, alpha: 0.95 },
-                    { kind: 'ripples',   rows: 4, rowGap: 3.4, offsetY: 1.2, segments: 7, baseLen: 26, ampLen: 14, speedX: 34, thickness: 1.1, seed: 23, color: 0x52FFFFFF, altColor: 0x2BFFFFFF, alpha: 0.95 },
-                    { kind: 'particles', count: 24, speedX: 15,  speedY: 0, minW: 1,   maxW: 2, thickness: 1.3, color: 0x7AFFFFFF, seed: 11, alpha: 0.85 },
-                    { kind: 'particles', count: 20, speedX: -44, speedY: 0, minW: 1.5, maxW: 5, thickness: 1.2, color: th.pure, altColor: th.accent, seed: 31, alpha: 0.92 }
-                ], { id: 'bar_main', clip: { dir: 'left', ratio: '$progress', mode: 'local' }, bind: impBind, bloomWidth: 24, bloomColor: 0xE0FFFFFF })
-                .ticks(bx, by - 2, barW, barH + 8, [0.25, 0.50, 0.75], 0x38FFFFFF, 1, 'ms')
-                .rect(bx, by + barH + 1, barW, 1.5, th.warn, { id: 'bar_sub_rail', clip: { dir: 'left', ratio: '$subProgress', mode: 'local' } })
-                .widget('v18_t_pin', { x: bx + barW + 17.25, y: by + 1, boxSize: 8.5, stemLen: 34, stemX: -0.25, color: th.accent, idPrefix: 'right_pin' })
-                // 5. 推进前缘动态跟随组（搁浅 T-Pin + 5 块 9Hz 体素簇 + 悬浮百分比）
-                .group(bx, by, { id: 'cursor_group', bind: { x: { var: 'progress', mult: barW }, seed: 5, impulseVar: 'impulse', shakeX: 1.4 } }, function (g) {
-                    g.widget('v18_t_pin', { x: 0, y: -12, boxSize: 7, stemLen: barH + 26, color: th.pure, idPrefix: 'cur_pin' })
-                        .boxes([
-                            [-6, -4, 8, 4.5, th.mA, { stepHz: 9, seed: 7, jitterX: 2, jitterW: 2 }, 'cur_vox_hi'],
-                            [2, 2, 9, 5.5, th.mB, { stepHz: 9, seed: 13, jitterX: 2, jitterW: 2 }, 'cur_vox_mid'],
-                            [-11, barH - 3, 10, 4.5, th.mB, { stepHz: 9, seed: 19, jitterX: 2, jitterW: 2 }, 'cur_vox_lo'],
-                            [3, barH - 5, 7, 6.5, th.mC, { stepHz: 9, seed: 29, jitterX: 1, jitterW: 2 }, 'cur_vox_lo2'],
-                            [10, 5, 5, 4.5, th.mA, { stepHz: 9, seed: 37, jitterX: 1 }, 'cur_vox_tr']
-                        ])
-                        .text(4, barH + 12, '$pctText', 0.80, th.pure, { id: 'cur_pct_flag' })
-                })
-                // 6. 所有非遮挡文字集中放在末端，最大化减少渲染器 graphics.flush() 次数
-                .text(bx + 4,  by - 16.5, '$efTag',     0.85, 0x090C10,   { id: 'ef_tag_text', shadow: false })
-                .text(bx + 93, by - 17,   '$title',     0.96, th.pure,    { id: 'title' })
-                .text(bx + barW + 25, by - 6,  '$unitLabel', 0.72, 0xAAFFFFFF, { id: 'right_unit' })
-                .text(bx + barW + 25, by + 2,  '$rightVal',  1.24, th.pure,    { id: 'right_readout' })
-                .text(bx + barW + 25, by + 15, '$rightSub',  0.90, th.warn,    { id: 'right_sub' })
-                .text(bx,             by + barH + 28, '$sub',       0.88, 0xD4FFFFFF, { id: 'sub' })
-                .text(bx + barW,      by + barH + 28, '$footRight', 0.88, th.accent,  { id: 'footer_right', anchor: 'top_right' })
-                .build()
+    DANMAKU.registerWidget('v18_reticle_badge', function (n, ui) {
+        var sz = Number(n.size) || 42
+        var hc = Math.round(sz * 0.5)
+        var th = n.theme || TELEMETRY_THEMES.cyan
+        var coreBind = { seed: 29, impulseVar: 'impulse', shakeX: 1.5, shakeY: 1.5, vibX: 0.45, vibY: 0.40, vibHz: 22 }
+        var rotBind  = { rotSpeed: 86, seed: 29, impulseVar: 'impulse', shakeX: 1.5, shakeY: 1.5, vibX: 0.45, vibY: 0.40, vibHz: 22 }
+        return ui({ ox: n.x, oy: n.y })
+            .rect(0, 0, sz, sz, th.badgeBg, { id: 'badge_plate' })
+            .boxes([
+                [sz + 1, 5, 6, 6, th.mC, { stepHz: 9, seed: 13, jitterX: 2, jitterY: 2, jitterW: 1 }, 'badge_aura_r'],
+                [-6, sz - 13, 5, 8, th.mC, { stepHz: 9, seed: 23, jitterX: 1, jitterY: 2 }, 'badge_aura_l'],
+                [sz + 1, sz - 7, 5, 5, th.mB, null, 'badge_aura_br']
+            ])
+            .outline(0, 0, sz, sz, th.pure, 1, { id: 'badge_outer' })
+            .corners(0, 0, sz, sz, 5, 2, th.warn, 'tl,br')
+            .outline(10, 10, sz - 20, sz - 20, th.accent, 1, { id: 'badge_inner', bind: coreBind })
+            .rect(hc, hc, 11, 11, th.mid, { id: 'badge_rot_sq', anchor: 'center', bind: rotBind })
+            .rect(hc, hc, 7, 7, th.pure, { id: 'badge_rot_dia', anchor: 'center', angle: 45, bind: rotBind })
+            .text(-1, -10, '$badgeCode', 0.80, th.accent, { id: 'badge_tag' })
+            .boxes([
+                [11, -10, 11, 8, th.pure, { stepHz: 9, seed: 41, jitterX: 7, jitterW: 3 }, 'badge_mask'],
+                [22, -10, 6, 8, th.mB, { stepHz: 9, seed: 41, jitterX: 7 }, 'badge_mask_tr']
+            ])
+            .text(0, sz + 4, 'ID//0x4F', 0.74, 0x99FFFFFF, { id: 'badge_idx' })
+            .build()
+    })
 
-            var titleStr  = String(c.text || c.title || '')
-            var subStr    = String(c.sub || c.subtitle || '')
-            var efTagStr  = String(c.efTag || 'EF-TLM // S1')
-            var panelCfg  = {
-                group:       c.group || TELEMETRY_GROUP,
-                namespace:   c.namespace || DANMAKU_NAMESPACE,
-                id:          c.id,
-                lifeMode:    c.lifeMode || 'active',
-                activeHold:  c.activeHold != null ? c.activeHold : 22,
-                priority:    c.priority || 'active',
-                pos:         c.pos || [0.27, 0.14],
-                size:        c.size != null ? c.size : 0.56,
-                tilt:        c.tilt != null ? c.tilt : 0,
-                shakeMode:   c.shakeMode || 'none',
-                shakeAmp:    c.shakeAmp != null ? c.shakeAmp : 0.0,
-                fadeStyle:   c.fadeStyle || 'char_last',
-                fadeOut:     c.fadeOut != null ? c.fadeOut : 14,
-                progress:    pVal,
-                subProgress: subPVal,
-                barWidth:    barW,
-                barHeight:   barH,
-                text:        titleStr,
-                sub:         subStr,
-                nodes:       nodes,
-                tracks:      c.tracks || {
-                    impulse: { mode: 'impulse', onChange: '$impulseEvent', peak: 1.0, initPeak: c.initPeak !== undefined ? c.initPeak : 0.90, decayMs: 420 }
-                },
-                vars: {
-                    progress:      pVal,
-                    progressTrail: pVal,
-                    subProgress:   subPVal,
-                    impulse:       0.0,
-                    impulseEvent:  String(c.impulseEvent !== undefined ? c.impulseEvent : efTagStr),
-                    pctText:       Math.round(pVal * 100) + '%',
-                    efTag:         efTagStr,
-                    badgeCode:     String(c.badgeCode || 'DETECTED'),
-                    unitLabel:     String(c.unitLabel || 'STABILITY_RATIO'),
-                    title:         titleStr,
-                    sub:           subStr,
-                    footRight:     String(c.footRight || 'PHASE_LOCK // STABLE'),
-                    rightVal:      String(c.rightVal || (Math.round(pVal * 100) + '.0%')),
-                    rightSub:      String(c.rightSub || 'ACTIVE')
-                }
+    DANMAKU.registerPreset('v18_telemetry', function (c, h) {
+        var th      = (typeof c.theme === 'string' && TELEMETRY_THEMES[c.theme]) ? TELEMETRY_THEMES[c.theme] : (c.theme || TELEMETRY_THEMES.cyan)
+        var vars    = buildTelemetryVars(c, true)
+        var barW    = Math.max(200, Math.min(540, Math.round(Number(c.barWidth) || 472)))
+        var barH    = Math.max(8, Math.min(24, Math.round(Number(c.barHeight) || 16)))
+        var bx      = -Math.round(barW * 0.5)
+        var by      = -Math.round(barH * 0.5)
+        var s1      = Math.round(barW * 0.44), s2 = Math.round(barW * 0.78)
+        var w1      = Math.round(barW * 0.30), w2 = Math.round(barW * 0.30), w3 = Math.round(barW * 0.24)
+        var w4      = barW - w1 - w2 - w3 + 10
+        var impBind = { seed: 5, impulseVar: 'impulse', shakeX: 1.4 }
+
+        var nodes = h.ui()
+            // 1. 左侧同心双框旋转准星徽章（自定义复合单元）
+            .widget('v18_reticle_badge', { x: bx - 57, y: by - 12, size: 42, theme: th })
+            // 2. 四段严丝合缝零重叠阶梯切角玻璃底衬 + 顶栏铭牌/状态灯 + 舱壁与下沿阶梯底轨（连续 solid/outline 便于客户端合批）
+            .steppedPlate(bx - 6, th.plateBg, [
+                [w1 + 6, by - 20, by + barH + 26],
+                [w2,     by - 18, by + barH + 27],
+                [w3,     by - 13, by + barH + 26],
+                [w4,     by - 9,  by + barH + 24]
+            ], ['panel_bg_l', 'panel_bg_m', 'panel_bg_m2', 'panel_bg_r'])
+            .boxes([
+                [bx - 5, by - 4, 1.5, barH + 10, th.accent, null, 'bulkhead_v'],
+                [bx - 5, by - 4, 22, 1.5, th.accent, null, 'bulkhead_cap'],
+                [bx, by - 18.5, 69, 11, th.warn, null, 'ef_tag_plate'],
+                [bx + 73, by - 15.5, 3.5, 6, th.accent, null, 'ef_pip_1'],
+                [bx + 79, by - 15.5, 3.5, 6, th.warn, { stepHz: 4, seed: 19, jitterH: 1.5 }, 'ef_pip_2'],
+                [bx + 85, by - 15.5, 3.5, 6, 0x44FFFFFF, null, 'ef_pip_3']
+            ])
+            .steppedLine(bx - 5, by + barH + 3, [
+                [s1 + 5, 0, 0x6BFFFFFF, 1.2],
+                [s2 - s1, 4, th.accent, 1.2],
+                [barW - s2 + 16, 0, th.mB, 1.5]
+            ])
+            // 3. 三层立体景深下方流动数据波纹场 + 上沿 13 段细锐悬空阶梯框
+            .parallax(bx, by + barH + 9, barW, 16, [
+                { kind: 'ripples',   rows: 3, rowGap: 5.0, offsetY: 1.5, segments: 7, baseLen: 38, ampLen: 22, speedX: 11,  thickness: 0.75, seed: 7,   color: 0x3826A69A, altColor: 0x2626A69A, alpha: 0.90 },
+                { kind: 'ripples',   rows: 4, rowGap: 3.6, offsetY: 0.5, segments: 6, baseLen: 22, ampLen: 14, speedX: -27, thickness: 1.0,  seed: 43,  color: th.mB,      altColor: th.mC,      alpha: 0.95 },
+                { kind: 'particles', count: 22, speedX: 52,  speedY: 0, minW: 1.5, maxW: 6.0, thickness: 1.0, seed: 89,  color: th.accent, altColor: th.pure, alpha: 0.88 },
+                { kind: 'particles', count: 14, speedX: -38, speedY: 0, minW: 1.0, maxW: 3.0, thickness: 0.9, seed: 131, color: th.warn,   altColor: th.pure, alpha: 0.72 }
+            ], { id: 'under_ripples' })
+            .parallax(bx, by - 6, barW, 4.5, [
+                { kind: 'steps', count: 13, stepHz: 9, risers: true, thickness: 1.2, color: th.accent, altColor: th.mB, alpha: 0.92 }
+            ], { id: 'frame_top_steps' })
+            // 4. 进度槽核心 + 5 层视差内胆 + 刻度细线 + 副轨 + 右端 T-Pin 吊线
+            .rect(bx, by, barW, barH, 0xEA04070B, { id: 'bar_bg', bind: impBind })
+            .rect(bx, by + 1, barW, barH - 2, th.trail, { id: 'bar_trail', clip: { dir: 'left', ratio: '$progressTrail', mode: 'local' } })
+            .parallax(bx, by + 1, barW, barH - 2, [
+                { kind: 'gradient',  from: th.from, mid: th.mid, to: th.to, midPos: 0.62, alpha: 1.0 },
+                { kind: 'stripes',   step: 18, width: 7, skew: 7, speedX: 20, color: 0x3D000000, alpha: 0.95 },
+                { kind: 'ripples',   rows: 4, rowGap: 3.4, offsetY: 1.2, segments: 7, baseLen: 26, ampLen: 14, speedX: 34, thickness: 1.1, seed: 23, color: 0x52FFFFFF, altColor: 0x2BFFFFFF, alpha: 0.95 },
+                { kind: 'particles', count: 24, speedX: 15,  speedY: 0, minW: 1,   maxW: 2, thickness: 1.3, color: 0x7AFFFFFF, seed: 11, alpha: 0.85 },
+                { kind: 'particles', count: 20, speedX: -44, speedY: 0, minW: 1.5, maxW: 5, thickness: 1.2, color: th.pure, altColor: th.accent, seed: 31, alpha: 0.92 }
+            ], { id: 'bar_main', clip: { dir: 'left', ratio: '$progress', mode: 'local' }, bind: impBind, bloomWidth: 24, bloomColor: 0xE0FFFFFF })
+            .ticks(bx, by - 2, barW, barH + 8, [0.25, 0.50, 0.75], 0x38FFFFFF, 1, 'ms')
+            .rect(bx, by + barH + 1, barW, 1.5, th.warn, { id: 'bar_sub_rail', clip: { dir: 'left', ratio: '$subProgress', mode: 'local' } })
+            .widget('v18_t_pin', { x: bx + barW + 17.25, y: by + 1, boxSize: 8.5, stemLen: 34, stemX: -0.25, color: th.accent, idPrefix: 'right_pin' })
+            // 5. 推进前缘动态跟随组（搁浅 T-Pin + 5 块 9Hz 体素簇 + 悬浮百分比）
+            .group(bx, by, { id: 'cursor_group', bind: { x: { var: 'progress', mult: barW }, seed: 5, impulseVar: 'impulse', shakeX: 1.4 } }, function (g) {
+                g.widget('v18_t_pin', { x: 0, y: -12, boxSize: 7, stemLen: barH + 26, color: th.pure, idPrefix: 'cur_pin' })
+                    .boxes([
+                        [-6, -4, 8, 4.5, th.mA, { stepHz: 9, seed: 7, jitterX: 2, jitterW: 2 }, 'cur_vox_hi'],
+                        [2, 2, 9, 5.5, th.mB, { stepHz: 9, seed: 13, jitterX: 2, jitterW: 2 }, 'cur_vox_mid'],
+                        [-11, barH - 3, 10, 4.5, th.mB, { stepHz: 9, seed: 19, jitterX: 2, jitterW: 2 }, 'cur_vox_lo'],
+                        [3, barH - 5, 7, 6.5, th.mC, { stepHz: 9, seed: 29, jitterX: 1, jitterW: 2 }, 'cur_vox_lo2'],
+                        [10, 5, 5, 4.5, th.mA, { stepHz: 9, seed: 37, jitterX: 1 }, 'cur_vox_tr']
+                    ])
+                    .text(4, barH + 12, '$pctText', 0.80, th.pure, { id: 'cur_pct_flag' })
+            })
+            // 6. 所有非遮挡文字集中放在末端，最大化减少渲染器 graphics.flush() 次数
+            .text(bx + 4,         by - 16.5,      '$efTag',     0.85, 0x090C10,   { id: 'ef_tag_text', shadow: false })
+            .text(bx + 93,        by - 17,        '$title',     0.96, th.pure,    { id: 'title' })
+            .text(bx + barW + 25, by - 6,         '$unitLabel', 0.72, 0xAAFFFFFF, { id: 'right_unit' })
+            .text(bx + barW + 25, by + 2,         '$rightVal',  1.24, th.pure,    { id: 'right_readout' })
+            .text(bx + barW + 25, by + 15,        '$rightSub',  0.90, th.warn,    { id: 'right_sub' })
+            .text(bx,             by + barH + 28, '$sub',       0.88, 0xD4FFFFFF, { id: 'sub' })
+            .text(bx + barW,      by + barH + 28, '$footRight', 0.88, th.accent,  { id: 'footer_right', anchor: 'top_right' })
+            .build()
+
+        return h.buildProgressPanel({
+            group:       c.group || TELEMETRY_GROUP,
+            namespace:   c.namespace || DANMAKU_NAMESPACE,
+            id:          c.id,
+            lifeMode:    c.lifeMode || 'active',
+            activeHold:  c.activeHold != null ? c.activeHold : 22,
+            priority:    c.priority || 'active',
+            pos:         c.pos || [0.27, 0.14],
+            size:        c.size != null ? c.size : 0.56,
+            tilt:        c.tilt != null ? c.tilt : 0,
+            shakeMode:   c.shakeMode || 'none',
+            shakeAmp:    c.shakeAmp != null ? c.shakeAmp : 0.0,
+            fadeStyle:   c.fadeStyle || 'char_last',
+            fadeOut:     c.fadeOut != null ? c.fadeOut : 14,
+            progress:    vars.progress,
+            subProgress: vars.subProgress,
+            barWidth:    barW,
+            barHeight:   barH,
+            text:        vars.title,
+            sub:         vars.sub,
+            nodes:       nodes,
+            vars:        vars,
+            tracks:      c.tracks || {
+                impulse: { mode: 'impulse', onChange: '$impulseEvent', peak: 1.0, initPeak: c.initPeak !== undefined ? c.initPeak : 0.90, decayMs: 420 }
             }
-            return h.buildProgressPanel(panelCfg)
         })
-    }
+    })
 
     // 遥测 HUD 智能推送：首次/阶段或主题切换/每 48 tick 推送全量预设包，其余同阶段刷新发送极简 action:'patch'
     function emitTelemetryHud(job, radius, slotId, stageKey, fullCfg) {
         var curTick  = (job && typeof job.t === 'number') ? job.t : tickCounter
         var needFull = !job || job._tlmSlotId !== slotId || job._tlmStageKey !== stageKey ||
-            job._tlmLastFullTick == null || (curTick - job._tlmLastFullTick) >= 48 ||
-            typeof DANMAKU.patchNear !== 'function'
+            job._tlmLastFullTick == null || (curTick - job._tlmLastFullTick) >= 48
         if (needFull) {
             if (job) {
                 job._tlmSlotId       = slotId
@@ -1016,28 +1037,12 @@
             sendDanmakuNear(job.level, job.x, job.y, job.z, radius, fullCfg)
             return
         }
-        var pVal    = Math.max(0.0, Math.min(1.0, Number(fullCfg.progress) || 0.0))
-        var subPVal = Math.max(0.0, Math.min(1.0, fullCfg.subProgress !== undefined ? Number(fullCfg.subProgress) : pVal))
-        var efTag   = String(fullCfg.efTag || 'EF-TLM // S1')
         DANMAKU.patchNear(job.level, job.x, job.y, job.z, radius, {
             namespace:  DANMAKU_NAMESPACE,
             group:      TELEMETRY_GROUP,
             id:         slotId,
             activeHold: fullCfg.activeHold != null ? fullCfg.activeHold : 22,
-            vars: {
-                progress:     pVal,
-                subProgress:  subPVal,
-                impulseEvent: String(fullCfg.impulseEvent !== undefined ? fullCfg.impulseEvent : efTag),
-                pctText:      Math.round(pVal * 100) + '%',
-                efTag:        efTag,
-                badgeCode:    String(fullCfg.badgeCode || 'DETECTED'),
-                unitLabel:    String(fullCfg.unitLabel || 'STABILITY_RATIO'),
-                title:        String(fullCfg.text || ''),
-                sub:          String(fullCfg.sub || ''),
-                footRight:    String(fullCfg.footRight || ''),
-                rightVal:     String(fullCfg.rightVal || ''),
-                rightSub:     String(fullCfg.rightSub || '')
-            }
+            vars:       buildTelemetryVars(fullCfg, false)
         })
     }
 
@@ -3092,67 +3097,63 @@
     // ------------------------------------------------------------------------
     // 液体清除与外圈岩浆环：向上提交 EpiphyWorldOps 预设后按名调用
     // ------------------------------------------------------------------------
-    var WORLD_OPS_HAS_PRESET = (WORLD_OPS != null && typeof WORLD_OPS.registerPreset === 'function')
-    if (WORLD_OPS_HAS_PRESET) {
-        WORLD_OPS.registerPreset('v18_fluid_sweep', {
-            padding:        LIQUID_PURGE_PADDING,
-            loops:          LIQUID_PURGE_LOOPS,
-            unloadedTtl:    LIQUID_UNLOADED_TTL,
-            syncInitRadius: 0,
-            syncMaxMs:      LIQUID_SYNC_MAX_MS,
-            excludeLava:    true
-        })
-        WORLD_OPS.registerPreset('v18_fluid_purge', {
-            padding:        LIQUID_PURGE_PADDING,
-            loops:          LIQUID_PURGE_LOOPS,
-            unloadedTtl:    LIQUID_UNLOADED_TTL,
-            syncInitRadius: LIQUID_SYNC_INIT_RADIUS,
-            syncMaxMs:      LIQUID_SYNC_MAX_MS
-        })
-        WORLD_OPS.registerPreset('v18_magma_ring', {
-            blockId:   'minecraft:lava',
-            width:     MAGMA_RING_WIDTH,
-            thickness: MAGMA_RING_THICKNESS
-        })
-    }
+    WORLD_OPS.registerPreset('v18_fluid_sweep', {
+        padding:        LIQUID_PURGE_PADDING,
+        loops:          LIQUID_PURGE_LOOPS,
+        unloadedTtl:    LIQUID_UNLOADED_TTL,
+        syncInitRadius: 0,
+        syncMaxMs:      LIQUID_SYNC_MAX_MS,
+        excludeLava:    true
+    })
+    WORLD_OPS.registerPreset('v18_fluid_purge', {
+        padding:        LIQUID_PURGE_PADDING,
+        loops:          LIQUID_PURGE_LOOPS,
+        unloadedTtl:    LIQUID_UNLOADED_TTL,
+        syncInitRadius: LIQUID_SYNC_INIT_RADIUS,
+        syncMaxMs:      LIQUID_SYNC_MAX_MS
+    })
+    WORLD_OPS.registerPreset('v18_magma_ring', {
+        blockId:   'minecraft:lava',
+        width:     MAGMA_RING_WIDTH,
+        thickness: MAGMA_RING_THICKNESS
+    })
 
     function triggerIncrementalLiquidSweep(level, dim, cx, cy, cz, radius) {
         if (!LIQUID_PURGE_ENABLED || level == null) return
-        WORLD_OPS.triggerIncrementalFluidSweep(level, dim, cx, cy, cz, radius, WORLD_OPS_HAS_PRESET
-            ? { preset: 'v18_fluid_sweep' }
-            : { padding: LIQUID_PURGE_PADDING, loops: LIQUID_PURGE_LOOPS, unloadedTtl: LIQUID_UNLOADED_TTL, syncInitRadius: 0, syncMaxMs: LIQUID_SYNC_MAX_MS, excludeLava: true })
+        WORLD_OPS.triggerIncrementalFluidSweep(level, dim, cx, cy, cz, radius, { preset: 'v18_fluid_sweep' })
     }
 
     function startLiquidPurge(level, dim, cx, cy, cz, radius, isRimOnlySweep) {
         if (!LIQUID_PURGE_ENABLED || level == null) return
-        var onDoneFn = () => {
-            sendChatNear(
-                level, dim, cx, cy, cz, FX_PACKET_RANGE + 120,
-                '{"text":"[LIQUID_PURGE] 湮灭流体剥离完成 —— 湮灭柱域内的水源、流动水、气泡柱、水生植物、含水方块与岩浆已全部归零。","color":"gold"}'
-            )
-        }
         // 引爆当 tick 仅做极短同步核心预扫（syncInitRadius=32, syncMaxMs=4ms），将主开销平摊至 EpiphyWorldOps 分帧预算（8ms/tick）
-        WORLD_OPS.startSphereFluidPurge(level, dim, cx, cy, cz, radius, WORLD_OPS_HAS_PRESET
-            ? { preset: 'v18_fluid_purge', isRimOnlySweep: Boolean(isRimOnlySweep), onDone: onDoneFn }
-            : { isRimOnlySweep: Boolean(isRimOnlySweep), padding: LIQUID_PURGE_PADDING, loops: LIQUID_PURGE_LOOPS, unloadedTtl: LIQUID_UNLOADED_TTL, syncInitRadius: LIQUID_SYNC_INIT_RADIUS, syncMaxMs: LIQUID_SYNC_MAX_MS, onDone: onDoneFn })
+        WORLD_OPS.startSphereFluidPurge(level, dim, cx, cy, cz, radius, {
+            preset:         'v18_fluid_purge',
+            isRimOnlySweep: Boolean(isRimOnlySweep),
+            onDone: () => {
+                sendChatNear(
+                    level, dim, cx, cy, cz, FX_PACKET_RANGE + 120,
+                    '{"text":"[LIQUID_PURGE] 湮灭流体剥离完成 —— 湮灭柱域内的水源、流动水、气泡柱、水生植物、含水方块与岩浆已全部归零。","color":"gold"}'
+                )
+            }
+        })
     }
 
     function startMagmaRing(job, maxR) {
-        var onDoneFn = (rJob) => {
-            var placed = rJob?.placedCols != null ? rJob.placedCols : 0
-            var total  = rJob?.totalCols  != null ? rJob.totalCols  : 0
-            if (placed <= 0) return
-            var covText = (total > 0 && placed < total)
-                ? `（已浇筑当前加载视距内 ${placed}/${total} 列）`
-                : ''
-            sendChatNear(
-                job.level, job.dim, job.x, job.y, job.z, FX_PACKET_RANGE + 80,
-                `{"text":"[MAGMA_RING] 最外壳层冷却完成 —— 半径 300 格处已形成岩浆圈层${covText}。","color":"gold"}`
-            )
-        }
-        WORLD_OPS.startRingBlockJob(job.level, job.dim, job.x, job.y, job.z, maxR, WORLD_OPS_HAS_PRESET
-            ? { preset: 'v18_magma_ring', onDone: onDoneFn }
-            : { blockId: 'minecraft:lava', width: MAGMA_RING_WIDTH, thickness: MAGMA_RING_THICKNESS, onDone: onDoneFn })
+        WORLD_OPS.startRingBlockJob(job.level, job.dim, job.x, job.y, job.z, maxR, {
+            preset: 'v18_magma_ring',
+            onDone: (rJob) => {
+                var placed = rJob?.placedCols != null ? rJob.placedCols : 0
+                var total  = rJob?.totalCols  != null ? rJob.totalCols  : 0
+                if (placed <= 0) return
+                var covText = (total > 0 && placed < total)
+                    ? `（已浇筑当前加载视距内 ${placed}/${total} 列）`
+                    : ''
+                sendChatNear(
+                    job.level, job.dim, job.x, job.y, job.z, FX_PACKET_RANGE + 80,
+                    `{"text":"[MAGMA_RING] 最外壳层冷却完成 —— 半径 300 格处已形成岩浆圈层${covText}。","color":"gold"}`
+                )
+            }
+        })
     }
 
     BASE.registerDebugProvider({
