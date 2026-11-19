@@ -673,6 +673,11 @@
         return ''
     }
 
+    var AUDIO_HAS_PRESET = (AUDIO != null && typeof AUDIO.registerPreset === 'function')
+    if (AUDIO_HAS_PRESET) {
+        AUDIO.registerPreset('v18_spatial_sfx', { category: 'MASTER', priority: 'high' })
+    }
+
     function playAt(level, x, y, z, sound, volume, pitch, maxDist) {
         if (sound == null || level == null) return
         var limit  = maxDist != null ? maxDist : SOUND_RANGE
@@ -681,24 +686,17 @@
 
         if (AUDIO != null && typeof AUDIO.play === 'function' && sndId) {
             try {
-                AUDIO.play({
-                    sound:    sndId,
-                    dim:      dimStr,
-                    at:       [x + 0.5, y + 0.5, z + 0.5],
-                    range:    limit,
-                    volume:   volume,
-                    pitch:    pitch,
-                    category: 'MASTER',
-                    priority: 'high'
-                })
+                AUDIO.play(AUDIO_HAS_PRESET
+                    ? { preset: 'v18_spatial_sfx', sound: sndId, dim: dimStr, at: [x + 0.5, y + 0.5, z + 0.5], range: limit, volume: volume, pitch: pitch }
+                    : { sound: sndId, dim: dimStr, at: [x + 0.5, y + 0.5, z + 0.5], range: limit, volume: volume, pitch: pitch, category: 'MASTER', priority: 'high' })
                 return
             } catch (eAud) { }
         }
 
         forEachPlayerNear(level, x, y, z, limit, function (p, distSq) {
             var factor = Math.max(0.20, 1.0 - Math.sqrt(distSq) / (limit * 1.25))
-            var vol = Math.max(0.15, Number((volume * factor).toFixed(2)))
-            var pit = Math.max(0.5, Math.min(2.0, Number(pitch.toFixed(2))))
+            var vol = Math.max(0.15, Math.round(volume * factor * 100) * 0.01)
+            var pit = Math.max(0.5, Math.min(2.0, Math.round(pitch * 100) * 0.01))
             try {
                 p.playSound(sound, vol, pit)
             } catch (e) { }
@@ -721,9 +719,10 @@
                     range:    limit,
                     volume:   volume,
                     pitch:    pitch,
-                    category: 'MASTER',
                     priority: soundId === CUSTOM_SND_ATOMIC_EXP ? 'critical' : 'high'
                 }
+                if (AUDIO_HAS_PRESET) playOpts.preset = 'v18_spatial_sfx'
+                else playOpts.category = 'MASTER'
                 if (keyTag) playOpts.key = keyTag
                 AUDIO.play(playOpts)
                 return
@@ -732,8 +731,8 @@
         var regSound = CUSTOM_SND_OBJECTS[soundId] != null ? CUSTOM_SND_OBJECTS[soundId] : reg(SOUND_REG, soundId)
         forEachPlayerNear(level, x, y, z, limit, function (p, distSq) {
             var factor = Math.max(0.25, 1.0 - Math.sqrt(distSq) / (limit * 1.3))
-            var vol = Math.max(0.15, Number((volume * factor).toFixed(2)))
-            var pit = Math.max(0.5, Math.min(2.0, Number(pitch.toFixed(2))))
+            var vol = Math.max(0.15, Math.round(volume * factor * 100) * 0.01)
+            var pit = Math.max(0.5, Math.min(2.0, Math.round(pitch * 100) * 0.01))
             if (regSound != null) {
                 try {
                     p.playSound(regSound, vol, pit)
@@ -817,201 +816,229 @@
         })
     }
 
-    function buildTelemetryProgressOpts(cfg) {
-        var c          = (cfg != null && typeof cfg === 'object') ? cfg : {}
-        var pVal       = Math.max(0.0, Math.min(1.0, Number(c.progress) || 0.0))
-        var subPVal    = Math.max(0.0, Math.min(1.0, c.subProgress !== undefined ? Number(c.subProgress) : pVal))
-        var barW       = Math.max(200, Math.min(540, Math.round(Number(c.barWidth) || 472)))
-        var barH       = Math.max(8, Math.min(24, Math.round(Number(c.barHeight) || 16)))
-        var barX0      = -Math.round(barW * 0.5)
-        var barY0      = -Math.round(barH * 0.5)
+    // ------------------------------------------------------------------------
+    // 定稿方案 α HUD：向 2D 渲染组件动态提交 v18 专属复合单元 + 主题化遥测预设
+    //   - 泛用原语（steppedPlate / corners / steppedLine / ticks / boxes）由 Epiphy2DSurface.ui 提供
+    //   - v18 专属视觉件（T-Pin 吊线、同心双框旋转准星徽章）向上注册为自定义 widget
+    //   - 同阶段刷新自动走 action:'patch' 增量补丁，仅在首次/切阶段/周期保活时发全量节点树
+    // ------------------------------------------------------------------------
+    var TELEMETRY_THEMES = {
+        cyan:    { from: 0x174A5A, mid: 0x26A69A, to: 0x80DEEA, accent: 0x4DD0E1, warn: 0xFFD54F, pure: 0xFFFFFF, trail: 0x6E4DD0E1, plateBg: 0x840A1318, badgeBg: 0x7A0A1318, mA: 0xD8FFFFFF, mB: 0x6E4DD0E1, mC: 0x3F26A69A },
+        amber:   { from: 0x5D1900, mid: 0xFF8F00, to: 0xFFE082, accent: 0xFFD54F, warn: 0xFFD54F, pure: 0xFFFFFF, trail: 0x66FFB300, plateBg: 0x88140E08, badgeBg: 0x7E140E08, mA: 0xD8FFFFFF, mB: 0x6EFFD54F, mC: 0x3FFF8F00 },
+        crimson: { from: 0x4A0714, mid: 0xC62828, to: 0xFF8A80, accent: 0xFF5252, warn: 0xFFAB00, pure: 0xFFEBEE, trail: 0x70FF5252, plateBg: 0x8A140B0E, badgeBg: 0x80140B0E, mA: 0xE0FFEBEE, mB: 0x70FF5252, mC: 0x40C62828 },
+        void:    { from: 0x240B4D, mid: 0x651FFF, to: 0x18FFFF, accent: 0x84FFFF, warn: 0xE040FB, pure: 0xF3E5F5, trail: 0x6E7C4DFF, plateBg: 0x8A0B0917, badgeBg: 0x800B0917, mA: 0xD8FFFFFF, mB: 0x6E18FFFF, mC: 0x407C4DFF }
+    }
 
-        var fillFrom   = c.barColorFrom !== undefined ? c.barColorFrom : 0x174A5A
-        var fillMid    = c.barColorMid !== undefined ? c.barColorMid : 0x26A69A
-        var fillTo     = c.barColorTo !== undefined ? c.barColorTo : 0x80DEEA
-        var accentCol  = c.accentColor !== undefined ? c.accentColor : fillTo
-        var warnCol    = c.warnColor !== undefined ? c.warnColor : 0xFFD54F
-        var pureCol    = c.pureColor !== undefined ? c.pureColor : 0xFFFFFF
-        var trailCol   = c.trailColor !== undefined ? c.trailColor : 0x664DD0E1
-        var plateBgCol = c.plateBgColor !== undefined ? c.plateBgColor : 0x840A1318
-        var badgeBgCol = c.badgeBgColor !== undefined ? c.badgeBgColor : 0x7A0A1318
-        var mosaicACol = c.mosaicAColor !== undefined ? c.mosaicAColor : 0xD8FFFFFF
-        var mosaicBCol = c.mosaicBColor !== undefined ? c.mosaicBColor : 0x6E4DD0E1
-        var mosaicCCol = c.mosaicCColor !== undefined ? c.mosaicCColor : 0x3F26A69A
+    if (typeof DANMAKU.registerWidget === 'function') {
+        DANMAKU.registerWidget('v18_t_pin', function (n, ui) {
+            var bs = Number(n.boxSize) || 7
+            var sl = Number(n.stemLen) || 34
+            var pfx = String(n.idPrefix || 'pin')
+            return ui({ ox: n.x, oy: n.y })
+                .outline(-bs * 0.5, 0, bs, bs, n.color, 1, { id: pfx + '_box' })
+                .rect(n.stemX !== undefined ? n.stemX : 0, bs, 1, sl, n.color, { id: pfx + '_line' })
+                .build()
+        })
 
-        var badgeSize  = 42
-        var badgeX     = barX0 - badgeSize - 15
-        var badgeY     = barY0 - 12
-        var badgeCx    = badgeX + Math.round(badgeSize * 0.5)
-        var badgeCy    = badgeY + Math.round(badgeSize * 0.5)
-        var split1     = Math.round(barW * 0.44)
-        var split2     = Math.round(barW * 0.78)
-        var seg1W      = Math.round(barW * 0.30)
-        var seg2W      = Math.round(barW * 0.30)
-        var seg3W      = Math.round(barW * 0.24)
-        var seg4W      = barW - seg1W - seg2W - seg3W + 10
+        DANMAKU.registerWidget('v18_reticle_badge', function (n, ui) {
+            var sz = Number(n.size) || 42
+            var hc = Math.round(sz * 0.5)
+            var th = n.theme || TELEMETRY_THEMES.cyan
+            var coreBind = { seed: 29, impulseVar: 'impulse', shakeX: 1.5, shakeY: 1.5, vibX: 0.45, vibY: 0.40, vibHz: 22 }
+            var rotBind  = { rotSpeed: 86, seed: 29, impulseVar: 'impulse', shakeX: 1.5, shakeY: 1.5, vibX: 0.45, vibY: 0.40, vibHz: 22 }
+            return ui({ ox: n.x, oy: n.y })
+                .rect(0, 0, sz, sz, th.badgeBg, { id: 'badge_plate' })
+                .boxes([
+                    [sz + 1, 5, 6, 6, th.mC, { stepHz: 9, seed: 13, jitterX: 2, jitterY: 2, jitterW: 1 }, 'badge_aura_r'],
+                    [-6, sz - 13, 5, 8, th.mC, { stepHz: 9, seed: 23, jitterX: 1, jitterY: 2 }, 'badge_aura_l'],
+                    [sz + 1, sz - 7, 5, 5, th.mB, null, 'badge_aura_br']
+                ])
+                .outline(0, 0, sz, sz, th.pure, 1, { id: 'badge_outer' })
+                .corners(0, 0, sz, sz, 5, 2, th.warn, 'tl,br')
+                .outline(10, 10, sz - 20, sz - 20, th.accent, 1, { id: 'badge_inner', bind: coreBind })
+                .rect(hc, hc, 11, 11, th.mid, { id: 'badge_rot_sq', anchor: 'center', bind: rotBind })
+                .rect(hc, hc, 7, 7, th.pure, { id: 'badge_rot_dia', anchor: 'center', angle: 45, bind: rotBind })
+                .text(-1, -10, '$badgeCode', 0.80, th.accent, { id: 'badge_tag' })
+                .boxes([
+                    [11, -10, 11, 8, th.pure, { stepHz: 9, seed: 41, jitterX: 7, jitterW: 3 }, 'badge_mask'],
+                    [22, -10, 6, 8, th.mB, { stepHz: 9, seed: 41, jitterX: 7 }, 'badge_mask_tr']
+                ])
+                .text(0, sz + 4, 'ID//0x4F', 0.74, 0x99FFFFFF, { id: 'badge_idx' })
+                .build()
+        })
+    }
 
-        var titleStr   = String(c.text || c.title || '')
-        var subStr     = String(c.sub || c.subtitle || '')
-        var efTagStr   = String(c.efTag || 'EF-TLM // S1')
-        var badgeCode  = String(c.badgeCode || 'DETECTED')
-        var unitLabel  = String(c.unitLabel || 'STABILITY_RATIO')
-        var rightVal   = String(c.rightVal || (Math.round(pVal * 100) + '.0%'))
-        var rightSub   = String(c.rightSub || 'ACTIVE')
-        var footRight  = String(c.footRight || 'PHASE_LOCK // STABLE')
-        var impulseEvt = String(c.impulseEvent !== undefined ? c.impulseEvent : efTagStr)
-        var pctStr     = Math.round(pVal * 100) + '%'
+    if (typeof DANMAKU.registerPreset === 'function') {
+        DANMAKU.registerPreset('v18_telemetry', function (c, h) {
+            var th      = (typeof c.theme === 'string' && TELEMETRY_THEMES[c.theme]) ? TELEMETRY_THEMES[c.theme] : (c.theme || TELEMETRY_THEMES.cyan)
+            var pVal    = Math.max(0.0, Math.min(1.0, Number(c.progress) || 0.0))
+            var subPVal = Math.max(0.0, Math.min(1.0, c.subProgress !== undefined ? Number(c.subProgress) : pVal))
+            var barW    = Math.max(200, Math.min(540, Math.round(Number(c.barWidth) || 472)))
+            var barH    = Math.max(8, Math.min(24, Math.round(Number(c.barHeight) || 16)))
+            var bx      = -Math.round(barW * 0.5)
+            var by      = -Math.round(barH * 0.5)
+            var s1      = Math.round(barW * 0.44), s2 = Math.round(barW * 0.78)
+            var w1      = Math.round(barW * 0.30), w2 = Math.round(barW * 0.30), w3 = Math.round(barW * 0.24)
+            var w4      = barW - w1 - w2 - w3 + 10
+            var impBind = { seed: 5, impulseVar: 'impulse', shakeX: 1.4 }
 
-        // 定稿方案 α (1:1 HTML 画布坐标系)：472x16 细长条带 × 零重叠阶梯切角玻璃底衬 × 居中无偏转旋转核 × 三层立体底流
-        var schemeAlphaNodes = [
-            // 1. 左侧同心严密对齐底衬 + 同心双框连续旋转方格准星 (外42 / 内22 / 旋转核11+7 同源同振零偏移) + 外缘不重叠体素碎片
-            { id: 'badge_plate',   type: 'rect', anchor: 'top_left', x: badgeX,                 y: badgeY,                 w: badgeSize,      h: badgeSize,      fill: { mode: 'solid', color: badgeBgCol } },
-            { id: 'badge_aura_r',  type: 'rect', anchor: 'top_left', x: badgeX + badgeSize + 1, y: badgeY + 5,             w: 6,              h: 6,              fill: { mode: 'solid', color: mosaicCCol }, bind: { stepHz: 9, seed: 13, jitterX: 2, jitterY: 2, jitterW: 1 } },
-            { id: 'badge_aura_l',  type: 'rect', anchor: 'top_left', x: badgeX - 6,             y: badgeY + badgeSize - 13, w: 5,             h: 8,              fill: { mode: 'solid', color: mosaicCCol }, bind: { stepHz: 9, seed: 23, jitterX: 1, jitterY: 2 } },
-            { id: 'badge_aura_br', type: 'rect', anchor: 'top_left', x: badgeX + badgeSize + 1, y: badgeY + badgeSize - 7, w: 5,              h: 5,              fill: { mode: 'solid', color: mosaicBCol } },
-            { id: 'badge_outer',   type: 'rect', anchor: 'top_left', x: badgeX,                 y: badgeY,                 w: badgeSize,      h: badgeSize,      fill: { mode: 'outline', color: pureCol, thickness: 1 } },
-            { id: 'badge_brk_tl1', type: 'rect', anchor: 'top_left', x: badgeX - 1,             y: badgeY - 1,             w: 5,              h: 2,              fill: { mode: 'solid', color: warnCol } },
-            { id: 'badge_brk_tl2', type: 'rect', anchor: 'top_left', x: badgeX - 1,             y: badgeY - 1,             w: 2,              h: 5,              fill: { mode: 'solid', color: warnCol } },
-            { id: 'badge_brk_br1', type: 'rect', anchor: 'top_left', x: badgeX + badgeSize - 4, y: badgeY + badgeSize - 1, w: 5,              h: 2,              fill: { mode: 'solid', color: warnCol } },
-            { id: 'badge_brk_br2', type: 'rect', anchor: 'top_left', x: badgeX + badgeSize - 1, y: badgeY + badgeSize - 4, w: 2,              h: 5,              fill: { mode: 'solid', color: warnCol } },
-            { id: 'badge_inner',   type: 'rect', anchor: 'top_left', x: badgeX + 10,            y: badgeY + 10,            w: badgeSize - 20, h: badgeSize - 20, fill: { mode: 'outline', color: accentCol, thickness: 1 }, bind: { seed: 29, impulseVar: 'impulse', shakeX: 1.5, shakeY: 1.5, vibX: 0.45, vibY: 0.40, vibHz: 22 } },
-            { id: 'badge_rot_sq',  type: 'rect', anchor: 'center',   x: badgeCx,                y: badgeCy,                w: 11,             h: 11,             fill: { mode: 'solid', color: fillMid },   bind: { rotSpeed: 86, seed: 29, impulseVar: 'impulse', shakeX: 1.5, shakeY: 1.5, vibX: 0.45, vibY: 0.40, vibHz: 22 } },
-            { id: 'badge_rot_dia', type: 'rect', anchor: 'center',   x: badgeCx,                y: badgeCy,                w: 7,              h: 7, angle: 45,    fill: { mode: 'solid', color: pureCol },   bind: { rotSpeed: 86, seed: 29, impulseVar: 'impulse', shakeX: 1.5, shakeY: 1.5, vibX: 0.45, vibY: 0.40, vibHz: 22 } },
-            { id: 'badge_tag',     type: 'text', anchor: 'top_left', x: badgeX - 1,             y: badgeY - 10,            scale: 0.80,     text: '$badgeCode',   color: accentCol, shadow: true },
-            { id: 'badge_mask',    type: 'rect', anchor: 'top_left', x: badgeX + 11,            y: badgeY - 10,            w: 11,             h: 8,              fill: { mode: 'solid', color: pureCol },    bind: { stepHz: 9, seed: 41, jitterX: 7, jitterW: 3 } },
-            { id: 'badge_mask_tr', type: 'rect', anchor: 'top_left', x: badgeX + 22,            y: badgeY - 10,            w: 6,              h: 8,              fill: { mode: 'solid', color: mosaicBCol }, bind: { stepHz: 9, seed: 41, jitterX: 7 } },
-            { id: 'badge_idx',     type: 'text', anchor: 'top_left', x: badgeX,                 y: badgeY + badgeSize + 4, scale: 0.74,     text: 'ID//0x4F',     color: 0x99FFFFFF, shadow: true },
+            var nodes = h.ui()
+                // 1. 左侧同心双框旋转准星徽章（自定义复合单元）
+                .widget('v18_reticle_badge', { x: bx - 57, y: by - 12, size: 42, theme: th })
+                // 2. 四段严丝合缝零重叠阶梯切角玻璃底衬 + 顶栏铭牌/状态灯 + 舱壁与下沿阶梯底轨（连续 solid/outline 便于客户端合批）
+                .steppedPlate(bx - 6, th.plateBg, [
+                    [w1 + 6, by - 20, by + barH + 26],
+                    [w2,     by - 18, by + barH + 27],
+                    [w3,     by - 13, by + barH + 26],
+                    [w4,     by - 9,  by + barH + 24]
+                ], ['panel_bg_l', 'panel_bg_m', 'panel_bg_m2', 'panel_bg_r'])
+                .boxes([
+                    [bx - 5, by - 4, 1.5, barH + 10, th.accent, null, 'bulkhead_v'],
+                    [bx - 5, by - 4, 22, 1.5, th.accent, null, 'bulkhead_cap'],
+                    [bx, by - 18.5, 69, 11, th.warn, null, 'ef_tag_plate'],
+                    [bx + 73, by - 15.5, 3.5, 6, th.accent, null, 'ef_pip_1'],
+                    [bx + 79, by - 15.5, 3.5, 6, th.warn, { stepHz: 4, seed: 19, jitterH: 1.5 }, 'ef_pip_2'],
+                    [bx + 85, by - 15.5, 3.5, 6, 0x44FFFFFF, null, 'ef_pip_3']
+                ])
+                .steppedLine(bx - 5, by + barH + 3, [
+                    [s1 + 5, 0, 0x6BFFFFFF, 1.2],
+                    [s2 - s1, 4, th.accent, 1.2],
+                    [barW - s2 + 16, 0, th.mB, 1.5]
+                ])
+                // 3. 三层立体景深下方流动数据波纹场 + 上沿 13 段细锐悬空阶梯框
+                .parallax(bx, by + barH + 9, barW, 16, [
+                    { kind: 'ripples',   rows: 3, rowGap: 5.0, offsetY: 1.5, segments: 7, baseLen: 38, ampLen: 22, speedX: 11,  thickness: 0.75, seed: 7,   color: 0x3826A69A, altColor: 0x2626A69A, alpha: 0.90 },
+                    { kind: 'ripples',   rows: 4, rowGap: 3.6, offsetY: 0.5, segments: 6, baseLen: 22, ampLen: 14, speedX: -27, thickness: 1.0,  seed: 43,  color: th.mB,      altColor: th.mC,      alpha: 0.95 },
+                    { kind: 'particles', count: 22, speedX: 52,  speedY: 0, minW: 1.5, maxW: 6.0, thickness: 1.0, seed: 89,  color: th.accent, altColor: th.pure, alpha: 0.88 },
+                    { kind: 'particles', count: 14, speedX: -38, speedY: 0, minW: 1.0, maxW: 3.0, thickness: 0.9, seed: 131, color: th.warn,   altColor: th.pure, alpha: 0.72 }
+                ], { id: 'under_ripples' })
+                .parallax(bx, by - 6, barW, 4.5, [
+                    { kind: 'steps', count: 13, stepHz: 9, risers: true, thickness: 1.2, color: th.accent, altColor: th.mB, alpha: 0.92 }
+                ], { id: 'frame_top_steps' })
+                // 4. 进度槽核心 + 5 层视差内胆 + 刻度细线 + 副轨 + 右端 T-Pin 吊线
+                .rect(bx, by, barW, barH, 0xEA04070B, { id: 'bar_bg', bind: impBind })
+                .rect(bx, by + 1, barW, barH - 2, th.trail, { id: 'bar_trail', clip: { dir: 'left', ratio: '$progressTrail', mode: 'local' } })
+                .parallax(bx, by + 1, barW, barH - 2, [
+                    { kind: 'gradient',  from: th.from, mid: th.mid, to: th.to, midPos: 0.62, alpha: 1.0 },
+                    { kind: 'stripes',   step: 18, width: 7, skew: 7, speedX: 20, color: 0x3D000000, alpha: 0.95 },
+                    { kind: 'ripples',   rows: 4, rowGap: 3.4, offsetY: 1.2, segments: 7, baseLen: 26, ampLen: 14, speedX: 34, thickness: 1.1, seed: 23, color: 0x52FFFFFF, altColor: 0x2BFFFFFF, alpha: 0.95 },
+                    { kind: 'particles', count: 24, speedX: 15,  speedY: 0, minW: 1,   maxW: 2, thickness: 1.3, color: 0x7AFFFFFF, seed: 11, alpha: 0.85 },
+                    { kind: 'particles', count: 20, speedX: -44, speedY: 0, minW: 1.5, maxW: 5, thickness: 1.2, color: th.pure, altColor: th.accent, seed: 31, alpha: 0.92 }
+                ], { id: 'bar_main', clip: { dir: 'left', ratio: '$progress', mode: 'local' }, bind: impBind, bloomWidth: 24, bloomColor: 0xE0FFFFFF })
+                .ticks(bx, by - 2, barW, barH + 8, [0.25, 0.50, 0.75], 0x38FFFFFF, 1, 'ms')
+                .rect(bx, by + barH + 1, barW, 1.5, th.warn, { id: 'bar_sub_rail', clip: { dir: 'left', ratio: '$subProgress', mode: 'local' } })
+                .widget('v18_t_pin', { x: bx + barW + 17.25, y: by + 1, boxSize: 8.5, stemLen: 34, stemX: -0.25, color: th.accent, idPrefix: 'right_pin' })
+                // 5. 推进前缘动态跟随组（搁浅 T-Pin + 5 块 9Hz 体素簇 + 悬浮百分比）
+                .group(bx, by, { id: 'cursor_group', bind: { x: { var: 'progress', mult: barW }, seed: 5, impulseVar: 'impulse', shakeX: 1.4 } }, function (g) {
+                    g.widget('v18_t_pin', { x: 0, y: -12, boxSize: 7, stemLen: barH + 26, color: th.pure, idPrefix: 'cur_pin' })
+                        .boxes([
+                            [-6, -4, 8, 4.5, th.mA, { stepHz: 9, seed: 7, jitterX: 2, jitterW: 2 }, 'cur_vox_hi'],
+                            [2, 2, 9, 5.5, th.mB, { stepHz: 9, seed: 13, jitterX: 2, jitterW: 2 }, 'cur_vox_mid'],
+                            [-11, barH - 3, 10, 4.5, th.mB, { stepHz: 9, seed: 19, jitterX: 2, jitterW: 2 }, 'cur_vox_lo'],
+                            [3, barH - 5, 7, 6.5, th.mC, { stepHz: 9, seed: 29, jitterX: 1, jitterW: 2 }, 'cur_vox_lo2'],
+                            [10, 5, 5, 4.5, th.mA, { stepHz: 9, seed: 37, jitterX: 1 }, 'cur_vox_tr']
+                        ])
+                        .text(4, barH + 12, '$pctText', 0.80, th.pure, { id: 'cur_pct_flag' })
+                })
+                // 6. 所有非遮挡文字集中放在末端，最大化减少渲染器 graphics.flush() 次数
+                .text(bx + 4,  by - 16.5, '$efTag',     0.85, 0x090C10,   { id: 'ef_tag_text', shadow: false })
+                .text(bx + 93, by - 17,   '$title',     0.96, th.pure,    { id: 'title' })
+                .text(bx + barW + 25, by - 6,  '$unitLabel', 0.72, 0xAAFFFFFF, { id: 'right_unit' })
+                .text(bx + barW + 25, by + 2,  '$rightVal',  1.24, th.pure,    { id: 'right_readout' })
+                .text(bx + barW + 25, by + 15, '$rightSub',  0.90, th.warn,    { id: 'right_sub' })
+                .text(bx,             by + barH + 28, '$sub',       0.88, 0xD4FFFFFF, { id: 'sub' })
+                .text(bx + barW,      by + barH + 28, '$footRight', 0.88, th.accent,  { id: 'footer_right', anchor: 'top_right' })
+                .build()
 
-            // 2. 四段严丝合缝零重叠阶梯切角半透明底衬（x 首尾精准衔接无叠色深斑，上下轮廓错步削角且完整包覆全部三层数据波纹不外露）
-            { id: 'panel_bg_l',  type: 'rect', anchor: 'top_left', x: barX0 - 6,                       y: barY0 - 20, w: seg1W + 6, h: barH + 46, fill: { mode: 'solid', color: plateBgCol } },
-            { id: 'panel_bg_m',  type: 'rect', anchor: 'top_left', x: barX0 + seg1W,                   y: barY0 - 18, w: seg2W,     h: barH + 45, fill: { mode: 'solid', color: plateBgCol } },
-            { id: 'panel_bg_m2', type: 'rect', anchor: 'top_left', x: barX0 + seg1W + seg2W,           y: barY0 - 13, w: seg3W,     h: barH + 39, fill: { mode: 'solid', color: plateBgCol } },
-            { id: 'panel_bg_r',  type: 'rect', anchor: 'top_left', x: barX0 + seg1W + seg2W + seg3W,   y: barY0 - 9,  w: seg4W,     h: barH + 33, fill: { mode: 'solid', color: plateBgCol } },
-
-            // 3. 三层立体景深下方流动数据波纹场（远景长波慢流 + 中景非周期错位水纹 + 近景双速高速微粒与数据爆发）
-            {
-                id: 'under_ripples', type: 'rect', anchor: 'top_left', x: barX0, y: barY0 + barH + 9, w: barW, h: 16,
-                fill: {
-                    mode: 'parallax',
-                    bgAlpha: 0,
-                    layers: [
-                        { kind: 'ripples',   rows: 3, rowGap: 5.0, offsetY: 1.5, segments: 7, baseLen: 38, ampLen: 22, speedX: 11,  thickness: 0.75, seed: 7,   color: 0x3826A69A, altColor: 0x2626A69A, alpha: 0.90 },
-                        { kind: 'ripples',   rows: 4, rowGap: 3.6, offsetY: 0.5, segments: 6, baseLen: 22, ampLen: 14, speedX: -27, thickness: 1.0,  seed: 43,  color: mosaicBCol, altColor: mosaicCCol, alpha: 0.95 },
-                        { kind: 'particles', count: 22, speedX: 52,  speedY: 0, minW: 1.5, maxW: 6.0, thickness: 1.0, seed: 89,  color: accentCol, altColor: pureCol, alpha: 0.88 },
-                        { kind: 'particles', count: 14, speedX: -38, speedY: 0, minW: 1.0, maxW: 3.0, thickness: 0.9, seed: 131, color: warnCol,   altColor: pureCol, alpha: 0.72 }
-                    ]
+            var titleStr  = String(c.text || c.title || '')
+            var subStr    = String(c.sub || c.subtitle || '')
+            var efTagStr  = String(c.efTag || 'EF-TLM // S1')
+            var panelCfg  = {
+                group:       c.group || TELEMETRY_GROUP,
+                namespace:   c.namespace || DANMAKU_NAMESPACE,
+                id:          c.id,
+                lifeMode:    c.lifeMode || 'active',
+                activeHold:  c.activeHold != null ? c.activeHold : 22,
+                priority:    c.priority || 'active',
+                pos:         c.pos || [0.27, 0.14],
+                size:        c.size != null ? c.size : 0.56,
+                tilt:        c.tilt != null ? c.tilt : 0,
+                shakeMode:   c.shakeMode || 'none',
+                shakeAmp:    c.shakeAmp != null ? c.shakeAmp : 0.0,
+                fadeStyle:   c.fadeStyle || 'char_last',
+                fadeOut:     c.fadeOut != null ? c.fadeOut : 14,
+                progress:    pVal,
+                subProgress: subPVal,
+                barWidth:    barW,
+                barHeight:   barH,
+                text:        titleStr,
+                sub:         subStr,
+                nodes:       nodes,
+                tracks:      c.tracks || {
+                    impulse: { mode: 'impulse', onChange: '$impulseEvent', peak: 1.0, initPeak: c.initPeak !== undefined ? c.initPeak : 0.90, decayMs: 420 }
+                },
+                vars: {
+                    progress:      pVal,
+                    progressTrail: pVal,
+                    subProgress:   subPVal,
+                    impulse:       0.0,
+                    impulseEvent:  String(c.impulseEvent !== undefined ? c.impulseEvent : efTagStr),
+                    pctText:       Math.round(pVal * 100) + '%',
+                    efTag:         efTagStr,
+                    badgeCode:     String(c.badgeCode || 'DETECTED'),
+                    unitLabel:     String(c.unitLabel || 'STABILITY_RATIO'),
+                    title:         titleStr,
+                    sub:           subStr,
+                    footRight:     String(c.footRight || 'PHASE_LOCK // STABLE'),
+                    rightVal:      String(c.rightVal || (Math.round(pVal * 100) + '.0%')),
+                    rightSub:      String(c.rightSub || 'ACTIVE')
                 }
-            },
+            }
+            return h.buildProgressPanel(panelCfg)
+        })
+    }
 
-            // 4. 左装甲舱壁折角 + 上沿 13 段细锐悬空阶梯框 + 下沿 3 段不对称阶梯底轨
-            { id: 'bulkhead_v',      type: 'rect', anchor: 'top_left', x: barX0 - 5,           y: barY0 - 4,          w: 1.5,                  h: barH + 10, fill: { mode: 'solid', color: accentCol } },
-            { id: 'bulkhead_cap',    type: 'rect', anchor: 'top_left', x: barX0 - 5,           y: barY0 - 4,          w: 22,                   h: 1.5,       fill: { mode: 'solid', color: accentCol } },
-            { id: 'frame_top_steps', type: 'rect', anchor: 'top_left', x: barX0,               y: barY0 - 6,          w: barW,                 h: 4.5,       fill: { mode: 'parallax', bgAlpha: 0, layers: [{ kind: 'steps', count: 13, stepHz: 9, risers: true, thickness: 1.2, color: accentCol, altColor: mosaicBCol, alpha: 0.92 }] } },
-            { id: 'frame_bot_1',     type: 'rect', anchor: 'top_left', x: barX0 - 5,           y: barY0 + barH + 3,   w: split1 + 5,           h: 1.2,       fill: { mode: 'solid', color: 0x6BFFFFFF } },
-            { id: 'frame_bot_r1',    type: 'rect', anchor: 'top_left', x: barX0 + split1,      y: barY0 + barH + 3,   w: 1.2,                  h: 5,         fill: { mode: 'solid', color: 0x6BFFFFFF } },
-            { id: 'frame_bot_2',     type: 'rect', anchor: 'top_left', x: barX0 + split1,      y: barY0 + barH + 7,   w: split2 - split1,      h: 1.2,       fill: { mode: 'solid', color: accentCol } },
-            { id: 'frame_bot_r2',    type: 'rect', anchor: 'top_left', x: barX0 + split2,      y: barY0 + barH + 3,   w: 1.2,                  h: 5.2,       fill: { mode: 'solid', color: mosaicBCol } },
-            { id: 'frame_bot_3',     type: 'rect', anchor: 'top_left', x: barX0 + split2,      y: barY0 + barH + 3,   w: barW - split2 + 16,   h: 1.5,       fill: { mode: 'solid', color: mosaicBCol } },
-
-            // 5. 顶栏《终末地》反色工业铭牌 + 3 枚状态指示灯 + 主遥测标题
-            { id: 'ef_tag_plate', type: 'rect', anchor: 'top_left', x: barX0,      y: barY0 - 18.5, w: 69, h: 11, fill: { mode: 'solid', color: warnCol } },
-            { id: 'ef_tag_text',  type: 'text', anchor: 'top_left', x: barX0 + 4,  y: barY0 - 16.5, scale: 0.85, text: '$efTag', color: 0x090C10, shadow: false },
-            { id: 'ef_pip_1',     type: 'rect', anchor: 'top_left', x: barX0 + 73, y: barY0 - 15.5, w: 3.5, h: 6, fill: { mode: 'solid', color: accentCol } },
-            { id: 'ef_pip_2',     type: 'rect', anchor: 'top_left', x: barX0 + 79, y: barY0 - 15.5, w: 3.5, h: 6, fill: { mode: 'solid', color: warnCol }, bind: { stepHz: 4, seed: 19, jitterH: 1.5 } },
-            { id: 'ef_pip_3',     type: 'rect', anchor: 'top_left', x: barX0 + 85, y: barY0 - 15.5, w: 3.5, h: 6, fill: { mode: 'solid', color: 0x44FFFFFF } },
-            { id: 'title',        type: 'text', anchor: 'top_left', x: barX0 + 93, y: barY0 - 17,   scale: 0.96, text: '$title', color: pureCol, shadow: true },
-
-            // 6. 进度槽核心：深邃暗腔 + trail 拖影 + 5 层程序化视差内胆 + 刻度细线 + 副轨
-            { id: 'bar_bg',    type: 'rect', anchor: 'top_left', x: barX0, y: barY0,     w: barW, h: barH,     fill: { mode: 'solid', color: 0xEA04070B }, bind: { seed: 5, impulseVar: 'impulse', shakeX: 1.4 } },
-            { id: 'bar_trail', type: 'rect', anchor: 'top_left', x: barX0, y: barY0 + 1, w: barW, h: barH - 2, fill: { mode: 'solid', color: trailCol }, clip: { dir: 'left', ratio: '$progressTrail', mode: 'local' } },
-            {
-                id: 'bar_main', type: 'rect', anchor: 'top_left', x: barX0, y: barY0 + 1, w: barW, h: barH - 2,
-                clip: { dir: 'left', ratio: '$progress', mode: 'local' },
-                bind: { seed: 5, impulseVar: 'impulse', shakeX: 1.4 },
-                fill: {
-                    mode: 'parallax',
-                    bgAlpha: 0,
-                    bloomWidth: 24,
-                    bloomColor: 0xE0FFFFFF,
-                    layers: [
-                        { kind: 'gradient',  from: fillFrom, mid: fillMid, to: fillTo, midPos: 0.62, alpha: 1.0 },
-                        { kind: 'stripes',   step: 18, width: 7, skew: 7, speedX: 20, color: 0x3D000000, alpha: 0.95 },
-                        { kind: 'ripples',   rows: 4, rowGap: 3.4, offsetY: 1.2, segments: 7, baseLen: 26, ampLen: 14, speedX: 34, thickness: 1.1, seed: 23, color: 0x52FFFFFF, altColor: 0x2BFFFFFF, alpha: 0.95 },
-                        { kind: 'particles', count: 24, speedX: 15,  speedY: 0, minW: 1, maxW: 2,   thickness: 1.3, color: 0x7AFFFFFF, seed: 11, alpha: 0.85 },
-                        { kind: 'particles', count: 20, speedX: -44, speedY: 0, minW: 1.5, maxW: 5, thickness: 1.2, color: pureCol, altColor: accentCol, seed: 31, alpha: 0.92 }
-                    ]
-                }
-            },
-            { id: 'ms_25',        type: 'rect', anchor: 'top_left', x: barX0 + Math.round(barW * 0.25), y: barY0 - 2, w: 1, h: barH + 8, fill: { mode: 'solid', color: 0x38FFFFFF } },
-            { id: 'ms_50',        type: 'rect', anchor: 'top_left', x: barX0 + Math.round(barW * 0.50), y: barY0 - 2, w: 1, h: barH + 8, fill: { mode: 'solid', color: 0x38FFFFFF } },
-            { id: 'ms_75',        type: 'rect', anchor: 'top_left', x: barX0 + Math.round(barW * 0.75), y: barY0 - 2, w: 1, h: barH + 8, fill: { mode: 'solid', color: 0x38FFFFFF } },
-            { id: 'bar_sub_rail', type: 'rect', anchor: 'top_left', x: barX0, y: barY0 + barH + 1, w: barW, h: 1.5, fill: { mode: 'solid', color: warnCol }, clip: { dir: 'left', ratio: '$subProgress', mode: 'local' } },
-
-            // 7. 推进前缘动态跟随组：搁浅 □─── 垂直穿透细线 + 6 块 9Hz 变形体素簇 + 悬浮百分比旗标
-            {
-                id: 'cursor_group', type: 'group', x: barX0, y: barY0,
-                bind: { x: { var: 'progress', mult: barW }, seed: 5, impulseVar: 'impulse', shakeX: 1.4 },
-                children: [
-                    { id: 'cur_pin_box',   type: 'rect', anchor: 'top_left', x: -3.5, y: -12,      w: 7,  h: 7,         fill: { mode: 'outline', color: pureCol, thickness: 1 } },
-                    { id: 'cur_drop_line', type: 'rect', anchor: 'top_left', x: 0,    y: -5,       w: 1,  h: barH + 26, fill: { mode: 'solid', color: pureCol } },
-                    { id: 'cur_vox_hi',    type: 'rect', anchor: 'top_left', x: -6,   y: -4,       w: 8,  h: 4.5,       fill: { mode: 'solid', color: mosaicACol }, bind: { stepHz: 9, seed: 7,  jitterX: 2, jitterW: 2 } },
-                    { id: 'cur_vox_mid',   type: 'rect', anchor: 'top_left', x: 2,    y: 2,        w: 9,  h: 5.5,       fill: { mode: 'solid', color: mosaicBCol }, bind: { stepHz: 9, seed: 13, jitterX: 2, jitterW: 2 } },
-                    { id: 'cur_vox_lo',    type: 'rect', anchor: 'top_left', x: -11,  y: barH - 3, w: 10, h: 4.5,       fill: { mode: 'solid', color: mosaicBCol }, bind: { stepHz: 9, seed: 19, jitterX: 2, jitterW: 2 } },
-                    { id: 'cur_vox_lo2',   type: 'rect', anchor: 'top_left', x: 3,    y: barH - 5, w: 7,  h: 6.5,       fill: { mode: 'solid', color: mosaicCCol }, bind: { stepHz: 9, seed: 29, jitterX: 1, jitterW: 2 } },
-                    { id: 'cur_vox_tr',    type: 'rect', anchor: 'top_left', x: 10,   y: 5,        w: 5,  h: 4.5,       fill: { mode: 'solid', color: mosaicACol }, bind: { stepHz: 9, seed: 37, jitterX: 1 } },
-                    { id: 'cur_pct_flag',  type: 'text', anchor: 'top_left', x: 4,    y: barH + 12, scale: 0.80, text: '$pctText', color: pureCol, shadow: true }
-                ]
-            },
-
-            // 8. 右端 T-Pin 垂直细吊线 (□───) + 三行遥测读数台 + 底部两端对齐表尾
-            { id: 'right_pin_box',  type: 'rect', anchor: 'top_left',  x: barX0 + barW + 13, y: barY0 + 1,         w: 8.5, h: 8.5, fill: { mode: 'outline', color: accentCol, thickness: 1 } },
-            { id: 'right_pin_line', type: 'rect', anchor: 'top_left',  x: barX0 + barW + 17, y: barY0 + 9.5,       w: 1,   h: 34,  fill: { mode: 'solid', color: accentCol } },
-            { id: 'right_unit',     type: 'text', anchor: 'top_left',  x: barX0 + barW + 25, y: barY0 - 6,         scale: 0.72, text: '$unitLabel', color: 0xAAFFFFFF, shadow: true },
-            { id: 'right_readout',  type: 'text', anchor: 'top_left',  x: barX0 + barW + 25, y: barY0 + 2,         scale: 1.24, text: '$rightVal',  color: pureCol,    shadow: true },
-            { id: 'right_sub',      type: 'text', anchor: 'top_left',  x: barX0 + barW + 25, y: barY0 + 15,        scale: 0.90, text: '$rightSub',  color: warnCol,    shadow: true },
-            { id: 'sub',            type: 'text', anchor: 'top_left',  x: barX0,             y: barY0 + barH + 28, scale: 0.88, text: '$sub',       color: 0xD4FFFFFF, shadow: true },
-            { id: 'footer_right',   type: 'text', anchor: 'top_right', x: barX0 + barW,      y: barY0 + barH + 28, scale: 0.88, text: '$footRight', color: accentCol,  shadow: true }
-        ]
-
-        var panelCfg = {}
-        for (var k in c) {
-            if (Object.prototype.hasOwnProperty.call(c, k)) panelCfg[k] = c[k]
+    // 遥测 HUD 智能推送：首次/阶段或主题切换/每 48 tick 推送全量预设包，其余同阶段刷新发送极简 action:'patch'
+    function emitTelemetryHud(job, radius, slotId, stageKey, fullCfg) {
+        var curTick  = (job && typeof job.t === 'number') ? job.t : tickCounter
+        var needFull = !job || job._tlmSlotId !== slotId || job._tlmStageKey !== stageKey ||
+            job._tlmLastFullTick == null || (curTick - job._tlmLastFullTick) >= 48 ||
+            typeof DANMAKU.patchNear !== 'function'
+        if (needFull) {
+            if (job) {
+                job._tlmSlotId       = slotId
+                job._tlmStageKey     = stageKey
+                job._tlmLastFullTick = curTick
+            }
+            fullCfg.preset = 'v18_telemetry'
+            fullCfg.group  = TELEMETRY_GROUP
+            fullCfg.id     = slotId
+            sendDanmakuNear(job.level, job.x, job.y, job.z, radius, fullCfg)
+            return
         }
-        panelCfg.progress    = pVal
-        panelCfg.subProgress = subPVal
-        panelCfg.barWidth    = barW
-        panelCfg.barHeight   = barH
-        panelCfg.text        = titleStr
-        panelCfg.sub         = subStr
-        panelCfg.nodes       = schemeAlphaNodes
-        panelCfg.vars        = {
-            progress:      pVal,
-            progressTrail: pVal,
-            subProgress:   subPVal,
-            impulse:       0.0,
-            impulseEvent:  impulseEvt,
-            pctText:       pctStr,
-            efTag:         efTagStr,
-            badgeCode:     badgeCode,
-            unitLabel:     unitLabel,
-            title:         titleStr,
-            sub:           subStr,
-            footRight:     footRight,
-            rightVal:      rightVal,
-            rightSub:      rightSub
-        }
-
-        if (typeof DANMAKU.buildProgressPanel === 'function') {
-            return DANMAKU.buildProgressPanel(panelCfg)
-        }
-        panelCfg.surface = 'screen'
-        panelCfg.tracks  = {
-            progress:      { mode: 'lerp', speed: 10.0, easing: 'out_cubic' },
-            progressTrail: { mode: 'trail', target: '$progress', delayMs: 220, speed: 4.5 },
-            subProgress:   { mode: 'lerp', speed: 12.0, easing: 'out_cubic' },
-            impulse:       { mode: 'impulse', onChange: '$impulseEvent', peak: 1.0, initPeak: 0.90, decayMs: 420 }
-        }
-        return panelCfg
+        var pVal    = Math.max(0.0, Math.min(1.0, Number(fullCfg.progress) || 0.0))
+        var subPVal = Math.max(0.0, Math.min(1.0, fullCfg.subProgress !== undefined ? Number(fullCfg.subProgress) : pVal))
+        var efTag   = String(fullCfg.efTag || 'EF-TLM // S1')
+        DANMAKU.patchNear(job.level, job.x, job.y, job.z, radius, {
+            namespace:  DANMAKU_NAMESPACE,
+            group:      TELEMETRY_GROUP,
+            id:         slotId,
+            activeHold: fullCfg.activeHold != null ? fullCfg.activeHold : 22,
+            vars: {
+                progress:     pVal,
+                subProgress:  subPVal,
+                impulseEvent: String(fullCfg.impulseEvent !== undefined ? fullCfg.impulseEvent : efTag),
+                pctText:      Math.round(pVal * 100) + '%',
+                efTag:        efTag,
+                badgeCode:    String(fullCfg.badgeCode || 'DETECTED'),
+                unitLabel:    String(fullCfg.unitLabel || 'STABILITY_RATIO'),
+                title:        String(fullCfg.text || ''),
+                sub:          String(fullCfg.sub || ''),
+                footRight:    String(fullCfg.footRight || ''),
+                rightVal:     String(fullCfg.rightVal || ''),
+                rightSub:     String(fullCfg.rightSub || '')
+            }
+        })
     }
 
     // ------------------------------------------------------------------------
@@ -1726,9 +1753,9 @@
             if (isInHudForbiddenZone(rx, ry)) continue
             // 仅避开准星正中心极小区域（半径 ~0.07），允许在中区内侧各处自由弹出
             if (avoidCrosshair && Math.abs(rx - 0.50) < 0.07 && Math.abs(ry - 0.50) < 0.07) continue
-            return [Number(rx.toFixed(3)), Number(ry.toFixed(3))]
+            return [Math.round(rx * 1000) * 0.001, Math.round(ry * 1000) * 0.001]
         }
-        return [Number((0.12 + Math.random() * 0.52).toFixed(3)), Number((0.12 + Math.random() * 0.64).toFixed(3))]
+        return [Math.round((0.12 + Math.random() * 0.52) * 1000) * 0.001, Math.round((0.12 + Math.random() * 0.64) * 1000) * 0.001]
     }
 
     // 崩溃弹幕流全屏 4×3 广域网格 + 自由随机混合打散（彻底消除扎堆在屏幕中央的现象，铺满全屏每一个非 HUD 角落）
@@ -1746,16 +1773,16 @@
         if (isInHudForbiddenZone(rx, ry)) {
             ry = 0.38 + Math.random() * 0.38
         }
-        return [Number(rx.toFixed(3)), Number(ry.toFixed(3))]
+        return [Math.round(rx * 1000) * 0.001, Math.round(ry * 1000) * 0.001]
     }
 
     // 生成连续丰富的随机倾角（涵盖端正 0°、微倾 ±1°~8°、中度倾斜 ±9°~20°、大倾角 ±21°~34°）
     function randomDiverseTilt() {
         var r = Math.random()
         if (r < 0.22) return 0.0
-        if (r < 0.45) return Number(((Math.random() - 0.5) * 14.0).toFixed(1))
+        if (r < 0.45) return Math.round(((Math.random() - 0.5) * 14.0) * 10) * 0.1
         var sign = Math.random() < 0.5 ? -1 : 1
-        return Number((sign * (8.0 + Math.random() * 26.0)).toFixed(1))
+        return Math.round((sign * (8.0 + Math.random() * 26.0)) * 10) * 0.1
     }
 
     function sendDanmakuNear(level, x, y, z, radius, opts) {
@@ -1789,35 +1816,19 @@
     function triggerRapidFinalErrorStream(job, remainTicks) {
         if (remainTicks <= 0 || remainTicks > FATAL_ERROR_TICKS) return
 
-        // 0. 左上角【约束场崩溃 · 视界锁死倒计时遥测面板】（定稿方案 α：终末地工业科研拓扑 × 搁浅吊线 × 阶梯流动波纹，每 4 tick 原地刷新）
+        // 0. 左上角【约束场崩溃 · 视界锁死倒计时遥测面板】（定稿方案 α 预设 + 同阶段增量 patch，每 4 tick 原地刷新）
         if (remainTicks % 4 === 0) {
             var pFinal  = Math.max(0, Math.min(1.0, 1.0 - (remainTicks / FATAL_ERROR_TICKS)))
             var subLock = Math.max(0, Math.min(1.0, 1.0 - ((remainTicks % 20) / 20)))
             var lockTag = job.fatalTriggered ? '§f§l约束场崩溃 · 视界锁死 §c[防破坏联锁]' : '§f§l约束场崩溃 · 视界锁死倒计时 §c[不可逆坍缩态]'
-            sendDanmakuNear(job.level, job.x, job.y, job.z, SCREEN_ALERT_RADIUS, buildTelemetryProgressOpts({
-                group:        TELEMETRY_GROUP,
-                id:           'core_telemetry_' + job.x + '_' + job.y + '_' + job.z,
-                lifeMode:     'active',
+            emitTelemetryHud(job, SCREEN_ALERT_RADIUS, 'core_telemetry_' + job.x + '_' + job.y + '_' + job.z, 'final_crimson', {
+                theme:        'crimson',
                 activeHold:   14,
-                priority:     'active',
                 progress:     pFinal,
                 subProgress:  subLock,
-                barWidth:     472,
-                barHeight:    16,
-                barColorFrom: 0x4A0714,
-                barColorMid:  0xC62828,
-                barColorTo:   0xFF8A80,
-                accentColor:  0xFF5252,
-                warnColor:    0xFFAB00,
-                pureColor:    0xFFEBEE,
-                trailColor:   0x70FF5252,
-                plateBgColor: 0x8A140B0E,
-                badgeBgColor: 0x80140B0E,
-                mosaicAColor: 0xE0FFEBEE,
-                mosaicBColor: 0x70FF5252,
-                mosaicCColor: 0x40C62828,
                 efTag:        job.fatalTriggered ? 'HZ-LCK // T-0' : 'CT-FAIL // T-0',
                 impulseEvent: job.fatalTriggered ? 'HZ_LCK' : 'CT_FAIL',
+                initPeak:     1.0,
                 badgeCode:    'CRITICAL',
                 unitLabel:    'REMAINING_WINDOW',
                 rightVal:     'T-' + (remainTicks / 20).toFixed(1) + 's',
@@ -1825,15 +1836,9 @@
                 footRight:    'HORIZON_LOCK // 100%',
                 text:         lockTag,
                 sub:          '§7(' + job.x + ',' + job.y + ',' + job.z + ') §8// §c奇点梯度锁死',
-                tracks:       { impulse: { mode: 'impulse', onChange: '$impulseEvent', peak: 1.0, initPeak: 1.0, decayMs: 420 } },
-                pos:          [0.27, 0.14],
-                size:         0.56,
-                tilt:         0,
-                shakeMode:    'none',
-                shakeAmp:     0.0,
                 fadeStyle:    'shatter',
                 fadeOut:      14
-            }))
+            })
         }
 
         // 1. 固定时间节点的主干错误层：全屏广域打散 + 随机色彩与来源 + 40% 概率静止不震动（确保有静有动、层次分明）
@@ -2260,34 +2265,18 @@
             return
         }
 
-        // 每 8 tick 刷新一次左上角持续激活【堆芯约束失稳遥测面板】HUD（定稿方案 α：终末地工业科研拓扑 × 搁浅吊线 × 阶梯流动波纹）
+        // 每 8 tick 刷新一次左上角持续激活【堆芯约束失稳遥测面板】HUD（定稿方案 α 预设 + 同阶段增量 patch）
         if (job.t % 8 === 0) {
             var stageSubProg = Math.min(1.0, ((job.t % 720) / 720))
             var isCritStage  = (stageIdx >= 3)
             var isStage5     = (stageIdx >= 4)
+            var stageTheme   = isStage5 ? 'crimson' : (isCritStage ? 'amber' : 'cyan')
             var stageTagCol  = isStage5 ? '§c' : (isCritStage ? '§6' : '§b')
-            sendDanmakuNear(job.level, job.x, job.y, job.z, SCREEN_ALERT_RADIUS, buildTelemetryProgressOpts({
-                group:        TELEMETRY_GROUP,
-                id:           'core_telemetry_' + job.x + '_' + job.y + '_' + job.z,
-                lifeMode:     'active',
+            emitTelemetryHud(job, SCREEN_ALERT_RADIUS, 'core_telemetry_' + job.x + '_' + job.y + '_' + job.z, 's_' + stageTheme, {
+                theme:        stageTheme,
                 activeHold:   22,
-                priority:     'active',
                 progress:     p,
                 subProgress:  stageSubProg,
-                barWidth:     472,
-                barHeight:    16,
-                barColorFrom: isStage5 ? 0x4A0714 : (isCritStage ? 0x5D1900 : 0x174A5A),
-                barColorMid:  isStage5 ? 0xC62828 : (isCritStage ? 0xFF8F00 : 0x26A69A),
-                barColorTo:   isStage5 ? 0xFF8A80 : (isCritStage ? 0xFFE082 : 0x80DEEA),
-                accentColor:  isStage5 ? 0xFF5252 : (isCritStage ? 0xFFD54F : 0x4DD0E1),
-                warnColor:    isStage5 ? 0xFFAB00 : 0xFFD54F,
-                pureColor:    isStage5 ? 0xFFEBEE : 0xFFFFFF,
-                trailColor:   isStage5 ? 0x70FF5252 : (isCritStage ? 0x66FFB300 : 0x6E4DD0E1),
-                plateBgColor: isStage5 ? 0x8A140B0E : (isCritStage ? 0x88140E08 : 0x840A1318),
-                badgeBgColor: isStage5 ? 0x80140B0E : (isCritStage ? 0x7E140E08 : 0x7A0A1318),
-                mosaicAColor: 0xD8FFFFFF,
-                mosaicBColor: isStage5 ? 0x70FF5252 : (isCritStage ? 0x6EFFD54F : 0x6E4DD0E1),
-                mosaicCColor: isStage5 ? 0x40C62828 : (isCritStage ? 0x3FFF8F00 : 0x3F26A69A),
                 efTag:        'EF-TLM // S' + (stageIdx + 1),
                 impulseEvent: 'STAGE_' + (stageIdx + 1),
                 badgeCode:    isCritStage ? 'UNSTABLE' : 'DETECTED',
@@ -2297,15 +2286,9 @@
                 footRight:    'R_ESCAPE // ' + (16 + stageIdx * 16) + 'm',
                 text:         '§f§l堆芯约束失稳遥测 ' + stageTagCol + '[S' + (stageIdx + 1) + '/5 · ' + meta.tag + ']',
                 sub:          '§7(' + job.x + ',' + job.y + ',' + job.z + ') §8// §e终望珍珠可停机',
-                tracks:       { impulse: { mode: 'impulse', onChange: '$impulseEvent', peak: 1.0, initPeak: 0.90, decayMs: 420 } },
-                pos:          [0.27, 0.14],
-                size:         0.56,
-                tilt:         0,
-                shakeMode:    'none',
-                shakeAmp:     0.0,
                 fadeStyle:    'char_last',
                 fadeOut:      14
-            }))
+            })
         }
 
         // 在主进度条运行期间，时不时在屏幕安全边缘带与聊天栏插入小型故障子报
@@ -2984,28 +2967,11 @@
         if (shownR < maxR && job.t % 6 === 0) {
             var shellSliceProg = Math.min(1.0, ((shownR % 30) / 30))
             var stratumIdx     = Math.max(1, Math.min(30, Math.ceil(p * 30)))
-            sendDanmakuNear(job.level, job.x, job.y, job.z, alertRange, buildTelemetryProgressOpts({
-                group:        TELEMETRY_GROUP,
-                id:           waveSlotId,
-                lifeMode:     'active',
+            emitTelemetryHud(job, alertRange, waveSlotId, 'wave_void', {
+                theme:        'void',
                 activeHold:   18,
-                priority:     'active',
                 progress:     p,
                 subProgress:  shellSliceProg,
-                barWidth:     472,
-                barHeight:    16,
-                barColorFrom: 0x240B4D,
-                barColorMid:  0x651FFF,
-                barColorTo:   0x18FFFF,
-                accentColor:  0x84FFFF,
-                warnColor:    0xE040FB,
-                pureColor:    0xF3E5F5,
-                trailColor:   0x6E7C4DFF,
-                plateBgColor: 0x8A0B0917,
-                badgeBgColor: 0x800B0917,
-                mosaicAColor: 0xD8FFFFFF,
-                mosaicBColor: 0x6E18FFFF,
-                mosaicCColor: 0x407C4DFF,
                 efTag:        'AW-300 // R+',
                 impulseEvent: 'STRATUM_' + stratumIdx,
                 badgeCode:    'WAVEFRONT',
@@ -3015,15 +2981,9 @@
                 footRight:    'STRATUM // #' + stratumIdx + '/30',
                 text:         '§f§l球状湮灭波前推进遥测 §b[R = ' + shownR + ' / ' + maxR + 'm]',
                 sub:          '§7(' + job.x + ',' + job.y + ',' + job.z + ') §8// §b物质层同步汽化',
-                tracks:       { impulse: { mode: 'impulse', onChange: '$impulseEvent', peak: 1.0, initPeak: 0.90, decayMs: 420 } },
-                pos:          [0.27, 0.14],
-                size:         0.56,
-                tilt:         0,
-                shakeMode:    'none',
-                shakeAmp:     0.0,
                 fadeStyle:    'shatter',
                 fadeOut:      18
-            }))
+            })
         }
 
         // 3. 湮灭进度推进期间（shownR < maxR），在避开右上角小地图与底部快捷栏的全屏自由位置插入丰富色彩与来源的异常子报
@@ -3130,11 +3090,11 @@
     }
 
     // ------------------------------------------------------------------------
-    // 液体清除与外圈岩浆环：委托给通用组件 EpiphyWorldOps (Epiphy的-方块与区块组件.js)
+    // 液体清除与外圈岩浆环：向上提交 EpiphyWorldOps 预设后按名调用
     // ------------------------------------------------------------------------
-    function triggerIncrementalLiquidSweep(level, dim, cx, cy, cz, radius) {
-        if (!LIQUID_PURGE_ENABLED || level == null) return
-        WORLD_OPS.triggerIncrementalFluidSweep(level, dim, cx, cy, cz, radius, {
+    var WORLD_OPS_HAS_PRESET = (WORLD_OPS != null && typeof WORLD_OPS.registerPreset === 'function')
+    if (WORLD_OPS_HAS_PRESET) {
+        WORLD_OPS.registerPreset('v18_fluid_sweep', {
             padding:        LIQUID_PURGE_PADDING,
             loops:          LIQUID_PURGE_LOOPS,
             unloadedTtl:    LIQUID_UNLOADED_TTL,
@@ -3142,45 +3102,57 @@
             syncMaxMs:      LIQUID_SYNC_MAX_MS,
             excludeLava:    true
         })
-    }
-
-    function startLiquidPurge(level, dim, cx, cy, cz, radius, isRimOnlySweep) {
-        if (!LIQUID_PURGE_ENABLED || level == null) return
-        // 引爆当 tick 仅做极短同步核心预扫（syncInitRadius=32, syncMaxMs=4ms），将主开销平摊至 EpiphyWorldOps 分帧预算（8ms/tick）
-        WORLD_OPS.startSphereFluidPurge(level, dim, cx, cy, cz, radius, {
-            isRimOnlySweep: Boolean(isRimOnlySweep),
+        WORLD_OPS.registerPreset('v18_fluid_purge', {
             padding:        LIQUID_PURGE_PADDING,
             loops:          LIQUID_PURGE_LOOPS,
             unloadedTtl:    LIQUID_UNLOADED_TTL,
             syncInitRadius: LIQUID_SYNC_INIT_RADIUS,
-            syncMaxMs:      LIQUID_SYNC_MAX_MS,
-            onDone: () => {
-                sendChatNear(
-                    level, dim, cx, cy, cz, FX_PACKET_RANGE + 120,
-                    '{"text":"[LIQUID_PURGE] 湮灭流体剥离完成 —— 湮灭柱域内的水源、流动水、气泡柱、水生植物、含水方块与岩浆已全部归零。","color":"gold"}'
-                )
-            }
+            syncMaxMs:      LIQUID_SYNC_MAX_MS
+        })
+        WORLD_OPS.registerPreset('v18_magma_ring', {
+            blockId:   'minecraft:lava',
+            width:     MAGMA_RING_WIDTH,
+            thickness: MAGMA_RING_THICKNESS
         })
     }
 
+    function triggerIncrementalLiquidSweep(level, dim, cx, cy, cz, radius) {
+        if (!LIQUID_PURGE_ENABLED || level == null) return
+        WORLD_OPS.triggerIncrementalFluidSweep(level, dim, cx, cy, cz, radius, WORLD_OPS_HAS_PRESET
+            ? { preset: 'v18_fluid_sweep' }
+            : { padding: LIQUID_PURGE_PADDING, loops: LIQUID_PURGE_LOOPS, unloadedTtl: LIQUID_UNLOADED_TTL, syncInitRadius: 0, syncMaxMs: LIQUID_SYNC_MAX_MS, excludeLava: true })
+    }
+
+    function startLiquidPurge(level, dim, cx, cy, cz, radius, isRimOnlySweep) {
+        if (!LIQUID_PURGE_ENABLED || level == null) return
+        var onDoneFn = () => {
+            sendChatNear(
+                level, dim, cx, cy, cz, FX_PACKET_RANGE + 120,
+                '{"text":"[LIQUID_PURGE] 湮灭流体剥离完成 —— 湮灭柱域内的水源、流动水、气泡柱、水生植物、含水方块与岩浆已全部归零。","color":"gold"}'
+            )
+        }
+        // 引爆当 tick 仅做极短同步核心预扫（syncInitRadius=32, syncMaxMs=4ms），将主开销平摊至 EpiphyWorldOps 分帧预算（8ms/tick）
+        WORLD_OPS.startSphereFluidPurge(level, dim, cx, cy, cz, radius, WORLD_OPS_HAS_PRESET
+            ? { preset: 'v18_fluid_purge', isRimOnlySweep: Boolean(isRimOnlySweep), onDone: onDoneFn }
+            : { isRimOnlySweep: Boolean(isRimOnlySweep), padding: LIQUID_PURGE_PADDING, loops: LIQUID_PURGE_LOOPS, unloadedTtl: LIQUID_UNLOADED_TTL, syncInitRadius: LIQUID_SYNC_INIT_RADIUS, syncMaxMs: LIQUID_SYNC_MAX_MS, onDone: onDoneFn })
+    }
+
     function startMagmaRing(job, maxR) {
-        WORLD_OPS.startRingBlockJob(job.level, job.dim, job.x, job.y, job.z, maxR, {
-            blockId:   'minecraft:lava',
-            width:     MAGMA_RING_WIDTH,
-            thickness: MAGMA_RING_THICKNESS,
-            onDone: (rJob) => {
-                var placed = rJob?.placedCols != null ? rJob.placedCols : 0
-                var total  = rJob?.totalCols  != null ? rJob.totalCols  : 0
-                if (placed <= 0) return
-                var covText = (total > 0 && placed < total)
-                    ? `（已浇筑当前加载视距内 ${placed}/${total} 列）`
-                    : ''
-                sendChatNear(
-                    job.level, job.dim, job.x, job.y, job.z, FX_PACKET_RANGE + 80,
-                    `{"text":"[MAGMA_RING] 最外壳层冷却完成 —— 半径 300 格处已形成岩浆圈层${covText}。","color":"gold"}`
-                )
-            }
-        })
+        var onDoneFn = (rJob) => {
+            var placed = rJob?.placedCols != null ? rJob.placedCols : 0
+            var total  = rJob?.totalCols  != null ? rJob.totalCols  : 0
+            if (placed <= 0) return
+            var covText = (total > 0 && placed < total)
+                ? `（已浇筑当前加载视距内 ${placed}/${total} 列）`
+                : ''
+            sendChatNear(
+                job.level, job.dim, job.x, job.y, job.z, FX_PACKET_RANGE + 80,
+                `{"text":"[MAGMA_RING] 最外壳层冷却完成 —— 半径 300 格处已形成岩浆圈层${covText}。","color":"gold"}`
+            )
+        }
+        WORLD_OPS.startRingBlockJob(job.level, job.dim, job.x, job.y, job.z, maxR, WORLD_OPS_HAS_PRESET
+            ? { preset: 'v18_magma_ring', onDone: onDoneFn }
+            : { blockId: 'minecraft:lava', width: MAGMA_RING_WIDTH, thickness: MAGMA_RING_THICKNESS, onDone: onDoneFn })
     }
 
     BASE.registerDebugProvider({

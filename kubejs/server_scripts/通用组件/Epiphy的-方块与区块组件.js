@@ -1,6 +1,6 @@
 // priority: 1050
 // ============================================================================
-//  通用方块追踪与区块地形批处理组件 (EpiphyBlockTracker / EpiphyChunkEngine v2.4)
+//  通用方块追踪与区块地形批处理组件 (EpiphyBlockTracker / EpiphyChunkEngine v2.5)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 <repo-root> 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
@@ -1190,10 +1190,23 @@
     // 自适应开销门控球体流体剥离：
     //   - 当总半径 r <= CONFIG.smallSphereDirectRadius 时，直接单帧完成，不分配跨帧热点/未加载队列；
     //   - 当总半径较大时，T+0 同步抽干核心区（受 syncMaxMs 保护），随后进入分帧热点队列与未加载区块挂起队列。
+    var WORLD_OPS_PRESETS = (typeof global !== 'undefined' && global.EpiphySpec && typeof global.EpiphySpec.createPresetRegistry === 'function')
+        ? global.EpiphySpec.createPresetRegistry('world_ops')
+        : { register: function () { return false }, has: function () { return false }, get: function () { return null }, remove: function () { return false }, list: function () { return [] }, resolve: function () { return null } }
+
+    function resolveWorldOpsOpts(rawOpts) {
+        if (!BASE.isObjectLike(rawOpts)) return {}
+        if (typeof rawOpts.preset === 'string' && rawOpts.preset.trim() !== '') {
+            var resolved = WORLD_OPS_PRESETS.resolve(rawOpts.preset, rawOpts)
+            if (BASE.isObjectLike(resolved)) return resolved
+        }
+        return rawOpts
+    }
+
     function startSphereFluidPurge(level, dim, cx, cy, cz, radius, opts) {
         if (level == null || !(radius > 0)) return false
         ensureWorldOpsInit()
-        var options       = BASE.isObjectLike(opts) ? opts : {}
+        var options       = resolveWorldOpsOpts(opts)
         var normDim       = normalizeDim(dim || dimOfLevel(level)) || 'minecraft:overworld'
         var isRimOnly     = Boolean(options.isRimOnlySweep)
         // 同时支持 options.cylinder2D 与 options.useCylinder2D 两种命名（默认开启上柱下球模式）
@@ -1343,19 +1356,20 @@
     }
 
     function triggerIncrementalFluidSweep(level, dim, cx, cy, cz, radius, opts) {
+        var resolvedOpts = resolveWorldOpsOpts(opts)
         var normDim = normalizeDim(dim || dimOfLevel(level)) || 'minecraft:overworld'
         var exist   = findFluidPurgeJob(normDim, cx, cy, cz)
         if (exist != null) {
             exist.loopsLeft  = Math.max(exist.loopsLeft, 2)
             exist.expireTick = Math.max(exist.expireTick, tickCounter + 240)
-            if (opts != null && (opts.excludeLava || opts.waterOnly)) {
+            if (resolvedOpts.excludeLava || resolvedOpts.waterOnly) {
                 exist.excludeLava = true
             }
             return true
         }
         var mergedOpts = {}
-        if (BASE.isObjectLike(opts)) {
-            for (var k in opts) mergedOpts[k] = opts[k]
+        for (var k in resolvedOpts) {
+            if (Object.prototype.hasOwnProperty.call(resolvedOpts, k)) mergedOpts[k] = resolvedOpts[k]
         }
         mergedOpts.isRimOnlySweep = true
         return startSphereFluidPurge(level, normDim, cx, cy, cz, radius, mergedOpts)
@@ -1411,7 +1425,7 @@
     // 分帧圆环方块浇筑任务（严格跳过未加载区块 + 遵守全局帧时间预算 + 支持表层上方/内部替换）
     function startRingBlockJob(level, dim, cx, cy, cz, radius, opts) {
         if (level == null || !(radius > 0)) return false
-        var options       = BASE.isObjectLike(opts) ? opts : {}
+        var options       = resolveWorldOpsOpts(opts)
         var normDim       = normalizeDim(dim || dimOfLevel(level)) || 'minecraft:overworld'
         var blockId       = String(options.blockId || 'minecraft:lava')
         var width         = (options.width != null && isFinite(Number(options.width))) ? Math.max(1, Math.floor(Number(options.width))) : 2
@@ -1838,7 +1852,11 @@
         triggerIncrementalFluidSweep: triggerIncrementalFluidSweep,
         findLoadedSurfaceY:           findLoadedSurfaceY,
         startRingBlockJob:            startRingBlockJob,
-        hasActiveWorldOps:            hasActiveWorldOps
+        hasActiveWorldOps:            hasActiveWorldOps,
+        registerPreset:               function (name, specOrFn) { return WORLD_OPS_PRESETS.register(name, specOrFn) },
+        preset:                       function (name, overrides) { return WORLD_OPS_PRESETS.resolve(name, overrides) },
+        listPresets:                  function () { return WORLD_OPS_PRESETS.list() },
+        removePreset:                 function (name) { return WORLD_OPS_PRESETS.remove(name) }
     }
     global.EpiphyBlockTracker = trackerAndChunkApi
     global.EpiphyChunkEngine  = trackerAndChunkApi

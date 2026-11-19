@@ -1,6 +1,6 @@
 // priority: 500
 // ============================================================================
-//  通用空间音频与流式声场组件 —— 服务端调度器 (EpiphyAudio v5.7)
+//  通用空间音频与流式声场组件 —— 服务端调度器 (EpiphyAudio v5.8)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 <repo-root> 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
@@ -1772,9 +1772,32 @@
         return existing.id
     }
 
+    var AUDIO_PRESETS = (SPEC && typeof SPEC.createPresetRegistry === 'function')
+        ? SPEC.createPresetRegistry('audio')
+        : { register: function () { return false }, has: function () { return false }, get: function () { return null }, remove: function () { return false }, list: function () { return [] }, resolve: function () { return null } }
+
+    var registerPreset = (name, specOrFn) => AUDIO_PRESETS.register(name, specOrFn)
+    var resolvePreset  = (name, overrides) => AUDIO_PRESETS.resolve(name, overrides)
+    var playPreset     = (name, overrides) => {
+        var resolved = resolvePreset(name, overrides)
+        if (resolved == null) {
+            reportWarning('playPreset', '未找到已注册的音频预设: ' + name)
+            return 0
+        }
+        return play(resolved)
+    }
+
     var play = (a, b, c) => {
         try {
             var spec  = (b === undefined && isSpecObject(a)) ? a : normalizeLegacySpec(a, b, c)
+            if (isSpecObject(spec) && typeof spec.preset === 'string' && spec.preset.trim() !== '') {
+                var resolvedAudio = resolvePreset(spec.preset, spec)
+                if (resolvedAudio == null) {
+                    reportWarning('play', '未找到已注册的音频预设: ' + spec.preset)
+                    return 0
+                }
+                spec = resolvedAudio
+            }
             var built = buildHandle(spec)
             if (built.error) {
                 reportWarning('play', built.error)
@@ -2445,6 +2468,12 @@
             ? safeCall(binding.specOrFn, [{ block: curBlock, level: lv, server: serverRef, dim: rec.dim, x: rec.x, y: rec.y, z: rec.z }], 'bindBlock')
             : binding.specOrFn
         if (rawSpec == null || typeof rawSpec !== 'object') return false
+        if (rawSpec.preset != null && String(rawSpec.preset).trim() !== '') {
+            var resolvedBlockSpec = resolvePreset(rawSpec.preset, rawSpec)
+            if (resolvedBlockSpec != null && typeof resolvedBlockSpec === 'object') {
+                rawSpec = resolvedBlockSpec
+            }
+        }
 
         var effMode = normalizeConflictMode(rawSpec.conflictMode !== undefined ? rawSpec.conflictMode : 'nearest', 'nearest')
         var playSpec = withFields(rawSpec, {
@@ -2550,7 +2579,14 @@
         var tracker = ensureAudioBlockTracker()
         if (tracker == null) return false
         var idStr = String(blockId).trim()
-        var range = (typeof specOrFn === 'object' && specOrFn.range != null) ? Number(specOrFn.range) : 32
+        var effectiveSpecObj = specOrFn
+        if (typeof specOrFn === 'object' && specOrFn.preset != null && String(specOrFn.preset).trim() !== '') {
+            var resolvedForScan = resolvePreset(specOrFn.preset, specOrFn)
+            if (resolvedForScan != null && typeof resolvedForScan === 'object') {
+                effectiveSpecObj = resolvedForScan
+            }
+        }
+        var range = (typeof effectiveSpecObj === 'object' && effectiveSpecObj.range != null) ? Number(effectiveSpecObj.range) : 32
         var metaEntry = {
             blockId:    idStr,
             specOrFn:   specOrFn,
@@ -2763,6 +2799,11 @@
         config:           CONFIG,
         play:             play,
         safePlay:         safePlay,
+        registerPreset:   registerPreset,
+        preset:           resolvePreset,
+        playPreset:       playPreset,
+        listPresets:      () => AUDIO_PRESETS.list(),
+        removePreset:     (name) => AUDIO_PRESETS.remove(name),
         send:             play,
         safeSend:         safePlay,
         toPlayer:         toPlayer,

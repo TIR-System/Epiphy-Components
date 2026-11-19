@@ -69,15 +69,15 @@
 | **L1 内容注册** | 隐藏物品 / 测试方块 / 失稳拆解台 | `startup` | 物品、测试方块与 5 阶段失稳方块 |
 | **L2 基础设施** | `Epiphy的-日志.js` | `server` / `1100` | `EpiphyLog v1.2`（限频、去重、`catchWarn`、外部文本日志） |
 | **L2 基础设施** | `Epiphy的-服务端核心.js` | `server` / `1080` | `EpiphyServerCore / EpiphyServerBase v2.5`（访问器、世界/实体/Curios工具、`.bak` 自愈、`epiphy-data/`、自动分叉、DSL） |
-| **L2 基础设施** | `Epiphy的-方块与区块组件.js` | `server` / `1050` | `EpiphyBlockTracker / EpiphyWorldOps v2.4`（区块段扫描、持久化派发、三级开销门控流体剥离与地形批处理） |
+| **L2 基础设施** | `Epiphy的-方块与区块组件.js` | `server` / `1050` | `EpiphyBlockTracker / EpiphyWorldOps v2.5`（区块段扫描、持久化派发、三级开销门控流体剥离、地形批处理与向上预设注册） |
 | **L2 安全控制** | `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v5.4`（`/epiphy`、三态分层权限域、命令方块修改锁、墓碑、按名备用模式） |
 | **L2 诊断维护** | `Epiphy的-调试组件.js` | `server` / `950` | `EpiphyDebug v1`（`/epiphy debug`） |
 | **L2 独立修复** | `Epiphy的-基础bug修复.js` | `server` / `900` | `EpiphyBugfix v1`（退出 HP 服务端恢复） |
-| **L3 业务调度** | `Epiphy的-平面渲染组件.js` | `server` / `500` | `Epiphy2DSurface / ScreenDanmaku v6.0`（2D 平面图元树/进度条/GUI 注入与弹幕调度，禁止跨模块直接复用内部实现） |
-| **L3 业务调度** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.7`（独立调度模块，禁止跨模块直接复用内部实现） |
-| **L3 玩法脚本** | `拆解台-混沌殉爆.v18.js` | `server` / `10` | 混沌殉爆事件链（强前置核心/世界/弹幕组件，含持久化、原生 2D 图元进度条、防伪造遗物与主手钻石镐校验） |
+| **L3 业务调度** | `Epiphy的-平面渲染组件.js` | `server` / `500` | `Epiphy2DSurface / ScreenDanmaku v6.1`（2D 图元树/紧凑 `ui()` DSL/预设与自定义复合单元注册/进度条/GUI 注入与弹幕调度，禁止跨模块直接复用内部实现） |
+| **L3 业务调度** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.8`（独立调度模块，支持向上预设注册，禁止跨模块直接复用内部实现） |
+| **L3 玩法脚本** | `拆解台-混沌殉爆.v18.js` | `server` / `10` | 混沌殉爆事件链（强前置核心/世界/弹幕组件，含持久化、原生 2D 图元遥测预设与增量 `patch`、防伪造遗物与主手钻石镐校验） |
 | **L3 玩法脚本** | `合成表-*`（原版 / 植物魔法 / 神秘遗物） | `server` / `0` | 独立合成表与配方微调脚本 |
-| **L4 客户端表现** | `平面渲染器` / `音频播放器` / `拆解台描述` | `client` | `Epiphy2DRenderer / ScreenDanmakuClient v6.0`、`EpiphyAudioClient v5.6` |
+| **L4 客户端表现** | `平面渲染器` / `音频播放器` / `拆解台描述` | `client` | `Epiphy2DRenderer / ScreenDanmakuClient v6.1`、`EpiphyAudioClient v5.6` |
 
 ### 3. 模块依赖与降级语义规范（YAML）
 
@@ -171,13 +171,13 @@ Epiphy的-音频播放器.js:
 ## 核心功能说明
 
 1. **通用基础设施与外部存储（`epiphy-data/`）**：
-   - 统一收拢跨端协议常量与解析规范（`EpiphySpec`）、限频去重日志与外部可读文本日志接收器（`EpiphyLog v1.2`，支持 `KubeJSPaths.dir + JsonIO` 写盘降级，入档自动切至对应世界 `logs/` 子文件夹）、服务端核心/原子文件读写/DSL（`EpiphyServerCore / EpiphyServerBase v2.5`，含 `corrupt` 专属 `.bak` 自愈、`worlds_index.json` 世界索引、`resolveLevel` 无效维度 fail-closed、`findPlayerItem` 无 NBT 伪造校验与零分配范围遍历）与渐进式区块段追踪及三级门控地形批处理（`EpiphyBlockTracker / EpiphyWorldOps v2.4`，支持 `cylinder2D` 上柱下球流体剥离、`excludeLava` 岩浆环保护与基岩/容器安全跳过）。
+   - 统一收拢跨端协议常量、解析规范、有界 FIFO 缓存池 (`createBoundedCache`) 与跨阶段向上预设注册表 (`createPresetRegistry` / `registerPreset`)（`EpiphySpec`）、限频去重日志与外部可读文本日志接收器（`EpiphyLog v1.2`，支持 `KubeJSPaths.dir + JsonIO` 写盘降级，入档自动切至对应世界 `logs/` 子文件夹）、服务端核心/原子文件读写/DSL（`EpiphyServerCore / EpiphyServerBase v2.5`，含 `corrupt` 专属 `.bak` 自愈、`worlds_index.json` 世界索引、`resolveLevel` 无效维度 fail-closed、`findPlayerItem` 无 NBT 伪造校验与零分配范围遍历）与渐进式区块段追踪及三级门控地形批处理（`EpiphyBlockTracker / EpiphyWorldOps v2.5`，支持 `registerPreset`/`preset`、`cylinder2D` 上柱下球流体剥离、`excludeLava` 岩浆环保护与基岩/容器安全跳过）。
    - 运行期在游戏根目录建立 `epiphy-data/`（`config` / `worlds` / `players` / `events` / `logs` / `presets` / `backups`），配合 `.tmp` + `.bak` 原子写入；世界目录采用 `<slug>__<shortId>` 命名并与存档内 `epiphy_world_id.json` 双向绑定，当 `lastWorldPath` 变化（如复制存档）时自动分叉并提示 OP 清理旧目录。
    - **权限与防回滚安全（`EpiphyPermissionValve v5.4`）**：基于 `Class.isInstance` 的源类型鉴权与分级 scope 模型（支持将如 `danmaku.self`、`audio.play` 等单个子命令独立授予非 OP，子级明确撤销优先于父模块授权，`danmaku.broadcast`/`audio.broadcast` 等 `exactScopeOnly` 广域权限须显式单授）；默认严格按 UUID 授权（并显式提示无 TrueUUID 与密码登录插件的纯离线服风险）；撤销写入外部 `revocations.json` 墓碑防止存档回滚复活；按名授权备用模式默认 Fail-Closed，须真 OP/控制台在 2 分钟内凭 8 位随机口令二次确认开启，支持 `/epiphy auth scopes|namegrant|grantname|revokename|where|reload`；已加固原型保留键过滤、`getContext()` 为空回退源拦截及墓碑重授权时间戳文本同步。
    - **独立修复与诊断**：动态性能监控与健康自检（`EpiphyDebug v1`），以及零硬依赖的纯服务端退出 HP 保留与延迟恢复修复（`EpiphyBugfix v1`）。
 2. **双端交互表现引擎（含 `authorized` 玩家资源隔离）**：
-   - **屏幕弹幕（`ScreenDanmaku v5.7` / `ScreenDanmakuClient v5.7`）**：归一化屏幕坐标与 HUD 禁区避让、多段打字机（闪烁光标不再破坏行缓存，`ensureLineVisTable` 预计算 $O(1)$ 字素切片与累计像素宽度表、隔离 `TRANSIENT_TEXT_SEQ_CACHE` 消除打字机过渡态缓存雪崩、非标签 `<...>` 首字符 $O(1)$ 短路与 `lCache` 数值键直通复用）、`per_char` 单字震动（含静态邻接段合并、$O(\text{可见数})$ 二分定界、屏幕外剔除、稳态快照、位运算随机/三角查找表、完整 `ZWJ`/国旗/扩展 Extend 字素聚类、FIFO 字宽缓存、帧级 `sAllowShadow` 与 `itemFgMat`/`itemOutMat` 复用、严格不变量 `rCtx` 及防闪烁优先级绘制序）、描边/发光、局部富文本标签（`<b>`/`<big>`/`<scale=...>`/`<shake>`/`<outline>`，其中纯 `<shake>` 保持清晰 `MODE_NORMAL(0)`）、`ModernUI (LGPL-3.0)` 专有深度优化及原版无感回退（`lookupVanillaLayout(String)` 零 `Text.of` 构造、纯金丝雀 `MUI_EPOCH` 失效、`measureWholeLineWidthPx` 整段换行预判、`'mui_stroke'`/`'sdf_stroke'` 单 Pass `drawTextOutline` 描边并在 Emoji/无 ModernUI 下自动回退 `'stroke'`、`drawUnitsPassGrouped` 三阶段分 Pass 合批绘制及续期同文本度量和服务端 `inDimension` 零玩家/冷却前置跳过 + `recentPos` 128 组上限清理 + 队列溢出 `action` 控制包保护 + 延迟方块追踪自动升级）、`once` / `active` 双生命周期（含冷却期后批处理/ModernUI 自动恢复）、持久化/进服延迟补发与按命名空间隔离的方块绑定；新增 `/epiphy danmaku self` 个人弹幕子指令，非 OP `authorized` 玩家命令进入 `'player'` 层级并受参数/人数（`>4` 人及跨维度需 `danmaku.broadcast`）/冷却限流、独立 `u:<uuid>` 命名空间清屏锁、端侧待处理队列上限（256）与每命名空间 `16` 条上限约束（JS API 与 OP/控制台/命令方块不受玩家限流）。
-   - **空间音频（`EpiphyAudio v5.7` / `EpiphyAudioClient v5.6`）**：固定位置/方块/追踪实体/维度/全局声场、衰减曲线、`Channel` 实时 3D 方位同步、静音/出界 `pause` 挂起保流、邻近同源方块扫描延迟聚合 `merge` 簇合并、按资源命名空间严格过滤的温和 `pause`/`unpause` 原版音乐避让（`duckMusic` 仅暂挂 `minecraft:` 频道并支持 `chanMap` 延迟恢复，彻底保护其他模组 BGM）与客户端断流退避重连；`configure` 参数严格校验、未启动超时清理、`pendingReset` 失败保留与后置方块追踪器自动升级；非 OP `authorized` 玩家命令进入 `'player'` 层级并受优先级 `<= 3`、`u:<uuid>:` key 隔离、`>4` 人/跨维度需 `audio.broadcast` 及双端单向淘汰保护。
+   - **2D 平面合成与屏幕弹幕（`Epiphy2DSurface / ScreenDanmaku v6.1` / `Epiphy2DRenderer / ScreenDanmakuClient v6.1`）**：基于 `PROTO v6` 的 6 类 2D 图元树（`rect`/`sprite`/`nine_slice`/`item`/`text`/`group`）、`rect.fill`（`solid`/`outline`/`gradient`/`parallax`/`shader`）、双模裁剪（`local`/`scissor`）、客户端插值轨道（`lerp`/`trail`/`impulse`）、`action: 'patch'` 队列合并增量更新、紧凑链式 `ui()` 构造器（`steppedPlate`/`corners`/`steppedLine`/`ticks`/`boxes`/`widget`）与向上预设/自定义复合单元注册（`registerPreset`/`registerWidget`）；端侧具备连续 `solid`/`outline` 矩形自动合批、视差早期剔除、左对齐免测宽与节点字宽缓存、统一有界 FIFO 缓存池、归一化屏幕坐标与 HUD 禁区避让、多段打字机（闪烁光标不再破坏行缓存，`ensureLineVisTable` 预计算 $O(1)$ 字素切片与累计像素宽度表、隔离 `TRANSIENT_TEXT_SEQ_CACHE` 消除打字机过渡态缓存雪崩、非标签 `<...>` 首字符 $O(1)$ 短路与 `lCache` 数值键直通复用）、`per_char` 单字震动（含静态邻接段合并、$O(\text{可见数})$ 二分定界、屏幕外剔除、稳态快照、位运算随机/三角查找表、完整 `ZWJ`/国旗/扩展 Extend 字素聚类、帧级 `sAllowShadow` 与 `itemFgMat`/`itemOutMat` 复用、严格不变量 `rCtx` 及防闪烁优先级绘制序）、描边/发光、局部富文本标签（`<b>`/`<big>`/`<scale=...>`/`<shake>`/`<outline>`，其中纯 `<shake>` 保持清晰 `MODE_NORMAL(0)`）、`ModernUI (LGPL-3.0)` 专有深度优化及原版无感回退、`once` / `active` / `screen_session` 生命周期、持久化/进服延迟补发与按命名空间隔离的方块绑定；新增 `/epiphy danmaku self` 个人弹幕子指令，非 OP `authorized` 玩家命令进入 `'player'` 层级并受参数/人数（`>4` 人及跨维度需 `danmaku.broadcast`）/冷却限流、独立 `u:<uuid>` 命名空间清屏锁、端侧待处理队列上限（256）与每命名空间 `16` 条上限约束（JS API 与 OP/控制台/命令方块不受玩家限流）。
+   - **空间音频（`EpiphyAudio v5.8` / `EpiphyAudioClient v5.6`）**：固定位置/方块/追踪实体/维度/全局声场与向上预设注册（`registerPreset`/`playPreset`/`{ preset }`，含 `bindBlock` 预设解析）、衰减曲线、`Channel` 实时 3D 方位同步、静音/出界 `pause` 挂起保流、邻近同源方块扫描延迟聚合 `merge` 簇合并、按资源命名空间严格过滤的温和 `pause`/`unpause` 原版音乐避让（`duckMusic` 仅暂挂 `minecraft:` 频道并支持 `chanMap` 延迟恢复，彻底保护其他模组 BGM）与客户端断流退避重连；`configure` 参数严格校验、未启动超时清理、`pendingReset` 失败保留与后置方块追踪器自动升级；非 OP `authorized` 玩家命令进入 `'player'` 层级并受优先级 `<= 3`、`u:<uuid>:` key 隔离、`>4` 人/跨维度需 `audio.broadcast` 及双端单向淘汰保护。
 3. **内容与玩法拓展**：`epiphy:stuff` 创造模式物品栏与隐藏物品收录（含混沌晶体 CCL 3D OBJ + Chaos Shader 物品渲染）、`epiphy:rnfmabj_test` 测试方块、暮色森林终极拆解台 5 阶段失稳殉爆与遗物豁免机制，以及原版/植物魔法/神秘遗物部分配方调整。
 
 ---

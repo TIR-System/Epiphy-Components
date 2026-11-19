@@ -1,11 +1,11 @@
 // ============================================================================
-//  通用平面渲染与屏幕弹幕组件 —— 客户端渲染引擎 (Epiphy2DRenderer / ScreenDanmakuClient v6.0)
+//  通用平面渲染与屏幕弹幕组件 —— 客户端渲染引擎 (Epiphy2DRenderer / ScreenDanmakuClient v6.1)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 <repo-root> 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-平面渲染器.js
 //  配套服务端组件：
-//    - kubejs/server_scripts/通用组件/Epiphy的-平面渲染组件.js（服务端调度器 Epiphy2DSurface / ScreenDanmaku v6.0）
+//    - kubejs/server_scripts/通用组件/Epiphy的-平面渲染组件.js（服务端调度器 Epiphy2DSurface / ScreenDanmaku v6.1）
 //    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀 EpiphyPermissionValve v5.4）
 //
 //  依赖与缺失降级：
@@ -107,13 +107,40 @@
     var TextLayoutEngineClass   = null
     var ModernTextRendererClass = null
     var SheetsClass             = null
+    function createLocalBoundedCache(maxSize) {
+        if (SPEC && typeof SPEC.createBoundedCache === 'function') {
+            return SPEC.createBoundedCache(maxSize)
+        }
+        var lim = (typeof maxSize === 'number' && maxSize >= 1) ? Math.floor(maxSize) : 512
+        var map = Object.create(null)
+        var ks  = []
+        var hd  = 0
+        var cnt = 0
+        return {
+            get: function (k) { var s = String(k); return (s in map) ? map[s] : undefined },
+            has: function (k) { return String(k) in map },
+            set: function (k, v) {
+                var s = String(k)
+                if (!(s in map)) {
+                    while (cnt >= lim && hd < ks.length) {
+                        var ok = ks[hd++]
+                        if (ok in map) { delete map[ok]; cnt-- }
+                    }
+                    if (hd > 64 && hd * 2 >= ks.length) { ks = ks.slice(hd); hd = 0 }
+                    ks.push(s); cnt++
+                }
+                map[s] = v
+                return v
+            },
+            clear: function () { map = Object.create(null); ks = []; hd = 0; cnt = 0 },
+            size:  function () { return cnt }
+        }
+    }
+
     var CACHED_FONT             = null
     var FONT_SIGNATURE          = ''
     var LAST_FONT_CHECK_MS      = -99999
-    var GLYPH_WIDTH_MAP         = {}
-    var GLYPH_WIDTH_KEYS        = []
-    var GLYPH_CACHE_HEAD        = 0
-    var GLYPH_CACHE_SIZE        = 0
+    var GLYPH_WIDTH_CACHE       = createLocalBoundedCache(CONFIG.glyphCacheLimit)
     var LAST_LEVEL_KEY          = ''
     var lastErrorLogAt          = 0
     var suppressedErrors        = 0
@@ -134,6 +161,9 @@
     var MUI_HAS_DRAW_OUTLINE    = false
     var CHAR_OFFSET_SCRATCH     = { dx: 0.0, dy: 0.0, rotDeg: 0.0 }
     var SHAKE_VEC_SCRATCH       = { x: 0.0, y: 0.0 }
+    var NODE_BIND_SCRATCH       = { x: 0.0, y: 0.0, w: 0.0, h: 0.0, alpha: 1.0, angle: 0.0 }
+    var BOX_ORIG_SCRATCH        = { x0: 0.0, y0: 0.0 }
+    var LOCAL_CLIP_SCRATCH      = { x: 0.0, y: 0.0, w: 0.0, h: 0.0, u: 0.0, v: 0.0, uw: 0.0, vh: 0.0, ratio: 1.0 }
     var FRAME_BATCH_CTX         = null
     var PASS_UNIT_SCRATCH       = []
     var PASS_MAT_POOL           = []
@@ -624,10 +654,7 @@
     }
 
     function resetGlyphWidthCache() {
-        GLYPH_WIDTH_MAP  = {}
-        GLYPH_WIDTH_KEYS = []
-        GLYPH_CACHE_HEAD = 0
-        GLYPH_CACHE_SIZE = 0
+        GLYPH_WIDTH_CACHE.clear()
     }
 
     function measureClusterWidthPx(cluster, isBold, fontObj) {
@@ -635,30 +662,12 @@
         var f = fontObj || getClientFont(null)
         if (f != null) {
             var cacheKey = (isBold ? '1:' : '0:') + cluster
-            if (Object.prototype.hasOwnProperty.call(GLYPH_WIDTH_MAP, cacheKey)) {
-                var cached = GLYPH_WIDTH_MAP[cacheKey]
-                if (cached !== undefined && isFinite(cached)) return cached
-            }
+            var cached = GLYPH_WIDTH_CACHE.get(cacheKey)
+            if (cached !== undefined && isFinite(cached)) return cached
             var probe = isBold ? ('§l' + cluster) : cluster
             var w = invokeFontWidth(f, probe)
             if (isFinite(w) && w >= 0) {
-                if (!Object.prototype.hasOwnProperty.call(GLYPH_WIDTH_MAP, cacheKey)) {
-                    // 按 FIFO 淘汰最旧字形宽度条目，避免超限全表清空造成后续帧 Font.width JNI 毛刺
-                    while (GLYPH_CACHE_SIZE >= CONFIG.glyphCacheLimit && GLYPH_CACHE_HEAD < GLYPH_WIDTH_KEYS.length) {
-                        var oldKey = GLYPH_WIDTH_KEYS[GLYPH_CACHE_HEAD++]
-                        if (oldKey !== undefined && Object.prototype.hasOwnProperty.call(GLYPH_WIDTH_MAP, oldKey)) {
-                            delete GLYPH_WIDTH_MAP[oldKey]
-                            GLYPH_CACHE_SIZE--
-                        }
-                    }
-                    if (GLYPH_CACHE_HEAD >= 512) {
-                        GLYPH_WIDTH_KEYS = GLYPH_WIDTH_KEYS.slice(GLYPH_CACHE_HEAD)
-                        GLYPH_CACHE_HEAD = 0
-                    }
-                    GLYPH_WIDTH_KEYS.push(cacheKey)
-                    GLYPH_CACHE_SIZE++
-                }
-                GLYPH_WIDTH_MAP[cacheKey] = w
+                GLYPH_WIDTH_CACHE.set(cacheKey, w)
                 return w
             }
         }
@@ -3511,7 +3520,7 @@
     // v6 适配器、Rhino/NBT 安全转换、状态变量插值轨道 (vars + tracks + action:'patch') 与几何裁剪纯函数
     // ------------------------------------------------------------------------
     var REPLACED_TEXTURE_REGISTRY = {}
-    var TEXTURE_EXIST_CACHE       = {}
+    var TEXTURE_EXIST_CACHE       = createLocalBoundedCache(512)
 
     function safeTypeOf(v) {
         if (v === null) return 'object'
@@ -3970,7 +3979,8 @@
         })
     }
 
-    function computeLocalClipRect(x, y, w, h, u, v, uw, vh, clipSpec, varsMap) {
+    function computeLocalClipRect(x, y, w, h, u, v, uw, vh, clipSpec, varsMap, outScratch) {
+        var out = outScratch != null ? outScratch : { x: 0, y: 0, w: 0, h: 0, u: 0, v: 0, uw: 0, vh: 0, ratio: 1.0 }
         var bx  = Number(x) || 0
         var by  = Number(y) || 0
         var bw  = max2(0, Number(w) || 0)
@@ -3980,76 +3990,37 @@
         var buw = Number(uw != null ? uw : bw) || 0
         var bvh = Number(vh != null ? vh : bh) || 0
         if (!isPlainObjLike(clipSpec)) {
-            return { x: bx, y: by, w: bw, h: bh, u: bu, v: bv, uw: buw, vh: bvh, ratio: 1.0 }
+            out.x = bx; out.y = by; out.w = bw; out.h = bh; out.u = bu; out.v = bv; out.uw = buw; out.vh = bvh; out.ratio = 1.0
+            return out
         }
         var ratio = clampNum(resolveVarNum(clipSpec.ratio, varsMap, 1.0), 0.0, 1.0)
         var dir   = String(clipSpec.dir || 'left').toLowerCase()
         if (dir === 'right') {
             var invR = 1.0 - ratio
-            return {
-                x:     bx + bw * invR,
-                y:     by,
-                w:     bw * ratio,
-                h:     bh,
-                u:     bu + buw * invR,
-                v:     bv,
-                uw:    buw * ratio,
-                vh:    bvh,
-                ratio: ratio
-            }
+            out.x = bx + bw * invR; out.y = by; out.w = bw * ratio; out.h = bh
+            out.u = bu + buw * invR; out.v = bv; out.uw = buw * ratio; out.vh = bvh; out.ratio = ratio
+            return out
         }
         if (dir === 'down') {
-            return {
-                x:     bx,
-                y:     by,
-                w:     bw,
-                h:     bh * ratio,
-                u:     bu,
-                v:     bv,
-                uw:    buw,
-                vh:    bvh * ratio,
-                ratio: ratio
-            }
+            out.x = bx; out.y = by; out.w = bw; out.h = bh * ratio
+            out.u = bu; out.v = bv; out.uw = buw; out.vh = bvh * ratio; out.ratio = ratio
+            return out
         }
         if (dir === 'up') {
             var invU = 1.0 - ratio
-            return {
-                x:     bx,
-                y:     by + bh * invU,
-                w:     bw,
-                h:     bh * ratio,
-                u:     bu,
-                v:     bv + bvh * invU,
-                uw:    buw,
-                vh:    bvh * ratio,
-                ratio: ratio
-            }
+            out.x = bx; out.y = by + bh * invU; out.w = bw; out.h = bh * ratio
+            out.u = bu; out.v = bv + bvh * invU; out.uw = buw; out.vh = bvh * ratio; out.ratio = ratio
+            return out
         }
         if (dir === 'center_x') {
             var halfInv = (1.0 - ratio) * 0.5
-            return {
-                x:     bx + bw * halfInv,
-                y:     by,
-                w:     bw * ratio,
-                h:     bh,
-                u:     bu + buw * halfInv,
-                v:     bv,
-                uw:    buw * ratio,
-                vh:    bvh,
-                ratio: ratio
-            }
+            out.x = bx + bw * halfInv; out.y = by; out.w = bw * ratio; out.h = bh
+            out.u = bu + buw * halfInv; out.v = bv; out.uw = buw * ratio; out.vh = bvh; out.ratio = ratio
+            return out
         }
-        return {
-            x:     bx,
-            y:     by,
-            w:     bw * ratio,
-            h:     bh,
-            u:     bu,
-            v:     bv,
-            uw:    buw * ratio,
-            vh:    bvh,
-            ratio: ratio
-        }
+        out.x = bx; out.y = by; out.w = bw * ratio; out.h = bh
+        out.u = bu; out.v = bv; out.uw = buw * ratio; out.vh = bvh; out.ratio = ratio
+        return out
     }
 
     function restoreAllReplacedTextures() {
@@ -4763,7 +4734,7 @@
     })
 
     global.ScreenDanmakuClient = {
-        VERSION:    '6.0.0',
+        VERSION:    '6.1.0',
         CONFIG:     CONFIG,
         setDebug:   function (enabled) { CONFIG.debug = Boolean(enabled); return CONFIG.debug },
         push:       enqueueDanmaku,
@@ -5120,8 +5091,9 @@
     function checkTextureExists(texPath) {
         if (!texPath) return false
         var key = String(texPath)
-        if (TEXTURE_EXIST_CACHE[key] !== undefined) {
-            return TEXTURE_EXIST_CACHE[key]
+        var cachedTex = TEXTURE_EXIST_CACHE.get(key)
+        if (cachedTex !== undefined) {
+            return cachedTex
         }
         var mc = null
         if (MinecraftClass != null && !MC_INSTANCE_FAILED) {
@@ -5129,7 +5101,7 @@
         }
         if (mc == null) {
             var fbOk = key.indexOf('missing') < 0 && key.indexOf('invalid') < 0
-            TEXTURE_EXIST_CACHE[key] = fbOk
+            TEXTURE_EXIST_CACHE.set(key, fbOk)
             return fbOk
         }
         try {
@@ -5139,13 +5111,13 @@
                 if (rl != null && typeof rm.getResource === 'function') {
                     var optRes = rm.getResource(rl)
                     var exists = optRes != null && (typeof optRes.isPresent === 'function' ? Boolean(optRes.isPresent()) : true)
-                    TEXTURE_EXIST_CACHE[key] = exists
+                    TEXTURE_EXIST_CACHE.set(key, exists)
                     return exists
                 }
             }
         } catch (eTex) { }
         var fallbackOk = key.indexOf('missing') < 0 && key.indexOf('invalid') < 0
-        TEXTURE_EXIST_CACHE[key] = fallbackOk
+        TEXTURE_EXIST_CACHE.set(key, fallbackOk)
         return fallbackOk
     }
 
@@ -5213,10 +5185,12 @@
         return baseVal + off + clamped * mult
     }
 
-    function evaluateNodeBind(node, baseX, baseY, baseW, baseH, baseAlpha, baseAngle, vMap, now) {
+    function evaluateNodeBind(node, baseX, baseY, baseW, baseH, baseAlpha, baseAngle, vMap, now, outScratch) {
+        var out = outScratch != null ? outScratch : { x: 0, y: 0, w: 0, h: 0, alpha: 1.0, angle: 0.0 }
         var b = node != null ? node.bind : null
         if (!isPlainObjLike(b)) {
-            return { x: baseX, y: baseY, w: baseW, h: baseH, alpha: baseAlpha, angle: baseAngle }
+            out.x = baseX; out.y = baseY; out.w = baseW; out.h = baseH; out.alpha = baseAlpha; out.angle = baseAngle
+            return out
         }
         var rx = evalAffinePropBind(baseX, b.x, vMap)
         var ry = evalAffinePropBind(baseY, b.y, vMap)
@@ -5258,15 +5232,18 @@
                 rAng = ((rAng + rotDelta) % 360.0 + 360.0) % 360.0
             }
         }
-        return { x: rx, y: ry, w: rw, h: rh, alpha: ra, angle: rAng }
+        out.x = rx; out.y = ry; out.w = rw; out.h = rh; out.alpha = ra; out.angle = rAng
+        return out
     }
 
-    function computeBoxAnchorOrigin(nx, ny, nw, nh, anchor) {
-        if (anchor === 'top_left') return { x0: nx, y0: ny }
-        if (anchor === 'left') return { x0: nx, y0: ny - nh * 0.5 }
-        if (anchor === 'top_right') return { x0: nx - nw, y0: ny }
-        if (anchor === 'right') return { x0: nx - nw, y0: ny - nh * 0.5 }
-        return { x0: nx - nw * 0.5, y0: ny - nh * 0.5 }
+    function computeBoxAnchorOrigin(nx, ny, nw, nh, anchor, outScratch) {
+        var out = outScratch != null ? outScratch : { x0: 0, y0: 0 }
+        if (anchor === 'top_left') { out.x0 = nx; out.y0 = ny; return out }
+        if (anchor === 'left') { out.x0 = nx; out.y0 = ny - nh * 0.5; return out }
+        if (anchor === 'top_right') { out.x0 = nx - nw; out.y0 = ny; return out }
+        if (anchor === 'right') { out.x0 = nx - nw; out.y0 = ny - nh * 0.5; return out }
+        out.x0 = nx - nw * 0.5; out.y0 = ny - nh * 0.5
+        return out
     }
 
     function computeNodesBounds(nodes, varsMap, out, depth, parentOffX, parentOffY) {
@@ -5704,14 +5681,20 @@
                         var stepPx = max2(4, Number(lay.step || 18))
                         var sWidth = max2(1, Number(lay.width || 6))
                         var sSkew  = (lay.skew !== undefined && isFinite(Number(lay.skew))) ? Number(lay.skew) : Math.round(fh * 0.5)
+                        var absSkew = Math.abs(sSkew)
                         var sShift = (((tSec * Number(lay.speedX || 20)) % stepPx) + stepPx) % stepPx
                         var sArgb  = toArgbWithAlpha(layColRaw, lAlpha)
-                        var nSlices = max2(3, min2(14, Math.round(fh / 1.5)))
+                        var nSlices = max2(3, min2(8, Math.ceil(absSkew) + 1))
                         var sliceH  = fh / nSlices
-                        for (var sx = fx - stepPx - Math.abs(sSkew) + sShift; sx < fx + fw + stepPx + Math.abs(sSkew); sx += stepPx) {
+                        var visX0   = x - sWidth - absSkew
+                        var visX1   = x + w + absSkew
+                        var baseOrigin = fx - stepPx - absSkew + sShift
+                        var skipSteps = Math.max(0, Math.floor((visX0 - baseOrigin) / stepPx))
+                        for (var sx = baseOrigin + skipSteps * stepPx; sx <= visX1; sx += stepPx) {
                             for (var sl = 0; sl < nSlices; sl++) {
                                 var progY = (sl + 0.5) / nSlices
                                 var slX   = sx + sSkew * (1.0 - progY)
+                                if (slX + sWidth <= x || slX >= x + w) continue
                                 emitClippedRect(slX, fy + sl * sliceH, sWidth, sliceH + 0.15, sArgb)
                             }
                         }
@@ -5727,8 +5710,10 @@
                         var rSeed = (Number(lay.seed || 17) | 0)
                         var spanW = fw + 56
                         var stride = spanW / rSegs
+                        var maxSegLen = rBase + rAmp
                         for (var rIdx = 0; rIdx < rRows; rIdx++) {
                             var ry = fy + rOffY + rIdx * rGap
+                            if (ry + rThk <= y || ry >= y + h) continue
                             var rDir = (rIdx % 2 === 0) ? 1.0 : -1.0
                             var phase = tSec * (rSpd + rIdx * 11.0) * rDir + ((rIdx * 137 + rSeed * 53) % spanW)
                             var rAlphaMod = lAlpha * (0.68 + (rIdx % 3) * 0.16)
@@ -5736,7 +5721,9 @@
                             for (var sg = 0; sg < rSegs; sg++) {
                                 var segJit = (hashStepSigned(sg + rIdx * 17, rSeed, 71) * 0.42) * stride
                                 var rx = fx - 28 + (((sg * stride + segJit + phase) % spanW + spanW) % spanW)
+                                if (rx >= x + w || rx + maxSegLen <= x) continue
                                 var rw = max2(3, rBase + Math.sin(tSec * 2.5 + rIdx * 1.9 + sg * 2.3) * rAmp)
+                                if (rx + rw <= x) continue
                                 emitClippedRect(rx, ry, rw, rThk, rCol)
                             }
                         }
@@ -5992,17 +5979,29 @@
         var isTopAnchor = (anchor === 'top_left' || anchor === 'top_right')
         var startY = isTopAnchor ? ny : (ny - Math.floor((lines.length * lineStep) * 0.5) + 1)
 
+        var needWidthMeasure = !(anchor === 'top_left' || anchor === 'left')
+        var curFontEpoch = needWidthMeasure ? (FONT_SIGNATURE + '|' + MUI_EPOCH) : ''
         for (var li = 0; li < lines.length; li++) {
             var lnStr = lines[li]
             if (!lnStr) continue
             var isTrans = (hasVarExpr || item.lifeMode === 'active' || lnStr.length <= 24)
             var entry = getCachedTextCompSeq(lnStr, false, isTrans)
-            var measuredW = invokeFontWidth(fontObj, lnStr)
-            var cleanLn = lnStr.replace(/§[0-9a-fk-or]/gi, '')
-            var lw    = (isFinite(measuredW) && measuredW >= 0) ? measuredW : (cleanLn.length * 6)
-            var lx    = (anchor === 'top_left' || anchor === 'left')
-                ? nx
-                : ((anchor === 'top_right' || anchor === 'right') ? (nx - lw) : (nx - Math.floor(lw * 0.5)))
+            var lx = nx
+            if (needWidthMeasure) {
+                var lw
+                if (lines.length === 1 && node._txtCacheKey === lnStr && node._txtCacheEpoch === curFontEpoch && node._txtCacheW !== undefined) {
+                    lw = node._txtCacheW
+                } else {
+                    var measuredW = invokeFontWidth(fontObj, lnStr)
+                    lw = (isFinite(measuredW) && measuredW >= 0) ? measuredW : (lnStr.replace(/§[0-9a-fk-or]/gi, '').length * 6)
+                    if (lines.length === 1) {
+                        node._txtCacheKey   = lnStr
+                        node._txtCacheEpoch = curFontEpoch
+                        node._txtCacheW     = lw
+                    }
+                }
+                lx = (anchor === 'top_right' || anchor === 'right') ? (nx - lw) : (nx - Math.floor(lw * 0.5))
+            }
             var ly    = startY + li * lineStep
             var lay   = (itemBatchCtx != null) ? resolveUnitMuiLayout(itemBatchCtx, entry.seq, entry) : null
             var useMui = (lay != null && itemBatchCtx != null && itemBatchCtx.muiActive)
@@ -6061,146 +6060,234 @@
     function renderDeclarativeNodes(event, item, nodes, varsMap, fadeAlpha, fontObj, itemBatchCtx, now, parentAngleDeg, depth) {
         if (!Array.isArray(nodes) || nodes.length === 0 || (depth || 0) > 4) return
         var vMap = isPlainObjLike(varsMap) ? varsMap : {}
+        var canRectBatch = (typeof event.beginQuads === 'function' && typeof event.rectangle === 'function' && typeof event.end === 'function')
+        var rectBatchOpen = false
+        var rectBatchPrevBlend = null
+        var rectBatchChangedBlend = false
 
-        for (var ni = 0; ni < nodes.length; ni++) {
-            var node = nodes[ni]
-            if (!isPlainObjLike(node)) continue
-            var nType      = String(node.type || node.kind || 'rect').toLowerCase()
-            var baseAlpha  = resolveVarNum(node.alpha, vMap, 1.0)
-            var baseX      = resolveVarNum(node.x, vMap, 0)
-            var baseY      = resolveVarNum(node.y, vMap, 0)
-            var baseW      = max2(0, resolveVarNum(node.w, vMap, nType === 'sprite' || nType === 'item' ? 16 : 64))
-            var baseH      = max2(0, resolveVarNum(node.h, vMap, nType === 'sprite' || nType === 'item' ? 16 : 8))
-            var nScale     = resolveVarNum(node.scale != null ? node.scale : node.size, vMap, 1.0)
-            var baseAngle  = resolveVarNum(node.angle != null ? node.angle : node.tilt, vMap, 0.0)
-            var boundProps = evaluateNodeBind(node, baseX, baseY, baseW, baseH, baseAlpha, baseAngle, vMap, now)
-            var nAlpha     = clampNum(boundProps.alpha * fadeAlpha, 0.0, 1.0)
-            if (nAlpha <= 0.005) continue
+        var openRectBatch = function () {
+            if (rectBatchOpen) return
+            ensureItemPosePushed(event)
+            flushBatchedBeforeImmediate()
+            rectBatchPrevBlend = queryGlBlendEnabled()
+            rectBatchChangedBlend = false
+            if (typeof event.setPositionColorShader === 'function') event.setPositionColorShader()
+            if (typeof event.blend === 'function' && rectBatchPrevBlend !== true) {
+                event.blend(true)
+                rectBatchChangedBlend = true
+            }
+            event.beginQuads(false)
+            rectBatchOpen = true
+        }
 
-            var nx     = boundProps.x
-            var ny     = boundProps.y
-            var nw     = boundProps.w
-            var nh     = boundProps.h
-            var nAngle = boundProps.angle
-            var anchor = String(node.anchor || 'center').toLowerCase()
-            var boxOrig = computeBoxAnchorOrigin(nx, ny, nw, nh, anchor)
-            var x0     = boxOrig.x0
-            var y0     = boxOrig.y0
-            var nodeRawColor = (node.color !== undefined) ? node.color : node.tint
-
-            var clipSpec = isPlainObjLike(node.clip) ? node.clip : null
-            var effAngle = (Number(parentAngleDeg) || 0) + nAngle
-            var useScissor = (clipSpec != null && clipSpec.mode === 'scissor' && Math.abs(effAngle) < 0.01)
-
-            var nodePushed    = false
-            var scissorPushed = false
+        var closeRectBatch = function () {
+            if (!rectBatchOpen) return
+            rectBatchOpen = false
             try {
-                if (nType === 'group' || nAngle !== 0 || Math.abs(nScale - 1.0) > 0.001) {
-                    ensureItemPosePushed(event)
-                    event.push()
-                    nodePushed = true
-                    if (nx !== 0 || ny !== 0) event.translate(nx, ny)
-                    if (nAngle !== 0 && isFinite(nAngle)) event.rotateDeg(nAngle)
-                    if (Math.abs(nScale - 1.0) > 0.001 && isFinite(nScale)) {
-                        applyNodeLocalScale(event, nScale, nScale)
-                    }
-                    var localOrig = computeBoxAnchorOrigin(0, 0, nw, nh, anchor)
-                    x0 = localOrig.x0
-                    y0 = localOrig.y0
-                }
-
-                var clipped = computeLocalClipRect(
-                    x0, y0, nw, nh,
-                    node.u || 0, node.v || 0,
-                    node.uw != null ? node.uw : nw,
-                    node.vh != null ? node.vh : nh,
-                    (!useScissor ? clipSpec : null),
-                    vMap
-                )
-
-                if (useScissor && clipSpec != null) {
-                    var scRect = computeLocalClipRect(x0, y0, nw, nh, 0, 0, nw, nh, clipSpec, vMap)
-                    scissorPushed = enableEventScissor(event, scRect.x, scRect.y, scRect.x + scRect.w, scRect.y + scRect.h)
-                }
-
-                if (nType === 'rect') {
-                    if (node.borderWidth != null && Number(node.borderWidth) > 0 && node.borderColor != null) {
-                        var bw = Math.round(Number(node.borderWidth))
-                        if (bw > 0) {
-                            var bCol = resolveVarValue(node.borderColor, vMap, 0xFFFFFFFF)
-                            var bArgb = toArgbWithAlpha(bCol, nAlpha)
-                            drawRectOutline(event, x0 - bw, y0 - bw, nw + bw * 2, nh + bw * 2, bw, bArgb)
-                        }
-                    }
-                    if (clipped.w > 0.25 && clipped.h > 0.25) {
-                        var fill = isPlainObjLike(node.fill)
-                            ? node.fill
-                            : { mode: 'solid', color: nodeRawColor != null ? nodeRawColor : 0xFF000000 }
-                        var fMode = String(fill.mode || 'solid').toLowerCase()
-                        if (fMode === 'outline') {
-                            var oCol = toArgbWithAlpha(resolveVarValue(fill.color != null ? fill.color : nodeRawColor, vMap, 0xFFFFFFFF), nAlpha)
-                            var oThk = max2(1, Math.round(Number(fill.thickness || 1)))
-                            drawRectOutline(event, clipped.x, clipped.y, clipped.w, clipped.h, oThk, oCol)
-                        } else if (fMode === 'gradient') {
-                            var cFrom = toArgbWithAlpha(resolveVarValue(fill.from !== undefined ? fill.from : fill.color, vMap, 0xFF5555), nAlpha)
-                            var cTo   = toArgbWithAlpha(resolveVarValue(fill.to !== undefined ? fill.to : fill.colorEnd, vMap, 0xFFAA00), nAlpha)
-                            var cMid  = fill.mid !== undefined ? toArgbWithAlpha(resolveVarValue(fill.mid, vMap, cTo), nAlpha) : null
-                            var gDirVal = (fill.dir === 'v' || fill.dir === 'vertical') ? 'v' : 'h'
-                            drawRectGradient(event, clipped.x, clipped.y, clipped.w, clipped.h, cFrom, cTo, gDirVal, cMid, fill.midPos)
-                        } else if (fMode === 'parallax') {
-                            drawRectParallax(event, clipped.x, clipped.y, clipped.w, clipped.h, fill, now, nAlpha, x0, y0, nw, nh, vMap)
-                        } else if (fMode === 'shader') {
-                            drawRectShader(event, clipped.x, clipped.y, clipped.w, clipped.h, fill, now, nAlpha)
-                        } else {
-                            var sCol = toArgbWithAlpha(resolveVarValue(fill.color != null ? fill.color : nodeRawColor, vMap, 0xFF000000), nAlpha)
-                            drawRectSolid(event, clipped.x, clipped.y, clipped.w, clipped.h, sCol)
-                        }
-                    }
-                } else if (nType === 'sprite') {
-                    if (clipped.w > 0.25 && clipped.h > 0.25) {
-                        var spTint = nodeRawColor != null ? resolveVarValue(nodeRawColor, vMap, 0xFFFFFFFF) : 0xFFFFFFFF
-                        drawTextureRegion(
-                            event,
-                            node.texture || node.tex || '',
-                            clipped.x, clipped.y, clipped.w, clipped.h,
-                            clipped.u, clipped.v, clipped.uw, clipped.vh,
-                            node.texW !== undefined ? node.texW : (node.tw || 256),
-                            node.texH !== undefined ? node.texH : (node.th || 256),
-                            nAlpha,
-                            spTint
-                        )
-                    }
-                } else if (nType === 'nine_slice') {
-                    if (clipped.w > 0.25 && clipped.h > 0.25) {
-                        drawNineSliceNode(event, node, clipped.x, clipped.y, clipped.w, clipped.h, nAlpha)
-                    }
-                } else if (nType === 'item') {
-                    drawItemNode(event, node, clipped.x, clipped.y)
-                } else if (nType === 'text') {
-                    drawDeclarativeTextNode(
-                        event,
-                        item,
-                        node,
-                        node.text != null ? node.text : (node.title || ''),
-                        vMap,
-                        nAlpha,
-                        fontObj,
-                        nodePushed ? null : itemBatchCtx,
-                        nodePushed ? 0 : nx,
-                        nodePushed ? 0 : ny
-                    )
-                } else if (nType === 'group') {
-                    var groupKids = Array.isArray(node.children) ? node.children : node.items
-                    renderDeclarativeNodes(event, item, groupKids, vMap, nAlpha, fontObj, null, now, effAngle, (depth || 0) + 1)
-                }
+                event.end()
             } finally {
-                if (scissorPushed) {
-                    try { disableEventScissor(event) } catch (eScis) { }
+                if (rectBatchChangedBlend && rectBatchPrevBlend === false && typeof event.blend === 'function') {
+                    try { event.blend(false) } catch (eBEnd) { }
                 }
-                if (nodePushed) {
-                    try { event.pop() } catch (eNPop) { }
+                rectBatchChangedBlend = false
+            }
+        }
+
+        var emitOutlineIntoOpenBatch = function (ox, oy, ow, oh, thickness, argbColor) {
+            if (ow <= 0 || oh <= 0) return
+            var t = max2(1, Math.round(Number(thickness) || 1))
+            event.rectangle(ox, oy, 0.0, ow, min2(t, oh), argbColor)
+            if (oh > t) {
+                event.rectangle(ox, oy + oh - t, 0.0, ow, t, argbColor)
+            }
+            var innerH = oh - t * 2
+            if (innerH > 0) {
+                event.rectangle(ox, oy + t, 0.0, min2(t, ow), innerH, argbColor)
+                if (ow > t) {
+                    event.rectangle(ox + ow - t, oy + t, 0.0, t, innerH, argbColor)
                 }
             }
+        }
+
+        try {
+            for (var ni = 0; ni < nodes.length; ni++) {
+                var node = nodes[ni]
+                if (!isPlainObjLike(node)) continue
+                var nType      = String(node.type || node.kind || 'rect').toLowerCase()
+                var baseAlpha  = resolveVarNum(node.alpha, vMap, 1.0)
+                var baseX      = resolveVarNum(node.x, vMap, 0)
+                var baseY      = resolveVarNum(node.y, vMap, 0)
+                var baseW      = max2(0, resolveVarNum(node.w, vMap, nType === 'sprite' || nType === 'item' ? 16 : 64))
+                var baseH      = max2(0, resolveVarNum(node.h, vMap, nType === 'sprite' || nType === 'item' ? 16 : 8))
+                var nScale     = resolveVarNum(node.scale != null ? node.scale : node.size, vMap, 1.0)
+                var baseAngle  = resolveVarNum(node.angle != null ? node.angle : node.tilt, vMap, 0.0)
+                var boundProps = evaluateNodeBind(node, baseX, baseY, baseW, baseH, baseAlpha, baseAngle, vMap, now, NODE_BIND_SCRATCH)
+                var nAlpha     = clampNum(boundProps.alpha * fadeAlpha, 0.0, 1.0)
+                if (nAlpha <= 0.005) continue
+
+                var nx     = boundProps.x
+                var ny     = boundProps.y
+                var nw     = boundProps.w
+                var nh     = boundProps.h
+                var nAngle = boundProps.angle
+                var anchor = String(node.anchor || 'center').toLowerCase()
+                var boxOrig = computeBoxAnchorOrigin(nx, ny, nw, nh, anchor, BOX_ORIG_SCRATCH)
+                var x0     = boxOrig.x0
+                var y0     = boxOrig.y0
+                var nodeRawColor = (node.color !== undefined) ? node.color : node.tint
+
+                var clipSpec = isPlainObjLike(node.clip) ? node.clip : null
+                var effAngle = (Number(parentAngleDeg) || 0) + nAngle
+                var useScissor = (clipSpec != null && clipSpec.mode === 'scissor' && Math.abs(effAngle) < 0.01)
+                var needsPush  = (nType === 'group' || nAngle !== 0 || Math.abs(nScale - 1.0) > 0.001)
+
+                // 快速连续合批轨：相邻无局部变换/无 Scissor 的 solid/outline rect 共用单次 beginQuads 批次与单次 GL_BLEND 检查
+                if (canRectBatch && !needsPush && !useScissor && nType === 'rect') {
+                    var fastFill = isPlainObjLike(node.fill) ? node.fill : null
+                    var fastMode = fastFill != null ? String(fastFill.mode || 'solid').toLowerCase() : 'solid'
+                    if (fastMode === 'solid' || fastMode === 'outline') {
+                        var fastClip = computeLocalClipRect(x0, y0, nw, nh, 0, 0, nw, nh, clipSpec, vMap, LOCAL_CLIP_SCRATCH)
+                        var hasBorder = (node.borderWidth != null && Number(node.borderWidth) > 0 && node.borderColor != null)
+                        var hasBody   = (fastClip.w > 0.25 && fastClip.h > 0.25)
+                        if (hasBorder || hasBody) {
+                            openRectBatch()
+                            if (hasBorder) {
+                                var fbw = Math.round(Number(node.borderWidth))
+                                if (fbw > 0) {
+                                    var fbCol = toArgbWithAlpha(resolveVarValue(node.borderColor, vMap, 0xFFFFFFFF), nAlpha)
+                                    emitOutlineIntoOpenBatch(x0 - fbw, y0 - fbw, nw + fbw * 2, nh + fbw * 2, fbw, fbCol)
+                                }
+                            }
+                            if (hasBody) {
+                                if (fastMode === 'outline') {
+                                    var foCol = toArgbWithAlpha(resolveVarValue((fastFill != null && fastFill.color != null) ? fastFill.color : nodeRawColor, vMap, 0xFFFFFFFF), nAlpha)
+                                    var foThk = max2(1, Math.round(Number((fastFill != null && fastFill.thickness) || 1)))
+                                    emitOutlineIntoOpenBatch(fastClip.x, fastClip.y, fastClip.w, fastClip.h, foThk, foCol)
+                                } else {
+                                    var fsCol = toArgbWithAlpha(resolveVarValue((fastFill != null && fastFill.color != null) ? fastFill.color : nodeRawColor, vMap, 0xFF000000), nAlpha)
+                                    event.rectangle(fastClip.x, fastClip.y, 0.0, fastClip.w, fastClip.h, fsCol)
+                                }
+                            }
+                        }
+                        continue
+                    }
+                }
+
+                closeRectBatch()
+
+                var nodePushed    = false
+                var scissorPushed = false
+                try {
+                    if (needsPush) {
+                        ensureItemPosePushed(event)
+                        event.push()
+                        nodePushed = true
+                        if (nx !== 0 || ny !== 0) event.translate(nx, ny)
+                        if (nAngle !== 0 && isFinite(nAngle)) event.rotateDeg(nAngle)
+                        if (Math.abs(nScale - 1.0) > 0.001 && isFinite(nScale)) {
+                            applyNodeLocalScale(event, nScale, nScale)
+                        }
+                        var localOrig = computeBoxAnchorOrigin(0, 0, nw, nh, anchor, BOX_ORIG_SCRATCH)
+                        x0 = localOrig.x0
+                        y0 = localOrig.y0
+                    }
+
+                    var clipped = computeLocalClipRect(
+                        x0, y0, nw, nh,
+                        node.u || 0, node.v || 0,
+                        node.uw != null ? node.uw : nw,
+                        node.vh != null ? node.vh : nh,
+                        (!useScissor ? clipSpec : null),
+                        vMap,
+                        LOCAL_CLIP_SCRATCH
+                    )
+
+                    if (useScissor && clipSpec != null) {
+                        var scRect = computeLocalClipRect(x0, y0, nw, nh, 0, 0, nw, nh, clipSpec, vMap)
+                        scissorPushed = enableEventScissor(event, scRect.x, scRect.y, scRect.x + scRect.w, scRect.y + scRect.h)
+                    }
+
+                    if (nType === 'rect') {
+                        if (node.borderWidth != null && Number(node.borderWidth) > 0 && node.borderColor != null) {
+                            var bw = Math.round(Number(node.borderWidth))
+                            if (bw > 0) {
+                                var bCol = resolveVarValue(node.borderColor, vMap, 0xFFFFFFFF)
+                                var bArgb = toArgbWithAlpha(bCol, nAlpha)
+                                drawRectOutline(event, x0 - bw, y0 - bw, nw + bw * 2, nh + bw * 2, bw, bArgb)
+                            }
+                        }
+                        if (clipped.w > 0.25 && clipped.h > 0.25) {
+                            var fill = isPlainObjLike(node.fill)
+                                ? node.fill
+                                : { mode: 'solid', color: nodeRawColor != null ? nodeRawColor : 0xFF000000 }
+                            var fMode = String(fill.mode || 'solid').toLowerCase()
+                            if (fMode === 'outline') {
+                                var oCol = toArgbWithAlpha(resolveVarValue(fill.color != null ? fill.color : nodeRawColor, vMap, 0xFFFFFFFF), nAlpha)
+                                var oThk = max2(1, Math.round(Number(fill.thickness || 1)))
+                                drawRectOutline(event, clipped.x, clipped.y, clipped.w, clipped.h, oThk, oCol)
+                            } else if (fMode === 'gradient') {
+                                var cFrom = toArgbWithAlpha(resolveVarValue(fill.from !== undefined ? fill.from : fill.color, vMap, 0xFF5555), nAlpha)
+                                var cTo   = toArgbWithAlpha(resolveVarValue(fill.to !== undefined ? fill.to : fill.colorEnd, vMap, 0xFFAA00), nAlpha)
+                                var cMid  = fill.mid !== undefined ? toArgbWithAlpha(resolveVarValue(fill.mid, vMap, cTo), nAlpha) : null
+                                var gDirVal = (fill.dir === 'v' || fill.dir === 'vertical') ? 'v' : 'h'
+                                drawRectGradient(event, clipped.x, clipped.y, clipped.w, clipped.h, cFrom, cTo, gDirVal, cMid, fill.midPos)
+                            } else if (fMode === 'parallax') {
+                                drawRectParallax(event, clipped.x, clipped.y, clipped.w, clipped.h, fill, now, nAlpha, x0, y0, nw, nh, vMap)
+                            } else if (fMode === 'shader') {
+                                drawRectShader(event, clipped.x, clipped.y, clipped.w, clipped.h, fill, now, nAlpha)
+                            } else {
+                                var sCol = toArgbWithAlpha(resolveVarValue(fill.color != null ? fill.color : nodeRawColor, vMap, 0xFF000000), nAlpha)
+                                drawRectSolid(event, clipped.x, clipped.y, clipped.w, clipped.h, sCol)
+                            }
+                        }
+                    } else if (nType === 'sprite') {
+                        if (clipped.w > 0.25 && clipped.h > 0.25) {
+                            var spTint = nodeRawColor != null ? resolveVarValue(nodeRawColor, vMap, 0xFFFFFFFF) : 0xFFFFFFFF
+                            drawTextureRegion(
+                                event,
+                                node.texture || node.tex || '',
+                                clipped.x, clipped.y, clipped.w, clipped.h,
+                                clipped.u, clipped.v, clipped.uw, clipped.vh,
+                                node.texW !== undefined ? node.texW : (node.tw || 256),
+                                node.texH !== undefined ? node.texH : (node.th || 256),
+                                nAlpha,
+                                spTint
+                            )
+                        }
+                    } else if (nType === 'nine_slice') {
+                        if (clipped.w > 0.25 && clipped.h > 0.25) {
+                            drawNineSliceNode(event, node, clipped.x, clipped.y, clipped.w, clipped.h, nAlpha)
+                        }
+                    } else if (nType === 'item') {
+                        drawItemNode(event, node, clipped.x, clipped.y)
+                    } else if (nType === 'text') {
+                        drawDeclarativeTextNode(
+                            event,
+                            item,
+                            node,
+                            node.text != null ? node.text : (node.title || ''),
+                            vMap,
+                            nAlpha,
+                            fontObj,
+                            nodePushed ? null : itemBatchCtx,
+                            nodePushed ? 0 : nx,
+                            nodePushed ? 0 : ny
+                        )
+                    } else if (nType === 'group') {
+                        var groupKids = Array.isArray(node.children) ? node.children : node.items
+                        renderDeclarativeNodes(event, item, groupKids, vMap, nAlpha, fontObj, null, now, effAngle, (depth || 0) + 1)
+                    }
+                } finally {
+                    if (scissorPushed) {
+                        try { disableEventScissor(event) } catch (eScis) { }
+                    }
+                    if (nodePushed) {
+                        try { event.pop() } catch (eNPop) { }
+                    }
+                }
+            }
+        } finally {
+            closeRectBatch()
         }
     }
 

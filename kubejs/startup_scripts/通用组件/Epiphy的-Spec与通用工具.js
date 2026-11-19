@@ -5,8 +5,9 @@
 //   所属阶段：startup_scripts（服务端与客户端共享，单一前置加载项）
 //   职责说明：
 //     1. 定义并导出 global.EpiphyProtocol（频道名、版本号、PRIORITY_MAP、HUD_FORBIDDEN_PRESETS）；
-//     2. 收拢跨组件复用的数值/布尔/时长/颜色/字号/倾角/命令解析器与球簇合并几何算法，导出 global.EpiphySpec；
-//     3. 服务端业务组件以本文件 + EpiphyServerBase 为底座；客户端渲染器/播放器在缺失本文件时仍可降级运行内置 v5 协议常量。
+//     2. 收拢跨组件复用的数值/布尔/时长/颜色/字号/倾角/命令解析器、球簇合并几何算法、有界 FIFO 缓存池 (`createBoundedCache`)
+//        与跨阶段向上预设注册表 (`createPresetRegistry` / `registerPreset` / `resolvePreset`)，导出 global.EpiphySpec；
+//     3. 服务端业务组件以本文件 + EpiphyServerBase 为底座；客户端渲染器/播放器在缺失本文件时仍可降级运行内置 v6 协议常量。
 //   语法规范：遵循 README-LLM.md §1 强制语法基准（与 docs/kube-mods-rhino-es5-es6-compatibility.md）
 // ============================================================================
 
@@ -867,7 +868,6 @@
         desc:           'sub',
         slot:           'slotId',
         position:       'pos',
-        preset:         'pos',
         fontSize:       'scale',
         rot:            'angle',
         rotation:       'angle',
@@ -1166,6 +1166,193 @@
         return out;
     }
 
+    // ------------------------------------------------------------------------
+    // 5. 统一轻量有界 FIFO 缓存池（供双端组件收敛复用，避免散落手写淘汰逻辑）
+    // ------------------------------------------------------------------------
+    function createBoundedCache(maxSize) {
+        var limit = (typeof maxSize === 'number' && isFinite(maxSize) && maxSize >= 1) ? Math.floor(maxSize) : 512;
+        var store = Object.create(null);
+        var keys  = [];
+        var head  = 0;
+        var count = 0;
+
+        function evictOverflow() {
+            while (count >= limit && head < keys.length) {
+                var oldKey = keys[head++];
+                if (oldKey in store) {
+                    delete store[oldKey];
+                    count--;
+                }
+            }
+            if (head > 64 && head * 2 >= keys.length) {
+                keys = keys.slice(head);
+                head = 0;
+            }
+        }
+
+        return {
+            get: function (key) {
+                var k = String(key);
+                return (k in store) ? store[k] : undefined;
+            },
+            has: function (key) {
+                return String(key) in store;
+            },
+            set: function (key, val) {
+                var k = String(key);
+                if (!(k in store)) {
+                    evictOverflow();
+                    keys.push(k);
+                    count++;
+                }
+                store[k] = val;
+                return val;
+            },
+            delete: function (key) {
+                var k = String(key);
+                if (!(k in store)) return false;
+                delete store[k];
+                count--;
+                return true;
+            },
+            clear: function () {
+                store = Object.create(null);
+                keys  = [];
+                head  = 0;
+                count = 0;
+            },
+            size: function () {
+                return count;
+            },
+            limit: function () {
+                return limit;
+            }
+        };
+    }
+
+    // ------------------------------------------------------------------------
+    // 6. 统一跨阶段预设/模板注册表（支持 startup_scripts 预先向上提交，server_scripts 自动承接）
+    // ------------------------------------------------------------------------
+    function mergeShallowObj(baseObj, overObj) {
+        var out = {};
+        var k;
+        if (isObjectLike(baseObj)) {
+            for (k in baseObj) {
+                if (hasOwn(baseObj, k)) out[k] = baseObj[k];
+            }
+        }
+        if (isObjectLike(overObj)) {
+            for (k in overObj) {
+                if (hasOwn(overObj, k) && overObj[k] !== undefined) out[k] = overObj[k];
+            }
+        }
+        return out;
+    }
+
+    function getSharedPresetBucket(domainName) {
+        var dKey = String(domainName || 'default').trim().toLowerCase() || 'default';
+        if (typeof global !== 'undefined') {
+            if (!isObjectLike(global.EpiphyPresetStore)) {
+                global.EpiphyPresetStore = {};
+            }
+            if (!isObjectLike(global.EpiphyPresetStore[dKey])) {
+                global.EpiphyPresetStore[dKey] = {};
+            }
+            return global.EpiphyPresetStore[dKey];
+        }
+        return {};
+    }
+
+    function createPresetRegistry(domainName) {
+        var bucket = getSharedPresetBucket(domainName);
+
+        function normKey(name) {
+            if (name == null) return '';
+            return String(name).trim().toLowerCase();
+        }
+
+        function register(name, specOrFn) {
+            var k = normKey(name);
+            if (!k) return false;
+            if (typeof specOrFn !== 'function' && !isObjectLike(specOrFn)) return false;
+            bucket[k] = specOrFn;
+            return true;
+        }
+
+        function has(name) {
+            var k = normKey(name);
+            return !!(k && hasOwn(bucket, k));
+        }
+
+        function get(name) {
+            var k = normKey(name);
+            return (k && hasOwn(bucket, k)) ? bucket[k] : null;
+        }
+
+        function remove(name) {
+            var k = normKey(name);
+            if (!k || !hasOwn(bucket, k)) return false;
+            delete bucket[k];
+            return true;
+        }
+
+        function list() {
+            var out = [];
+            for (var k in bucket) {
+                if (hasOwn(bucket, k)) out.push(k);
+            }
+            out.sort();
+            return out;
+        }
+
+        function clear() {
+            for (var k in bucket) {
+                if (hasOwn(bucket, k)) delete bucket[k];
+            }
+        }
+
+        function resolve(name, overrides, helpers) {
+            var entry = get(name);
+            if (entry == null) return null;
+            var ov = isObjectLike(overrides) ? overrides : {};
+            if (typeof entry === 'function') {
+                var built = entry(ov, helpers);
+                if (!isObjectLike(built)) return built;
+                var resFn = mergeShallowObj(built, null);
+                delete resFn.preset;
+                return resFn;
+            }
+            var merged = mergeShallowObj(entry, ov);
+            delete merged.preset;
+            if (isObjectLike(entry.vars) && isObjectLike(ov.vars)) {
+                merged.vars = mergeShallowObj(entry.vars, ov.vars);
+            }
+            if (isObjectLike(entry.tracks) && isObjectLike(ov.tracks)) {
+                merged.tracks = mergeShallowObj(entry.tracks, ov.tracks);
+            }
+            return merged;
+        }
+
+        return {
+            domain:   String(domainName || 'default'),
+            register: register,
+            has:      has,
+            get:      get,
+            remove:   remove,
+            list:     list,
+            clear:    clear,
+            resolve:  resolve
+        };
+    }
+
+    function registerPresetGlobal(domainName, name, specOrFn) {
+        return createPresetRegistry(domainName).register(name, specOrFn);
+    }
+
+    function resolvePresetGlobal(domainName, name, overrides, helpers) {
+        return createPresetRegistry(domainName).resolve(name, overrides, helpers);
+    }
+
     if (typeof global !== 'undefined') {
         global.EpiphySpec = {
             PROTOCOL:                   PROTOCOL,
@@ -1183,6 +1370,10 @@
             computeNodeListCost:        computeNodeListCost,
             computeOverlayCost:         computeOverlayCost,
             adaptV5ToV6:                adaptV5ToV6,
+            createBoundedCache:         createBoundedCache,
+            createPresetRegistry:       createPresetRegistry,
+            registerPreset:             registerPresetGlobal,
+            resolvePreset:              resolvePresetGlobal,
             min2:                       min2,
             max2:                       max2,
             clampNum:                   clampNum,

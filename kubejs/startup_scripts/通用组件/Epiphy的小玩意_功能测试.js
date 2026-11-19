@@ -176,9 +176,13 @@
         return rawTemplate.replace('……', chosenName)
     }
 
-    // ======================================================================== 3. 绑定到通用音频组件与通用弹幕组件的 bindBlock 接口
+    // ======================================================================== 3. 向上提交音频/渲染预设并绑定到通用组件 bindBlock 接口
     // 渐进式区块分段扫描、坐标持久化、放置与破坏事件生命周期均由通用组件的 bindBlock 接口统一托管
-    var audioBindingSpec = {
+    var AUDIO_PRESET_ID    = 'rnfmabj_test_bgm'
+    var DANMAKU_PRESET_ID  = 'rnfmabj_test_prescript'
+    var hasSpecPresetApi   = (typeof global !== 'undefined' && global.EpiphySpec != null && typeof global.EpiphySpec.registerPreset === 'function')
+
+    var audioPresetSpec = {
         sound:            SOUND_ID,
         category:         'records',
         range:            EFFECT_RADIUS,
@@ -194,44 +198,59 @@
         stopOnBlockBreak: true
     }
 
+    var danmakuPresetSpec = {
+        scale:             [1.15, 1.60],    // 原先 small_random (~0.76) 的 1.5~2.0 倍随机缩放
+        color:             0x8CE6FF,        // 冰青蓝主字色（保留明显青色调，与红色外圈形成对比）
+        outline:           'glow',          // 柔和发光外圈
+        outlineColor:      0xD82038,        // 绯红色外圈光晕
+        outlineWidth:      1.05,            // 外圈发光半径
+        shadow:            false,           // 使用外圈发光替代默认右下硬阴影，字形更干净
+        letterSpacing:     1.0,             // 相对字宽等比字间距（全角汉字 +1.0px，英文按真实字宽等比缩放）
+        letterSpacingMode: 'relative',      // 避免英文窄字符被固定像素撑得过宽
+        pos:               'spread',
+        tilt:              [-40, 40],       // 以水平为 0，±40° 随机倾斜
+        typewriter:        true,
+        charMs:            64,              // 打字速度降至原先一半（64ms/字）
+        duration:          130,             // 打字全部显示完毕后，额外完整停留 130 tick (6.5 秒)
+        fade:              'blur',          // 柔和失焦虚化淡出（不放大字号、不分裂重影）
+        fadeOut:           28,              // 1.4 秒平滑虚化消散
+        shake:             'per_char',      // 逐字独立微抖动
+        charShakeStyle:    'horizontal_step', // 每周期 1 次轻微位移 + 水平/垂直与朝向晃动
+        charShakeShiftX:   0.31,            // 水平落点微位移幅度倍率（约 ±0.23px 轻微位移）
+        charShakeShiftY:   0.36,            // 垂直落点微位移幅度倍率（约 ±0.27px 轻微位移）
+        charShakeSwayX:    0.32,            // 水平方向轻度阻尼晃动幅度倍率
+        charShakeSwayY:    0.22,            // 垂直方向轻度阻尼晃动幅度倍率
+        charShakeRotDeg:   2.5,             // 单字朝向（角度）轻微随机变更与晃动幅度（度）
+        charShakeWin:      0.38,            // 周期初段晃动窗口占比
+        charShakeSnap:     true,            // false=平滑过渡位移，true=每周期直接瞬移
+        shakeFreq:         800,             // 每 0.8 秒触发 1 次
+        shakeAmp:          0.75,            // 轻微且清晰可辨的逐字微抖动幅度
+        avoidOverlap:      true,            // 随机落点时尽量避开同组近期弹幕，防止几乎重叠
+        minSepX:           0.28,
+        minSepY:           0.22,
+        group:             DANMAKU_GROUP,
+        maxGroup:          3,               // 同屏最多 3 条
+        debug:             false            // 调试日志默认关闭
+    }
+
+    if (hasSpecPresetApi) {
+        global.EpiphySpec.registerPreset('audio', AUDIO_PRESET_ID, audioPresetSpec)
+        global.EpiphySpec.registerPreset('surface', DANMAKU_PRESET_ID, danmakuPresetSpec)
+    }
+
+    var audioBindingSpec = hasSpecPresetApi ? { preset: AUDIO_PRESET_ID } : audioPresetSpec
+
     function buildDanmakuSpec(ctx) {
         var srv = ctx != null ? ctx.server : null
         var lv  = ctx != null ? ctx.level : null
-        return {
-            text:          pickPrescriptForOnlinePlayer(srv, lv),
-            scale:         [1.15, 1.60],    // 原先 small_random (~0.76) 的 1.5~2.0 倍随机缩放
-            color:         0x8CE6FF,        // 冰青蓝主字色（保留明显青色调，与红色外圈形成对比）
-            outline:       'glow',          // 柔和发光外圈
-            outlineColor:  0xD82038,        // 绯红色外圈光晕
-            outlineWidth:  1.05,            // 外圈发光半径
-            shadow:            false,           // 使用外圈发光替代默认右下硬阴影，字形更干净
-            letterSpacing:     1.0,             // 相对字宽等比字间距（全角汉字 +1.0px，英文按真实字宽等比缩放）
-            letterSpacingMode: 'relative',      // 避免英文窄字符被固定像素撑得过宽
-            pos:           'spread',
-            tilt:          [-40, 40],       // 以水平为 0，±40° 随机倾斜
-            typewriter:     true,
-            charMs:         64,                // 打字速度降至原先一半（64ms/字）
-            duration:       130,               // 打字全部显示完毕后，额外完整停留 130 tick (6.5 秒)
-            fade:           'blur',            // 柔和失焦虚化淡出（不放大字号、不分裂重影）
-            fadeOut:        28,                // 1.4 秒平滑虚化消散
-            shake:           'per_char',        // 逐字独立微抖动
-            charShakeStyle:  'horizontal_step', // 每周期 1 次轻微位移 + 水平/垂直与朝向晃动
-            charShakeShiftX: 0.31,              // 水平落点微位移幅度倍率（约 ±0.23px 轻微位移）
-            charShakeShiftY: 0.36,              // 垂直落点微位移幅度倍率（约 ±0.27px 轻微位移）
-            charShakeSwayX:  0.32,              // 水平方向轻度阻尼晃动幅度倍率
-            charShakeSwayY:  0.22,              // 垂直方向轻度阻尼晃动幅度倍率
-            charShakeRotDeg: 2.5,               // 单字朝向（角度）轻微随机变更与晃动幅度（度）
-            charShakeWin:    0.38,              // 周期初段晃动窗口占比
-            charShakeSnap:   true,              // false=平滑过渡位移，true=每周期直接瞬移（也可传 charShakeTransition: 'snap'|'smooth'|0~1）
-            shakeFreq:       800,               // 每 0.8 秒触发 1 次
-            shakeAmp:        0.75,              // 轻微且清晰可辨的逐字微抖动幅度
-            avoidOverlap:    true,              // 随机落点时尽量避开同组近期弹幕，防止几乎重叠
-            minSepX:         0.28,
-            minSepY:         0.22,
-            group:         DANMAKU_GROUP,
-            maxGroup:      3,               // 同屏最多 3 条
-            debug:         false            // 调试日志默认关闭
+        var txt = pickPrescriptForOnlinePlayer(srv, lv)
+        if (hasSpecPresetApi) {
+            return { preset: DANMAKU_PRESET_ID, text: txt }
         }
+        var copy = {}
+        for (var k in danmakuPresetSpec) copy[k] = danmakuPresetSpec[k]
+        copy.text = txt
+        return copy
     }
 
     var danmakuBindingExtra = {

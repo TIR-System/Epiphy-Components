@@ -7078,7 +7078,7 @@ test('Uncrafting Chaos & EpiphyServerCore/EpiphyWorldOps: anti-rename relic spoo
         loadStartupBase(cliSb)
         runScriptIn(cliSb, RENDERER_PATH)
         var CliV57 = cliSb.global.ScreenDanmakuClient
-        assert.strictEqual(CliV57.VERSION, '6.0.0', 'ScreenDanmakuClient must expose VERSION 6.0.0')
+        assert.strictEqual(CliV57.VERSION, '6.1.0', 'ScreenDanmakuClient must expose VERSION 6.1.0')
         assert.strictEqual(cliSb.global.Epiphy2DRenderer, CliV57, 'Epiphy2DRenderer must alias ScreenDanmakuClient')
         assert.strictEqual(CliV57._pure.isPotentialSpanTagHead('<AVARITIA_BIOS>', 0), false, '<AVARITIA_BIOS> must be fast-rejected in O(1)')
         assert.strictEqual(CliV57._pure.hasRichSpanTags('<AVARITIA_BIOS> :: [0x00F8_DEADC0DE] >>'), false, 'non-tag brackets must not trigger regex or span tag mode')
@@ -7177,7 +7177,7 @@ test('Epiphy2DSurface & Epiphy2DRenderer v6.0: adaptV5ToV6, aliases, quotas, tra
 
     // 1. P2-4 & P1-2: Dual export and protocol compatibility (v6 accepts 5 and 6, rejects 4)
     assert.strictEqual(Surface, Dm, 'Epiphy2DSurface must alias ScreenDanmaku')
-    assert.strictEqual(Dm.VERSION, '6.0.0', 'ScreenDanmaku VERSION must be 6.0.0')
+    assert.strictEqual(Dm.VERSION, '6.1.0', 'ScreenDanmaku VERSION must be 6.1.0')
     assert.strictEqual(Proto.DANMAKU_PROTO_VERSION, 6, 'DANMAKU_PROTO_VERSION must be 6')
     assert.strictEqual(Spec.isProtoCompatible(6, 6), true)
     assert.strictEqual(Spec.isProtoCompatible(6, 5), true)
@@ -7579,6 +7579,12 @@ test('Epiphy2DSurface & Epiphy2DRenderer v6.0: adaptV5ToV6, aliases, quotas, tra
     assert.ok(v18RotSq && (v18RotSq.fill.color >>> 0) === 0x26A69A, 'v18 badge_rot_sq must keep Endfield cyan-teal #26A69A fill in Stage 1')
     assert.ok(v18BadgeIn && v18BadgeIn.bind && v18BadgeIn.bind.vibX > 0 && v18BadgeIn.bind.vibY > 0, 'v18 badge_inner must enable continuous micro-vibration')
     assert.ok(tPkt.tracks && tPkt.tracks.impulse && tPkt.tracks.impulse.initPeak > 0, 'v18 impulse track must trigger entrance shock via initPeak')
+    assert.ok(telemetryPkts.length >= 2, 'v18 16 ticks must emit initial full packet (t=8) and intra-stage patch (t=16)')
+    var tPatch = telemetryPkts[1]
+    assert.strictEqual(tPatch.action, 'patch', 'v18 intra-stage refresh at t=16 must emit lightweight action:patch')
+    assert.strictEqual(tPatch.slotId, 'core_telemetry_0_64_0', 'v18 patch must target same slotId')
+    assert.strictEqual(tPatch.nodes, undefined, 'v18 patch packet must NOT resend full node tree')
+    assert.ok(tPatch.vars && typeof tPatch.vars.progress === 'number' && tPatch.vars.progress > tPkt.vars.progress, 'v18 patch must advance vars.progress')
 
     // 5b. Verify evaluateNodeBind (affine track binding + discrete stepHz modulation + impulse shake)
     var bTestNode = {
@@ -8076,6 +8082,198 @@ test('62. 32-bit ARGB alpha preservation, bind.rotSpeed continuous rotation, and
     assert.ok(evA.angle >= 0 && evA.angle < 360 && evB.angle >= 0 && evB.angle < 360, 'epoch rotSpeed angle must stay normalized within [0, 360)')
     assert.ok(Math.abs(Math.fround(evB.angle) - Math.fround(evA.angle)) > 5.0, 'float32-rounded angle must advance crisply under epoch Date.now() instead of freezing at 16384-deg steps')
     assert.ok(Math.abs(evA.x - 10) > 0.01 && Math.abs(evB.x - evA.x) > 0.01, 'vibX micro-vibration must oscillate smoothly without Math.round stalling')
+})
+
+test('63. v6.1/v5.8/v2.5 preset & widget registry, UI DSL, bounded cache pool, and renderer hot-path optimizations', function () {
+    // 1. EpiphySpec.createBoundedCache FIFO eviction + createPresetRegistry cross-stage sharing
+    var sb = {
+        console: { info: function () {}, warn: function () {}, error: function (m) { throw new Error(m) }, debug: function () {}, log: function () {} },
+        ServerEvents: { loaded: function () {}, tick: function () {}, commandRegistry: function () {} },
+        BlockEvents: { placed: function () {}, broken: function () {} },
+        PlayerEvents: { loggedIn: function () {}, loggedOut: function () {} },
+        Java: { loadClass: function () { return null } },
+        global: {}
+    }
+    sb.globalThis = sb
+    vm.createContext(sb)
+    loadStartupBase(sb)
+    var Spec = sb.global.EpiphySpec
+
+    var bc = Spec.createBoundedCache(3)
+    bc.set('a', 1); bc.set('b', 2); bc.set('c', 3); bc.set('d', 4)
+    assert.strictEqual(bc.size(), 3, 'bounded cache must enforce maxSize')
+    assert.strictEqual(bc.has('a'), false, 'bounded cache must evict oldest FIFO key a')
+    assert.strictEqual(bc.get('d'), 4)
+    bc.set('b', 22)
+    assert.strictEqual(bc.get('b'), 22)
+    bc.clear()
+    assert.strictEqual(bc.size(), 0)
+
+    // Register presets in startup phase via EpiphySpec.registerPreset BEFORE loading server scripts
+    assert.strictEqual(Spec.registerPreset('surface', 'startup_banner', {
+        pos: [0.5, 0.2], color: 0x00FFAA, duration: 60, group: 'cross_stage'
+    }), true)
+    assert.strictEqual(Spec.registerPreset('audio', 'startup_sfx', {
+        sound: 'minecraft:entity.experience_orb.pickup', category: 'MASTER', volume: 0.9, range: 48
+    }), true)
+    assert.strictEqual(Spec.registerPreset('world_ops', 'startup_purge', {
+        padding: 12, loops: 5, syncInitRadius: 0, excludeLava: true
+    }), true)
+
+    runScriptIn(sb, SERVER_BASE_PATH)
+    runScriptIn(sb, TRACKER_PATH)
+    runScriptIn(sb, DANMAKU_PATH)
+    runScriptIn(sb, AUDIO_PATH)
+
+    var Surface = sb.global.Epiphy2DSurface
+    var Audio   = sb.global.EpiphyAudio
+    var WorldOps = sb.global.EpiphyWorldOps
+
+    // 2. Cross-stage surface preset + custom widget + compact ui() builder + rect.outline shorthand
+    var crossPkt = Surface.buildPacket({ preset: 'startup_banner', text: 'CrossStageOK' })
+    assert.ok(crossPkt && crossPkt.title === 'CrossStageOK' && crossPkt.group === 'cross_stage', 'surface buildPacket must resolve startup-registered preset')
+
+    assert.strictEqual(Surface.registerWidget('test_badge', function (n, ui) {
+        return ui({ ox: n.x, oy: n.y })
+            .outline(0, 0, n.size || 20, n.size || 20, n.color || 0xFFFFFF, 1, { id: 'tb_outer' })
+            .corners(0, 0, n.size || 20, n.size || 20, 4, 1, 0xFFD54F, 'tl,br')
+            .build()
+    }), true)
+
+    assert.strictEqual(Surface.registerPreset('hud_demo', function (c, h) {
+        var nodes = h.ui()
+            .steppedPlate(-100, 0x80102030, [[60, -10, 20], [80, -8, 18], [60, -6, 16]], ['p0', 'p1', 'p2'])
+            .steppedLine(-100, 22, [[90, 0, 0xFFFFFF, 1], [110, 4, 0x4DD0E1, 1]])
+            .ticks(-100, 0, 200, 12, [0.25, 0.5, 0.75], 0x44FFFFFF, 1, 'tk')
+            .widget('test_badge', { x: -130, y: -6, size: 24, color: 0x00FFFF })
+            .push({ id: 'raw_out', type: 'rect', x: 10, y: 0, w: 12, h: 12, outline: 0xFF5555, thickness: 2 })
+            .build()
+        return h.buildProgressPanel({ id: c.id || 'demo', progress: c.progress || 0.5, nodes: nodes })
+    }), true)
+
+    var demoPkt = Surface.buildPacket({ preset: 'hud_demo', id: 'hud_1', progress: 0.75 })
+    assert.ok(demoPkt && Array.isArray(demoPkt.nodes), 'function preset with ui() + widget must build valid v6 packet')
+    var p0 = demoPkt.nodes.find(function (n) { return n.id === 'p0' })
+    var p1 = demoPkt.nodes.find(function (n) { return n.id === 'p1' })
+    var p2 = demoPkt.nodes.find(function (n) { return n.id === 'p2' })
+    assert.strictEqual(p0.x + p0.w, p1.x, 'ui.steppedPlate must abut p0->p1 with zero overlap')
+    assert.strictEqual(p1.x + p1.w, p2.x, 'ui.steppedPlate must abut p1->p2 with zero overlap')
+    assert.ok(demoPkt.nodes.some(function (n) { return n.id === 'tb_outer' && n.fill && n.fill.mode === 'outline' }), 'registered widget must expand during sanitizeNodesList')
+    assert.ok(demoPkt.nodes.some(function (n) { return n.id === 'tk_50' && n.x === 0 }), 'ui.ticks must generate 50% tick at x=0')
+    var rawOutNode = demoPkt.nodes.find(function (n) { return n.id === 'raw_out' })
+    assert.ok(rawOutNode && rawOutNode.fill && rawOutNode.fill.mode === 'outline' && rawOutNode.fill.thickness === 2, 'raw rect.outline shorthand must normalize to outline fill')
+
+    // 3. Audio & WorldOps preset resolution
+    var audResolved = Audio.preset('startup_sfx', { pitch: 1.25 })
+    assert.ok(audResolved && audResolved.sound === 'minecraft:entity.experience_orb.pickup' && audResolved.volume === 0.9 && audResolved.pitch === 1.25, 'EpiphyAudio.preset must resolve startup-registered audio preset with overrides')
+    assert.strictEqual(Audio.registerPreset('boss_hit', { sound: 'minecraft:entity.generic.explode', priority: 'critical' }), true)
+    assert.ok(Audio.listPresets().indexOf('boss_hit') >= 0)
+
+    var woResolved = WorldOps.preset('startup_purge', { isRimOnlySweep: true })
+    assert.ok(woResolved && woResolved.padding === 12 && woResolved.excludeLava === true && woResolved.isRimOnlySweep === true, 'EpiphyWorldOps.preset must resolve startup-registered world_ops preset')
+
+    // 4. Client renderer: contiguous solid/outline rect batching + parallax early-cull + text width cache & left-anchor skip
+    var cliPaints = []
+    var cliNetCb  = null
+    var nowVal    = 10000
+    var cliSb = {
+        console: { info: function () {}, warn: function () {}, error: function (m) { throw new Error(m) }, debug: function () {}, log: function () {} },
+        Date: { now: function () { return nowVal } },
+        Client: { getCurrentScreen: function () { return null } },
+        ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, paintScreen: function (fn) { cliPaints.push(fn) } },
+        NetworkEvents: { dataReceived: function (ch, fn) { if (ch === 'epiphy:screen_danmaku') cliNetCb = fn } },
+        Java: { loadClass: function () { return null } },
+        Text: { of: function (s) { return { string: String(s) } } },
+        global: {}
+    }
+    cliSb.globalThis = cliSb
+    vm.createContext(cliSb)
+    loadStartupBase(cliSb)
+    runScriptIn(cliSb, RENDERER_PATH)
+
+    var batchNodes = []
+    for (var ri = 0; ri < 8; ri++) {
+        batchNodes.push({ id: 'sr_' + ri, type: 'rect', anchor: 'top_left', x: ri * 10, y: 0, w: 8, h: 8, fill: { mode: 'solid', color: 0xFF33AAFF } })
+    }
+    batchNodes.push({ id: 'or_0', type: 'rect', anchor: 'top_left', x: 0, y: 12, w: 20, h: 10, fill: { mode: 'outline', color: 0xFFFFFFFF, thickness: 1 } })
+    batchNodes.push({ id: 'or_1', type: 'rect', anchor: 'top_left', x: 24, y: 12, w: 20, h: 10, fill: { mode: 'outline', color: 0xFFFFAA00, thickness: 1 } })
+    batchNodes.push({ id: 'tl_txt', type: 'text', anchor: 'top_left', x: 0, y: 30, scale: 1.0, text: 'LEFT_LABEL', color: 0xFFFFFFFF, shadow: true })
+    batchNodes.push({ id: 'tr_txt', type: 'text', anchor: 'top_right', x: 100, y: 30, scale: 1.0, text: '$dynRight', color: 0xFFFFFFFF, shadow: true })
+
+    cliNetCb({
+        data: {
+            proto: 6, surface: 'screen', id: 'batch_test', key: 'batch_test',
+            lifeMode: 'active', activeHold: 100, rx: 0.5, ry: 0.5, scale: 1.0, tilt: 0,
+            vars: { dynRight: 'RIGHT_A' },
+            nodes: batchNodes
+        }
+    })
+
+    var beginCount = 0, endCount = 0, quadCount = 0, fontWidthCalls = 0
+    var mockEv = {
+        width: 854, height: 480, level: 'minecraft:overworld',
+        font: { width: function (s) { var str = String(s); if (str === 'LEFT_LABEL' || str === 'RIGHT_A' || str === 'RIGHT_UPDATED') fontWidthCalls++; return str.length * 6 } },
+        graphics: { flush: function () {} },
+        push: function () {}, pop: function () {}, translate: function () {}, rotateDeg: function () {}, scale: function () {},
+        getMatrix: function () { return {} },
+        setPositionColorShader: function () {},
+        blend: function () {},
+        beginQuads: function () { beginCount++ },
+        end: function () { endCount++ },
+        rectangle: function () { quadCount++ },
+        text: function () {}
+    }
+    // Frame 1: 8 solid + 2 outline (4 edges each) = 16 quads emitted inside ONE single beginQuads/end batch!
+    cliPaints[0](mockEv)
+    assert.strictEqual(beginCount, 1, '10 contiguous solid/outline rect nodes must coalesce into 1 beginQuads batch, got ' + beginCount)
+    assert.strictEqual(endCount, 1, 'coalesced rect batch must close cleanly with 1 end()')
+    assert.strictEqual(quadCount, 16, '8 solid + 2x4 outline edges must emit all 16 quads')
+    assert.strictEqual(fontWidthCalls, 1, 'top_left text must skip font.width (0 calls); only top_right calls font.width once')
+
+    // Frame 2 with unchanged dynRight: top_right hits per-node width cache -> 0 additional font.width calls!
+    nowVal += 50
+    cliPaints[0](mockEv)
+    assert.strictEqual(fontWidthCalls, 1, 'unchanged top_right text must hit per-node width cache (still 1 call total)')
+
+    // Frame 3 after action:'patch' mutates dynRight: cache invalidates -> 1 new font.width call!
+    cliNetCb({ data: { proto: 6, surface: 'screen', action: 'patch', id: 'batch_test', vars: { dynRight: 'RIGHT_UPDATED' } } })
+    nowVal += 50
+    cliPaints[0](mockEv)
+    assert.strictEqual(fontWidthCalls, 2, 'mutated top_right text must invalidate cache and re-measure once')
+
+    // 5. Parallax early-culling at low progress (10px wide clip on 472px bar)
+    var lowQuads = 0, fullQuads = 0
+    var mkParallaxEv = function (counterFn) {
+        return {
+            width: 854, height: 480, level: 'minecraft:overworld',
+            font: { width: function () { return 20 } },
+            graphics: { flush: function () {} },
+            push: function () {}, pop: function () {}, translate: function () {}, rotateDeg: function () {}, scale: function () {},
+            getMatrix: function () { return {} }, setPositionColorShader: function () {}, blend: function () {},
+            beginQuads: function () {}, end: function () {},
+            rectangle: function () { counterFn() }, text: function () {}
+        }
+    }
+    var pFill = {
+        mode: 'parallax', bgAlpha: 0,
+        layers: [
+            { kind: 'stripes', step: 18, width: 7, skew: 7, speedX: 20, color: 0x3D000000, alpha: 0.95 },
+            { kind: 'ripples', rows: 4, rowGap: 3.4, offsetY: 1.2, segments: 7, baseLen: 26, ampLen: 14, speedX: 34, thickness: 1.1, seed: 23, color: 0x52FFFFFF, alpha: 0.95 }
+        ]
+    }
+    cliNetCb({ data: { proto: 6, surface: 'screen', action: 'clear', group: '*', maxPriority: 10 } })
+    cliNetCb({
+        data: {
+            proto: 6, surface: 'screen', id: 'p_cull', key: 'p_cull', lifeMode: 'active', activeHold: 100, rx: 0.5, ry: 0.5, scale: 1.0,
+            vars: { p: 0.02 },
+            nodes: [{ id: 'pm', type: 'rect', anchor: 'top_left', x: -236, y: -7, w: 472, h: 14, clip: { dir: 'left', ratio: '$p', mode: 'local' }, fill: pFill }]
+        }
+    })
+    cliPaints[0](mkParallaxEv(function () { lowQuads++ }))
+    cliNetCb({ data: { proto: 6, surface: 'screen', action: 'patch', id: 'p_cull', vars: { p: 1.0 } } })
+    nowVal += 50
+    cliPaints[0](mkParallaxEv(function () { fullQuads++ }))
+    assert.ok(lowQuads > 0 && lowQuads * 4 < fullQuads, 'parallax early-cull at 2% width must emit <25% of full-bar quads (low=' + lowQuads + ', full=' + fullQuads + ')')
 })
 
 

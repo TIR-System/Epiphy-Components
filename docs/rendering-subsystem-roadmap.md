@@ -319,7 +319,7 @@
 
 ## 6. 测试验证方案与性能帧预算（Verification & Performance Budget）
 
-所有新增能力必须同步扩展 [`tests/pure_functions.test.js`](../tests/pure_functions.test.js)（当前基线 **59/59 passed**），并在实机通过帧耗时预算核验：
+所有新增能力必须同步扩展 [`tests/pure_functions.test.js`](../tests/pure_functions.test.js)（当前基线 **63/63 passed**），并在实机通过帧耗时预算核验：
 
 ### 6.1 沙盒单元测试必测项（`npm test` 新增用例清单）
 1. **`adaptV5ToV6` 无损往返与等价性测试**：遍历全部 45 个 `v5` 字段输入，断言转换后的 `v6` 包在顶层 Envelope 与 `nodes[0]` 上数值 100% 精确对齐，且 `ScreenDanmakuClient` 对 `proto: 5` 与 `proto: 6` 包产生完全相同的内部 Overlay 状态与渲染调用序列；
@@ -383,7 +383,7 @@ Phase 4 (Kotlin + Java 原生模组迁移：彻底移除淘汰别名 + 硬件级
 | [x] | **P1-3** | **状态变量字典 (`vars`)、`action: 'patch'` 队列合并与 `tracks` 插值器**：实现同 `slotId` 队列合并、孤儿包丢弃、`lerp`/`trail`/`impulse`（`dt <= 100ms` 钳制）及 `node.bind` 仿射/步进绑定 | `Epiphy的-平面渲染组件.js`<br>`Epiphy的-平面渲染器.js` | 时间序列插值与 `evaluateNodeBind` 单测 | 已完成 |
 | [x] | **P1-4** | **声明式 2D 图元树与独立层级调度**：实现 6 类图元、`nine_slice.slice` 4 元数组与标量、`5` 向 `anchor`、双模 `clip`、`renderPriority` 独立于 `priority` 的层叠排序（GUI 默认置顶）及 `flushBatchedBeforeImmediate` 双缓冲刷新修复 | `Epiphy的-平面渲染器.js` | 异常注入状态零泄漏 + 层叠排序与遮罩单测 | 已完成 |
 | [x] | **P1-5** | **`rect.fill` 统一填充机制**：完成 `solid` / `outline` / 三色 `gradient` / 外部贴图与程序化几何 `parallax`（`ripples`/`steps`/`particles`/`stripes`）/ `shader`（原版 `end_portal`/`end_gateway`/`glint` + `registerShader` 可扩展机制）与 `TEXTURE_EXIST_CACHE` 防缺贴图 | `Epiphy的-平面渲染器.js` | 视差 UV 计算 + Shader 降级 + 缺贴图单测 | 已完成 |
-| [x] | **P1-6** | **Phase 1 预设封装与 `v18` 方案 α 实装**：内置 `buildProgressPanel`，`v18` 三幕遥测全面采用方案 α（`248x13` 宽双轨/波纹/斜向装甲肋/阶梯外框/T-Pin 吊线/同心旋转方格徽章/32 位 ARGB 真半透明 & 无残影交接） | `Epiphy的-平面渲染组件.js`<br>`拆解台-混沌殉爆.v18.js` | `v18` NBT 序列化 + 真 `PaintScreenEventJS` 断言 | 已完成 |
+| [x] | **P1-6** | **Phase 1 预设封装、向上自定义注册与 `v18` 方案 α 实装**：内置 `buildProgressPanel` + 紧凑链式 `ui()` DSL（`steppedPlate`/`corners`/`steppedLine`/`ticks`/`boxes`/`widget`）与跨阶段 `registerPreset`/`registerWidget`；`v18` 三幕遥测全面采用方案 α（`472x16@0.56` 细长条带、零重叠阶梯切角玻璃底衬、同心旋转方格徽章、4 层立体底流与同阶段 `action:'patch'` 增量更新） | `Epiphy的-Spec与通用工具.js`<br>`Epiphy的-平面渲染组件.js`<br>`拆解台-混沌殉爆.v18.js` | `v18` NBT 序列化 + 真 `PaintScreenEventJS` + `ui()`/预设/`patch` 断言 (63/63) | 已完成 |
 | [~] | **P2-1** | **承载面 `surface: 'gui'` 夹心层与会话寿命**：已实现 `renderGuiSurfacePass`、`lifeMode: 'screen_session'` 与 `renderPriority: 100` 默认不被弹幕覆盖；注：KubeJS 侧 `ClientEvents.paintScreen` 无容器原生槽位前后阶段，完整 `renderBg/renderSlots` 夹心挂钩需 Phase 2B 事件桥或 Phase 4 Mixin | `Epiphy的-平面渲染组件.js`<br>`Epiphy的-平面渲染器.js` | `screen_session` / `renderGuiSurfacePass` 单测 | 部分完成（PaintScreen 阶段可用，原版 Screen 夹心事件待桥接） |
 | [x] | **P2-2** | **会话级纹理重映射与 `fill.mode: 'shader'`**：`applyReplacedTexturesForGui` 接入 `Minecraft.getTextureManager().register` 真替换并在界面关闭/`loggedOut`/`clear` 自动还原；支持原版内置及外部注册自定义 Shader 与降级回退 | `Epiphy的-平面渲染器.js` | 纹理还原防污染单测 + Shader 降级单测 | 已完成 |
 | [~] | **P2-3** | **承载面 `surface: 'slot'` 物品槽位 2D 叠加层**：完成 `slotMatch` 与局部偏移绘制（`renderPriority: 200`）及单测；实机自动跟随每个槽位绘制待容器 `Screen` 绘制钩子接入 | `Epiphy的-平面渲染器.js` | 槽位匹配与局部坐标裁剪单测 | 部分完成（接口就绪，自动槽位事件待桥接） |
@@ -414,4 +414,15 @@ Phase 4 (Kotlin + Java 原生模组迁移：彻底移除淘汰别名 + 硬件级
   - **淘汰告警接入 `EpiphyLog`**：`EpiphyLog` 新增 `setDeprecationWarnings` / `isDeprecationWarningsEnabled` / `warnDeprecatedOnce`，`ScreenDanmaku.CONFIG.warnDeprecatedAliases` 默认改为 `'log'`（受 `/epiphy debug log deprecations on` 或 `/epiphy debug log danmaku on` 与 `EpiphyLog` 开关控制）；
   - **GUI 独立渲染优先级 (`renderPriority` / `zIndex`)**：解耦淘汰与帧预算 `priority`，默认 `'screen': 0` < `'gui': 100` < `'slot': 200`，修正 `compareOverlayDrawPriority` 为按 `renderPriority` 升序绘制并跨越层级强制刷新批处理，确保 GUI 默认置于弹幕之上不被覆盖且支持逐包/全局调整；
   - **真机序列与方案 α 精调**：修复 `flushBatchedBeforeImmediate()` 补刷 `event.graphics.flush()`（解决 `badge_mask` 遮不住缩放文本 `badge_tag`）、补齐 `getActiveScreen` 与真实 `TextureManager` 纹理替换、`screen_session` 界面关闭自动注销，并加宽 `v18` `ef_tag_plate`（`56px`）与进度条（`236px`）、绑定 `impulse` 至 `$impulseEvent` 避免 0.4s 误抽搐、切换 300m 湮灭时显式关闭 `core_telemetry`。
+- **2026-11-20 (`v1.2` / 跨组件向上预设与自定义复合单元、紧凑 `ui()` DSL、缓存池收敛与 KubeJS 零视觉变化热路径优化)**：
+  - **跨组件向上预设与缓存池收敛 (`EpiphySpec` / `Epiphy2DSurface v6.1` / `EpiphyAudio v5.8` / `EpiphyWorldOps v2.5`)**：
+    1. `EpiphySpec` 新增 `createBoundedCache(maxSize)`（$O(1)$ 均摊 FIFO 有界缓存池）与 `createPresetRegistry(domain)` / `registerPreset` / `resolvePreset`（挂载 `global.EpiphyPresetStore`，支持 `startup_scripts` 向上提交预设供 `server_scripts` 消费）；破坏性移除已淘汰的 `preset -> pos` 别名，使 `preset` 成为全组件统一预设字段；
+    2. `Epiphy2DSurface v6.1` 新增 `ui()` 紧凑链式构造器（内置 `steppedPlate` 零重叠阶梯底衬、`corners` 四角加固折角、`steppedLine` 自动立柱折线、`ticks` 刻度线、`boxes`、`group`、`widget` 泛用原语及 `rect.outline` 简写）与 `registerPreset` / `registerWidget`，支持下游玩法脚本向上提交专属复合单元（如 `v18_t_pin`、`v18_reticle_badge`）与参数化预设（`v18_telemetry`）；
+    3. `EpiphyAudio v5.8`（含 `bindBlock` 扫描/启播）与 `EpiphyWorldOps v2.5` 同步落地 `registerPreset` / `preset` / `{ preset: '...' }` 自动解析；`Epiphy的小玩意_功能测试.js` 升级为启动期向上提交 `rnfmabj_test_bgm` / `rnfmabj_test_prescript` 预设。
+  - **客户端零视觉变化热路径优化 (`Epiphy2DRenderer v6.1`)**：
+    1. 将 `GLYPH_WIDTH_CACHE` 与 `TEXTURE_EXIST_CACHE`（上限 512）统一收敛至 `EpiphySpec.createBoundedCache`（缺 `SPEC` 时平滑降级本地有界实现）；
+    2. 新增连续 `solid`/`outline` `rect` 自动合批（相邻几何节点合并为单次 `beginQuads`/`end`，外层 `finally` 强关闭保证异常安全）；
+    3. 为 `evaluateNodeBind` / `computeBoxAnchorOrigin` / `computeLocalClipRect` 补充热路径 Scratch 复用参数（未传时仍返回纯新对象）；
+    4. `drawRectParallax` 增加 `stripes`/`ripples` 视口早期剔除与斜肋分段上限（`3..8`）；`drawDeclarativeTextNode` 左对齐零 `font.width` 跳过 + 右/中对齐单行节点宽度缓存（绑定 `FONT_SIGNATURE|MUI_EPOCH` 失效）；
+  - **`v18` 定义瘦身与同阶段 `action: 'patch'` 增量更新**：`拆解台-混沌殉爆.v18.js` 三幕遥测全面迁移至 `v18_telemetry` 预设 + 4 套主题，非遮挡文字集中置尾减少 Flush，同阶段刷新自动发极简 `action: 'patch'`（仅首次/切阶段/每 48 tick 发全量节点树），热路径去 `toFixed` 字符串分配；全量测试扩展至 `63/63` 通过并通过真实 Rhino `Context.compileString` 编译核验。
 

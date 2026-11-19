@@ -1,11 +1,11 @@
 // priority: 500
 // ============================================================================
-//  通用平面渲染与屏幕弹幕组件 —— 服务端调度器 (Epiphy2DSurface / ScreenDanmaku v6.0)
+//  通用平面渲染与屏幕弹幕组件 —— 服务端调度器 (Epiphy2DSurface / ScreenDanmaku v6.1)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 <repo-root> 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/server_scripts/通用组件/Epiphy的-平面渲染组件.js
-//  配套客户端渲染器：kubejs/client_scripts/通用组件/Epiphy的-平面渲染器.js (Epiphy2DRenderer / ScreenDanmakuClient v6.0)
+//  配套客户端渲染器：kubejs/client_scripts/通用组件/Epiphy的-平面渲染器.js (Epiphy2DRenderer / ScreenDanmakuClient v6.1)
 //  配套权限阀组件：kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（管理 /epiphy 根命令、执行权限与 actorTier 资源分级）
 //
 //  依赖与缺失降级行为：
@@ -1319,6 +1319,306 @@
         }
     }
 
+    // ------------------------------------------------------------------------
+    // 向上提交预设 (registerPreset) / 自定义复合图元 (registerWidget) / 紧凑 UI 构造器 (ui)
+    // ------------------------------------------------------------------------
+    var SURFACE_PRESETS = (SPEC && typeof SPEC.createPresetRegistry === 'function')
+        ? SPEC.createPresetRegistry('surface')
+        : { register: function () { return false }, has: function () { return false }, get: function () { return null }, remove: function () { return false }, list: function () { return [] }, resolve: function () { return null } }
+
+    var WIDGET_REGISTRY = (SPEC && typeof SPEC.createPresetRegistry === 'function')
+        ? SPEC.createPresetRegistry('widget')
+        : { register: function () { return false }, has: function () { return false }, get: function () { return null }, remove: function () { return false }, list: function () { return [] }, resolve: function () { return null } }
+
+    function mergeExtraProps(target, extra) {
+        if (extra != null && typeof extra === 'object') {
+            for (var ek in extra) {
+                if (Object.prototype.hasOwnProperty.call(extra, ek) && extra[ek] !== undefined) {
+                    target[ek] = extra[ek]
+                }
+            }
+        }
+        return target
+    }
+
+    function createUiBuilder(scopeOpts) {
+        var sc      = (scopeOpts != null && typeof scopeOpts === 'object') ? scopeOpts : {}
+        var defAnc  = String(sc.anchor || 'top_left')
+        var ox      = Number(sc.ox || 0) || 0
+        var oy      = Number(sc.oy || 0) || 0
+        var nodes   = Array.isArray(sc.nodes) ? sc.nodes : []
+        var autoSeq = 0
+
+        function nextId(prefix) {
+            autoSeq++
+            return (prefix || 'u') + '_' + autoSeq
+        }
+
+        function appendAny(itemOrArr) {
+            if (Array.isArray(itemOrArr)) {
+                for (var ai = 0; ai < itemOrArr.length; ai++) {
+                    if (itemOrArr[ai] != null) nodes.push(itemOrArr[ai])
+                }
+            } else if (itemOrArr != null) {
+                nodes.push(itemOrArr)
+            }
+            return builder
+        }
+
+        var builder = {
+            nodes: nodes,
+            push:  appendAny,
+            at: function (newOx, newOy, newAnchor) {
+                return createUiBuilder({
+                    ox:     ox + (Number(newOx) || 0),
+                    oy:     oy + (Number(newOy) || 0),
+                    anchor: newAnchor || defAnc,
+                    nodes:  nodes
+                })
+            },
+            rect: function (x, y, w, h, color, extra) {
+                var n = {
+                    id:     nextId('r'),
+                    type:   'rect',
+                    anchor: defAnc,
+                    x:      ox + (Number(x) || 0),
+                    y:      oy + (Number(y) || 0),
+                    w:      w,
+                    h:      h,
+                    fill:   { mode: 'solid', color: color }
+                }
+                nodes.push(mergeExtraProps(n, extra))
+                return builder
+            },
+            outline: function (x, y, w, h, color, thk, extra) {
+                var n = {
+                    id:     nextId('o'),
+                    type:   'rect',
+                    anchor: defAnc,
+                    x:      ox + (Number(x) || 0),
+                    y:      oy + (Number(y) || 0),
+                    w:      w,
+                    h:      h,
+                    fill:   { mode: 'outline', color: color, thickness: thk != null ? thk : 1 }
+                }
+                nodes.push(mergeExtraProps(n, extra))
+                return builder
+            },
+            text: function (x, y, str, scale, color, extra) {
+                var n = {
+                    id:     nextId('t'),
+                    type:   'text',
+                    anchor: defAnc,
+                    x:      ox + (Number(x) || 0),
+                    y:      oy + (Number(y) || 0),
+                    scale:  scale != null ? scale : 1.0,
+                    text:   str,
+                    color:  color !== undefined ? color : 0xFFFFFF,
+                    shadow: true
+                }
+                nodes.push(mergeExtraProps(n, extra))
+                return builder
+            },
+            parallax: function (x, y, w, h, layers, extra) {
+                var fillObj = { mode: 'parallax', bgAlpha: 0, layers: Array.isArray(layers) ? layers : [] }
+                var n = {
+                    id:     nextId('p'),
+                    type:   'rect',
+                    anchor: defAnc,
+                    x:      ox + (Number(x) || 0),
+                    y:      oy + (Number(y) || 0),
+                    w:      w,
+                    h:      h,
+                    fill:   fillObj
+                }
+                if (extra != null && typeof extra === 'object') {
+                    if (extra.bloomWidth !== undefined) fillObj.bloomWidth = extra.bloomWidth
+                    if (extra.bloomColor !== undefined) fillObj.bloomColor = extra.bloomColor
+                    if (extra.bgColor !== undefined) fillObj.bgColor = extra.bgColor
+                    if (extra.bgAlpha !== undefined) fillObj.bgAlpha = extra.bgAlpha
+                    for (var pk in extra) {
+                        if (!Object.prototype.hasOwnProperty.call(extra, pk)) continue
+                        if (pk === 'bloomWidth' || pk === 'bloomColor' || pk === 'bgColor' || pk === 'bgAlpha') continue
+                        n[pk] = extra[pk]
+                    }
+                }
+                nodes.push(n)
+                return builder
+            },
+            group: function (x, y, extra, buildFn) {
+                var fn = (typeof extra === 'function') ? extra : buildFn
+                var optsObj = (typeof extra === 'function') ? null : extra
+                var sub = createUiBuilder({ anchor: defAnc, ox: 0, oy: 0 })
+                if (typeof fn === 'function') fn(sub)
+                var g = {
+                    id:       nextId('g'),
+                    type:     'group',
+                    x:        ox + (Number(x) || 0),
+                    y:        oy + (Number(y) || 0),
+                    children: sub.nodes
+                }
+                nodes.push(mergeExtraProps(g, optsObj))
+                return builder
+            },
+            widget: function (typeName, cfg) {
+                var wn = mergeExtraProps({ type: String(typeName || '') }, cfg)
+                if (typeof wn.x === 'number' || wn.x === undefined) wn.x = ox + (Number(wn.x) || 0)
+                if (typeof wn.y === 'number' || wn.y === undefined) wn.y = oy + (Number(wn.y) || 0)
+                nodes.push(wn)
+                return builder
+            },
+            // 零重叠连续阶梯玻璃底衬：segs 为 [[w, topY, botY], ...] 或 [{ w, top, bottom, id? }, ...]，自动首尾严密衔接无叠色暗斑
+            steppedPlate: function (x0, color, segs, idsOrPrefix) {
+                if (!Array.isArray(segs) || segs.length === 0) return builder
+                var curX = ox + Math.round(Number(x0) || 0)
+                var prefix = (typeof idsOrPrefix === 'string') ? idsOrPrefix : 'plate'
+                for (var si = 0; si < segs.length; si++) {
+                    var s = segs[si]
+                    if (s == null) continue
+                    var sw   = Math.round(Number(Array.isArray(s) ? s[0] : s.w) || 0)
+                    var topY = Number(Array.isArray(s) ? s[1] : s.top) || 0
+                    var botY = Number(Array.isArray(s) ? s[2] : s.bottom) || 0
+                    var sid  = (Array.isArray(idsOrPrefix) && idsOrPrefix[si])
+                        ? String(idsOrPrefix[si])
+                        : ((!Array.isArray(s) && s.id) ? String(s.id) : (prefix + '_' + si))
+                    if (sw > 0 && botY > topY) {
+                        nodes.push({
+                            id:     sid,
+                            type:   'rect',
+                            anchor: 'top_left',
+                            x:      curX,
+                            y:      oy + topY,
+                            w:      sw,
+                            h:      botY - topY,
+                            fill:   { mode: 'solid', color: (!Array.isArray(s) && s.color !== undefined) ? s.color : color }
+                        })
+                    }
+                    curX += sw
+                }
+                return builder
+            },
+            // 四角 L 型加固折角：mask 支持 'all' | 'tl,br' | 'tr,bl' 等
+            corners: function (x, y, w, h, len, thk, color, mask) {
+                var bx = ox + (Number(x) || 0)
+                var by = oy + (Number(y) || 0)
+                var bw = Number(w) || 0
+                var bh = Number(h) || 0
+                var l  = Number(len) || 5
+                var t  = Number(thk) || 2
+                var m  = String(mask || 'all').toLowerCase()
+                var all = (m === 'all')
+                if (all || m.indexOf('tl') >= 0) {
+                    nodes.push({ id: nextId('c_tlh'), type: 'rect', anchor: 'top_left', x: bx - 1, y: by - 1, w: l, h: t, fill: { mode: 'solid', color: color } })
+                    nodes.push({ id: nextId('c_tlv'), type: 'rect', anchor: 'top_left', x: bx - 1, y: by - 1, w: t, h: l, fill: { mode: 'solid', color: color } })
+                }
+                if (all || m.indexOf('tr') >= 0) {
+                    nodes.push({ id: nextId('c_trh'), type: 'rect', anchor: 'top_left', x: bx + bw - l + 1, y: by - 1, w: l, h: t, fill: { mode: 'solid', color: color } })
+                    nodes.push({ id: nextId('c_trv'), type: 'rect', anchor: 'top_left', x: bx + bw - t + 1, y: by - 1, w: t, h: l, fill: { mode: 'solid', color: color } })
+                }
+                if (all || m.indexOf('bl') >= 0) {
+                    nodes.push({ id: nextId('c_blh'), type: 'rect', anchor: 'top_left', x: bx - 1, y: by + bh - t + 1, w: l, h: t, fill: { mode: 'solid', color: color } })
+                    nodes.push({ id: nextId('c_blv'), type: 'rect', anchor: 'top_left', x: bx - 1, y: by + bh - l + 1, w: t, h: l, fill: { mode: 'solid', color: color } })
+                }
+                if (all || m.indexOf('br') >= 0) {
+                    nodes.push({ id: nextId('c_brh'), type: 'rect', anchor: 'top_left', x: bx + bw - l + 1, y: by + bh - t + 1, w: l, h: t, fill: { mode: 'solid', color: color } })
+                    nodes.push({ id: nextId('c_brv'), type: 'rect', anchor: 'top_left', x: bx + bw - t + 1, y: by + bh - l + 1, w: t, h: l, fill: { mode: 'solid', color: color } })
+                }
+                return builder
+            },
+            // 多段错落水平折线（自动在相邻高度差处插入竖向连接立柱）：segs 为 [[w, yOff, color, thk?], ...]
+            steppedLine: function (x0, y0, segs) {
+                if (!Array.isArray(segs) || segs.length === 0) return builder
+                var curX = ox + (Number(x0) || 0)
+                var baseY = oy + (Number(y0) || 0)
+                var prevY = null
+                for (var li = 0; li < segs.length; li++) {
+                    var seg = segs[li]
+                    if (!Array.isArray(seg) || seg.length < 3) continue
+                    var sw   = Number(seg[0]) || 0
+                    var yOff = Number(seg[1]) || 0
+                    var col  = seg[2]
+                    var thk  = seg[3] != null ? Number(seg[3]) : 1.2
+                    var curY = baseY + yOff
+                    if (prevY !== null && Math.abs(curY - prevY) > 0.05) {
+                        var ry0 = Math.min(prevY, curY)
+                        var rh  = Math.abs(curY - prevY) + thk
+                        nodes.push({ id: nextId('sl_r'), type: 'rect', anchor: 'top_left', x: curX, y: ry0, w: thk, h: rh, fill: { mode: 'solid', color: col } })
+                    }
+                    if (sw > 0) {
+                        nodes.push({ id: nextId('sl_h'), type: 'rect', anchor: 'top_left', x: curX, y: curY, w: sw, h: thk, fill: { mode: 'solid', color: col } })
+                    }
+                    curX += sw
+                    prevY = curY
+                }
+                return builder
+            },
+            // 沿横跨区间按比例批量生成刻度细线
+            ticks: function (x, y, spanW, h, ratios, color, w, idPrefix) {
+                if (!Array.isArray(ratios)) return builder
+                var bx = ox + (Number(x) || 0)
+                var by = oy + (Number(y) || 0)
+                var tw = w != null ? Number(w) : 1
+                var pfx = idPrefix || 'ms'
+                for (var ti = 0; ti < ratios.length; ti++) {
+                    var r = Number(ratios[ti])
+                    if (!isFinite(r)) continue
+                    nodes.push({
+                        id:     pfx + '_' + Math.round(r * 100),
+                        type:   'rect',
+                        anchor: 'top_left',
+                        x:      bx + Math.round(spanW * r),
+                        y:      by,
+                        w:      tw,
+                        h:      h,
+                        fill:   { mode: 'solid', color: color }
+                    })
+                }
+                return builder
+            },
+            // 紧凑装饰块矩阵：items 为 [[x, y, w, h, color, bind?, id?], ...]
+            boxes: function (items) {
+                if (!Array.isArray(items)) return builder
+                for (var bi = 0; bi < items.length; bi++) {
+                    var it = items[bi]
+                    if (!Array.isArray(it) || it.length < 5) continue
+                    var bn = {
+                        id:     it[6] != null ? String(it[6]) : nextId('bx'),
+                        type:   'rect',
+                        anchor: defAnc,
+                        x:      ox + (Number(it[0]) || 0),
+                        y:      oy + (Number(it[1]) || 0),
+                        w:      it[2],
+                        h:      it[3],
+                        fill:   { mode: 'solid', color: it[4] }
+                    }
+                    if (it[5] != null && typeof it[5] === 'object') bn.bind = it[5]
+                    nodes.push(bn)
+                }
+                return builder
+            },
+            build: function () {
+                return nodes
+            }
+        }
+        return builder
+    }
+
+    function registerPreset(name, specOrFn) {
+        return SURFACE_PRESETS.register(name, specOrFn)
+    }
+
+    function resolvePreset(name, overrides) {
+        return SURFACE_PRESETS.resolve(name, overrides, {
+            ui:                 createUiBuilder,
+            buildProgressPanel: buildProgressPanel
+        })
+    }
+
+    function registerWidget(typeName, expandFn) {
+        if (typeof expandFn !== 'function') return false
+        return WIDGET_REGISTRY.register(typeName, expandFn)
+    }
+
     function sanitizeNodesList(rawNodes, depth) {
         if (!Array.isArray(rawNodes) || depth > SYSTEM_PACKET_LIMITS.maxNodeDepth) return []
         var out = []
@@ -1326,7 +1626,20 @@
             var rn = rawNodes[i]
             if (rn == null || typeof rn !== 'object') continue
             var nType = String(rn.type || rn.kind || 'rect').trim().toLowerCase()
-            if (!VALID_NODE_TYPES[nType]) continue
+            if (!VALID_NODE_TYPES[nType]) {
+                var widgetFn = WIDGET_REGISTRY.get(nType)
+                if (typeof widgetFn === 'function' && (depth || 0) < SYSTEM_PACKET_LIMITS.maxNodeDepth) {
+                    try {
+                        var expanded = widgetFn(rn, createUiBuilder)
+                        var expList = Array.isArray(expanded) ? expanded : (expanded != null ? [expanded] : [])
+                        var cleanExp = sanitizeNodesList(expList, (depth || 0) + 1)
+                        for (var ei = 0; ei < cleanExp.length; ei++) out.push(cleanExp[ei])
+                    } catch (eWidget) {
+                        reportCatch('widget:' + nType, eWidget)
+                    }
+                }
+                continue
+            }
             var rawAnc = String(rn.anchor || 'center').trim().toLowerCase()
             var anchor = VALID_ANCHORS[rawAnc] ? rawAnc : 'center'
             var nodeColorVal = (rn.color !== undefined) ? rn.color : rn.tint
@@ -1356,7 +1669,11 @@
             if (nType === 'rect') {
                 node.w    = node.w !== undefined ? node.w : 64
                 node.h    = node.h !== undefined ? node.h : 8
-                node.fill = sanitizeRectFill(rn.fill, nodeColorVal)
+                var rawFill = rn.fill
+                if (rawFill == null && rn.outline !== undefined) {
+                    rawFill = { mode: 'outline', color: rn.outline, thickness: rn.thickness != null ? rn.thickness : 1 }
+                }
+                node.fill = sanitizeRectFill(rawFill, nodeColorVal)
                 if (nodeColorVal !== undefined) node.color = sanitizeVarOrColor(nodeColorVal, 0xFF000000)
                 if (rn.borderColor !== undefined) node.borderColor = sanitizeVarOrColor(rn.borderColor, 0xFFFFFFFF)
                 if (rn.borderWidth !== undefined) node.borderWidth = Math.max(0, Math.min(16, parseFiniteNum(rn.borderWidth, 1)))
@@ -1479,6 +1796,13 @@
         var rawOpts = normalizeOptionsObject(optsOrText)
         if (rawOpts == null || typeof rawOpts !== 'object') {
             return reportConfigWarning('调用时必须传入弹幕配置对象或文本字符串！', notifyPlayer)
+        }
+        if (typeof rawOpts.preset === 'string' && rawOpts.preset.trim() !== '') {
+            var resolvedPreset = resolvePreset(rawOpts.preset, rawOpts)
+            if (resolvedPreset == null || typeof resolvedPreset !== 'object') {
+                return reportConfigWarning('未找到已注册的平面渲染预设: ' + rawOpts.preset, notifyPlayer)
+            }
+            rawOpts = resolvedPreset
         }
         var opts = (SPEC && typeof SPEC.normalizeDanmakuAliases === 'function')
             ? SPEC.normalizeDanmakuAliases(rawOpts, function (depKey, canonKey) {
@@ -2940,9 +3264,17 @@
     }
 
     global.ScreenDanmaku = {
-        VERSION:            '6.0.0',
+        VERSION:            '6.1.0',
         CHANNEL:            CHANNEL,
         configure:          configure,
+        ui:                 createUiBuilder,
+        registerPreset:     registerPreset,
+        preset:             resolvePreset,
+        listPresets:        function () { return SURFACE_PRESETS.list() },
+        removePreset:       function (name) { return SURFACE_PRESETS.remove(name) },
+        registerWidget:     registerWidget,
+        listWidgets:        function () { return WIDGET_REGISTRY.list() },
+        removeWidget:       function (name) { return WIDGET_REGISTRY.remove(name) },
         bindBlock:          bindBlock,
         watchBlock:         bindBlock,
         unbindBlock:        unbindBlock,
