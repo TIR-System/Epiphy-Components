@@ -131,6 +131,23 @@
 ## 6. 工作流、文档同步、版本规范与协议合规
 
 1. **Git 规范与 MC 实例同步**：主仓库位于 `<repo-root>`；每次修改脚本、完成验证并提交至 `<repo-root>` 后，须同步将 `<repo-root>/kubejs` 更新到实机测试实例 `<mc-instance>/.minecraft/kubejs`（保持 `assets/`、`client_scripts/`、`server_scripts/`、`startup_scripts/` 等目录完全一致，勿误删实例内 `probe/`、用户自备版权音乐与运行数据）。重大重构或模块改动前须先提交当前可用基准；严禁将运行期生成的 `epiphy-data/`、`_backup_*/`、`probe/`、`*.log`、`*.tmp`、`*.bak`、`*.mp3`、版权音乐 `children_of_the_city.ogg`、`kubejs/config/epiphy_permissions/` 等提交进版本库。所有读写均须使用 **UTF-8** 编码。
+   - **强制 Git 提交信息规范（双语）**：
+     - **格式**：`<subject> [(<子类型/scope>)] <中文说明> | <English description>`（`<subject>` 后固定接 1 个空格；如有子类型/作用域，用英文半角括号 `(...)` 包裹后再接 1 个空格；message 主体必须**中文与英文各写一次**；复杂改动可在空行后的正文分别补写中文与英文要点；破坏性改动须在中英文中均标注 `[BREAKING]` 或 `BREAKING CHANGE:`）。
+     - **标准 `<subject>` 类型**：
+       - `feat`：新增功能 / New feature
+       - `fix`：缺陷修复 / Bug fix
+       - `refactor`：代码重构与结构收敛（不改变外部行为）/ Refactoring & structural convergence
+       - `perf`：性能优化 / Performance optimization
+       - `docs`：文档增改 / Documentation changes
+       - `style`：代码排版、格式化、空白与对齐（不影响逻辑）/ Formatting & code style
+       - `test`：单元测试与验证用例增改 / Adding or updating tests
+       - `chore`：仓库维护、配置清理与杂项任务 / Maintenance & chores
+       - `build`：构建系统、依赖或打包变更 / Build system or dependency changes
+       - `ci`：CI/CD 工作流与自动化配置 / CI/CD pipeline changes
+       - `revert`：回滚既有提交 / Revert a previous commit
+     - **示例**：
+       - 含子类型：`feat (renderer) 新增连续矩形合批与预设注册表 | Add contiguous rect batching and preset registry`
+       - 无子类型：`docs 补充 Git 双语提交规范 | Add bilingual Git commit convention`
 2. **文档与头部版本号同步规范（每次功能/架构改动必做）**：
    - **更新脚本头部注释与版本号**：修改任意 `.js` 组件涉及职责、依赖、降级策略或接口行为变化时，提交前必须检查并同步更新该脚本顶部注释的版本号（如 `EpiphyLog v1.2`、`EpiphyServerCore v2.5`、`EpiphyBlockTracker / EpiphyWorldOps v2.5`、`EpiphyPermissionValve v5.4`、`Epiphy2DSurface / ScreenDanmaku v6.1`、`Epiphy2DRenderer / ScreenDanmakuClient v6.1`、`EpiphyAudio v5.8`、`EpiphyAudioClient v5.6` 等）、职责列表与依赖说明；若涉及共享语义版本常量（如 `EpiphySpec` 中 `AUDIO_SEMVER` 与端侧兜底 `VERSION`），须双端同步递增（网络包 `PROTO_VERSION` 仅在不兼容包结构变更时递增）。不得删除或篡改与改动无关的已有注释。
    - **同步仓库文档**：须同步检查并更新 [`README.md`](README.md)、[`README_EN.md`](README_EN.md)（工程架构表、组件版本号、核心能力与指令/目录说明），以及本文档 [`README-LLM.md`](README-LLM.md) 第 4 节（已解决问题基线表打 `[x]`）与第 5 节（现行契约状态）。

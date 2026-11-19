@@ -222,6 +222,10 @@ npm test
 
 > **Note**: Node.js (V8) only validates pure JS logic and mocked contracts. In-game execution runs on a customized `kube-mods/rhino` interpreter; always consult [`docs/kube-mods-rhino-es5-es6-compatibility.md`](docs/kube-mods-rhino-es5-es6-compatibility.md) and verify in-game after syntax, Java interop, or rendering edits.
 
+### Git Commit Convention
+- **Format**: `<subject> [(<scope>)] <中文说明> | <English description>` (both Chinese and English summaries are required in every commit message).
+- **Standard `<subject>` types**: `feat` / `fix` / `refactor` / `perf` / `docs` / `style` / `test` / `chore` / `build` / `ci` / `revert` (see [`README-LLM.md`](README-LLM.md) Section 6 for full details).
+
 ---
 
 ## Authors & Roles

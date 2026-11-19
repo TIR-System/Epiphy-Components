@@ -222,6 +222,10 @@ npm test
 
 > **提示**：Node.js 沙盒（V8）仅能校验纯 JS 逻辑与模拟契约，无法替代游戏内 `kube-mods/rhino` 及双端渲染实测；提交语法、Java 互操作或渲染改动前请参考 [`docs/kube-mods-rhino-es5-es6-compatibility.md`](docs/kube-mods-rhino-es5-es6-compatibility.md) 并进服验证。
 
+### Git 提交规范
+- **格式**：`<subject> [(<子类型>)] <中文说明> | <English description>`（message 主体须中英文各写一次）。
+- **常用 `<subject>`**：`feat` / `fix` / `refactor` / `perf` / `docs` / `style` / `test` / `chore` / `build` / `ci` / `revert`（详见 [`README-LLM.md`](README-LLM.md) 第 6 节）。
+
 ---
 
 ## 作者与分工
