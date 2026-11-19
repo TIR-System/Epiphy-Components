@@ -2947,6 +2947,7 @@ function makeNodeBackedJavaSandbox(gameDir, extraClassResolver) {
     NodeJavaFile.prototype.getCanonicalPath = function () { return this._p }
     NodeJavaFile.prototype.getAbsolutePath = function () { return this._p }
     NodeJavaFile.prototype.delete = function () { if (fs.existsSync(this._p)) fs.unlinkSync(this._p); return true }
+    NodeJavaFile.prototype.lastModified = function () { return fs.existsSync(this._p) ? fs.statSync(this._p).mtimeMs : 0 }
     NodeJavaFile.prototype.renameTo = function (dst) { fs.renameSync(this._p, dst._p); return true }
     NodeJavaFile.prototype.listFiles = function () {
         if (!fs.existsSync(this._p)) return []
@@ -8755,6 +8756,30 @@ test('66. v6.2.2 strict corrupt lock + quarantine backup & HUD renderPriority/pr
     assert.ok(idxHi > idxLo, 'high-priority danmaku must draw AFTER low-priority danmaku (on top)')
     assert.ok(idxHud > idxHi, 'HUD progress bar must draw AFTER all danmaku at elevated Z layer z=1 (ops=' + JSON.stringify(drawOps) + ')')
     assert.ok(drawOps.slice(idxHi, idxHud).indexOf('FLUSH') >= 0, 'graphics.flush() must occur between danmaku layer and HUD layer')
+
+    // 4. Real FS rolling retention test for quarantine backups (maxQuarantineBackups = 3)
+    var os = require('os')
+    var qTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epiphy_qprune_'))
+    try {
+        var qSb = makeNodeBackedJavaSandbox(qTmpDir)
+        loadServerBase(qSb)
+        var qBase = qSb.global.EpiphyServerCore
+        var qFile = path.join(qTmpDir, 'permissions.json')
+        var qStore = qBase.openJsonStore(qFile, { backup: false, lockOnCorrupt: true, maxQuarantineBackups: 3 })
+        for (var qi = 1; qi <= 6; qi++) {
+            fs.writeFileSync(qFile, '{ corrupt_round_' + qi, 'utf8')
+            assert.strictEqual(qStore.load().status, 'corrupt')
+            assert.strictEqual(qStore.save({ round: qi }, { quarantine: true }), true)
+        }
+        var keptBackups = fs.readdirSync(qTmpDir).filter(function (fn) {
+            return fn.indexOf('permissions.json.corrupt.') === 0 && fn.slice(-4) === '.bak'
+        }).sort()
+        assert.strictEqual(keptBackups.length, 3, 'quarantine pruning must keep only the newest maxQuarantineBackups=3 files, got: ' + JSON.stringify(keptBackups))
+        assert.strictEqual(fs.readFileSync(path.join(qTmpDir, keptBackups[0]), 'utf8'), '{ corrupt_round_4')
+        assert.strictEqual(fs.readFileSync(path.join(qTmpDir, keptBackups[2]), 'utf8'), '{ corrupt_round_6')
+    } finally {
+        try { fs.rmSync(qTmpDir, { recursive: true, force: true }) } catch (eRm) { }
+    }
 })
 
 

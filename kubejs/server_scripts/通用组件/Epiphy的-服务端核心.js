@@ -1630,7 +1630,48 @@
         var stamp = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '_' +
             pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
         quarantineSeq++;
-        return normPath + '.corrupt.' + stamp + '_' + quarantineSeq + '.bak';
+        var seqStr = quarantineSeq < 10 ? ('00' + quarantineSeq) : (quarantineSeq < 100 ? ('0' + quarantineSeq) : String(quarantineSeq));
+        return normPath + '.corrupt.' + stamp + '_' + seqStr + '.bak';
+    }
+
+    // 滚动裁剪同文件名的历史损坏隔离备份，默认仅保留最近 N=5 份，防止长期跑服目录膨胀
+    function pruneQuarantineBackups(normPath, maxKeep, logger) {
+        if (!normPath || !(maxKeep > 0) || JAVA_FILE_CLASS == null) return 0;
+        var pruned = 0;
+        try {
+            var targetFile = new JAVA_FILE_CLASS(String(normPath));
+            var parentDir  = targetFile.getParentFile();
+            if (parentDir == null || !Boolean(parentDir.exists()) || !Boolean(parentDir.isDirectory())) return 0;
+            var baseName = String(targetFile.getName());
+            var prefix   = baseName + '.corrupt.';
+            var suffix   = '.bak';
+            var children = parentDir.listFiles();
+            if (children == null || children.length <= maxKeep) return 0;
+            var matches = [];
+            for (var i = 0; i < children.length; i++) {
+                var f = children[i];
+                if (f == null || !Boolean(f.isFile())) continue;
+                var fn = String(f.getName());
+                if (fn.indexOf(prefix) === 0 && fn.slice(-suffix.length) === suffix) {
+                    var mt = (typeof f.lastModified === 'function') ? (Number(f.lastModified()) || 0) : 0;
+                    matches.push({ file: f, name: fn, mtime: mt });
+                }
+            }
+            if (matches.length <= maxKeep) return 0;
+            matches.sort(function (a, b) {
+                if (a.mtime !== b.mtime) return a.mtime - b.mtime;
+                return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
+            });
+            var toDelete = matches.length - maxKeep;
+            for (var dIdx = 0; dIdx < toDelete; dIdx++) {
+                try {
+                    if (Boolean(matches[dIdx].file['delete']())) pruned++;
+                } catch (eDelOne) { }
+            }
+        } catch (ePrune) {
+            (logger || baseLogger).catchWarn('pruneQuarantineBackups', ePrune);
+        }
+        return pruned;
     }
 
     // 损坏文件现场隔离备份：先将磁盘原损坏文件完整保留至 <path>.corrupt.<stamp>.bak，确认成功才返回 ok:true
@@ -1650,6 +1691,12 @@
                     var dstP = JAVA_PATHS_CLASS.get(String(qPath));
                     JAVA_FILES_CLASS.write(dstP, rawBytes);
                     return { ok: true, backupPath: qPath, existed: true };
+                }
+                if (typeof JAVA_FILES_CLASS.readString === 'function' && JAVA_CHARSET_UTF8 != null) {
+                    var rawUtf = String(JAVA_FILES_CLASS.readString(srcP, JAVA_CHARSET_UTF8));
+                    if (writeTextAtomic(qPath, rawUtf, false, logger)) {
+                        return { ok: true, backupPath: qPath, existed: true };
+                    }
                 }
             } catch (eNioQ) {
                 (logger || baseLogger).catchWarn('quarantineCorruptFile:nio', eNioQ);
@@ -1691,10 +1738,13 @@
         var cfg           = isObjectLike(opts) ? opts : {};
         var normPath      = filePath ? normalizeSlashPath(filePath) : '';
         var effLogger     = cfg.logger || baseLogger;
-        var keepBackup    = cfg.backup !== false;
-        var lockOnCorrupt = cfg.lockOnCorrupt !== false;
-        var defaultData   = cfg.defaultData;
-        var corruptLocked = false;
+        var keepBackup           = cfg.backup !== false;
+        var lockOnCorrupt        = cfg.lockOnCorrupt !== false;
+        var maxQuarantineBackups = (cfg.maxQuarantineBackups !== undefined)
+            ? Math.max(0, Math.floor(Number(cfg.maxQuarantineBackups) || 0))
+            : 5;
+        var defaultData          = cfg.defaultData;
+        var corruptLocked        = false;
 
         function quarantineNow() {
             if (!normPath) return { ok: false, backupPath: null, existed: false };
@@ -1702,6 +1752,9 @@
             if (qRes.ok) {
                 corruptLocked = false;
                 if (qRes.existed && qRes.backupPath) {
+                    if (maxQuarantineBackups > 0) {
+                        pruneQuarantineBackups(normPath, maxQuarantineBackups, effLogger);
+                    }
                     effLogger.warn(
                         'jsonStore:quarantined:' + normPath,
                         '已将损坏的持久化原文件隔离备份至 "' + qRes.backupPath + '"，随后解除损坏保护锁并写入新数据。'

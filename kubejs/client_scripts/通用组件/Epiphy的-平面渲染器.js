@@ -5103,6 +5103,14 @@
     }
 
     var DRAW_ORDER_SCRATCH = []
+    // 层叠排序（2D 画家算法，先画的在底层、后画的覆盖在上层）：
+    //   1. 第一关键字 `renderPriority`（别名 `zIndex`，-10000~10000）：独立控制视觉 Z 叠层，跨层自动 flush + 推进 Z 偏移；
+    //      默认阶梯：普通屏幕弹幕 0 < 屏幕声明式 HUD 50 < 容器 GUI 100 < 槽位 200。
+    //   2. 第二关键字 `priority`（0~10）：本职是重要程度 / 清除过滤与满额淘汰权重；仅在同 `renderPriority` 未显式分层时
+    //      按升序作为平局兜底（重要元素默认压住普通弹幕）。
+    //   用法示例：
+    //     - 重要但需垫在所有弹幕最底层：{ priority: 'critical', zIndex: -10 }（抗 clear、免熔断，绘制在 0 层之下）
+    //     - 低优先但临时浮于 HUD 之上：{ priority: 'low', zIndex: 80 }
     function compareOverlayDrawPriority(a, b) {
         var rpa = (a && a.renderPriority != null) ? Number(a.renderPriority) : 0
         var rpb = (b && b.renderPriority != null) ? Number(b.renderPriority) : 0
