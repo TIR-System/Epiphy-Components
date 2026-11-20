@@ -1,7 +1,6 @@
 // ============================================================================
 //  通用平面渲染与屏幕弹幕组件 —— 客户端渲染引擎 (Epiphy2DRenderer / ScreenDanmakuClient v6.2)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
-//  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 <repo-root> 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-平面渲染器.js
 //  配套服务端组件：
@@ -57,13 +56,20 @@
         })
     }
 
+    // 帧耗时预算单一事实源（对齐 docs/rendering-subsystem-roadmap.md §6.2，由 Test 68 锁死防漂移）
+    var PERF_BUDGET = {
+        singlePanelMs:     0.3,
+        highLoadFrameMs:   2.5,
+        emergencyCutoffMs: 45.0
+    }
+
     // 统一配置常量表（消除散落魔法数）
     var CONFIG = {
         maxOverlays:                  120,
         maxPlayerOverlaysPerNamespace: 16,    // 单个玩家指令命名空间 (u:<uuid>) 同屏最多保留条数
         maxPendingActions:            256,    // 未消费入队动作上限（防单帧包洪泛 OOM）
         maxPendingPerFrame:           64,     // 单帧最多消费入队动作数
-        frameBudgetMs:                45.0,   // 单帧硬防卡死熔断上限 (ms，正常高特效帧不触及；仅当超重负载累计超过阈值时截断本帧尾部条目防客户端冻结，不降级单条特效本身)
+        frameBudgetMs:                PERF_BUDGET.emergencyCutoffMs, // 单帧硬防卡死熔断上限 (ms，正常高特效帧不触及；仅当超重负载累计超过阈值时截断本帧尾部条目防客户端冻结，不降级单条特效本身)
         maxTitleChars:                2048,   // 客户端主标题安全截断长度
         maxSubChars:                  1024,   // 客户端副标题安全截断长度
         maxCursorChars:               16,     // 打字机光标安全截断长度
@@ -100,7 +106,7 @@
         slotRenderPriority:    200,    // 容器槽位覆盖层默认渲染层级
         perfLogEnabled:        false,  // 默认关闭性能日志写盘（按需通过 /epiphy debug renderperf on 或 setPerfLog(true) 开启，且仅在 ClientEvents.tick 节流落盘，绝不在渲染线程写盘）
         perfLogIntervalMs:     10000,  // 开启性能日志时的常规最小刷盘间隔 (ms)
-        perfLogAlertMs:        2.5     // 超高压帧预算告警线 (ms)，开启性能日志且超限时允许最快每 2s 提前刷新快照
+        perfLogAlertMs:        PERF_BUDGET.highLoadFrameMs // 超高压帧预算告警线 (ms)，开启性能日志且超限时允许最快每 2s 提前刷新快照
     }
 
     var PI         = 3.141592653589793
@@ -334,8 +340,8 @@
         bucket.lastMs = dtMs
         bucket.emaMs  = (bucket.frames === 1) ? dtMs : (bucket.emaMs * 0.85 + dtMs * 0.15)
         if (dtMs > bucket.maxMs) bucket.maxMs = dtMs
-        if (dtMs > 0.3) bucket.over03Count++
-        if (dtMs > 2.5) bucket.over25Count++
+        if (dtMs > PERF_BUDGET.singlePanelMs) bucket.over03Count++
+        if (dtMs > PERF_BUDGET.highLoadFrameMs) bucket.over25Count++
     }
 
     function resolveClientPerfLogPath() {
@@ -376,8 +382,8 @@
             modernUiActive: Boolean(FRAME_BATCH_CTX != null && FRAME_BATCH_CTX.muiActive),
             batchFailed:    Boolean(BATCH_FAILED),
             budgetTargetsMs: {
-                singlePanel:     0.3,
-                highLoadFrame:   2.5,
+                singlePanel:     PERF_BUDGET.singlePanelMs,
+                highLoadFrame:   PERF_BUDGET.highLoadFrameMs,
                 emergencyCutoff: CONFIG.frameBudgetMs
             },
             budgetTrips: PERF_STATS.budgetTrips,

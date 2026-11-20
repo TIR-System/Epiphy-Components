@@ -213,7 +213,9 @@
 
 ### 4.1 `PROTO_VERSION = 6` 顶层包与节点 Schema 规范表
 
-#### (A) 顶层信封（Envelope Fields）
+> **单一事实源声明（SSOT）**：完整的机器可读线协议全量 79 字段契约以 [`docs/proto_v6_schema.json`](proto_v6_schema.json) 为**唯一权威定义**（含继承自 `v5` 的富文本排版、描边与 `charShake*` 细节参数）。下方 §4.1 表格为面向人类的**核心结构字段导览**，测试套件 Test 68 强制锁定「§4.1 导览字段 ⊆ `proto_v6_schema.json`」与官方别名 1:1 对齐。
+
+#### (A) 顶层信封（核心结构字段导览）
 | 主标准名 (Canonical) | 显式高频别名（至多 1 个） | 类型 | 取值范围 / 枚举 | 默认值 | 单位 | 说明 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `proto` | - | `number` | `5 \| 6` | `6` | - | 协议版本号（`5` 经 `adaptV5ToV6` 自动转 `6`） |
@@ -237,11 +239,13 @@
 | `fadeStyle` | `【别名: fade】` | `string` | `'shrink' \| 'char_first' \| 'char_last' \| 'blink' \| 'shatter' \| 'blur' \| 'split' \| 'random'` | `'shrink'` | - | 退场动画风格 |
 | `vars` | - | `object` | `Record<string, number \| boolean \| string>`（单值字符串 `<= 256`） | `{}` | 数值 / 状态 | 服务端下发的状态变量字典 |
 | `tracks` | - | `object` | `Record<string, TrackSpec>`（最多 16 个通道） | `{}` | - | 客户端插值通道定义（`lerp` / `trail` / `impulse`） |
+| `clip` | - | `object` | `{ dir, ratio, mode }` | `null` | - | 顶层面板级比例裁剪规则 |
 | `nodes` | `【别名: layers】` | `array` | `NodeSpec[]`（总权重 `cost <= maxCost`） | `[]` | - | 声明式 2D 图元树根节点列表 |
 | `targetGui` | - | `object` | `{ screenClass?: string, titleMatch?: string }` | `null` | - | `surface === 'gui'` 时的目标界面匹配条件 |
 | `replaceTextures` | `【别名: texMap】` | `object` | `Record<string, string>` | `{}` | - | `surface === 'gui'` 时会话级原贴图重映射表 |
 | `bgNodes` | `【别名: bg】` | `array` | `NodeSpec[]` | `[]` | - | `surface === 'gui'` 时背景夹心层图元（底图后/槽位前） |
 | `fgNodes` | `【别名: fg】` | `array` | `NodeSpec[]` | `[]` | - | `surface === 'gui'` 时前景装饰层图元（槽位后/提示前） |
+| `slotMatch` | - | `object` | `{ slotIndex?, itemId?, containerClass? }` | `null` | - | `surface === 'slot'` 时的目标容器槽位匹配条件 |
 | `worldPos` | `【别名: at】` | `number[3]` | `[x, y, z]` | `null` | 米 (`m`) | `surface === 'world_plane'` 时的世界三维坐标 |
 | `billboard` | `【别名: facing】` | `string` | `'center' \| 'vertical' \| 'fixed'` | `'vertical'` | - | `surface === 'world_plane'` 时的朝向跟随模式 |
 | `seeThrough` | `【别名: xray】` | `boolean` | `true \| false` | `false` | - | `surface === 'world_plane'` 时是否穿透方块遮挡 |
@@ -319,7 +323,7 @@
 
 ## 6. 测试验证方案与性能帧预算（Verification & Performance Budget）
 
-所有新增能力必须同步扩展 [`tests/pure_functions.test.js`](../tests/pure_functions.test.js)（当前基线 **68/68 passed**）并通过 [`scripts/rhino-check.js`](../scripts/rhino-check.js) 校验（自动接入 `npm test`；有本地 `rhino-forge` Jar 时执行真实 `Context.compileString`，缺失时自动降级为本地语义与语法检查），并在实机通过 `epiphy-data/logs/client_render_perf.json` 核验帧耗时预算：
+所有新增能力必须同步扩展 [`tests/pure_functions.test.js`](../tests/pure_functions.test.js)（当前基线 **69/69 passed**，首次执行前须先 `npm install` 安装 `acorn`）并通过 [`scripts/rhino-check.js`](../scripts/rhino-check.js) 校验（自动接入 `npm test`；缺 `acorn` 直接硬失败，有本地 `rhino-forge` Jar 与 JDK 时执行真实 `Context.compileString`，仅 Jar/JDK 缺失时降级为 `local-acorn-ast`），并在实机通过 `/epiphy debug renderperf on|dump` 输出 `epiphy-data/logs/client_render_perf.json` 核验帧耗时预算：
 
 ### 6.1 沙盒单元测试必测项（`npm test` 新增用例清单）
 1. **`adaptV5ToV6` 无损往返与等价性测试**：遍历全部 45 个 `v5` 字段输入，断言转换后的 `v6` 包在顶层 Envelope 与 `nodes[0]` 上数值 100% 精确对齐，且 `ScreenDanmakuClient` 对 `proto: 5` 与 `proto: 6` 包产生完全相同的内部 Overlay 状态与渲染调用序列；

@@ -9054,13 +9054,31 @@ test('68. Renderer per-phase perf stats (off by default, tick-only disk flush, /
     assert.deepStrictEqual(schema.officialAliases.envelope, Object.assign({}, Spec.OFFICIAL_DANMAKU_ALIASES), 'schema envelope aliases must match EpiphySpec.OFFICIAL_DANMAKU_ALIASES')
     assert.deepStrictEqual(schema.officialAliases.node, Object.assign({}, Spec.OFFICIAL_NODE_ALIASES), 'schema node aliases must match EpiphySpec.OFFICIAL_NODE_ALIASES')
 
-    // 2. Roadmap §4.1 canonical fields must exist in schema.envelope
-    var sec41 = roadmapText.slice(roadmapText.indexOf('#### (A) 顶层信封'), roadmapText.indexOf('#### (B) 图元节点'))
+    // 2. Roadmap §4.1 canonical core fields must exist in schema.envelope (with explicit slice & row-count floor)
+    var sec41Start = roadmapText.indexOf('#### (A) 顶层信封')
+    var sec41End   = roadmapText.indexOf('#### (B) 图元节点')
+    assert.ok(sec41Start >= 0 && sec41End > sec41Start, 'roadmap §4.1 headings must be present and ordered')
+    var sec41 = roadmapText.slice(sec41Start, sec41End)
     var rowRe = /^\|\s*`([a-zA-Z][a-zA-Z0-9_]*)`/gm
     var rm
+    var sec41Rows = 0
     while ((rm = rowRe.exec(sec41)) !== null) {
+        sec41Rows++
         assert.ok(schema.envelope[rm[1]] != null, 'roadmap §4.1 field `' + rm[1] + '` must be defined in docs/proto_v6_schema.json')
     }
+    assert.ok(sec41Rows >= 25, 'roadmap §4.1 parser must match >= 25 core envelope rows, got ' + sec41Rows)
+
+    // 2b. Roadmap §6.2 frame budget targets must stay in lockstep with Epiphy2DRenderer PERF_BUDGET
+    var sec62Start = roadmapText.indexOf('### 6.2 客户端帧耗时预算')
+    assert.ok(sec62Start >= 0, 'roadmap §6.2 frame budget section must exist')
+    var sec62 = roadmapText.slice(sec62Start, sec62Start + 700)
+    var mSingle = /<=\s*([0-9]+(?:\.[0-9]+)?)\s*ms/.exec(sec62)
+    var mHigh   = /增量\s*\*\*`?<=\s*([0-9]+(?:\.[0-9]+)?)\s*ms/.exec(sec62)
+    var mCutoff = /现行\s*`([0-9]+(?:\.[0-9]+)?)\s*ms`/.exec(sec62)
+    assert.ok(mSingle && mHigh && mCutoff, 'roadmap §6.2 must declare singlePanel, highLoadFrame & emergencyCutoff ms targets')
+    assert.strictEqual(st.budgetTargetsMs.singlePanel,     Number(mSingle[1]), 'singlePanel budget must match roadmap §6.2')
+    assert.strictEqual(st.budgetTargetsMs.highLoadFrame,   Number(mHigh[1]),   'highLoadFrame budget must match roadmap §6.2')
+    assert.strictEqual(st.budgetTargetsMs.emergencyCutoff, Number(mCutoff[1]), 'emergencyCutoff budget must match roadmap §6.2')
 
     function validateNodeConformance(node, ctxLabel) {
         assert.ok(node && typeof node === 'object', ctxLabel + ': node must be object')

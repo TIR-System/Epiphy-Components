@@ -64,15 +64,15 @@ A collection of shared server/client infrastructure modules, audiovisual present
 
 | Layer | Modules | Stage / Priority | Primary Exports / Role |
 | :--- | :--- | :--- | :--- |
-| **L1 Cross-Side Spec** | `Epiphy的-Spec与通用工具.js` | `startup` / `1200` | `EpiphySpec`, `EpiphyProtocol` |
-| **L1 Content Reg** | `创造模式栏-epiphy.js` | `startup` / `1000` | `EpiphyCreativeTab` (`epiphy:stuff`) |
+| **L1 Cross-Side Spec** | `Epiphy的-Spec与通用工具.js` | `startup` / `1200` | `EpiphySpec v2.6`, `EpiphyProtocol` |
+| **L1 Content Reg** | `创造模式栏-epiphy.js` | `startup` / `1000` | `EpiphyCreativeTab v1.0` (`epiphy:stuff`) |
 | **L1 Content Reg** | Hidden Items / Test Block / Unstable Table | `startup` | Custom items, test block & 5-stage blocks |
 | **L2 Infrastructure** | `Epiphy的-日志.js` | `server` / `1100` | `EpiphyLog v1.2` (rate-limit, `once`, `catchWarn`, external `.log` sink) |
 | **L2 Infrastructure** | `Epiphy的-服务端核心.js` | `server` / `1080` | `EpiphyServerCore / EpiphyServerBase v2.6` (accessors, world/entity/Curios helpers, `openJsonStore` stateful persistence & `.bak` recovery, `epiphy-data/`, world fork, DSL) |
 | **L2 Infrastructure** | `Epiphy的-方块与区块组件.js` | `server` / `1050` | `EpiphyBlockTracker / EpiphyWorldOps v2.5` (section scanning, persist dispatch, cost-gated fluid purge, terrain ops & preset registry) |
 | **L2 Access Control** | `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v5.4` (`/epiphy`, 3-state scopes, command-block mutation lock, tombstones, fail-closed auth) |
-| **L2 Diagnostics** | `Epiphy的-调试组件.js` | `server` / `950` | `EpiphyDebug v1` (`/epiphy debug`) |
-| **L2 Standalone Fix** | `Epiphy的-基础bug修复.js` | `server` / `900` | `EpiphyBugfix v1` (logout HP restoration) |
+| **L2 Diagnostics** | `Epiphy的-调试组件.js` | `server` / `950` | `EpiphyDebug v1.0` (`/epiphy debug`, including `renderperf` client perf logger control) |
+| **L2 Standalone Fix** | `Epiphy的-基础bug修复.js` | `server` / `900` | `EpiphyBugfix v1.0` (logout HP restoration) |
 | **L3 Presentation** | `Epiphy的-平面渲染组件.js` | `server` / `500` | `Epiphy2DSurface / ScreenDanmaku v6.2` (2D scene graph, grouped deep-merge options, `channel`/`slot`, `id`-first `ui()` DSL, preset/widget registries, built-in `'progress_bar'` preset & danmaku scheduler; internal logic not for cross-module reuse) |
 | **L3 Presentation** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.8` (standalone scheduler with preset registry; internal logic not for cross-module reuse) |
 | **L3 Gameplay** | `拆解台-混沌殉爆.v18.js` | `server` / `10` | Meltdown progression (hard-requiring Core/WorldOps/Danmaku; persisted countdown, native 2D preset HUD + `channel`/`slot` incremental `patch`, anti-spoof relic & mainhand pickaxe check) |
@@ -215,12 +215,17 @@ Epiphy的-音频播放器.js:
    - The third-party commercial track `children_of_the_city.ogg` is intentionally omitted from this public repository (and git-ignored; see [`docs/audio-assets.md`](docs/audio-assets.md)). [`sounds.json`](kubejs/assets/epiphy/sounds.json) and the test block script retain the `epiphy:children_of_the_city` sound event slot for optional user-supplied audio without breaking the block's danmaku/placement behavior when absent.
    - Only runtime-loaded `.ogg` sound effects are included; redundant `.mp3` sources, leftover `.bak` backups, and KubeJS default templates/IDE configs (`example_*`, `kubejs/README.txt`, `kubejs/config/*.properties`, `probejs.json`, `jsconfig.json`) were removed so merging `kubejs/` will not overwrite existing modpack configs.
 
-### Running Sandbox Unit Tests
+### Running Sandbox Unit Tests & Rhino Checks
 ```bash
+npm install
 npm test
 ```
 
-> **Note**: Node.js (V8) only validates pure JS logic and mocked contracts. In-game execution runs on a customized `kube-mods/rhino` interpreter; always consult [`docs/kube-mods-rhino-es5-es6-compatibility.md`](docs/kube-mods-rhino-es5-es6-compatibility.md) and verify in-game after syntax, Java interop, or rendering edits.
+> **Notes**:
+> - Run `npm install` first on a fresh clone to install the zero-dependency `acorn` devDependency; `scripts/rhino-check.js` fails fast (`exit 1`) if `acorn` is missing rather than downgrading to a weak check.
+> - `npm test` runs `node tests/pure_functions.test.js` (V8 sandbox tests + `docs/proto_v6_schema.json` protocol conformance) followed by `node scripts/rhino-check.js` (mandatory `acorn` AST semantic-drift guard + real Rhino / `local-acorn-ast` syntax validation).
+> - If a JDK and `rhino-forge-*.jar` are available locally, point `RHINO_JAR`, `MC_MODS_DIR`, or git-ignored `.rhino-local.json` to them for real `Context.compileString` verification (pass `--require-rhino` to forbid fallback); otherwise it falls back to `local-acorn-ast`.
+> - For rendering or frame-budget changes, verify in-game and toggle `/epiphy debug renderperf on|dump` to inspect `epiphy-data/logs/client_render_perf.json`.
 
 ### Git Commit Convention
 - **Format**: `<subject> [(<scope>)] <中文说明> | <English description>` (both Chinese and English summaries are required in every commit message).

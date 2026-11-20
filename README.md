@@ -64,15 +64,15 @@
 
 | 架构层 | 核心模块 | 阶段 / Priority | 核心导出 / 职责 |
 | :--- | :--- | :--- | :--- |
-| **L1 跨端契约** | `Epiphy的-Spec与通用工具.js` | `startup` / `1200` | `EpiphySpec`、`EpiphyProtocol` |
-| **L1 内容注册** | `创造模式栏-epiphy.js` | `startup` / `1000` | `EpiphyCreativeTab` (`epiphy:stuff`) |
+| **L1 跨端契约** | `Epiphy的-Spec与通用工具.js` | `startup` / `1200` | `EpiphySpec v2.6`、`EpiphyProtocol` |
+| **L1 内容注册** | `创造模式栏-epiphy.js` | `startup` / `1000` | `EpiphyCreativeTab v1.0` (`epiphy:stuff`) |
 | **L1 内容注册** | 隐藏物品 / 测试方块 / 失稳拆解台 | `startup` | 物品、测试方块与 5 阶段失稳方块 |
 | **L2 基础设施** | `Epiphy的-日志.js` | `server` / `1100` | `EpiphyLog v1.2`（限频、去重、`catchWarn`、外部文本日志） |
 | **L2 基础设施** | `Epiphy的-服务端核心.js` | `server` / `1080` | `EpiphyServerCore / EpiphyServerBase v2.6`（访问器、世界/实体/Curios工具、`openJsonStore` 状态化持久化与 `.bak` 自愈、`epiphy-data/`、自动分叉、DSL） |
 | **L2 基础设施** | `Epiphy的-方块与区块组件.js` | `server` / `1050` | `EpiphyBlockTracker / EpiphyWorldOps v2.5`（区块段扫描、持久化派发、三级开销门控流体剥离、地形批处理与向上预设注册） |
 | **L2 安全控制** | `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v5.4`（`/epiphy`、三态分层权限域、命令方块修改锁、墓碑、按名备用模式） |
-| **L2 诊断维护** | `Epiphy的-调试组件.js` | `server` / `950` | `EpiphyDebug v1`（`/epiphy debug`） |
-| **L2 独立修复** | `Epiphy的-基础bug修复.js` | `server` / `900` | `EpiphyBugfix v1`（退出 HP 服务端恢复） |
+| **L2 诊断维护** | `Epiphy的-调试组件.js` | `server` / `950` | `EpiphyDebug v1.0`（`/epiphy debug`，含 `renderperf` 客户端性能打点开关） |
+| **L2 独立修复** | `Epiphy的-基础bug修复.js` | `server` / `900` | `EpiphyBugfix v1.0`（退出 HP 服务端恢复） |
 | **L3 业务调度** | `Epiphy的-平面渲染组件.js` | `server` / `500` | `Epiphy2DSurface / ScreenDanmaku v6.2`（2D 图元树、分组深合并、`channel`/`slot`、`id` 前置 `ui()` DSL、预设与自定义复合单元注册、内置 `'progress_bar'` 预设与弹幕调度，禁止跨模块直接复用内部实现） |
 | **L3 业务调度** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.8`（独立调度模块，支持向上预设注册，禁止跨模块直接复用内部实现） |
 | **L3 玩法脚本** | `拆解台-混沌殉爆.v18.js` | `server` / `10` | 混沌殉爆事件链（强前置核心/世界/弹幕组件，含持久化、原生 2D 遥测预设与 `channel`/`slot` 自动增量 `patch`、防伪造遗物与主手钻石镐校验） |
@@ -215,12 +215,17 @@ Epiphy的-音频播放器.js:
    - 第三方商业版权曲目 `children_of_the_city.ogg` 未随仓库分发（已在 `.gitignore` 中忽略，详见 [`docs/audio-assets.md`](docs/audio-assets.md)）；[`sounds.json`](kubejs/assets/epiphy/sounds.json) 与测试方块脚本仍保留 `epiphy:children_of_the_city` 槽位，缺省时不崩溃，本地如需测试 BGM 可自行补放同名 `.ogg` 或改用其他音效 ID。
    - 仅保留游戏实际读取的 `.ogg` 音效，已移除冗余 `.mp3` 源文件、历史 `.bak` 备份文件，以及 KubeJS 默认占位资源/本地工具配置（`example_*`、`kubejs/README.txt`、`kubejs/config/*.properties`、`probejs.json`、`jsconfig.json`），避免合并 `kubejs/` 时覆盖既有整合包配置。
 
-### 本地沙盒单元测试
+### 本地沙盒单元测试与 Rhino 语法校验
 ```bash
+npm install
 npm test
 ```
 
-> **提示**：Node.js 沙盒（V8）仅能校验纯 JS 逻辑与模拟契约，无法替代游戏内 `kube-mods/rhino` 及双端渲染实测；提交语法、Java 互操作或渲染改动前请参考 [`docs/kube-mods-rhino-es5-es6-compatibility.md`](docs/kube-mods-rhino-es5-es6-compatibility.md) 并进服验证。
+> **说明**：
+> - 首次拉取仓库后须先执行 `npm install`（安装零传递依赖的 `acorn` 开发依赖）；未安装 `acorn` 时 `scripts/rhino-check.js` 会直接报错退出，拒绝弱校验放行。
+> - `npm test` 依次运行 `node tests/pure_functions.test.js`（Node V8 沙盒单测 + `docs/proto_v6_schema.json` 独立协议 Conformance 校验）与 `node scripts/rhino-check.js`（强制 `acorn` AST 语义偏移守卫 + 真实 Rhino / `local-acorn-ast` 编译校验）。
+> - 如本机已安装 JDK 与 `rhino-forge-*.jar`，可通过环境变量 `RHINO_JAR`、`MC_MODS_DIR` 或被 `.gitignore` 忽略的 `.rhino-local.json` 启用真实 `Context.compileString` 编译核验（传入 `--require-rhino` 可强制要求真 Rhino）；未配置时自动降级为 `local-acorn-ast` 校验。
+> - 涉及实机渲染或帧耗时变更后，仍须进服并通过 `/epiphy debug renderperf on|dump` 输出 `epiphy-data/logs/client_render_perf.json` 核验。
 
 ### Git 提交规范
 - **格式**：`<subject> [(<子类型>)] <中文说明> | <English description>`（message 主体须中英文各写一次）。
