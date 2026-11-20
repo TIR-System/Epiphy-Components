@@ -13,8 +13,8 @@
     "url": "https://github.com/TIR-System/Epiphy-Components/issues"
   },
   "scripts": {
-    "test": "node tests/pure_functions.test.js && node scripts/rhino-check.js",
-    "test:unit": "node tests/pure_functions.test.js",
+    "test": "node tests/run.js && node scripts/rhino-check.js",
+    "test:unit": "node tests/run.js",
     "test:rhino": "node scripts/rhino-check.js",
     "test:rhino-local": "node scripts/rhino-check.js --force-local"
   },
