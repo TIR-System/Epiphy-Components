@@ -5,8 +5,8 @@
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-平面渲染器.js
 //  配套服务端组件：
-//    - kubejs/server_scripts/通用组件/Epiphy的-平面渲染组件.js（服务端调度器 Epiphy2DSurface / ScreenDanmaku v6.2）
-//    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀 EpiphyPermissionValve v5.4）
+//    - kubejs/server_scripts/通用组件/Epiphy的-平面渲染组件.js（服务端调度器 Epiphy2DSurface >= 6.0.0, <= 6.99.x，协议 v6 向下兼容 v5）
+//    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀 EpiphyPermissionValve >= 5.0.0, <= 5.99.x）
 //
 //  依赖与缺失降级：
 //    - 可选前置：kubejs/startup_scripts/通用组件/Epiphy的-Spec与通用工具.js (EpiphySpec / EpiphyProtocol, priority: 1200)
@@ -47,7 +47,15 @@
         } catch (eWarnInit) { }
     }
     var CHANNEL       = (PROTO && PROTO.DANMAKU_CHANNEL) || 'epiphy:screen_danmaku'
+    var DEBUG_CHANNEL = 'epiphy:render_debug'
     var PROTO_VERSION = (PROTO && PROTO.DANMAKU_PROTO_VERSION) || 6
+    var VERSION       = '6.2.0'
+    if (SPEC && typeof SPEC.checkDependencyVersion === 'function') {
+        SPEC.checkDependencyVersion('EpiphySpec', SPEC, '2.5.0', '2.99.99', {
+            caller: 'Epiphy2DRenderer',
+            onWarn: function (msg) { try { console.warn(msg) } catch (eW) { } }
+        })
+    }
 
     // 统一配置常量表（消除散落魔法数）
     var CONFIG = {
@@ -89,7 +97,10 @@
         screenRenderPriority:  0,      // 屏幕弹幕默认渲染层级（先画，处于底层）
         hudRenderPriority:     50,     // 屏幕声明式图形 HUD/进度条默认渲染层级（默认高于弹幕不被覆盖、低于容器 GUI）
         guiRenderPriority:     100,    // GUI 覆盖层默认渲染层级（默认高于弹幕与 HUD 不被覆盖，可独立调整）
-        slotRenderPriority:    200     // 容器槽位覆盖层默认渲染层级
+        slotRenderPriority:    200,    // 容器槽位覆盖层默认渲染层级
+        perfLogEnabled:        false,  // 默认关闭性能日志写盘（按需通过 /epiphy debug renderperf on 或 setPerfLog(true) 开启，且仅在 ClientEvents.tick 节流落盘，绝不在渲染线程写盘）
+        perfLogIntervalMs:     10000,  // 开启性能日志时的常规最小刷盘间隔 (ms)
+        perfLogAlertMs:        2.5     // 超高压帧预算告警线 (ms)，开启性能日志且超限时允许最快每 2s 提前刷新快照
     }
 
     var PI         = 3.141592653589793
@@ -275,6 +286,176 @@
     }
 
     var RENDERER_EPOCH_MS = monotonicNowMs()
+
+    // ------------------------------------------------------------------------
+    // 分 Phase 单帧耗时自度量与 epiphy-data 低频节流快照（零热路径分配、空屏 0 开销）
+    // ------------------------------------------------------------------------
+    function makePerfBucket() {
+        return { frames: 0, items: 0, lastMs: 0, emaMs: 0, maxMs: 0, over03Count: 0, over25Count: 0 }
+    }
+
+    function resetPerfBucket(b) {
+        b.frames = 0; b.items = 0; b.lastMs = 0; b.emaMs = 0; b.maxMs = 0; b.over03Count = 0; b.over25Count = 0
+    }
+
+    function clonePerfBucket(b) {
+        return {
+            frames:      b.frames,
+            items:       b.items,
+            lastMs:      Number(b.lastMs.toFixed(4)),
+            emaMs:       Number(b.emaMs.toFixed(4)),
+            maxMs:       Number(b.maxMs.toFixed(4)),
+            over03Count: b.over03Count,
+            over25Count: b.over25Count
+        }
+    }
+
+    var PERF_STATS = {
+        paint_total:        makePerfBucket(),
+        screen_text:        makePerfBucket(),
+        screen_hud:         makePerfBucket(),
+        gui:                makePerfBucket(),
+        slot:               makePerfBucket(),
+        budgetTrips:        0,
+        lastFlushMs:        0,
+        pendingFlush:       false,
+        pendingFlushUrgent: false,
+        perfLogPath:        '',
+        lastWriteErr:       ''
+    }
+
+    var CLIENT_KUBEJS_PATHS = null
+    var clientKubeJsPathsProbed = false
+
+    function recordPerfSample(bucket, dtMs, itemCount) {
+        if (bucket == null || !isFinite(dtMs) || dtMs < 0) return
+        bucket.frames++
+        bucket.items += (itemCount || 0)
+        bucket.lastMs = dtMs
+        bucket.emaMs  = (bucket.frames === 1) ? dtMs : (bucket.emaMs * 0.85 + dtMs * 0.15)
+        if (dtMs > bucket.maxMs) bucket.maxMs = dtMs
+        if (dtMs > 0.3) bucket.over03Count++
+        if (dtMs > 2.5) bucket.over25Count++
+    }
+
+    function resolveClientPerfLogPath() {
+        if (PERF_STATS.perfLogPath) return PERF_STATS.perfLogPath
+        if (!clientKubeJsPathsProbed) {
+            clientKubeJsPathsProbed = true
+            CLIENT_KUBEJS_PATHS = loadJavaClass('dev.latvian.mods.kubejs.KubeJSPaths', true)
+        }
+        var gameDir = ''
+        if (CLIENT_KUBEJS_PATHS != null) {
+            try {
+                var dirObj = CLIENT_KUBEJS_PATHS.DIRECTORY
+                if (dirObj != null) {
+                    var par = (typeof dirObj.toAbsolutePath === 'function')
+                        ? dirObj.toAbsolutePath().normalize().getParent()
+                        : ((typeof dirObj.getParent === 'function') ? dirObj.getParent() : null)
+                    if (par != null) gameDir = String(par).replace(/\\/g, '/').replace(/\/+$/, '')
+                }
+            } catch (eDir) { }
+            if (!gameDir) {
+                try {
+                    if (CLIENT_KUBEJS_PATHS.GAMEDIR != null) {
+                        gameDir = String(CLIENT_KUBEJS_PATHS.GAMEDIR).replace(/\\/g, '/').replace(/\/+$/, '')
+                    }
+                } catch (eGd) { }
+            }
+        }
+        PERF_STATS.perfLogPath = (gameDir ? (gameDir + '/') : '') + 'epiphy-data/logs/client_render_perf.json'
+        return PERF_STATS.perfLogPath
+    }
+
+    function getRendererPerfStats() {
+        return {
+            version:        VERSION,
+            protoVersion:   PROTO_VERSION,
+            activeOverlays: activeOverlays.length,
+            pendingActions: pendingActions.length,
+            modernUiActive: Boolean(FRAME_BATCH_CTX != null && FRAME_BATCH_CTX.muiActive),
+            batchFailed:    Boolean(BATCH_FAILED),
+            budgetTargetsMs: {
+                singlePanel:     0.3,
+                highLoadFrame:   2.5,
+                emergencyCutoff: CONFIG.frameBudgetMs
+            },
+            budgetTrips: PERF_STATS.budgetTrips,
+            phases: {
+                paint_total: clonePerfBucket(PERF_STATS.paint_total),
+                screen_text: clonePerfBucket(PERF_STATS.screen_text),
+                screen_hud:  clonePerfBucket(PERF_STATS.screen_hud),
+                gui:         clonePerfBucket(PERF_STATS.gui),
+                slot:        clonePerfBucket(PERF_STATS.slot)
+            },
+            caches: {
+                sharedSeq:    SHARED_TEXT_SEQ_CACHE.size(),
+                transientSeq: TRANSIENT_TEXT_SEQ_CACHE.size(),
+                glyphWidth:   GLYPH_WIDTH_CACHE.size(),
+                textureExist: TEXTURE_EXIST_CACHE.size()
+            },
+            perfLogEnabled: Boolean(CONFIG.perfLogEnabled),
+            perfLogPath:    PERF_STATS.perfLogPath || resolveClientPerfLogPath(),
+            lastWriteErr:   PERF_STATS.lastWriteErr
+        }
+    }
+
+    function resetRendererPerfStats() {
+        resetPerfBucket(PERF_STATS.paint_total)
+        resetPerfBucket(PERF_STATS.screen_text)
+        resetPerfBucket(PERF_STATS.screen_hud)
+        resetPerfBucket(PERF_STATS.gui)
+        resetPerfBucket(PERF_STATS.slot)
+        PERF_STATS.budgetTrips        = 0
+        PERF_STATS.lastFlushMs        = 0
+        PERF_STATS.pendingFlush       = false
+        PERF_STATS.pendingFlushUrgent = false
+        PERF_STATS.lastWriteErr       = ''
+        return getRendererPerfStats()
+    }
+
+    function flushClientPerfSnapshot(nowMs) {
+        var targetPath = resolveClientPerfLogPath()
+        var payload = getRendererPerfStats()
+        payload.updatedAtMs = Math.round(nowMs || monotonicNowMs())
+        try {
+            if (typeof JsonIO !== 'undefined' && JsonIO != null && typeof JsonIO.write === 'function') {
+                if (CLIENT_KUBEJS_PATHS != null && typeof CLIENT_KUBEJS_PATHS.dir === 'function') {
+                    var slashIdx = targetPath.lastIndexOf('/')
+                    if (slashIdx > 0) {
+                        try { CLIENT_KUBEJS_PATHS.dir(targetPath.slice(0, slashIdx)) } catch (eMk) { }
+                    }
+                }
+                JsonIO.write(targetPath, payload)
+                PERF_STATS.lastWriteErr = ''
+                return true
+            }
+        } catch (ePerfW) {
+            PERF_STATS.lastWriteErr = String(ePerfW)
+        }
+        return false
+    }
+
+    // 渲染线程仅置脏标记，绝不在 paintScreen / renderGuiSurfacePass 中同步写盘
+    function markClientPerfDirty(latestMs) {
+        if (!CONFIG.perfLogEnabled) return
+        PERF_STATS.pendingFlush = true
+        if (latestMs > CONFIG.perfLogAlertMs) {
+            PERF_STATS.pendingFlushUrgent = true
+        }
+    }
+
+    // 仅在显式开启 perfLogEnabled 时于 ClientEvents.tick 阶段节流落盘
+    function tickFlushClientPerfLog() {
+        if (!CONFIG.perfLogEnabled || !PERF_STATS.pendingFlush) return
+        var nowMs  = monotonicNowMs()
+        var minGap = PERF_STATS.pendingFlushUrgent ? 2000 : Math.max(1000, Number(CONFIG.perfLogIntervalMs) || 10000)
+        if (PERF_STATS.lastFlushMs > 0 && (nowMs - PERF_STATS.lastFlushMs) < minGap) return
+        PERF_STATS.pendingFlush       = false
+        PERF_STATS.pendingFlushUrgent = false
+        PERF_STATS.lastFlushMs        = nowMs
+        flushClientPerfSnapshot(nowMs)
+    }
 
     function toAnimTimeSec(nowMs) {
         var cur = Number(nowMs) || 0
@@ -4786,10 +4967,51 @@
         }
     })
 
+    if (typeof NetworkEvents !== 'undefined' && NetworkEvents != null && typeof NetworkEvents.dataReceived === 'function') {
+        NetworkEvents.dataReceived(DEBUG_CHANNEL, function (event) {
+            try {
+                var raw = (event != null) ? event.data : null
+                var cmd = (raw != null) ? String(readStr(raw, 'cmd', '')).trim().toLowerCase() : ''
+                if (!cmd) return
+                if (cmd === 'on') {
+                    CONFIG.perfLogEnabled = true
+                    var iv = readNum(raw, 'intervalMs', NaN)
+                    if (isFinite(iv) && iv >= 1000) CONFIG.perfLogIntervalMs = Math.round(iv)
+                    PERF_STATS.pendingFlush = true
+                } else if (cmd === 'off') {
+                    CONFIG.perfLogEnabled         = false
+                    PERF_STATS.pendingFlush       = false
+                    PERF_STATS.pendingFlushUrgent = false
+                } else if (cmd === 'dump') {
+                    PERF_STATS.lastFlushMs = monotonicNowMs()
+                    flushClientPerfSnapshot(PERF_STATS.lastFlushMs)
+                } else if (cmd === 'reset') {
+                    resetRendererPerfStats()
+                }
+            } catch (eDbgNet) {
+                logErrorThrottled('debug dataReceived error', eDbgNet)
+            }
+        })
+    }
+
     global.ScreenDanmakuClient = {
-        VERSION:    '6.2.0',
+        VERSION:    VERSION,
         CONFIG:     CONFIG,
         setDebug:   function (enabled) { CONFIG.debug = Boolean(enabled); return CONFIG.debug },
+        getStats:   getRendererPerfStats,
+        resetStats: resetRendererPerfStats,
+        setPerfLog: function (enabled, intervalMs) {
+            CONFIG.perfLogEnabled = Boolean(enabled)
+            if (!CONFIG.perfLogEnabled) {
+                PERF_STATS.pendingFlush       = false
+                PERF_STATS.pendingFlushUrgent = false
+            }
+            if (typeof intervalMs === 'number' && isFinite(intervalMs) && intervalMs >= 1000) {
+                CONFIG.perfLogIntervalMs = Math.round(intervalMs)
+            }
+            return { enabled: CONFIG.perfLogEnabled, intervalMs: CONFIG.perfLogIntervalMs, path: resolveClientPerfLogPath() }
+        },
+        flushPerfLog: function () { return flushClientPerfSnapshot(monotonicNowMs()) },
         push:       enqueueDanmaku,
         patch:      function (slotIdOrOpts, maybeVars, maybeHoldTicks) {
             if (slotIdOrOpts != null && typeof slotIdOrOpts === 'object') {
@@ -4920,6 +5142,9 @@
     }
     ClientEvents.loggedOut(resetClientSessionState)
     ClientEvents.loggedIn(resetClientSessionState)
+    if (typeof ClientEvents !== 'undefined' && ClientEvents != null && typeof ClientEvents.tick === 'function') {
+        ClientEvents.tick(tickFlushClientPerfLog)
+    }
 
     // 判定当前是否打开了需要遮挡 HUD 弹幕的交互式 GUI：
     //   注意：HUD 的 PaintScreenEventJS 构造时不传入 Screen（event.screen 恒为 null），
@@ -6802,6 +7027,12 @@
             ACTIVE_FRAME_EVENT = prevEv
             GRAPHICS_TEXT_DIRTY = prevDirty
             if (prevEv == null) LAST_CAPS_EVENT = null
+            if (rendered > 0) {
+                var passEndMs = monotonicNowMs()
+                var passDtMs  = max2(0, passEndMs - now)
+                recordPerfSample(phase === 'slot' ? PERF_STATS.slot : PERF_STATS.gui, passDtMs, rendered)
+                markClientPerfDirty(passDtMs)
+            }
         }
         return rendered
     }
@@ -6853,6 +7084,12 @@
         var lastRenderPri       = null
         var layerZ              = 0.0
         var anyGuiReplaceMatch  = false
+        var curPhase            = null
+        var curPhaseStartMs     = frameStartMs
+        var phaseTextMs         = 0.0, phaseTextN = 0
+        var phaseHudMs          = 0.0, phaseHudN  = 0
+        var phaseGuiMs          = 0.0, phaseGuiN  = 0
+        var phaseSlotMs         = 0.0, phaseSlotN = 0
         ACTIVE_FRAME_EVENT      = event
         GRAPHICS_TEXT_DIRTY     = false
 
@@ -6897,8 +7134,26 @@
             // 单帧硬防卡死熔断（每绘制 8 条采样一次 monotonicNowMs，大幅削减 System.nanoTime JNI 跨界开销）：
             // 仅截断低优先级普通弹幕 (renderPriority <= 0 && priority <= 2)；高优先级弹幕与 HUD/GUI/slot (renderPriority > 0) 始终放行。
             if (curRenderPri <= 0 && (item.priority || 0) <= 2 && drawnCount >= 1 && (drawnCount & 7) === 1 && (monotonicNowMs() - frameStartMs) >= CONFIG.frameBudgetMs) {
+                PERF_STATS.budgetTrips++
                 continue
             }
+            var itemPhase = (item.surface === 'slot') ? 'slot'
+                : ((item.surface === 'gui') ? 'gui'
+                    : (item.hasGraphicNodes ? 'screen_hud' : 'screen_text'))
+            if (curPhase !== null && itemPhase !== curPhase) {
+                var pSwitchMs = monotonicNowMs()
+                var pSpan = max2(0, pSwitchMs - curPhaseStartMs)
+                if (curPhase === 'screen_text') phaseTextMs += pSpan
+                else if (curPhase === 'screen_hud') phaseHudMs += pSpan
+                else if (curPhase === 'gui') phaseGuiMs += pSpan
+                else if (curPhase === 'slot') phaseSlotMs += pSpan
+                curPhaseStartMs = pSwitchMs
+            }
+            curPhase = itemPhase
+            if (itemPhase === 'screen_text') phaseTextN++
+            else if (itemPhase === 'screen_hud') phaseHudN++
+            else if (itemPhase === 'gui') phaseGuiN++
+            else if (itemPhase === 'slot') phaseSlotN++
             drawnCount++
 
             if (fontObj === null) {
@@ -7541,6 +7796,23 @@
             if (batchCtx != null && batchCtx.needBlendRestore) {
                 if (HAS_EVENT_BLEND) event.blend(false)
                 batchCtx.needBlendRestore = false
+            }
+            if (drawnCount > 0) {
+                var frameEndMs = monotonicNowMs()
+                if (curPhase !== null) {
+                    var tailSpan = max2(0, frameEndMs - curPhaseStartMs)
+                    if (curPhase === 'screen_text') phaseTextMs += tailSpan
+                    else if (curPhase === 'screen_hud') phaseHudMs += tailSpan
+                    else if (curPhase === 'gui') phaseGuiMs += tailSpan
+                    else if (curPhase === 'slot') phaseSlotMs += tailSpan
+                }
+                var totalFrameMs = max2(0, frameEndMs - frameStartMs)
+                recordPerfSample(PERF_STATS.paint_total, totalFrameMs, drawnCount)
+                if (phaseTextN > 0) recordPerfSample(PERF_STATS.screen_text, phaseTextMs, phaseTextN)
+                if (phaseHudN > 0)  recordPerfSample(PERF_STATS.screen_hud,  phaseHudMs,  phaseHudN)
+                if (phaseGuiN > 0)  recordPerfSample(PERF_STATS.gui,         phaseGuiMs,  phaseGuiN)
+                if (phaseSlotN > 0) recordPerfSample(PERF_STATS.slot,        phaseSlotMs, phaseSlotN)
+                markClientPerfDirty(totalFrameMs)
             }
         }
     })

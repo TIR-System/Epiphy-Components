@@ -2656,7 +2656,7 @@ test('EpiphyBugfix: zero hard dependencies, optional EpiphyLog, server-authorita
     // 1. 零前置独立加载：无 Spec / Base / Log，不监听任何客户端上传包，纯服务端落盘后重启恢复
     var sharedDisk = {}
     var h1 = makeBugfixHarness({ sharedDisk: sharedDisk, withLog: false })
-    assert.ok(h1.api != null && h1.api.VERSION === 1)
+    assert.ok(h1.api != null && h1.api.VERSION === '1.0.0')
     assert.strictEqual(h1.netTried, false, 'EpiphyBugfix must never register client->server NetworkEvents handlers')
     assert.ok(h1.logs.info.some(function (s) { return s.indexOf('内置兜底') >= 0 }))
 
@@ -2667,6 +2667,7 @@ test('EpiphyBugfix: zero hard dependencies, optional EpiphyLog, server-authorita
         { hp: 55, max: 60 }
     )
     assert.ok(sharedDisk['world_test/kubejs_epiphy_bugfix_hp.json'] != null)
+    assert.strictEqual(sharedDisk['world_test/kubejs_epiphy_bugfix_hp.json'].version, 1, 'persisted HP JSON schema version must remain integer 1 for save compatibility')
 
     // 模拟重开世界 + 可选接入 EpiphyLog + 原版读档先钳位到 20，再分两阶段恢复到 60 上限
     var h2 = makeBugfixHarness({ sharedDisk: sharedDisk, withLog: true })
@@ -8779,6 +8780,438 @@ test('66. v6.2.2 strict corrupt lock + quarantine backup & HUD renderPriority/pr
         assert.strictEqual(fs.readFileSync(path.join(qTmpDir, keptBackups[2]), 'utf8'), '{ corrupt_round_6')
     } finally {
         try { fs.rmSync(qTmpDir, { recursive: true, force: true }) } catch (eRm) { }
+    }
+})
+
+test('67. Component-owned VERSION, semver range dependency checks (min <= v <= max) & header parity', function () {
+    var CREATIVE_TAB_PATH = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', '创造模式栏-epiphy.js')
+    var sb = {
+        console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+        StartupEvents: { registry: function () {}, modifyCreativeTab: function () {} },
+        ServerEvents: { loaded: function () {}, unloaded: function () {}, tick: function () {}, commandRegistry: function () {}, command: function () {} },
+        BlockEvents: { placed: function () {}, broken: function () {} },
+        PlayerEvents: { loggedIn: function () {}, loggedOut: function () {} },
+        LevelEvents: { loaded: function () {} },
+        ClientEvents: { tick: function () {}, loggedIn: function () {}, loggedOut: function () {}, paintScreen: function () {} },
+        NetworkEvents: { dataReceived: function () {} },
+        Java: { loadClass: function () { return null } },
+        Text: { of: function (s) { return { string: String(s) } } },
+        global: {}
+    }
+    sb.globalThis = sb
+    vm.createContext(sb)
+    loadStartupBase(sb)
+    runScriptIn(sb, CREATIVE_TAB_PATH)
+    runScriptIn(sb, LOG_PATH)
+    runScriptIn(sb, SERVER_BASE_PATH)
+    runScriptIn(sb, TRACKER_PATH)
+    runScriptIn(sb, VALVE_PATH)
+    runScriptIn(sb, DEBUG_PATH)
+    runScriptIn(sb, BUGFIX_PATH)
+    runScriptIn(sb, AUDIO_PATH)
+    runScriptIn(sb, AUDIO_CLIENT_PATH)
+    runScriptIn(sb, DANMAKU_PATH)
+    runScriptIn(sb, RENDERER_PATH)
+
+    var Spec  = sb.global.EpiphySpec
+    var Proto = sb.global.EpiphyProtocol
+
+    // 1. Protocol layer must NOT own component implementation versions
+    assert.strictEqual(Proto.AUDIO_SEMVER, undefined, 'EpiphyProtocol must only carry wire protocol numbers, not component implementation semver')
+    assert.strictEqual(Proto.DANMAKU_PROTO_VERSION, 6)
+    assert.strictEqual(Proto.AUDIO_PROTO_VERSION, 5)
+
+    // 2. Semver parsing, comparison & closed-range checks [min, max]
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(Spec.parseSemver('v5.8.0'))), { major: 5, minor: 8, patch: 0, raw: '5.8.0' })
+    assert.strictEqual(Spec.compareSemver('2.5.0', '2.6.0'), -1)
+    assert.strictEqual(Spec.compareSemver('2.6.0', '2.6.0'), 0)
+    assert.strictEqual(Spec.compareSemver('3.0.0', '2.99.99'), 1)
+    assert.strictEqual(Spec.isVersionInRange('2.5.0', '2.5.0', '2.99.99'), true)
+    assert.strictEqual(Spec.isVersionInRange('2.99.99', '2.5.0', '2.99.99'), true)
+    assert.strictEqual(Spec.isVersionInRange('2.4.9', '2.5.0', '2.99.99'), false)
+    assert.strictEqual(Spec.isVersionInRange('3.0.0', '2.5.0', '2.99.99'), false)
+
+    // 3. Every common component under kubejs/*/通用组件/*.js MUST be managed (auto-discovered, no silent escape)
+    var componentMatrix = [
+        { name: 'EpiphySpec',            obj: sb.global.EpiphySpec,            file: SPEC_PATH },
+        { name: 'EpiphyCreativeTab',     obj: sb.global.EpiphyCreativeTab,     file: CREATIVE_TAB_PATH },
+        { name: 'EpiphyLog',             obj: sb.global.EpiphyLog,             file: LOG_PATH },
+        { name: 'EpiphyServerCore',      obj: sb.global.EpiphyServerCore,      file: SERVER_BASE_PATH },
+        { name: 'EpiphyBlockTracker',    obj: sb.global.EpiphyBlockTracker,    file: TRACKER_PATH },
+        { name: 'EpiphyPermissionValve', obj: sb.global.EpiphyPermissionValve, file: VALVE_PATH },
+        { name: 'EpiphyDebug',           obj: sb.global.EpiphyDebug,           file: DEBUG_PATH },
+        { name: 'EpiphyBugfix',          obj: sb.global.EpiphyBugfix,          file: BUGFIX_PATH },
+        { name: 'EpiphyAudio',           obj: sb.global.EpiphyAudio,           file: AUDIO_PATH },
+        { name: 'EpiphyAudioClient',     obj: sb.global.EpiphyAudioClient,     file: AUDIO_CLIENT_PATH },
+        { name: 'Epiphy2DSurface',       obj: sb.global.Epiphy2DSurface,       file: DANMAKU_PATH },
+        { name: 'Epiphy2DRenderer',      obj: sb.global.Epiphy2DRenderer,      file: RENDERER_PATH }
+    ]
+    // Pure content/item/block-registration scripts with no exported global component API
+    var exemptCommonScripts = [
+        path.normalize(path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的小玩意-原版_其他Mod的隐藏物品.js')),
+        path.normalize(path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的小玩意_功能测试.js'))
+    ]
+    var managedSet = {}
+    for (var mi = 0; mi < componentMatrix.length; mi++) {
+        managedSet[path.normalize(componentMatrix[mi].file)] = true
+    }
+    var commonDirs = [
+        path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件'),
+        path.join(ROOT_DIR, 'kubejs', 'server_scripts',  '通用组件'),
+        path.join(ROOT_DIR, 'kubejs', 'client_scripts',  '通用组件')
+    ]
+    var discoveredCommonFiles = []
+    for (var cd = 0; cd < commonDirs.length; cd++) {
+        if (!fs.existsSync(commonDirs[cd])) continue
+        var ents = fs.readdirSync(commonDirs[cd])
+        for (var ce = 0; ce < ents.length; ce++) {
+            if (ents[ce].slice(-3) !== '.js') continue
+            var fullFp = path.normalize(path.join(commonDirs[cd], ents[ce]))
+            discoveredCommonFiles.push(fullFp)
+            if (exemptCommonScripts.indexOf(fullFp) >= 0) continue
+            assert.ok(managedSet[fullFp], 'Unmanaged common component detected (must register VERSION & header check in Test 67): ' + path.relative(ROOT_DIR, fullFp))
+        }
+    }
+    assert.ok(discoveredCommonFiles.length >= componentMatrix.length, 'common component directory scan must discover all scripts')
+
+    for (var i = 0; i < componentMatrix.length; i++) {
+        var row = componentMatrix[i]
+        assert.ok(row.obj && typeof row.obj.VERSION === 'string', row.name + ' must export its own semver VERSION string')
+        var parsed = Spec.parseSemver(row.obj.VERSION)
+        assert.ok(parsed != null, row.name + ' VERSION must be valid semver: ' + row.obj.VERSION)
+        var headLines = fs.readFileSync(row.file, 'utf8').split(/\r?\n/).slice(0, 6).join('\n')
+        var expectedHeaderTag = 'v' + parsed.major + '.' + parsed.minor
+        assert.ok(headLines.indexOf(expectedHeaderTag) >= 0, row.name + ' header must declare ' + expectedHeaderTag + ' matching exported VERSION ' + row.obj.VERSION)
+    }
+    assert.strictEqual(sb.global.EpiphyAudio.VERSION, '5.8.0', 'EpiphyAudio must report its own 5.8.0 version')
+    assert.strictEqual(sb.global.EpiphyAudioClient.VERSION, '5.6.0', 'EpiphyAudioClient must report its own 5.6.0 version')
+    assert.strictEqual(sb.global.EpiphyDebug.VERSION, '1.0.0', 'EpiphyDebug must report its own 1.0.0 version')
+    assert.strictEqual(sb.global.EpiphyBugfix.VERSION, '1.0.0', 'EpiphyBugfix must report its own 1.0.0 version')
+
+    // 4. Out-of-range dependency version MUST be rejected fail-fast by downstream hard-dependent component
+    var badCases = ['2.4.9', '3.0.0']
+    for (var bi = 0; bi < badCases.length; bi++) {
+        var badSb = {
+            console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+            ServerEvents: { loaded: function () {}, unloaded: function () {}, tick: function () {}, commandRegistry: function () {}, command: function () {} },
+            BlockEvents: { placed: function () {}, broken: function () {} },
+            PlayerEvents: { loggedIn: function () {}, loggedOut: function () {} },
+            Java: { loadClass: function () { return null } },
+            global: {}
+        }
+        badSb.globalThis = badSb
+        vm.createContext(badSb)
+        loadServerBase(badSb)
+        badSb.global.EpiphyServerCore.VERSION = badCases[bi]
+        badSb.global.EpiphyServerBase.VERSION = badCases[bi]
+        assert.throws(function () {
+            runScriptIn(badSb, AUDIO_PATH)
+        }, /版本不兼容/, 'EpiphyAudio must reject EpiphyServerCore version ' + badCases[bi] + ' outside [2.5.0, 2.99.99]')
+    }
+})
+
+test('68. Renderer per-phase perf stats (off by default, tick-only disk flush, /epiphy debug renderperf) & PROTO v6 schema conformance', function () {
+    // --- Part A: Client per-phase perf metrics & epiphy-data snapshot ---
+    var cliPaints   = []
+    var cliTicks    = []
+    var cliNetCb    = null
+    var cliDbgNetCb = null
+    var cNow        = 1000
+    var writtenPerf = {}
+    var writeCount  = 0
+    var createdDirs = []
+    var cliSb = {
+        console: { info: function () {}, warn: function () {}, error: function (m) { throw new Error(m) }, debug: function () {}, log: function () {} },
+        Date: { now: function () { return cNow } },
+        Client: { getCurrentScreen: function () { return { title: 'TestGui', guiLeft: 0, guiTop: 0 } } },
+        ClientEvents: {
+            loggedOut: function () {},
+            loggedIn: function () {},
+            tick: function (fn) { cliTicks.push(fn) },
+            paintScreen: function (fn) { cliPaints.push(fn) }
+        },
+        NetworkEvents: {
+            dataReceived: function (chName, fn) {
+                if (chName === 'epiphy:screen_danmaku') cliNetCb = fn
+                else if (chName === 'epiphy:render_debug') cliDbgNetCb = fn
+            }
+        },
+        JsonIO: { write: function (p, obj) { writeCount++; writtenPerf[p] = obj } },
+        Java: {
+            loadClass: function (cls) {
+                if (cls === 'dev.latvian.mods.kubejs.KubeJSPaths') {
+                    return {
+                        DIRECTORY: { getParent: function () { return 'C:/mock_mc' } },
+                        dir: function (d) { createdDirs.push(d) }
+                    }
+                }
+                return null
+            }
+        },
+        Text: { of: function (s) { return { string: String(s) } } },
+        global: {}
+    }
+    cliSb.globalThis = cliSb
+    vm.createContext(cliSb)
+    loadStartupBase(cliSb)
+    runScriptIn(cliSb, RENDERER_PATH)
+    var R = cliSb.global.Epiphy2DRenderer
+
+    // Default MUST be off (debug opt-in) & zero disk IO during paintScreen
+    assert.strictEqual(R.CONFIG.perfLogEnabled, false, 'perfLogEnabled must default to false (debug opt-in)')
+    assert.strictEqual(typeof cliDbgNetCb, 'function', 'client renderer must listen on epiphy:render_debug')
+    assert.ok(cliTicks.length >= 1, 'client renderer must register ClientEvents.tick flush handler')
+
+    cliNetCb({ data: { proto: 6, surface: 'screen', title: 'PLAIN', stay: 100, showInGui: true, rx: 0.3, ry: 0.2 } })
+    cliNetCb({ data: { proto: 6, surface: 'screen', id: 'hud1', lifeMode: 'active', activeHold: 100, showInGui: true, rx: 0.5, ry: 0.2, nodes: [{ id: 'r1', type: 'rect', x: 0, y: 0, w: 60, h: 10, fill: { mode: 'solid', color: 0xFF33AAFF } }] } })
+    cliNetCb({ data: { proto: 6, surface: 'gui', id: 'g1', lifeMode: 'active', activeHold: 100, targetGui: { titleMatch: 'TestGui' }, fgNodes: [{ id: 'gr1', type: 'rect', x: 0, y: 0, w: 20, h: 10, fill: { mode: 'solid', color: 0xFFFFFFFF } }] } })
+
+    var mockEv = {
+        width: 854, height: 480, level: 'minecraft:overworld',
+        font: { width: function () { return 24 } },
+        graphics: { flush: function () {} },
+        push: function () {}, pop: function () {}, translate: function () {}, rotateDeg: function () {}, scale: function () {},
+        setPositionColorShader: function () {}, blend: function () {}, beginQuads: function () {}, end: function () {},
+        rectangle: function () {}, text: function () {}
+    }
+    cliPaints[0](mockEv)
+    R.renderGuiSurfacePass(mockEv, 'fg', { screen: { title: 'TestGui', guiLeft: 0, guiTop: 0 } })
+    cliTicks[0]()
+    assert.strictEqual(writeCount, 0, 'when perfLogEnabled is false, neither paintScreen nor tick may write disk')
+
+    var st = R.getStats()
+    assert.strictEqual(st.version, '6.2.0')
+    assert.strictEqual(st.perfLogEnabled, false)
+    assert.strictEqual(st.phases.paint_total.frames, 1)
+    assert.strictEqual(st.phases.screen_text.frames, 1)
+    assert.strictEqual(st.phases.screen_hud.frames, 1)
+    assert.ok(st.phases.gui.frames >= 1)
+    assert.strictEqual(st.budgetTargetsMs.singlePanel, 0.3)
+    assert.strictEqual(st.budgetTargetsMs.highLoadFrame, 2.5)
+
+    // Enable via server EpiphyDebug.dispatchRenderPerf -> client epiphy:render_debug
+    var dbgSvSb = {
+        console: { info: function () {}, warn: function () {}, error: function (m) { throw new Error(m) }, debug: function () {}, log: function () {} },
+        ServerEvents: { loaded: function () {}, tick: function () {}, commandRegistry: function () {} },
+        Java: { loadClass: function () { return null } },
+        Text: { of: function (s) { return String(s) } },
+        global: {}
+    }
+    dbgSvSb.globalThis = dbgSvSb
+    vm.createContext(dbgSvSb)
+    loadServerBase(dbgSvSb)
+    runScriptIn(dbgSvSb, DEBUG_PATH)
+    var sentDbgPackets = []
+    var fakePlayer = { sendData: function (ch, data) { sentDbgPackets.push({ ch: ch, data: data }); if (ch === 'epiphy:render_debug') cliDbgNetCb({ data: data }) } }
+    var dispOn = dbgSvSb.global.EpiphyDebug.dispatchRenderPerf({ player: fakePlayer }, 'on')
+    assert.strictEqual(dispOn.ok, true)
+    assert.strictEqual(dispOn.sent, 1)
+    assert.strictEqual(sentDbgPackets[0].ch, 'epiphy:render_debug')
+    assert.strictEqual(sentDbgPackets[0].data.cmd, 'on')
+    assert.strictEqual(R.CONFIG.perfLogEnabled, true)
+
+    // Render frame while enabled: STILL zero sync disk write inside paintScreen
+    cNow += 50
+    cliPaints[0](mockEv)
+    assert.strictEqual(writeCount, 0, 'paintScreen render thread must NEVER synchronously write disk even when perfLogEnabled is true')
+
+    // Flush occurs only on ClientEvents.tick
+    cNow += 50
+    cliTicks[0]()
+    var expectedPerfPath = 'C:/mock_mc/epiphy-data/logs/client_render_perf.json'
+    assert.strictEqual(writeCount, 1, 'ClientEvents.tick must perform the throttled disk write once marked dirty')
+    assert.ok(writtenPerf[expectedPerfPath] != null, 'renderer must write throttled perf snapshot to epiphy-data/logs/client_render_perf.json')
+    assert.strictEqual(writtenPerf[expectedPerfPath].phases.screen_hud.frames, 2)
+
+    // Reset & disable via debug command dispatch
+    dbgSvSb.global.EpiphyDebug.dispatchRenderPerf({ player: fakePlayer }, 'reset')
+    assert.strictEqual(R.getStats().phases.paint_total.frames, 0)
+    dbgSvSb.global.EpiphyDebug.dispatchRenderPerf({ player: fakePlayer }, 'off')
+    assert.strictEqual(R.CONFIG.perfLogEnabled, false)
+
+    // --- Part B: Standalone docs/proto_v6_schema.json Conformance Validation ---
+    var schemaPath = path.join(ROOT_DIR, 'docs', 'proto_v6_schema.json')
+    var schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'))
+    var roadmapText = fs.readFileSync(path.join(ROOT_DIR, 'docs', 'rendering-subsystem-roadmap.md'), 'utf8')
+
+    var svSb = {
+        console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+        ServerEvents: { loaded: function () {}, tick: function () {}, commandRegistry: function () {} },
+        BlockEvents: { placed: function () {}, broken: function () {} },
+        PlayerEvents: { loggedIn: function () {}, loggedOut: function () {} },
+        Java: { loadClass: function () { return null } },
+        global: {}
+    }
+    svSb.globalThis = svSb
+    vm.createContext(svSb)
+    loadServerBase(svSb)
+    runScriptIn(svSb, TRACKER_PATH)
+    runScriptIn(svSb, DANMAKU_PATH)
+    var Spec    = svSb.global.EpiphySpec
+    var Surface = svSb.global.Epiphy2DSurface
+
+    // 1. Official aliases in schema must match Spec 1:1
+    assert.deepStrictEqual(schema.officialAliases.envelope, Object.assign({}, Spec.OFFICIAL_DANMAKU_ALIASES), 'schema envelope aliases must match EpiphySpec.OFFICIAL_DANMAKU_ALIASES')
+    assert.deepStrictEqual(schema.officialAliases.node, Object.assign({}, Spec.OFFICIAL_NODE_ALIASES), 'schema node aliases must match EpiphySpec.OFFICIAL_NODE_ALIASES')
+
+    // 2. Roadmap §4.1 canonical fields must exist in schema.envelope
+    var sec41 = roadmapText.slice(roadmapText.indexOf('#### (A) 顶层信封'), roadmapText.indexOf('#### (B) 图元节点'))
+    var rowRe = /^\|\s*`([a-zA-Z][a-zA-Z0-9_]*)`/gm
+    var rm
+    while ((rm = rowRe.exec(sec41)) !== null) {
+        assert.ok(schema.envelope[rm[1]] != null, 'roadmap §4.1 field `' + rm[1] + '` must be defined in docs/proto_v6_schema.json')
+    }
+
+    function validateNodeConformance(node, ctxLabel) {
+        assert.ok(node && typeof node === 'object', ctxLabel + ': node must be object')
+        assert.ok(schema.node.types.indexOf(node.type) >= 0, ctxLabel + ': invalid node.type=' + node.type)
+        if (node.anchor !== undefined) {
+            assert.ok(schema.node.anchors.indexOf(node.anchor) >= 0, ctxLabel + ': invalid anchor=' + node.anchor)
+        }
+        if (node.clip != null) {
+            assert.ok(schema.clip.dirs.indexOf(node.clip.dir) >= 0, ctxLabel + ': invalid clip.dir=' + node.clip.dir)
+            assert.ok(schema.clip.modes.indexOf(node.clip.mode) >= 0, ctxLabel + ': invalid clip.mode=' + node.clip.mode)
+        }
+        if (node.type === 'rect' && node.fill != null) {
+            assert.ok(schema.fill.modes.indexOf(node.fill.mode) >= 0, ctxLabel + ': invalid fill.mode=' + node.fill.mode)
+        }
+        if (node.type === 'group' && Array.isArray(node.children)) {
+            for (var ci = 0; ci < node.children.length; ci++) {
+                validateNodeConformance(node.children[ci], ctxLabel + '.children[' + ci + ']')
+            }
+        }
+    }
+
+    function validatePacketConformance(pkt, label) {
+        assert.ok(pkt && typeof pkt === 'object', label + ': packet must be object')
+        var act = pkt.action
+        assert.ok(schema.actions.indexOf(act) >= 0, label + ': invalid action=' + act)
+        var reqs = schema.requiredByAction[act]
+        for (var ri = 0; ri < reqs.length; ri++) {
+            assert.ok(pkt[reqs[ri]] !== undefined, label + ': missing required field `' + reqs[ri] + '` for action=' + act)
+        }
+        for (var k in pkt) {
+            if (!Object.prototype.hasOwnProperty.call(pkt, k)) continue
+            var spec = schema.envelope[k]
+            assert.ok(spec != null, label + ': unexpected/undocumented wire key `' + k + '` not in proto_v6_schema.json')
+            var v = pkt[k]
+            if (spec.type === 'vec3') {
+                assert.ok(Array.isArray(v) && v.length === 3, label + '.' + k + ' must be vec3 array')
+            } else if (spec.type === 'array') {
+                assert.ok(Array.isArray(v), label + '.' + k + ' must be array')
+            } else if (spec.type === 'object') {
+                assert.ok(v != null && typeof v === 'object' && !Array.isArray(v), label + '.' + k + ' must be plain object')
+            } else {
+                assert.strictEqual(typeof v, spec.type, label + '.' + k + ' expected ' + spec.type + ', got ' + typeof v)
+            }
+            if (spec.enum) {
+                assert.ok(spec.enum.indexOf(v) >= 0, label + '.' + k + '=' + v + ' not in enum ' + JSON.stringify(spec.enum))
+            }
+            if (spec.type === 'number') {
+                if (spec.min !== undefined) assert.ok(v >= spec.min, label + '.' + k + '=' + v + ' < min ' + spec.min)
+                if (spec.max !== undefined) assert.ok(v <= spec.max, label + '.' + k + '=' + v + ' > max ' + spec.max)
+            }
+            if (spec.type === 'string' && spec.maxLen !== undefined) {
+                assert.ok(v.length <= spec.maxLen, label + '.' + k + ' exceeds maxLen ' + spec.maxLen)
+            }
+        }
+        if (pkt.tracks != null) {
+            for (var tk in pkt.tracks) {
+                if (!Object.prototype.hasOwnProperty.call(pkt.tracks, tk)) continue
+                assert.ok(schema.track.modes.indexOf(pkt.tracks[tk].mode) >= 0, label + '.tracks.' + tk + ' invalid mode')
+            }
+        }
+        var nodeLists = ['nodes', 'bgNodes', 'fgNodes']
+        for (var nl = 0; nl < nodeLists.length; nl++) {
+            var arr = pkt[nodeLists[nl]]
+            if (Array.isArray(arr)) {
+                for (var ni = 0; ni < arr.length; ni++) {
+                    validateNodeConformance(arr[ni], label + '.' + nodeLists[nl] + '[' + ni + ']')
+                }
+            }
+        }
+    }
+
+    // 3. Validate all representative packet families against standalone schema
+    validatePacketConformance(Surface.buildPacket({ text: 'Hello', sub: 'World', pos: [0.5, 0.3], scale: 1.2 }), 'screen_text')
+    validatePacketConformance(Surface.buildPacket({ preset: 'progress_bar', id: 'p1', title: 'HP', data: { progress: 0.6 }, life: { mode: 'active', hold: 40 } }), 'progress_bar')
+    validatePacketConformance(Surface.buildPacket({ action: 'patch', id: 'p1', data: { progress: 0.8 }, life: { hold: 40 } }), 'patch')
+    validatePacketConformance(Surface.buildPacket({ action: 'deactivate', id: 'p1', fadeOut: 12 }), 'deactivate')
+    validatePacketConformance(Surface.buildPacket({ action: 'clear', group: '*', maxPriority: 5 }), 'clear')
+    validatePacketConformance(Surface.buildPacket({ surface: 'gui', lifeMode: 'screen_session', targetGui: { titleMatch: 'Chest' }, bgNodes: [{ type: 'rect', x: 0, y: 0, w: 40, h: 20, fill: { mode: 'gradient', from: 0x112233, to: 0x445566 } }] }), 'gui')
+    validatePacketConformance(Surface.buildPacket({ surface: 'slot', slotMatch: { slotIndex: 0 }, nodes: [{ type: 'rect', x: 0, y: 0, w: 16, h: 16, fill: { mode: 'outline', color: 0xFFFF0000 } }] }), 'slot')
+    validatePacketConformance(Surface.buildPacket({ surface: 'world_plane', worldPos: [1, 64, 2], billboard: 'vertical', seeThrough: true, nodes: [{ type: 'text', x: 0, y: 0, text: 'WP' }] }), 'world_plane')
+    validatePacketConformance(Spec.adaptV5ToV6({ proto: 5, title: 'LegacyV5', priority: 3, rx: 0.5, ry: 0.35, stay: 60 }), 'adaptV5ToV6')
+})
+
+test('69. rhino-check.js AST guards (Unicode let/const, Rhino SyntaxError rules, no silent javac/RHINO_JAR fallback)', function () {
+    var cp = require('child_process')
+    var os = require('os')
+    var checkerPath = path.join(ROOT_DIR, 'scripts', 'rhino-check.js')
+    var tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epiphy_rhino_checker_test_'))
+    try {
+        function runCheckerOnSnippet(name, code, extraArgs, envPatch) {
+            var fp = path.join(tmpDir, name)
+            fs.writeFileSync(fp, code, 'utf8')
+            var env = Object.assign({}, process.env)
+            delete env.RHINO_JAR
+            delete env.MC_MODS_DIR
+            delete env.RHINO_JAVAC_BIN
+            delete env.RHINO_JAVA_BIN
+            if (envPatch) {
+                for (var k in envPatch) env[k] = envPatch[k]
+            }
+            return cp.spawnSync(process.execPath, [checkerPath].concat(extraArgs || ['--force-local']).concat([fp]), {
+                encoding: 'utf8',
+                env: env
+            })
+        }
+
+        // 1. Unicode/Chinese identifier const/let MUST fail
+        var rCnConst = runCheckerOnSnippet('cn_const.js', 'const 甲 = 1;\n')
+        assert.notStrictEqual(rCnConst.status, 0, 'const 甲 = 1 must be rejected by AST semantic-drift guard')
+
+        var rCnLet = runCheckerOnSnippet('cn_let.js', 'for (let 索引 = 0; 索引 < 3; 索引++) {}\n')
+        assert.notStrictEqual(rCnLet.status, 0, 'for (let 索引 ...) must be rejected by AST semantic-drift guard')
+
+        // 2. Documented kube-mods/rhino SyntaxErrors MUST fail in local AST mode
+        var badSnippets = [
+            ['shorthand.js',     'var x = 1; var o = { x };\n'],
+            ['computed.js',      'var k = "a"; var o = { [k]: 1 };\n'],
+            ['default_param.js', 'function f(a = 1) { return a; }\n'],
+            ['destr_def.js',     'var { a = 1 } = {};\n'],
+            ['spread.js',        'var a = [1, 2]; var b = [...a];\n'],
+            ['new_target.js',    'function F() { return new.target; }\n'],
+            ['nullish.js',       'var v = null ?? 9;\n'],
+            ['regex_u.js',       'var r = /abc/u;\n']
+        ]
+        for (var bi = 0; bi < badSnippets.length; bi++) {
+            var rBad = runCheckerOnSnippet(badSnippets[bi][0], badSnippets[bi][1])
+            assert.notStrictEqual(rBad.status, 0, badSnippets[bi][0] + ' must be rejected by local-acorn-ast')
+        }
+
+        // 3. Rhino-supported ES5 + basic destructuring + method shorthand MUST pass
+        var rGood = runCheckerOnSnippet('good.js', 'var obj = { a: 1, b: 2, m(x) { return x + 1; } }; var { a, b } = obj; var arrow = (v) => `${v}`;\n')
+        assert.strictEqual(rGood.status, 0, 'Rhino-compatible code must pass local-acorn-ast: ' + (rGood.stderr || rGood.stdout))
+
+        // 4. Explicit nonexistent RHINO_JAR MUST fail hard (no silent fallback)
+        var rMissingEnv = runCheckerOnSnippet('ok_env.js', 'var ok = 1;\n', [], {
+            RHINO_JAR: path.join(tmpDir, 'does_not_exist_rhino.jar')
+        })
+        assert.notStrictEqual(rMissingEnv.status, 0, 'explicit missing RHINO_JAR must fail hard instead of falling back')
+
+        // 5. Existing JAR + failing javac MUST fail hard (no silent fallback to green, deterministic even without JDK)
+        var fakeJar = path.join(tmpDir, 'rhino-forge-fake.jar')
+        fs.writeFileSync(fakeJar, 'not-a-valid-jar', 'utf8')
+        var rBrokenJavac = runCheckerOnSnippet('ok_broken_javac.js', 'var ok = 1;\n', [], {
+            RHINO_JAR:       fakeJar,
+            RHINO_CACHE_DIR: path.join(tmpDir, 'fresh_cache'),
+            RHINO_JAVAC_BIN: process.execPath
+        })
+        assert.notStrictEqual(rBrokenJavac.status, 0, 'existing JAR + failing javac must NEVER silently degrade to exit 0')
+        assert.ok((rBrokenJavac.stderr || '').indexOf('禁止静默降级') >= 0, 'stderr must explicitly report fail-hard on toolchain error')
+    } finally {
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch (eRm) { }
     }
 })
 

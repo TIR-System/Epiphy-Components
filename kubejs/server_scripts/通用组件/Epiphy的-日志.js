@@ -512,7 +512,10 @@
         }
     }
 
+    var VERSION = '1.2.0'
+
     var api = {
+        VERSION:             VERSION,
         DEFAULT_INTERVAL_MS: DEFAULT_INTERVAL_MS,
         warn:                warn,
         error:               error,

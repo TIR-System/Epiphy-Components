@@ -1,6 +1,6 @@
 {
   "name": "epiphy-kubejs-components",
-  "version": "1.0.0",
+  "version": "6.2.0",
   "private": true,
   "license": "SEE LICENSE.md",
   "description": "Epiphy KubeJS server/client common components pure & harness tests",
@@ -13,6 +13,12 @@
     "url": "https://github.com/TIR-System/Epiphy-Components/issues"
   },
   "scripts": {
-    "test": "node tests/pure_functions.test.js"
+    "test": "node tests/pure_functions.test.js && node scripts/rhino-check.js",
+    "test:unit": "node tests/pure_functions.test.js",
+    "test:rhino": "node scripts/rhino-check.js",
+    "test:rhino-local": "node scripts/rhino-check.js --force-local"
+  },
+  "devDependencies": {
+    "acorn": "^8.19.0"
   }
 }

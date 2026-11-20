@@ -21,14 +21,19 @@
 // ============================================================================
 
 ;(function () {
+    var VERSION         = '2.5.0'
     var PERSIST_KEY     = 'epiphy_tracked_blocks_v2'
     // 注意：trackedBlocks 记录物理方块坐标状态，须随存档备份还原同步回滚，因此刻意保存在 saves/<world>/ 而非抗回滚的 epiphy-data/（见 README-LLM.md §5.1）
     var WORLD_FILE_NAME = 'kubejs_epiphy_tracked_blocks.json'
     var FALLBACK_DIR    = 'kubejs/config/epiphy_tracked_blocks'
 
+    var SPEC = (typeof global !== 'undefined' && global.EpiphySpec != null) ? global.EpiphySpec : null
     var BASE = (typeof global !== 'undefined') ? (global.EpiphyServerCore || global.EpiphyServerBase) : null
     if (!BASE) {
         throw new Error('[EpiphyBlockTracker] 缺少硬依赖 global.EpiphyServerBase，请确认 server_scripts/通用组件/Epiphy的-服务端核心.js 已加载')
+    }
+    if (SPEC && typeof SPEC.checkDependencyVersion === 'function') {
+        SPEC.checkDependencyVersion('EpiphyServerCore', BASE, '2.5.0', '2.99.99', { caller: 'EpiphyBlockTracker', required: true })
     }
     var LOGGER = BASE.createLogger('EpiphyBlockTracker', 5000)
 
@@ -1843,6 +1848,7 @@
     }
 
     var trackerAndChunkApi = {
+        VERSION:                      VERSION,
         CONFIG:                       CONFIG,
         configure:                    configure,
         createTracker:                createTracker,

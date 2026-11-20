@@ -5,7 +5,7 @@
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 <repo-root> 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/server_scripts/通用组件/Epiphy的-平面渲染组件.js
-//  配套客户端渲染器：kubejs/client_scripts/通用组件/Epiphy的-平面渲染器.js (Epiphy2DRenderer / ScreenDanmakuClient v6.2)
+//  配套客户端渲染器：kubejs/client_scripts/通用组件/Epiphy的-平面渲染器.js (Epiphy2DRenderer >= 6.0.0, <= 6.99.x，协议 v6 向下兼容 v5)
 //  配套权限阀组件：kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（管理 /epiphy 根命令、执行权限与 actorTier 资源分级）
 //
 //  依赖与缺失降级行为：
@@ -77,6 +77,11 @@
     if (!SPEC || !PROTO || !BASE) {
         throw new Error('[ScreenDanmaku] 缺少硬依赖 (EpiphySpec / EpiphyServerBase)，请确认基础脚本已加载')
     }
+    if (typeof SPEC.checkDependencyVersion === 'function') {
+        SPEC.checkDependencyVersion('EpiphySpec', SPEC, '2.5.0', '2.99.99', { caller: 'Epiphy2DSurface', required: true })
+        SPEC.checkDependencyVersion('EpiphyServerCore', BASE, '2.5.0', '2.99.99', { caller: 'Epiphy2DSurface', required: true })
+    }
+    var VERSION       = '6.2.0'
     var LOGGER        = BASE.createLogger('ScreenDanmaku', 5000)
     var CHANNEL       = PROTO.DANMAKU_CHANNEL
     var PROTO_VERSION = PROTO.DANMAKU_PROTO_VERSION
@@ -3570,7 +3575,7 @@
     }
 
     global.ScreenDanmaku = {
-        VERSION:            '6.2.0',
+        VERSION:            VERSION,
         CHANNEL:            CHANNEL,
         configure:          configure,
         ui:                 createUiBuilder,

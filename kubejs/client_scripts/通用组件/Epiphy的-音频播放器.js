@@ -5,8 +5,8 @@
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-音频播放器.js
 //  配套服务端组件：
-//    - kubejs/server_scripts/通用组件/Epiphy的-音频组件.js（服务端调度器 EpiphyAudio v5.7）
-//    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀 EpiphyPermissionValve v5.4）
+//    - kubejs/server_scripts/通用组件/Epiphy的-音频组件.js（服务端调度器 EpiphyAudio >= 5.6.0, <= 5.99.x，协议 v5）
+//    - kubejs/server_scripts/通用组件/Epiphy的-权限阀.js（/epiphy 指令注册中心与权限阀 EpiphyPermissionValve >= 5.0.0, <= 5.99.x）
 
 //  依赖与缺失降级：
 //    - 可选前置：kubejs/startup_scripts/通用组件/Epiphy的-Spec与通用工具.js (EpiphySpec / EpiphyProtocol, priority: 1200)
@@ -32,7 +32,13 @@
     }
     var CHANNEL       = (PROTO && PROTO.AUDIO_CHANNEL) || 'epiphy:audio'
     var PROTO_VERSION = (PROTO && PROTO.AUDIO_PROTO_VERSION) || 5
-    var VERSION       = (PROTO && PROTO.AUDIO_SEMVER) || '5.6.0'
+    var VERSION       = '5.6.0'
+    if (SPEC && typeof SPEC.checkDependencyVersion === 'function') {
+        SPEC.checkDependencyVersion('EpiphySpec', SPEC, '2.5.0', '2.99.99', {
+            caller: 'EpiphyAudioClient',
+            onWarn: function (msg) { try { console.warn(msg) } catch (eW) { } }
+        })
+    }
 
     var CONFIG = {
         sweepIntervalTicks:     10,   // 慢速巡检周期（负责死链清理、异常断流重连、超时判定）

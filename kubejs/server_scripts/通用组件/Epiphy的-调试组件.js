@@ -1,6 +1,6 @@
 // priority: 950
 // ============================================================================
-//  通用调试与性能诊断组件 (EpiphyDebug v1)
+//  通用调试与性能诊断组件 (EpiphyDebug v1.0)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 <repo-root> 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
@@ -10,11 +10,12 @@
 //    1. 提供统一的动态调试提供者注册表 (registerProvider / global.EpiphyDebugProviderQueue)，
 //       使上下游各组件无需彼此耦合即可动态上报运行时指标、耗时统计、健康自检与维护动作；
 //    2. 默认向权限阀 (EpiphyPermissionValve) 注册管理员专属子命令 `/epiphy debug`：
-//         - `/epiphy debug` / `status`             : 查看全局摘要与全模块关键性能指标
-//         - `/epiphy debug module <名>`            : 查看单模块完整详细指标、自检与可用动作
-//         - `/epiphy debug checks`                 : 执行全部已注册模块的健康检查
-//         - `/epiphy debug log <模块|*> <on|off>`  : 统一切换 EpiphyLog 模块级调试日志开关
-//         - `/epiphy debug action <模块> <动作>`    : 触发模块注册的维护动作（如 rescan / clearcache 等）
+//         - `/epiphy debug` / `status`                   : 查看全局摘要与全模块关键性能指标
+//         - `/epiphy debug module <名>`                  : 查看单模块完整详细指标、自检与可用动作
+//         - `/epiphy debug checks`                       : 执行全部已注册模块的健康检查
+//         - `/epiphy debug log <模块|*> <on|off>`        : 统一切换 EpiphyLog 模块级调试日志开关
+//         - `/epiphy debug action <模块> <动作>`          : 触发模块注册的维护动作（如 rescan / clearcache 等）
+//         - `/epiphy debug renderperf <on|off|dump|reset>`: 按需控制客户端 2D 渲染性能打点落盘开关与快照导出
 //    3. 同时导出 JS API `global.EpiphyDebug`，供脚本诊断或节点单元测试调用。
 //
 //  依赖与缺失影响：
@@ -34,7 +35,9 @@
         throw new Error('[EpiphyDebug] 缺少硬依赖 global.EpiphyServerBase，请确认 server_scripts/通用组件/Epiphy的-服务端核心.js 已加载')
     }
 
-    var LOGGER        = BASE.createLogger('EpiphyDebug', 5000)
+    var VERSION              = '1.0.0'
+    var RENDER_DEBUG_CHANNEL = 'epiphy:render_debug'
+    var LOGGER               = BASE.createLogger('EpiphyDebug', 5000)
     var providers     = new Map() // key -> providerRecord
     var providerOrder = []
     var SERVER_REF    = null
@@ -452,6 +455,76 @@
         return 1
     }
 
+    function dispatchRenderPerf(sourceOrTarget, mode) {
+        var normMode = normalizeName(mode)
+        if (normMode !== 'on' && normMode !== 'off' && normMode !== 'dump' && normMode !== 'reset') {
+            return { ok: false, sent: 0, message: '不支持的 renderperf 动作: ' + String(mode) + '（可选 on|off|dump|reset）' }
+        }
+        var targets = []
+        if (sourceOrTarget != null && typeof sourceOrTarget.sendData === 'function') {
+            targets.push(sourceOrTarget)
+        } else if (sourceOrTarget != null) {
+            var srcPlayer = null
+            try {
+                if (sourceOrTarget.player != null) srcPlayer = sourceOrTarget.player
+                else if (typeof sourceOrTarget.getPlayer === 'function') srcPlayer = sourceOrTarget.getPlayer()
+            } catch (eSrcP) { }
+            if (srcPlayer != null && typeof srcPlayer.sendData === 'function') {
+                targets.push(srcPlayer)
+            } else {
+                var srv = null
+                try { srv = sourceOrTarget.server || (typeof sourceOrTarget.getServer === 'function' ? sourceOrTarget.getServer() : null) } catch (eSrcS) { }
+                if (srv == null) srv = SERVER_REF
+                if (srv != null) {
+                    try {
+                        var list = (srv.players != null) ? srv.players : (typeof srv.getPlayerList === 'function' ? srv.getPlayerList().getPlayers() : null)
+                        if (list != null) {
+                            if (typeof list.iterator === 'function') {
+                                var it = list.iterator()
+                                while (it.hasNext()) {
+                                    var p = it.next()
+                                    if (p != null && typeof p.sendData === 'function') targets.push(p)
+                                }
+                            } else if (Array.isArray(list)) {
+                                for (var pi = 0; pi < list.length; pi++) {
+                                    if (list[pi] != null && typeof list[pi].sendData === 'function') targets.push(list[pi])
+                                }
+                            }
+                        }
+                    } catch (eSrvP) {
+                        logCatch('dispatchRenderPerf.collectPlayers', eSrvP)
+                    }
+                }
+            }
+        }
+
+        var sent = 0
+        for (var i = 0; i < targets.length; i++) {
+            try {
+                targets[i].sendData(RENDER_DEBUG_CHANNEL, { cmd: normMode })
+                sent++
+            } catch (eSend) {
+                logCatch('dispatchRenderPerf.sendData', eSend)
+            }
+        }
+        if (sent === 0) {
+            return { ok: false, sent: 0, message: '未找到可下发的在线玩家客户端（renderperf=' + normMode + '）' }
+        }
+        var descMap = {
+            on:    '已开启客户端渲染性能打点（于 ClientEvents.tick 节流写入 epiphy-data/logs/client_render_perf.json）',
+            off:   '已关闭客户端渲染性能打点落盘',
+            dump:  '已请求客户端立即导出当前渲染性能快照至 epiphy-data/logs/client_render_perf.json',
+            reset: '已重置客户端渲染性能统计桶'
+        }
+        return { ok: true, sent: sent, message: descMap[normMode] + ' [已下发 ' + sent + ' 个客户端]' }
+    }
+
+    function execRenderPerfCommand(source, mode) {
+        var res = dispatchRenderPerf(source, mode)
+        sendSourceMsg(source, (res.ok ? '§a[EpiphyDebug] ' : '§c[EpiphyDebug] ') + res.message)
+        return res.ok ? 1 : 0
+    }
+
     function buildDebugCommandNode(ctxApi) {
         var b = BASE.createCommandBuilder(ctxApi, { tag: 'EpiphyDebug' })
         return b.literal('debug', {
@@ -488,6 +561,14 @@
                             return res.ok ? 1 : 0
                         }
                     ]
+                }),
+                b.literal('renderperf', {
+                    children: [
+                        b.literal('on',    function (ctx) { return execRenderPerfCommand(ctx.source, 'on') }),
+                        b.literal('off',   function (ctx) { return execRenderPerfCommand(ctx.source, 'off') }),
+                        b.literal('dump',  function (ctx) { return execRenderPerfCommand(ctx.source, 'dump') }),
+                        b.literal('reset', function (ctx) { return execRenderPerfCommand(ctx.source, 'reset') })
+                    ]
                 })
             ]
         })
@@ -502,6 +583,7 @@
         '§e3. 全模块健康自检：   §f/epiphy debug checks',
         '§e4. 统一切换日志开关： §f/epiphy debug log <模块|*> <on|off>',
         '§e5. 执行维护诊断动作： §f/epiphy debug action <模块> <动作名>',
+        '§e6. 客户端渲染性能盘： §f/epiphy debug renderperf <on|off|dump|reset>',
         '§3§l----------------------------------------------------'
     ]
 
@@ -571,6 +653,7 @@
     drainProviderQueue()
 
     global.EpiphyDebug = {
+        VERSION:            VERSION,
         registerProvider:   registerProvider,
         unregisterProvider: unregisterProvider,
         hasProvider:        function (name) { drainProviderQueue(); return providers.has(normalizeName(name)) },
@@ -578,7 +661,8 @@
         collectSnapshot:    collectSnapshot,
         runChecks:          runChecks,
         runAction:          runAction,
-        toggleLogDebug:     toggleLogDebug
+        toggleLogDebug:     toggleLogDebug,
+        dispatchRenderPerf: dispatchRenderPerf
     }
 
     BASE.registerSubcommandSafe(debugSubcommandSpec, { requirePermissionValve: false })

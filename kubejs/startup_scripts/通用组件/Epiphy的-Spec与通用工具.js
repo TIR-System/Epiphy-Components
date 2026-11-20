@@ -1,6 +1,6 @@
 // priority: 1200
 // ============================================================================
-// Epiphy 通用规范、共享协议契约与纯逻辑基座 (EpiphySpec + EpiphyProtocol)
+// Epiphy 通用规范、共享协议契约与纯逻辑基座 (EpiphySpec + EpiphyProtocol v2.6)
 //   许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //   所属阶段：startup_scripts（服务端与客户端共享，单一前置加载项）
 //   职责说明：
@@ -61,12 +61,13 @@
         bossbar:   Object.freeze({ x: 0.25, y: 0.00, w: 0.50, h: 0.09 })
     };
 
+    var SPEC_VERSION          = '2.6.0';
+
     var DANMAKU_CHANNEL       = 'epiphy:screen_danmaku';
     var DANMAKU_PROTO_VERSION = 6;
 
     var AUDIO_CHANNEL         = 'epiphy:audio';
     var AUDIO_PROTO_VERSION   = 5;
-    var AUDIO_SEMVER          = '5.6.0';
 
     function isProtoCompatible(expectedVer, incomingVer) {
         if (incomingVer === undefined || incomingVer === null) return false;
@@ -75,6 +76,85 @@
         if (!isFinite(n) || !isFinite(exp)) return false;
         if (exp === 6) return n === 5 || n === 6;
         return n === exp;
+    }
+
+    // ------------------------------------------------------------------------
+    // 语义化版本解析与闭区间依赖兼容校验 (minVer <= actualVer <= maxVer)
+    //   说明：组件实现版本由各组件自身独立维护导出，EpiphySpec 仅提供通用比较与区间校验工具。
+    // ------------------------------------------------------------------------
+    function parseSemver(rawVer) {
+        if (rawVer === undefined || rawVer === null) return null;
+        if (typeof rawVer === 'number') {
+            if (!isFinite(rawVer) || rawVer < 0) return null;
+            var mjN = Math.floor(rawVer);
+            return { major: mjN, minor: 0, patch: 0, raw: mjN + '.0.0' };
+        }
+        var s = String(rawVer).trim();
+        if (!s) return null;
+        if (s.charAt(0) === 'v' || s.charAt(0) === 'V') s = s.slice(1).trim();
+        var m = /^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+].*)?$/.exec(s);
+        if (!m) return null;
+        var major = parseInt(m[1], 10);
+        var minor = m[2] !== undefined ? parseInt(m[2], 10) : 0;
+        var patch = m[3] !== undefined ? parseInt(m[3], 10) : 0;
+        if (!isFinite(major) || !isFinite(minor) || !isFinite(patch)) return null;
+        return { major: major, minor: minor, patch: patch, raw: major + '.' + minor + '.' + patch };
+    }
+
+    function compareSemver(a, b) {
+        var pa = parseSemver(a);
+        var pb = parseSemver(b);
+        if (pa == null || pb == null) return null;
+        if (pa.major !== pb.major) return pa.major < pb.major ? -1 : 1;
+        if (pa.minor !== pb.minor) return pa.minor < pb.minor ? -1 : 1;
+        if (pa.patch !== pb.patch) return pa.patch < pb.patch ? -1 : 1;
+        return 0;
+    }
+
+    function isVersionInRange(actualVer, minVer, maxVer) {
+        var pa = parseSemver(actualVer);
+        if (pa == null) return false;
+        if (minVer !== undefined && minVer !== null && String(minVer).trim() !== '') {
+            var cMin = compareSemver(pa.raw, minVer);
+            if (cMin === null || cMin < 0) return false;
+        }
+        if (maxVer !== undefined && maxVer !== null && String(maxVer).trim() !== '') {
+            var cMax = compareSemver(pa.raw, maxVer);
+            if (cMax === null || cMax > 0) return false;
+        }
+        return true;
+    }
+
+    function checkDependencyVersion(depName, depObj, minVer, maxVer, opts) {
+        var cfg    = isObjectLike(opts) ? opts : {};
+        var caller = cfg.caller ? String(cfg.caller) : 'Epiphy';
+        if (depObj == null) {
+            var missMsg = '[' + caller + '] 缺少依赖 ' + String(depName) + '（要求版本 >= ' + String(minVer || '0.0.0') + ' 且 <= ' + String(maxVer || '*') + '）';
+            if (cfg.required === true) throw new Error(missMsg);
+            if (typeof cfg.onWarn === 'function') cfg.onWarn(missMsg);
+            return { ok: false, reason: 'missing', actual: null, min: minVer || null, max: maxVer || null, message: missMsg };
+        }
+        var rawVer = (depObj.VERSION !== undefined) ? depObj.VERSION : depObj.version;
+        if (rawVer === undefined || rawVer === null) {
+            if (cfg.strictMissingVersion === true) {
+                var noVerMsg = '[' + caller + '] 依赖 ' + String(depName) + ' 未声明 VERSION（要求 >= ' + String(minVer || '0.0.0') + ' 且 <= ' + String(maxVer || '*') + '）';
+                if (cfg.required === true) throw new Error(noVerMsg);
+                if (typeof cfg.onWarn === 'function') cfg.onWarn(noVerMsg);
+                return { ok: false, reason: 'unversioned', actual: null, min: minVer || null, max: maxVer || null, message: noVerMsg };
+            }
+            return { ok: true, reason: 'unversioned_skipped', actual: null, min: minVer || null, max: maxVer || null, message: '' };
+        }
+        var parsed = parseSemver(rawVer);
+        var inRng  = parsed != null && isVersionInRange(parsed.raw, minVer, maxVer);
+        if (!inRng) {
+            var actualStr = parsed != null ? parsed.raw : String(rawVer);
+            var rangeStr  = (minVer ? ('>=' + minVer) : '') + (minVer && maxVer ? ' 且 ' : '') + (maxVer ? ('<=' + maxVer) : '');
+            var badMsg    = '[' + caller + '] 依赖 ' + String(depName) + ' 版本不兼容（实际 ' + actualStr + '，兼容范围 ' + rangeStr + '）';
+            if (cfg.required === true) throw new Error(badMsg);
+            if (typeof cfg.onWarn === 'function') cfg.onWarn(badMsg);
+            return { ok: false, reason: 'out_of_range', actual: actualStr, min: minVer || null, max: maxVer || null, message: badMsg };
+        }
+        return { ok: true, reason: 'ok', actual: parsed.raw, min: minVer || null, max: maxVer || null, message: '' };
     }
 
     function registerPriorityAlias(name, level) {
@@ -100,7 +180,6 @@
         DANMAKU_PROTO_VERSION: DANMAKU_PROTO_VERSION,
         AUDIO_CHANNEL:         AUDIO_CHANNEL,
         AUDIO_PROTO_VERSION:   AUDIO_PROTO_VERSION,
-        AUDIO_SEMVER:          AUDIO_SEMVER,
         PRIORITY_MAP:                PRIORITY_MAP,
         PRIORITY_CANON_NAMES:        PRIORITY_CANON_NAMES,
         DEPRECATED_PRIORITY_ALIASES: DEPRECATED_PRIORITY_ALIASES,
@@ -1097,6 +1176,17 @@
             return out;
         }
 
+        if (out.namespace === undefined || out.namespace === null) out.namespace = '';
+        else out.namespace = String(out.namespace);
+        if (out.tier !== 'player' && out.tier !== 'system') {
+            out.tier = (out.namespace.indexOf('u:') === 0) ? 'player' : 'system';
+        }
+        if (out.group === undefined || out.group === null || String(out.group) === '') out.group = 'default';
+        else out.group = String(out.group);
+        if (out.lifeMode === undefined || out.lifeMode === null || String(out.lifeMode) === '') out.lifeMode = 'once';
+        if (out.priority === undefined || out.priority === null) {
+            out.priority = (out.lifeMode === 'active') ? 5 : 2;
+        }
         if (out.slotId == null) {
             out.slotId = out.id != null ? String(out.id) : (out.slot != null ? String(out.slot) : '');
         }
@@ -1502,8 +1592,13 @@
 
     if (typeof global !== 'undefined') {
         global.EpiphySpec = {
+            VERSION:                    SPEC_VERSION,
             PROTOCOL:                   PROTOCOL,
             PROTO:                      PROTOCOL,
+            parseSemver:                parseSemver,
+            compareSemver:              compareSemver,
+            isVersionInRange:           isVersionInRange,
+            checkDependencyVersion:     checkDependencyVersion,
             COLOR_PRESETS:              COLOR_PRESETS,
             SIZE_PRESETS:               SIZE_PRESETS,
             PRIORITY_MAP:               PRIORITY_MAP,

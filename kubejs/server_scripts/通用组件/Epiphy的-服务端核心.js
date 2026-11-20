@@ -19,11 +19,17 @@
 ;(function () {
     'use strict';
 
+    var VERSION = '2.6.0';
     var spec = (typeof global !== 'undefined' && global.EpiphySpec != null) ? global.EpiphySpec : null;
     if (!spec) {
         try {
             console.warn('[EpiphyServerBase] 未检测到 global.EpiphySpec (Epiphy的-Spec与通用工具.js)，维度归一化与类数组判断将启用内置降级。');
         } catch (eSpecWarn) { }
+    } else if (typeof spec.checkDependencyVersion === 'function') {
+        spec.checkDependencyVersion('EpiphySpec', spec, '2.5.0', '2.99.99', {
+            caller: 'EpiphyServerCore',
+            onWarn: function (msg) { try { console.warn(msg); } catch (eW) { } }
+        });
     }
 
     function safeTypeOf(x) {
@@ -2963,6 +2969,7 @@
 
     if (typeof global !== 'undefined') {
         var coreApi = {
+            VERSION:                      VERSION,
             createLogger:                 createLogger,
             loadJavaClass:                loadJavaClass,
             nowNano:                      nowNano,

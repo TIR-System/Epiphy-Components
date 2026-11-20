@@ -1,6 +1,6 @@
 // priority: 900
 // ============================================================================
-//  基础 Bug 修复组件 (EpiphyBugfix v1)
+//  基础 Bug 修复组件 (EpiphyBugfix v1.0)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  [LLM 协作规范] 每次进行较大修改或重构前，请先将修改同步至 <repo-root> 并执行 git commit 保存当前可用状态，便于随时回退与对比 diff。
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
@@ -27,7 +27,8 @@
 // ============================================================================
 
 ;(function () {
-    var VERSION         = 1
+    var VERSION         = '1.0.0'
+    var DATA_VERSION    = 1
     var MODULE_NAME     = 'EpiphyBugfix'
     var WORLD_FILE_NAME = 'kubejs_epiphy_bugfix_hp.json'
     var PERSIST_KEY     = 'epiphy_bugfix_logout_hp_v1'
@@ -594,7 +595,7 @@
             return false
         }
         var payload = {
-            version: VERSION,
+            version: DATA_VERSION,
             players: exportPlayers
         }
 

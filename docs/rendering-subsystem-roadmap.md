@@ -226,8 +226,8 @@
 | `tier` | - | `string` | `'system' \| 'player'` | `'system'` | - | 调用源权限层级 |
 | `lifeMode` | - | `string` | `'once' \| 'active' \| 'screen_session'` | `'once'` | - | 单次定时、心跳续期或随当前打开的 GUI 会话共存亡 |
 | `priority` | - | `number` | 整数 `0..10`（玩家层 `<= 3`） | `2` (`once`) / `5` (`active`) | - | 淘汰与帧预算保护优先级（数值越高越晚淘汰） |
-| `renderPriority` | `【别名: zIndex】` | `number` | `-10000 .. 10000` | `'screen':0`, `'gui':100`, `'slot':200` | - | **独立画面层叠渲染优先级**（默认 GUI 高于弹幕不被覆盖，可独立调整） |
-| `rx`, `ry` | `【组合别名: pos】` | `number` | `0.0 .. 1.0` | `0.5`, `0.34` | 归一化屏幕比 | `surface === 'screen'` 时的锚点坐标（`pos: [rx, ry]`） |
+| `renderPriority` | `【别名: zIndex】` | `number` | `-10000 .. 10000` | `'screen':0`, `'screen+nodes(HUD)':50`, `'gui':100`, `'slot':200` | - | **独立画面层叠渲染优先级**（默认图形 HUD 高于弹幕、GUI 高于 HUD，可独立调整） |
+| `rx`, `ry` | `【组合别名: pos】` | `number` | `0.0 .. 1.0` | `0.5`, `0.35` | 归一化屏幕比 | `surface === 'screen'` 时的锚点坐标（`pos: [rx, ry]`） |
 | `ox`, `oy` | - | `number` | `-4096 .. 4096` | `0`, `0` | `px` | 相对于锚点的像素微调偏移 |
 | `scale` | `【别名: size】` | `number` | `0.2 .. 8.0`（玩家层 `0.5..2.0`） | `1.0` | 倍率 | 面板整体缩放倍率 |
 | `angle` | `【别名: tilt】` | `number` | `-180.0 .. 180.0` | `0.0` | 度 (`deg`) | 面板整体顺时针旋转角 |
@@ -235,7 +235,7 @@
 | `activeHold` | - | `number` | 整数 `4 .. 72000` | `28` | `ticks` (50ms) | `lifeMode: 'active'` 单次心跳维持窗口 |
 | `fadeOut` | - | `number` | 整数 `1 .. 1200` | `10` | `ticks` (50ms) | 淡出阶段时长 |
 | `fadeStyle` | `【别名: fade】` | `string` | `'shrink' \| 'char_first' \| 'char_last' \| 'blink' \| 'shatter' \| 'blur' \| 'split' \| 'random'` | `'shrink'` | - | 退场动画风格 |
-| `vars` | - | `object` | `Record<string, number>`（最多 16 个键） | `{}` | 数值 / 比例 | 服务端下发的状态变量字典 |
+| `vars` | - | `object` | `Record<string, number \| boolean \| string>`（单值字符串 `<= 256`） | `{}` | 数值 / 状态 | 服务端下发的状态变量字典 |
 | `tracks` | - | `object` | `Record<string, TrackSpec>`（最多 16 个通道） | `{}` | - | 客户端插值通道定义（`lerp` / `trail` / `impulse`） |
 | `nodes` | `【别名: layers】` | `array` | `NodeSpec[]`（总权重 `cost <= maxCost`） | `[]` | - | 声明式 2D 图元树根节点列表 |
 | `targetGui` | - | `object` | `{ screenClass?: string, titleMatch?: string }` | `null` | - | `surface === 'gui'` 时的目标界面匹配条件 |
@@ -319,7 +319,7 @@
 
 ## 6. 测试验证方案与性能帧预算（Verification & Performance Budget）
 
-所有新增能力必须同步扩展 [`tests/pure_functions.test.js`](../tests/pure_functions.test.js)（当前基线 **66/66 passed**），并在实机通过帧耗时预算核验：
+所有新增能力必须同步扩展 [`tests/pure_functions.test.js`](../tests/pure_functions.test.js)（当前基线 **68/68 passed**）并通过 [`scripts/rhino-check.js`](../scripts/rhino-check.js) 校验（自动接入 `npm test`；有本地 `rhino-forge` Jar 时执行真实 `Context.compileString`，缺失时自动降级为本地语义与语法检查），并在实机通过 `epiphy-data/logs/client_render_perf.json` 核验帧耗时预算：
 
 ### 6.1 沙盒单元测试必测项（`npm test` 新增用例清单）
 1. **`adaptV5ToV6` 无损往返与等价性测试**：遍历全部 45 个 `v5` 字段输入，断言转换后的 `v6` 包在顶层 Envelope 与 `nodes[0]` 上数值 100% 精确对齐，且 `ScreenDanmakuClient` 对 `proto: 5` 与 `proto: 6` 包产生完全相同的内部 Overlay 状态与渲染调用序列；

@@ -41,9 +41,14 @@
 // ============================================================================
 
 ;(function () {
-    var BASE = (typeof global !== 'undefined') ? (global.EpiphyServerCore || global.EpiphyServerBase) : null
+    var VERSION = '5.4.0'
+    var SPEC    = (typeof global !== 'undefined' && global.EpiphySpec != null) ? global.EpiphySpec : null
+    var BASE    = (typeof global !== 'undefined') ? (global.EpiphyServerCore || global.EpiphyServerBase) : null
     if (!BASE) {
         throw new Error('[EpiphyPermissionValve] 缺少硬依赖 global.EpiphyServerBase，请确认 server_scripts/通用组件/Epiphy的-服务端核心.js 已加载')
+    }
+    if (SPEC && typeof SPEC.checkDependencyVersion === 'function') {
+        SPEC.checkDependencyVersion('EpiphyServerCore', BASE, '2.5.0', '2.99.99', { caller: 'EpiphyPermissionValve', required: true })
     }
 
     var LOGGER                  = BASE.createLogger('EpiphyPermissionValve', 5000)
@@ -2293,6 +2298,7 @@
     }
 
     var valveApi = {
+        VERSION:                   VERSION,
         ROOT_LITERAL:              ROOT_LITERAL,
         POLICIES:                  POLICY_PRESETS,
         normalizePermissionPolicy: normalizePermissionPolicy,
