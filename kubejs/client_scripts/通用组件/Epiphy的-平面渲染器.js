@@ -42,7 +42,7 @@
         : (SPEC && SPEC.PROTOCOL ? SPEC.PROTOCOL : null)
     if (PROTO == null || SPEC == null) {
         try {
-            console.warn('[ScreenDanmakuClient] 未检测到 startup_scripts/通用组件/Epiphy的-Spec与通用工具.js，已启用内置 v5 协议常量与基础工具降级运行。')
+            console.warn('[ScreenDanmakuClient] 未检测到 startup_scripts/通用组件/Epiphy的-Spec与通用工具.js，已启用内置 v6 协议常量与基础工具降级运行。')
         } catch (eWarnInit) { }
     }
     var CHANNEL       = (PROTO && PROTO.DANMAKU_CHANNEL) || 'epiphy:screen_danmaku'
@@ -5132,6 +5132,15 @@
                     transientCount: TRANSIENT_TEXT_SEQ_CACHE.size(),
                     hasShared:      function (k) { return SHARED_TEXT_SEQ_CACHE.has(k) },
                     hasTransient:   function (k) { return TRANSIENT_TEXT_SEQ_CACHE.has(k) }
+                }
+            },
+            getProtocolState:             function () {
+                return {
+                    channel:              CHANNEL,
+                    protoVersion:         PROTO_VERSION,
+                    priorityMap:          PRIORITY_MAP,
+                    legacyPriorityMap:    LEGACY_PRIORITY_MAP,
+                    checkProtoCompatible: checkProtoCompatible
                 }
             },
             inspectOverlays:              function () { return activeOverlays }

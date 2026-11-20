@@ -196,7 +196,10 @@ Epiphy的-音频播放器.js:
 │   ├── kube-mods-rhino-es5-es6-compatibility.md  # Bytecode & runtime audit of kube-mods/rhino
 │   └── rendering-subsystem-roadmap.md            # 2D Planar Compositor & 3D Spatial FX roadmap & v6 protocol specification
 ├── tests/
-│   └── pure_functions.test.js    # Node.js sandbox & pure-function test suite
+│   ├── run.js                    # Unified test runner (supports suite/name filtering)
+│   ├── helpers/harness.js        # Shared KubeJS VM sandbox & path harness
+│   ├── suites/*.test.js          # 7 domain-grouped test suites (69 test cases)
+│   └── pure_functions.test.js    # Backwards-compatible shim forwarding to tests/run.js
 ├── README.md                     # Chinese README (default)
 ├── README_EN.md                  # English README
 ├── README-LLM.md                 # Engineering rules & persistent context for LLMs

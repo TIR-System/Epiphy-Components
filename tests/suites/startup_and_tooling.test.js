@@ -75,27 +75,57 @@ module.exports = function registerSuite(test, h) {
             }
         }
 
-        // 1. 音频客户端无 startup 前置时平滑降级，仍严格拒收旧版本包
+        // 0. 加载一份参照 EpiphyProtocol 沙盒，用于校验两个客户端降级副本与协议单一事实源 1:1 一致
+        var refSb = createKubeSandbox()
+        loadStartupBase(refSb)
+        var RefProto = refSb.global.EpiphyProtocol
+        assert.ok(RefProto != null, 'reference EpiphyProtocol must load from SPEC_PATH')
+
+        // 1. 音频客户端无 startup 前置时平滑降级，且降级常量与 EpiphyProtocol 1:1 一致
         var auEnv = makeClientDegradedSandbox()
         runScriptIn(auEnv.sb, AUDIO_CLIENT_PATH)
         assert.ok(auEnv.warns.some(function (w) { return w.indexOf('Epiphy的-Spec与通用工具.js') >= 0 }))
         assert.ok(auEnv.sb.global.EpiphyAudioClient != null)
-        assert.ok(typeof auEnv.netHandlers['epiphy:audio'] === 'function')
-        auEnv.netHandlers['epiphy:audio']({ data: { proto: 4, action: 'play', snd: 'minecraft:ui.button.click' } })
+        var auProto = auEnv.sb.global.EpiphyAudioClient._pure.getProtocolState()
+        assert.strictEqual(auProto.channel, RefProto.AUDIO_CHANNEL, 'degraded audio channel fallback must match EpiphyProtocol.AUDIO_CHANNEL')
+        assert.strictEqual(auProto.protoVersion, RefProto.AUDIO_PROTO_VERSION, 'degraded audio protoVersion fallback must match EpiphyProtocol.AUDIO_PROTO_VERSION')
+        assert.ok(typeof auEnv.netHandlers[RefProto.AUDIO_CHANNEL] === 'function', 'degraded audio client must register listener on EpiphyProtocol.AUDIO_CHANNEL')
+        var protoProbes = [0, 4, 5, 6, 7, null, undefined, 'bad']
+        for (var api = 0; api < protoProbes.length; api++) {
+            assert.strictEqual(
+                auProto.checkProtoCompatible(auProto.protoVersion, protoProbes[api]),
+                RefProto.isProtoCompatible(RefProto.AUDIO_PROTO_VERSION, protoProbes[api]),
+                'degraded audio checkProtoCompatible must match EpiphyProtocol.isProtoCompatible for probe=' + String(protoProbes[api])
+            )
+        }
+        auEnv.netHandlers[RefProto.AUDIO_CHANNEL]({ data: { proto: 4, action: 'play', snd: 'minecraft:ui.button.click' } })
         assert.strictEqual(auEnv.errors.length, 1, 'degraded audio client must fail-closed reject mismatched proto=4 packet')
-        auEnv.netHandlers['epiphy:audio']({ data: { proto: 5, action: 'play', h: 'degraded_h1', snd: 'minecraft:ui.button.click', vol: 1.2 } })
-        assert.strictEqual(auEnv.errors.length, 1, 'degraded audio client must accept valid proto=5 packet without errors')
-        assert.strictEqual(auEnv.sb.global.EpiphyAudioClient.count(), 1, 'degraded audio client must queue valid proto=5 action')
+        auEnv.netHandlers[RefProto.AUDIO_CHANNEL]({ data: { proto: RefProto.AUDIO_PROTO_VERSION, action: 'play', h: 'degraded_h1', snd: 'minecraft:ui.button.click', vol: 1.2 } })
+        assert.strictEqual(auEnv.errors.length, 1, 'degraded audio client must accept valid current audio proto packet without errors')
+        assert.strictEqual(auEnv.sb.global.EpiphyAudioClient.count(), 1, 'degraded audio client must queue valid audio action')
 
-        // 2. 弹幕客户端无 startup 前置时可接收 v5 包并完成绘制，同时拒收错误版本包
+        // 2. 弹幕/平面渲染客户端无 startup 前置时平滑降级，且全部降级常量与 EpiphyProtocol 1:1 一致
         var dmEnv = makeClientDegradedSandbox()
         runScriptIn(dmEnv.sb, RENDERER_PATH)
         assert.ok(dmEnv.warns.some(function (w) { return w.indexOf('Epiphy的-Spec与通用工具.js') >= 0 }))
         assert.ok(dmEnv.sb.global.ScreenDanmakuClient != null)
-        assert.ok(typeof dmEnv.netHandlers['epiphy:screen_danmaku'] === 'function')
+        var dmProto = dmEnv.sb.global.ScreenDanmakuClient._pure.getProtocolState()
+        assert.strictEqual(dmProto.channel, RefProto.DANMAKU_CHANNEL, 'degraded renderer channel fallback must match EpiphyProtocol.DANMAKU_CHANNEL')
+        assert.strictEqual(dmProto.protoVersion, RefProto.DANMAKU_PROTO_VERSION, 'degraded renderer protoVersion fallback must match EpiphyProtocol.DANMAKU_PROTO_VERSION')
+        assert.strictEqual(dmEnv.sb.global.ScreenDanmakuClient.getStats().protoVersion, RefProto.DANMAKU_PROTO_VERSION, 'degraded renderer stats protoVersion must match EpiphyProtocol')
+        assert.deepStrictEqual(plain(dmProto.priorityMap), plain(RefProto.PRIORITY_MAP), 'degraded renderer PRIORITY_MAP must match EpiphyProtocol.PRIORITY_MAP')
+        assert.deepStrictEqual(plain(dmProto.legacyPriorityMap), plain(RefProto.DEPRECATED_PRIORITY_ALIASES), 'degraded renderer LEGACY_PRIORITY_MAP must match EpiphyProtocol.DEPRECATED_PRIORITY_ALIASES')
+        assert.ok(typeof dmEnv.netHandlers[RefProto.DANMAKU_CHANNEL] === 'function', 'degraded renderer must register listener on EpiphyProtocol.DANMAKU_CHANNEL')
+        for (var dpi = 0; dpi < protoProbes.length; dpi++) {
+            assert.strictEqual(
+                dmProto.checkProtoCompatible(dmProto.protoVersion, protoProbes[dpi]),
+                RefProto.isProtoCompatible(RefProto.DANMAKU_PROTO_VERSION, protoProbes[dpi]),
+                'degraded renderer checkProtoCompatible must match EpiphyProtocol.isProtoCompatible for probe=' + String(protoProbes[dpi])
+            )
+        }
 
         // 错误版本包被 fail-closed 拒收，不入队
-        dmEnv.netHandlers['epiphy:screen_danmaku']({ data: { proto: 4, title: 'bad_proto' } })
+        dmEnv.netHandlers[RefProto.DANMAKU_CHANNEL]({ data: { proto: 4, title: 'bad_proto' } })
         assert.strictEqual(dmEnv.errors.length, 1, 'degraded renderer must fail-closed reject mismatched proto=4 packet')
 
         var mockEvent = {
@@ -119,14 +149,18 @@ module.exports = function registerSuite(test, h) {
         dmEnv.paintHandlers[0](mockEvent)
         assert.strictEqual(dmEnv.draws.length, 0, 'rejected proto=4 packet must produce 0 draws')
 
-        // 正常 v5 包可触发绘制（含字符串优先级与布尔字段解析）
-        dmEnv.netHandlers['epiphy:screen_danmaku']({
+        // 正常 v5 与 v6 包均可触发绘制（含字符串优先级与布尔字段解析）
+        dmEnv.netHandlers[RefProto.DANMAKU_CHANNEL]({
             data: { proto: 5, title: 'DegradedOK', priority: 'urgent', typewriter: 'false', shadow: false, stay: 40 }
         })
+        dmEnv.netHandlers[RefProto.DANMAKU_CHANNEL]({
+            data: { proto: RefProto.DANMAKU_PROTO_VERSION, surface: 'screen', title: 'DegradedV6OK', priority: 'high', typewriter: false, shadow: false, stay: 40 }
+        })
         dmEnv.paintHandlers[0](mockEvent)
-        assert.strictEqual(dmEnv.errors.length, 1, 'degraded renderer must paint valid proto=5 danmaku without draw errors')
-        assert.ok(dmEnv.draws.length >= 1, 'degraded renderer must still render valid proto=5 danmaku')
-        assert.ok(dmEnv.draws.some(function (s) { return s.indexOf('DegradedOK') >= 0 }), 'degraded renderer must draw payload text')
+        assert.strictEqual(dmEnv.errors.length, 1, 'degraded renderer must paint valid v5/v6 danmaku without draw errors')
+        assert.ok(dmEnv.draws.length >= 2, 'degraded renderer must still render valid v5 & v6 danmaku')
+        assert.ok(dmEnv.draws.some(function (s) { return s.indexOf('DegradedOK') >= 0 }), 'degraded renderer must draw v5 payload text')
+        assert.ok(dmEnv.draws.some(function (s) { return s.indexOf('DegradedV6OK') >= 0 }), 'degraded renderer must draw v6 payload text')
     })
 
     // ----------------------------------------------------------------------------

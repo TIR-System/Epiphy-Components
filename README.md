@@ -196,7 +196,10 @@ Epiphy的-音频播放器.js:
 │   ├── kube-mods-rhino-es5-es6-compatibility.md  # kube-mods/rhino 实测兼容性与语义偏移参考
 │   └── rendering-subsystem-roadmap.md            # 2D 平面合成器与 3D 空间特效子系统演进路线图与 v6 协议规范
 ├── tests/
-│   └── pure_functions.test.js    # Node 沙盒与纯函数测试套件
+│   ├── run.js                    # 统一测试汇总入口（支持按套件/关键词筛选运行）
+│   ├── helpers/harness.js        # 共享 KubeJS VM 沙盒与路径底座
+│   ├── suites/*.test.js          # 按被测模块拆分的 7 个测试套件（共 69 项用例）
+│   └── pure_functions.test.js    # 向后兼容转发入口（转发至 tests/run.js）
 ├── README.md                     # 中文自述（默认）
 ├── README_EN.md                  # 英文自述
 ├── README-LLM.md                 # 面向 AI 协作者的工程准则与跨上下文交接备忘

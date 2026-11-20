@@ -1661,6 +1661,13 @@
         stopAll: () => {
             pendingActions.length = 0
             clearAllNow()
+        },
+        _pure: {
+            getProtocolState: () => ({
+                channel:              CHANNEL,
+                protoVersion:         PROTO_VERSION,
+                checkProtoCompatible: checkProtoCompatible
+            })
         }
     }
 })()
