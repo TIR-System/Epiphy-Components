@@ -1,6 +1,6 @@
 // priority: 1050
 // ============================================================================
-//  Epiphy 的通用组件 —— 空间特效渲染核心 (Epiphy3DFXCore v1.0.4 · Startup/ModBus)
+//  Epiphy 的通用组件 —— 空间特效渲染核心 (Epiphy3DFXCore v1.0.5 · Startup/ModBus)
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/startup_scripts/通用组件/Epiphy的-空间特效核心.js
 //  第三方 Mod 可选特例（原则见 README-LLM.md §3.3）：
@@ -15,16 +15,16 @@
 //      1. 通过 RegisterShadersEvent + CodeChickenLib CCShaderInstance.create（单重载工厂，根治 Rhino
 //         ShaderInstance 构造二义性）注册 100% 自研 GLSL 核心着色器 `epiphy:epiphy_cosmos`；
 //      2. 通过 ModelEvent$ModifyBakingResult 挂载 CodeChickenLib IItemRenderer，在烘焙期一次性预烘焙
-//         带法线（`computeNormals()`）且经过有限值校验的 `CCModel`（星窗面片、3D 星盘陀螺环、度盘刻度与四芒星棱晶、
-//         双螺旋缠刃光带及游弋星屑），热路径由纯 Java `CCModel.render` 提交至 `RenderType.entityTranslucentEmissive`
-//         （`brightness=FULL_BRIGHT` / `overlay=NO_OVERLAY`）；
-//      3. 热路径零 JS 逐顶点循环、零每帧矩阵分配、零 ClassFilter 异常，`cosmosType` 单次 flush 防 Hand/GUI uniform 串扰，
+//         经有限值校验的连续光滑 `CCModel`（星窗面片、极细柔光 3D 星盘双环、Frenet 连续双螺旋缠刃丝线与柔光四芒星芒），
+//         热路径由纯 Java `CCModel.render` 提交至无闪烁加法发光 RenderType（`POSITION_COLOR_TEX` + `LIGHTNING_TRANSPARENCY`
+//         + 双线性滤波柔光贴图 `glow_ribbon.png`/`star_flare.png` + `NO_CULL` + `COLOR_WRITE` + `sortOnUpload=false`）；
+//      3. 热路径零 JS 逐顶点循环、零每帧矩阵分配、零排序/共面闪烁，`cosmosType` 单次 flush 防 Hand/GUI uniform 串扰，
 //         配合 GUI 轻量 LOD 稳定保持 < 1ms。
 //  语法规范：遵循 README-LLM.md §1 强制 Rhino ES5 语法基准（严禁读取 Math.PI 等 NativeMath 缺失常量）。
 // ============================================================================
 
 ;(function () {
-    var VERSION    = '1.0.4'
+    var VERSION    = '1.0.5'
     var E_MATH     = (typeof global !== 'undefined' && global != null && global.EpiphyMath != null)
         ? global.EpiphyMath
         : ((typeof global !== 'undefined' && global != null && global.EpiphySpec && global.EpiphySpec.MATH) ? global.EpiphySpec.MATH : null)
@@ -248,7 +248,7 @@
         return {
             scheme:         's1',
             maskTexture:    null,
-            speed:          1.2,
+            speed:          1.0,
             slashExpand:    0.45,
             originX:        -9.5,
             originY:        9.5,
@@ -260,40 +260,37 @@
             renderInSlots:  true,
             cosmosWindow: {
                 enabled:  true,
-                parallax: 1.8,
-                speed:    1.2
+                parallax: 1.6,
+                speed:    0.95
             },
             rings: [
                 {
-                    R: 8.8, tiltU: 0.46, tiltV: 0.15, spd: 1.15, segs: 28,
-                    cCore: 0xFFF7DA, cGlow: 0xF5B952, ticks: 12, prisms: 4, wBase: 1.45, uOffset: 0.0
+                    R: 8.4, tiltU: 0.52, tiltV: 0.16, spd: 0.65, segs: 36,
+                    cCore: 0xFFF4D6, cGlow: 0xF2C068, ticks: 16, prisms: 2, wBase: 0.68, uOffset: 0.0
                 },
                 {
-                    R: 12.8, tiltU: -0.64, tiltV: -0.22, spd: -0.85, segs: 32,
-                    cCore: 0xC6F2FF, cGlow: 0xB86BFF, ticks: 8, prisms: 2, wBase: 1.30, uOffset: 0.0
-                },
-                {
-                    R: 6.2, tiltU: 0.18, tiltV: 0.0, spd: 1.75, segs: 20,
-                    cCore: 0xFFE8AE, cGlow: 0xE84B84, ticks: 0, prisms: 0, wBase: 1.05, uOffset: -5.2
+                    R: 11.2, tiltU: -0.78, tiltV: -0.26, spd: -0.48, segs: 40,
+                    cCore: 0xD2EAFF, cGlow: 0x9C7EFF, ticks: 0, prisms: 2, wBase: 0.62, uOffset: 1.5
                 }
             ],
             helix: {
                 enabled: true,
-                steps:   28,
-                uStart:  2.0,
-                uSpan:   49.0,
-                radius:  5.4,
-                freq:    0.21,
-                speed:   2.3,
-                cCore0:  0xFFEAC8,
-                cGlow0:  0xF458AA,
-                cCore1:  0xC2F4FF,
-                cGlow1:  0x9672FF
+                steps:   36,
+                uStart:  3.0,
+                uSpan:   48.0,
+                radius:  4.5,
+                freq:    0.17,
+                speed:   1.15,
+                wBase:   0.52,
+                cCore0:  0xFFEAF4,
+                cGlow0:  0xFFA2CC,
+                cCore1:  0xD8F4FF,
+                cGlow1:  0x8CD8FF
             },
             motes: {
                 enabled:    true,
-                count:      14,
-                trailSteps: 3
+                count:      6,
+                trailSteps: 0
             }
         }
     }
@@ -331,75 +328,84 @@
     }
 
     // ======================================================================== 3. 纯几何 3D 预烘焙网格生成器（仅在烘焙期运行一次）
-    function pushQuad(list, p0, p1, p2, p3, rgba, uvRect) {
+    function pushQuad(list, p0, p1, p2, p3, rgba, uvRect, rgbaEnd) {
+        var cEnd = rgbaEnd !== undefined && rgbaEnd !== null ? rgbaEnd : rgba
         list.push({
             p0: p0, p1: p1, p2: p2, p3: p3,
             u0: uvRect ? uvRect[0] : 0.0, v0: uvRect ? uvRect[1] : 0.0,
             u1: uvRect ? uvRect[2] : 1.0, v1: uvRect ? uvRect[3] : 0.0,
             u2: uvRect ? uvRect[4] : 1.0, v2: uvRect ? uvRect[5] : 1.0,
             u3: uvRect ? uvRect[6] : 0.0, v3: uvRect ? uvRect[7] : 1.0,
-            rgba: rgba
+            rgba:  rgba,
+            rgba0: rgba,
+            rgba1: rgba,
+            rgba2: cEnd,
+            rgba3: cEnd
         })
     }
 
-    function pushRibbonQuad(list, a, b, normal, halfW, rgba) {
-        var hx = normal[0] * halfW, hy = normal[1] * halfW, hz = normal[2] * halfW
+    // 严格共享端点的连续柔光丝带段：v=0..1 横跨丝带宽度匹配 glow_ribbon.png 高斯柔光剖面，u=0..1 沿路径无缝衔接
+    function pushConnectedRibbonQuad(list, a, nA, hwA, b, nB, hwB, rgbaA, rgbaB) {
+        var ax = nA[0] * hwA, ay = nA[1] * hwA, az = nA[2] * hwA
+        var bx = nB[0] * hwB, by = nB[1] * hwB, bz = nB[2] * hwB
         pushQuad(
             list,
-            [a[0] - hx, a[1] - hy, a[2] - hz],
-            [a[0] + hx, a[1] + hy, a[2] + hz],
-            [b[0] + hx, b[1] + hy, b[2] + hz],
-            [b[0] - hx, b[1] - hy, b[2] - hz],
-            rgba, null
+            [a[0] - ax, a[1] - ay, a[2] - az],
+            [a[0] + ax, a[1] + ay, a[2] + az],
+            [b[0] + bx, b[1] + by, b[2] + bz],
+            [b[0] - bx, b[1] - by, b[2] - bz],
+            rgbaA,
+            [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0],
+            rgbaB
         )
     }
 
-    // 添加三维十字交叉光带段（两个正交面片，从任意角度观察都不会变细消失）
-    function pushCrossSegmentQuads(list, a, b, n1, n2, halfW, rgba) {
-        pushRibbonQuad(list, a, b, n1, halfW, rgba)
-        pushRibbonQuad(list, a, b, n2, halfW, rgba)
+    function pushRibbonQuad(list, a, b, normal, halfW, rgba, rgbaEnd) {
+        pushConnectedRibbonQuad(list, a, normal, halfW, b, normal, halfW, rgba, rgbaEnd)
     }
 
-    // 添加三维双十字四芒星棱晶 ✦（两个正交四芒星菱形，轻量且任意角度均立体发光）
-    function pushStarPrism3DQuads(list, cx, cy, cz, ax1, ax2, ax3, outerR, rgbaGlow, rgbaCore) {
+    // 添加三维正交十字光带段（两片正交柔光面片，配合加法混合在任意视角恒定纤细、零共面闪烁）
+    function pushCrossSegmentQuads(list, a, b, n1, n2, halfW, rgba) {
+        pushRibbonQuad(list, a, b, n1, halfW, rgba, rgba)
+        pushRibbonQuad(list, a, b, n2, halfW, rgba, rgba)
+    }
+
+    // 添加三维正交柔光四芒星芒 ✦（3 片正交贴图面片配 star_flare.png，任意 3D 视角清透璀璨且零硬边刺突）
+    function pushStarFlare3DQuads(list, cx, cy, cz, ax1, ax2, ax3, radius, rgba) {
         var pairs = [
             [ax1, ax2],
             [ax2, ax3],
             [ax1, ax3]
         ]
-        var i, u, v, tipR, sideW
-        for (i = 0; i < pairs.length; i++) {
-            u = pairs[i][0]
-            v = pairs[i][1]
-            tipR  = outerR * 1.45
-            sideW = outerR * 0.48
+        var uvFull = [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0]
+        for (var i = 0; i < pairs.length; i++) {
+            var u = pairs[i][0]
+            var v = pairs[i][1]
+            var ux = u[0] * radius, uy = u[1] * radius, uz = u[2] * radius
+            var vx = v[0] * radius, vy = v[1] * radius, vz = v[2] * radius
             pushQuad(
                 list,
-                [cx + u[0] * tipR,  cy + u[1] * tipR,  cz + u[2] * tipR],
-                [cx + v[0] * sideW, cy + v[1] * sideW, cz + v[2] * sideW],
-                [cx - u[0] * tipR,  cy - u[1] * tipR,  cz - u[2] * tipR],
-                [cx - v[0] * sideW, cy - v[1] * sideW, cz - v[2] * sideW],
-                rgbaGlow, null
-            )
-            tipR  = outerR * 0.96
-            sideW = outerR * 0.24
-            pushQuad(
-                list,
-                [cx + u[0] * tipR,  cy + u[1] * tipR,  cz + u[2] * tipR],
-                [cx + v[0] * sideW, cy + v[1] * sideW, cz + v[2] * sideW],
-                [cx - u[0] * tipR,  cy - u[1] * tipR,  cz - u[2] * tipR],
-                [cx - v[0] * sideW, cy - v[1] * sideW, cz - v[2] * sideW],
-                rgbaCore, null
+                [cx - ux - vx, cy - uy - vy, cz - uz - vz],
+                [cx + ux - vx, cy + uy - vy, cz + uz - vz],
+                [cx + ux + vx, cy + uy + vy, cz + uz + vz],
+                [cx - ux + vx, cy - uy + vy, cz - uz + vz],
+                rgba, uvFull, rgba
             )
         }
     }
 
-    // 3.1 剑身前后双面星窗覆盖面片（紧贴 item/generated 前后面 Z=0.53125/0.46875 外侧 0.001 单位，消除 Z-fighting）
+    // 保留外部纯几何辅助别名（兼容既有 _pure API）
+    function pushStarPrism3DQuads(list, cx, cy, cz, ax1, ax2, ax3, outerR, rgbaGlow, rgbaCore) {
+        pushStarFlare3DQuads(list, cx, cy, cz, ax1, ax2, ax3, outerR * 1.35, rgbaGlow)
+        pushStarFlare3DQuads(list, cx, cy, cz, ax1, ax2, ax3, outerR * 0.72, rgbaCore)
+    }
+
+    // 3.1 剑身前后双面星窗覆盖面片（紧贴 item/generated 前后面 Z=0.53125/0.46875 外侧 0.00175 单位，根绝斜视 Z-fighting）
     function buildCosmosOverlayQuads() {
         var quads = []
         var white = packRgba(0xFFFFFF, 255)
-        var zFront = 0.5322
-        var zBack  = 0.4678
+        var zFront = 0.5330
+        var zBack  = 0.4670
         pushQuad(
             quads,
             [0.0, 0.0, zFront],
@@ -421,161 +427,196 @@
         return quads
     }
 
-    // 3.2 单个 3D 星盘陀螺环预烘焙网格（轻量化高对比丝带：每个环约 56~84 quads）
+    // 3.2 单个 3D 星盘陀螺环丝带预烘焙网格（端点严格共享、极细柔光丝带 + 精细微刻度，零共面重叠）
     function buildAstrolabeRingQuads(ring) {
         var quads = []
-        var R     = Number(ring.R != null ? ring.R : 8.8) * PX_TO_UNIT
-        var segs  = clampNum(Math.round(Number(ring.segs != null ? ring.segs : 22)), 14, 24)
-        var wBase = Number(ring.wBase != null ? ring.wBase : 1.35) * PX_TO_UNIT
-        var cCore = ring.cCore != null ? Number(ring.cCore) : 0xFFF7DA
-        var cGlow = ring.cGlow != null ? Number(ring.cGlow) : 0xF5B952
-        var rgbaGlow = packRgba(cGlow, 172)
-        var rgbaCore = packRgba(cCore, 248)
-        var rgbaTick = packRgba(cCore, 220)
+        var R     = Number(ring.R != null ? ring.R : 8.4) * PX_TO_UNIT
+        var segs  = clampNum(Math.round(Number(ring.segs != null ? ring.segs : 36)), 20, 48)
+        var wBase = Number(ring.wBase != null ? ring.wBase : 0.68) * PX_TO_UNIT
+        var cCore = ring.cCore != null ? Number(ring.cCore) : 0xFFF4D6
+        var cGlow = ring.cGlow != null ? Number(ring.cGlow) : 0xF2C068
+        // 单层柔光丝带（glow_ribbon.png 自带细亮芯 + 柔焦晕，加法混合下叠加增亮，绝不产生共面闪烁）
+        var rgbaBand = packRgba(cGlow, 188)
+        var rgbaAxis = packRgba(cCore, 152)
+        var rgbaTick = packRgba(cCore, 165)
+        var rgbaTickTip = packRgba(cGlow, 28)
 
-        var wGlow = wBase * 0.82
-        var wCore = wBase * 0.34
         var xAxis = [1.0, 0.0, 0.0]
 
-        var i, a0, a1, c0, s0, c1, s1, p0, p1, radMid
+        var i, a0, a1, c0, s0, c1, s1, p0, p1, rad0, rad1
         for (i = 0; i < segs; i++) {
             a0 = (i / segs) * TWO_PI
             a1 = ((i + 1) / segs) * TWO_PI
             c0 = Math.cos(a0); s0 = Math.sin(a0)
             c1 = Math.cos(a1); s1 = Math.sin(a1)
-            p0 = [0.0, R * c0, R * s0]
-            p1 = [0.0, R * c1, R * s1]
-            var am = 0.5 * (a0 + a1)
-            radMid = [0.0, Math.cos(am), Math.sin(am)]
-            // 外层十字光带（保证正视与侧视均饱满满亮）+ 内层高光主环
-            pushCrossSegmentQuads(quads, p0, p1, radMid, xAxis, wGlow, rgbaGlow)
-            pushRibbonQuad(quads, p0, p1, radMid, wCore, rgbaCore)
+            p0   = [0.0, R * c0, R * s0]
+            p1   = [0.0, R * c1, R * s1]
+            rad0 = [0.0, c0, s0]
+            rad1 = [0.0, c1, s1]
+            // 严格共享端点的径向柔光带 + 轴向柔光带（任意 3D 倾角下保持精致细线、严丝合缝）
+            pushConnectedRibbonQuad(quads, p0, rad0, wBase, p1, rad1, wBase, rgbaBand, rgbaBand)
+            pushConnectedRibbonQuad(quads, p0, xAxis, wBase * 0.88, p1, xAxis, wBase * 0.88, rgbaAxis, rgbaAxis)
         }
 
-        // 星盘度盘刻度（限制上限 16 以保持极低顶点数）
-        var ticks = clampNum(Math.round(Number(ring.ticks || 0)), 0, 16)
+        // 星盘精致微刻度（短细针尖，避免凌乱）
+        var ticks = clampNum(Math.round(Number(ring.ticks || 0)), 0, 24)
         if (ticks > 0) {
-            var tickW = wBase * 0.28
+            var tickW = wBase * 0.44
             for (var tk = 0; tk < ticks; tk++) {
                 var ta = (tk / ticks) * TWO_PI
                 var tc = Math.cos(ta), ts = Math.sin(ta)
                 var isMajor = (tk % 4 === 0)
-                var rIn  = R - (isMajor ? 1.85 : 1.05) * PX_TO_UNIT
-                var rOut = R + (isMajor ? 1.85 : 1.05) * PX_TO_UNIT
+                var extOut  = (isMajor ? 1.15 : 0.68) * PX_TO_UNIT
+                var extIn   = (isMajor ? 0.52 : 0.25) * PX_TO_UNIT
                 var tanV = [0.0, -ts, tc]
-                pushRibbonQuad(
+                var midPt = [0.0, R * tc, R * ts]
+                pushConnectedRibbonQuad(
                     quads,
-                    [0.0, rIn * tc,  rIn * ts],
-                    [0.0, rOut * tc, rOut * ts],
-                    tanV, tickW, isMajor ? rgbaCore : rgbaTick
+                    midPt, tanV, tickW,
+                    [0.0, (R + extOut) * tc, (R + extOut) * ts], tanV, tickW * 0.55,
+                    rgbaTick, rgbaTickTip
+                )
+                pushConnectedRibbonQuad(
+                    quads,
+                    midPt, tanV, tickW,
+                    [0.0, (R - extIn) * tc, (R - extIn) * ts], tanV, tickW * 0.55,
+                    rgbaTick, rgbaTickTip
                 )
             }
         }
 
-        // 方位四芒星棱晶 ✦
-        var prisms = clampNum(Math.round(Number(ring.prisms || 0)), 0, 6)
-        if (prisms > 0) {
-            var prismR = (2.45 * (ring.wBase != null ? Number(ring.wBase) : 1.35)) * PX_TO_UNIT
-            var pGlow  = packRgba(cGlow, 195)
-            var pCore  = packRgba(0xFFFFFF, 255)
-            for (var pk = 0; pk < prisms; pk++) {
-                var pa = (pk / prisms) * TWO_PI
-                var pc = Math.cos(pa), ps = Math.sin(pa)
-                var radVec = [0.0, pc, ps]
-                var tanVec = [0.0, -ps, pc]
-                pushStarPrism3DQuads(quads, 0.0, R * pc, R * ps, radVec, tanVec, xAxis, prismR, pGlow, pCore)
-            }
-        }
-
         return quads
     }
 
-    // 3.3 双螺旋缠刃光带单股预烘焙网格（20 段轻量化丝带，约 60 quads/股）
+    // 3.2b 星盘环上的精致柔光四芒星节点（使用 star_flare.png）
+    function buildAstrolabeRingStarQuads(ring) {
+        var quads = []
+        var prisms = clampNum(Math.round(Number(ring.prisms || 0)), 0, 6)
+        if (prisms <= 0) return quads
+        var R     = Number(ring.R != null ? ring.R : 8.4) * PX_TO_UNIT
+        var cCore = ring.cCore != null ? Number(ring.cCore) : 0xFFF4D6
+        var starR = 2.35 * PX_TO_UNIT
+        var rgba  = packRgba(cCore, 168)
+        var xAxis = [1.0, 0.0, 0.0]
+        for (var pk = 0; pk < prisms; pk++) {
+            var pa = (pk / prisms) * TWO_PI + 0.35
+            var pc = Math.cos(pa), ps = Math.sin(pa)
+            var radVec = [0.0, pc, ps]
+            var tanVec = [0.0, -ps, pc]
+            pushStarFlare3DQuads(quads, 0.0, R * pc, R * ps, radVec, tanVec, xAxis, starR, rgba)
+        }
+        return quads
+    }
+
+    // 3.3 双螺旋缠刃纤细流光丝线（真正 Frenet 连续标架 + 端点严格共享 + 首尾平滑渐隐，彻底零断口）
     function buildHelixRibbonQuads(helix, strandIndex) {
         var quads = []
         if (!helix || helix.enabled === false) return quads
-        var steps  = clampNum(Math.round(Number(helix.steps != null ? helix.steps : 20)), 14, 22)
-        var uStartPx = Number(helix.uStart != null ? helix.uStart : 2.0)
-        var uSpanPx  = Number(helix.uSpan != null ? helix.uSpan : 49.0)
-        var uStart = uStartPx * PX_TO_UNIT
-        var uSpan  = uSpanPx * PX_TO_UNIT
-        var radMax = Number(helix.radius != null ? helix.radius : 5.4) * PX_TO_UNIT
-        var freqPx = Number(helix.freq != null ? helix.freq : 0.21)
-        var phase  = (strandIndex === 1) ? PI : 0.0
-        var cCore  = (strandIndex === 1) ? Number(helix.cCore1 != null ? helix.cCore1 : 0xC2F4FF) : Number(helix.cCore0 != null ? helix.cCore0 : 0xFFEAC8)
-        var cGlow  = (strandIndex === 1) ? Number(helix.cGlow1 != null ? helix.cGlow1 : 0x9672FF) : Number(helix.cGlow0 != null ? helix.cGlow0 : 0xF458AA)
+        var steps    = clampNum(Math.round(Number(helix.steps != null ? helix.steps : 36)), 18, 48)
+        var uStartPx = Number(helix.uStart != null ? helix.uStart : 3.0)
+        var uSpanPx  = Number(helix.uSpan != null ? helix.uSpan : 48.0)
+        var uStart   = uStartPx * PX_TO_UNIT
+        var uSpan    = uSpanPx * PX_TO_UNIT
+        var radMax   = Number(helix.radius != null ? helix.radius : 4.5) * PX_TO_UNIT
+        var freqPx   = Number(helix.freq != null ? helix.freq : 0.17)
+        var wBasePx  = Number(helix.wBase != null ? helix.wBase : 0.52)
+        var phase    = (strandIndex === 1) ? PI : 0.0
+        var cGlow    = (strandIndex === 1) ? Number(helix.cGlow1 != null ? helix.cGlow1 : 0x8CD8FF) : Number(helix.cGlow0 != null ? helix.cGlow0 : 0xFFA2CC)
+        var cCore    = (strandIndex === 1) ? Number(helix.cCore1 != null ? helix.cCore1 : 0xD8F4FF) : Number(helix.cCore0 != null ? helix.cCore0 : 0xFFEAF4)
 
-        var prevP = null
-        for (var i = 0; i <= steps; i++) {
-            var frac  = i / steps
-            var uPx   = uStartPx + frac * uSpanPx
-            var u     = uStart + frac * uSpan
-            var env   = Math.pow(Math.max(0.0, Math.sin(frac * PI)), 0.72)
-            var r     = radMax * (0.30 + 0.70 * env)
-            var ang   = uPx * freqPx + phase
-            var ca    = Math.cos(ang), sa = Math.sin(ang)
-            var curP  = [u, r * ca, r * sa]
+        // 先预采样所有中心点与径向方向
+        var pts  = new Array(steps + 1)
+        var rads = new Array(steps + 1)
+        var envs = new Array(steps + 1)
+        var i
+        for (i = 0; i <= steps; i++) {
+            var frac = i / steps
+            var uPx  = uStartPx + frac * uSpanPx
+            var u    = uStart + frac * uSpan
+            var env  = Math.pow(Math.max(0.0, Math.sin(frac * PI)), 0.78)
+            var r    = radMax * (0.28 + 0.72 * env)
+            var ang  = uPx * freqPx + phase
+            var ca   = Math.cos(ang), sa = Math.sin(ang)
+            pts[i]  = [u, r * ca, r * sa]
+            rads[i] = [0.0, ca, sa]
+            envs[i] = env
+        }
 
-            if (prevP != null) {
-                var fade = Math.pow(Math.max(0.0, Math.sin((frac - 0.5 / steps) * PI)), 0.65)
-                var wG   = (1.10 + 0.85 * fade) * PX_TO_UNIT
-                var wC   = (0.44 + 0.35 * fade) * PX_TO_UNIT
-                var aG   = Math.round(70 + 130 * fade)
-                var aC   = Math.round(130 + 122 * fade)
-                var radN = [0.0, ca, sa]
-                var tanN = [1.0, 0.0, 0.0]
-                pushCrossSegmentQuads(quads, prevP, curP, radN, tanN, wG, packRgba(cGlow, aG))
-                pushRibbonQuad(quads, prevP, curP, radN, wC, packRgba(cCore, aC))
-            }
-            prevP = curP
+        // 计算每点连续正交标架 (N1, N2) 与平滑宽/色
+        var n1Arr  = new Array(steps + 1)
+        var n2Arr  = new Array(steps + 1)
+        var hwArr  = new Array(steps + 1)
+        var c1Arr  = new Array(steps + 1)
+        var c2Arr  = new Array(steps + 1)
+        for (i = 0; i <= steps; i++) {
+            var pPrev = pts[i > 0 ? (i - 1) : 0]
+            var pNext = pts[i < steps ? (i + 1) : steps]
+            var tx = pNext[0] - pPrev[0]
+            var ty = pNext[1] - pPrev[1]
+            var tz = pNext[2] - pPrev[2]
+            var tLen = Math.sqrt(tx * tx + ty * ty + tz * tz)
+            if (tLen < 1e-6) { tx = 1.0; ty = 0.0; tz = 0.0 }
+            else { tx /= tLen; ty /= tLen; tz /= tLen }
+
+            // Gram-Schmidt：将径向投影到垂直于切线的平面，确保截面对齐且沿曲线平滑旋转
+            var rx = rads[i][0], ry = rads[i][1], rz = rads[i][2]
+            var dot = rx * tx + ry * ty + rz * tz
+            var n1x = rx - dot * tx
+            var n1y = ry - dot * ty
+            var n1z = rz - dot * tz
+            var n1Len = Math.sqrt(n1x * n1x + n1y * n1y + n1z * n1z)
+            if (n1Len < 1e-5) { n1x = 0.0; n1y = 1.0; n1z = 0.0 }
+            else { n1x /= n1Len; n1y /= n1Len; n1z /= n1Len }
+
+            // N2 = T x N1（自动单位化且与 N1/T 两两正交）
+            var n2x = ty * n1z - tz * n1y
+            var n2y = tz * n1x - tx * n1z
+            var n2z = tx * n1y - ty * n1x
+            var n2Len = Math.sqrt(n2x * n2x + n2y * n2y + n2z * n2z)
+            if (n2Len > 1e-5) { n2x /= n2Len; n2y /= n2Len; n2z /= n2Len }
+
+            n1Arr[i] = [n1x, n1y, n1z]
+            n2Arr[i] = [n2x, n2y, n2z]
+            hwArr[i] = (wBasePx * (0.45 + 0.55 * envs[i])) * PX_TO_UNIT
+            c1Arr[i] = packRgba(cGlow, Math.round(182 * envs[i]))
+            c2Arr[i] = packRgba(cCore, Math.round(138 * envs[i]))
+        }
+
+        // 相邻采样点逐段严丝合缝连接（0 阶梯错位、0 断裂缺口）
+        for (i = 0; i < steps; i++) {
+            pushConnectedRibbonQuad(quads, pts[i], n1Arr[i], hwArr[i], pts[i + 1], n1Arr[i + 1], hwArr[i + 1], c1Arr[i], c1Arr[i + 1])
+            pushConnectedRibbonQuad(quads, pts[i], n2Arr[i], hwArr[i] * 0.88, pts[i + 1], n2Arr[i + 1], hwArr[i + 1] * 0.88, c2Arr[i], c2Arr[i + 1])
         }
         return quads
     }
 
-    // 3.4 3D 游弋星屑与彗尾分簇预烘焙网格（14 枚星屑分为 2 个反向轨道簇，轻量紧凑）
+    // 3.4 精选柔光漂浮四芒星点（克制留白、聚焦剑身中上部，使用 star_flare.png，无杂乱彗尾）
     function buildStarMotesQuads(motes, groupIndex, groupCount) {
         var quads = []
         if (!motes || motes.enabled === false) return quads
-        var count      = clampNum(Math.round(Number(motes.count != null ? motes.count : 12)), 1, 14)
-        var trailSteps = clampNum(Math.round(Number(motes.trailSteps != null ? motes.trailSteps : 2)), 2, 3)
-        var gCount     = Math.max(1, groupCount || 2)
-        var palette    = [0xFFF2C8, 0x8CF4FF, 0xE6A4FF, 0xFF9AC8]
-        var xAxis      = [1.0, 0.0, 0.0]
+        var count  = clampNum(Math.round(Number(motes.count != null ? motes.count : 6)), 1, 10)
+        var gCount = Math.max(1, groupCount || 2)
+        var palette = [0xFFD6EC, 0xB8EAFF, 0xFFF2D0, 0xE2C4FF]
+        var xAxis   = [1.0, 0.0, 0.0]
 
         for (var i = 0; i < count; i++) {
             if ((i % gCount) !== groupIndex) continue
-            var h1 = Math.sin(i * 12.9898 + 1.37) * 43758.5453; h1 = h1 - Math.floor(h1)
-            var h2 = Math.sin(i * 78.233 + 4.19) * 19283.1234;  h2 = h2 - Math.floor(h2)
-            var h3 = Math.sin(i * 39.425 + 7.61) * 28411.9812;  h3 = h3 - Math.floor(h3)
+            var h1 = Math.sin(i * 17.31 + 2.13) * 43758.5453; h1 = h1 - Math.floor(h1)
+            var h2 = Math.sin(i * 71.19 + 5.47) * 19283.1234; h2 = h2 - Math.floor(h2)
+            var h3 = Math.sin(i * 43.87 + 1.91) * 28411.9812; h3 = h3 - Math.floor(h3)
 
-            var uBase = (2.5 + h1 * 48.0) * PX_TO_UNIT
-            var orbR  = (7.5 + h2 * 7.5) * PX_TO_UNIT
+            // 集中点缀在剑身中上部（14..48px），避开剑格环区防拥挤
+            var uBase = (14.0 + h1 * 34.0) * PX_TO_UNIT
+            var orbR  = (5.2 + h2 * 4.2) * PX_TO_UNIT
             var ang0  = h3 * TWO_PI
-            var cGlow = palette[i % palette.length]
-            var dir   = (groupIndex === 1) ? -1.0 : 1.0
+            var cTint = palette[i % palette.length]
 
             var c0 = Math.cos(ang0), s0 = Math.sin(ang0)
             var hx = uBase, hy = orbR * c0, hz = orbR * s0
             var radV = [0.0, c0, s0]
             var tanV = [0.0, -s0, c0]
-            var starR = (1.55 + 0.70 * h2) * PX_TO_UNIT
-            pushStarPrism3DQuads(quads, hx, hy, hz, radV, tanV, xAxis, starR, packRgba(cGlow, 185), packRgba(0xFFFFFF, 255))
-
-            var prevP = [hx, hy, hz]
-            for (var ts = 1; ts <= trailSteps; ts++) {
-                var frac = ts / trailSteps
-                var aT   = ang0 - dir * frac * 0.44
-                var uT   = uBase - frac * 1.5 * PX_TO_UNIT
-                var rT   = orbR * (1.0 - frac * 0.05)
-                var ct   = Math.cos(aT), st = Math.sin(aT)
-                var curP = [uT, rT * ct, rT * st]
-                var tw   = (0.78 * (1.0 - frac * 0.65)) * PX_TO_UNIT
-                var ta   = Math.round(195 * (1.0 - frac) * (1.0 - frac))
-                if (ta > 12) {
-                    pushRibbonQuad(quads, prevP, curP, [0.0, ct, st], tw, packRgba(cGlow, ta))
-                }
-                prevP = curP
-            }
+            var starR = (1.85 + 0.85 * h2) * PX_TO_UNIT
+            pushStarFlare3DQuads(quads, hx, hy, hz, radV, tanV, xAxis, starR, packRgba(cTint, 158))
         }
         return quads
     }
@@ -626,17 +667,21 @@
         var idx = 0
         for (var i = 0; i < validQuads.length; i++) {
             var q = validQuads[i]
+            var c0 = q.rgba0 !== undefined ? q.rgba0 : q.rgba
+            var c1 = q.rgba1 !== undefined ? q.rgba1 : q.rgba
+            var c2 = q.rgba2 !== undefined ? q.rgba2 : q.rgba
+            var c3 = q.rgba3 !== undefined ? q.rgba3 : q.rgba
             model.verts[idx]     = new $Vertex5(q.p0[0], q.p0[1], q.p0[2], q.u0, q.v0)
-            colours[idx]         = q.rgba
+            colours[idx]         = c0
             model.verts[idx + 1] = new $Vertex5(q.p1[0], q.p1[1], q.p1[2], q.u1, q.v1)
-            colours[idx + 1]     = q.rgba
+            colours[idx + 1]     = c1
             model.verts[idx + 2] = new $Vertex5(q.p2[0], q.p2[1], q.p2[2], q.u2, q.v2)
-            colours[idx + 2]     = q.rgba
+            colours[idx + 2]     = c2
             model.verts[idx + 3] = new $Vertex5(q.p3[0], q.p3[1], q.p3[2], q.u3, q.v3)
-            colours[idx + 3]     = q.rgba
+            colours[idx + 3]     = c3
             idx += 4
         }
-        // NEW_ENTITY (RenderType.entityTranslucentEmissive) 绑定时 NormalAttribute 强制要求存在法线属性
+        // 烘焙期统一计算法线（同时兼容 POSITION_COLOR_TEX 与 NEW_ENTITY 顶点格式）
         model.computeNormals()
         return model
     }
@@ -837,13 +882,12 @@
                     var $Supplier              = Java.loadClass('java.util.function.Supplier')
 
                     var posColTexFmt    = readMcMember($DefaultVertexFormat, 'POSITION_COLOR_TEX', 'f_85818_')
-                    var newEntityFmt    = readMcMember($DefaultVertexFormat, 'NEW_ENTITY', 'f_85812_')
                     var transAlpha      = readMcMember($RenderStateShard, 'TRANSLUCENT_TRANSPARENCY', 'f_110139_')
+                    var lightningBlend  = readMcMember($RenderStateShard, 'LIGHTNING_TRANSPARENCY', 'f_110136_')
                     var noCull          = readMcMember($RenderStateShard, 'NO_CULL', 'f_110110_')
                     var colorDepthWrite = readMcMember($RenderStateShard, 'COLOR_DEPTH_WRITE', 'f_110114_')
                     var colorOnlyWrite  = readMcMember($RenderStateShard, 'COLOR_WRITE', 'f_110115_')
-                    var overlayShard    = readMcMember($RenderStateShard, 'OVERLAY', 'f_110154_')
-                    var emissiveShader  = readMcMember($RenderStateShard, 'RENDERTYPE_ENTITY_TRANSLUCENT_EMISSIVE_SHADER', 'f_234323_')
+                    var posColTexShard  = readMcMember($RenderStateShard, 'POSITION_COLOR_TEX_SHADER', 'f_173101_')
                     var guiContextEnum  = readMcMember($ItemDisplayContext, 'GUI', 'GUI')
 
                     // 预先解析热路径直连静态方法句柄（零每帧反射与临时数组分配）
@@ -852,55 +896,35 @@
                     var fnGetItemRenderRt  = resolveMcMethod($ItemBlockRenderTypes, 'getRenderType', 'm_109279_')
                     var fnGetFoilBufDirect = resolveMcMethod($ItemRenderer, 'getFoilBufferDirect', 'm_115222_')
 
-                    // 共享 3D 环绕特效 RenderType：优先直接使用原版纯 Java entityTranslucentEmissive(white_pixel, false)
-                    // （NEW_ENTITY 顶点格式 + NO_CULL + COLOR_WRITE + 纯自发光 + 半透明排序 + 零每帧 Rhino Supplier 代理开销）
-                    var whitePixelLoc = new $ResourceLocation('epiphy', 'textures/effect/white_pixel.png')
-                    var vfxSurroundType = null
-                    try {
-                        vfxSurroundType = callMcMember($RenderType, 'entityTranslucentEmissive', 'm_234335_', whitePixelLoc, false)
-                    } catch (eEmissiveRt) {
-                        vfxSurroundType = null
+                    // 构造无闪烁加法发光 RenderType 工厂：
+                    //   - POSITION_COLOR_TEX (每顶点仅 3 字段，不吃世界暗光/红闪)
+                    //   - LIGHTNING_TRANSPARENCY (SRC_ALPHA, ONE 严格可交换加法混合 -> 0 排序闪烁、0 共面闪烁)
+                    //   - TextureStateShard(loc, true, false) (开启双线性滤波抗锯齿，柔光边缘如丝顺滑)
+                    //   - NO_CULL + COLOR_WRITE (不写深度，只做深度测试被剑身真实遮挡) + sortOnUpload=false
+                    var vfxShaderState = posColTexShard != null
+                        ? posColTexShard
+                        : new $ShaderStateShard(new $Supplier({ get: function () { return fnGetPosColTexSh.call($GameRenderer) } }))
+                    var vfxBlendState = lightningBlend != null ? lightningBlend : transAlpha
+                    var buildAdditiveVfxType = function (rtName, texPath) {
+                        var b = callMcMember($CompositeState, 'builder', 'm_110628_')
+                        b = callMcMember(b, 'setShaderState', 'm_173292_', vfxShaderState)
+                        b = callMcMember(b, 'setTextureState', 'm_173290_', new $TextureStateShard(new $ResourceLocation('epiphy', texPath), true, false))
+                        b = callMcMember(b, 'setTransparencyState', 'm_110685_', vfxBlendState)
+                        b = callMcMember(b, 'setCullState', 'm_110661_', noCull)
+                        b = callMcMember(b, 'setWriteMaskState', 'm_110687_', colorOnlyWrite)
+                        return callMcMember(
+                            $RenderType, 'create', 'm_173215_',
+                            rtName,
+                            posColTexFmt,
+                            $VertexFormatMode.QUADS,
+                            1024,
+                            false,
+                            false,
+                            buildCompositeStateNone(b)
+                        )
                     }
-                    if (vfxSurroundType == null) {
-                        var vfxBuilder = callMcMember($CompositeState, 'builder', 'm_110628_')
-                        if (emissiveShader != null && newEntityFmt != null) {
-                            vfxBuilder = callMcMember(vfxBuilder, 'setShaderState', 'm_173292_', emissiveShader)
-                            vfxBuilder = callMcMember(vfxBuilder, 'setTextureState', 'm_173290_', new $TextureStateShard(whitePixelLoc, false, false))
-                            vfxBuilder = callMcMember(vfxBuilder, 'setTransparencyState', 'm_110685_', transAlpha)
-                            vfxBuilder = callMcMember(vfxBuilder, 'setCullState', 'm_110661_', noCull)
-                            vfxBuilder = callMcMember(vfxBuilder, 'setWriteMaskState', 'm_110687_', colorOnlyWrite)
-                            if (overlayShard != null) vfxBuilder = callMcMember(vfxBuilder, 'setOverlayState', 'm_110677_', overlayShard)
-                            vfxSurroundType = callMcMember(
-                                $RenderType, 'create', 'm_173215_',
-                                'epiphy:fx3d_surround_vfx',
-                                newEntityFmt,
-                                $VertexFormatMode.QUADS,
-                                1024,
-                                false,
-                                false,
-                                buildCompositeStateNone(vfxBuilder)
-                            )
-                        } else {
-                            var vfxShaderSup = new $Supplier({
-                                get: function () { return fnGetPosColTexSh.call($GameRenderer) }
-                            })
-                            vfxBuilder = callMcMember(vfxBuilder, 'setShaderState', 'm_173292_', new $ShaderStateShard(vfxShaderSup))
-                            vfxBuilder = callMcMember(vfxBuilder, 'setTextureState', 'm_173290_', new $TextureStateShard(whitePixelLoc, false, false))
-                            vfxBuilder = callMcMember(vfxBuilder, 'setTransparencyState', 'm_110685_', transAlpha)
-                            vfxBuilder = callMcMember(vfxBuilder, 'setCullState', 'm_110661_', noCull)
-                            vfxBuilder = callMcMember(vfxBuilder, 'setWriteMaskState', 'm_110687_', colorOnlyWrite)
-                            vfxSurroundType = callMcMember(
-                                $RenderType, 'create', 'm_173215_',
-                                'epiphy:fx3d_surround_vfx',
-                                posColTexFmt,
-                                $VertexFormatMode.QUADS,
-                                1024,
-                                false,
-                                false,
-                                buildCompositeStateNone(vfxBuilder)
-                            )
-                        }
-                    }
+                    var vfxRibbonType = buildAdditiveVfxType('epiphy:fx3d_surround_ribbon', 'textures/effect/glow_ribbon.png')
+                    var vfxStarType   = buildAdditiveVfxType('epiphy:fx3d_surround_star',   'textures/effect/star_flare.png')
 
                     var cosmosOverlayQuads = buildCosmosOverlayQuads()
                     var cosmosOverlayVerts = cosmosOverlayQuads.length * 4
@@ -960,34 +984,39 @@
 
                             var totalSurroundVerts = 0
 
-                            // 一次性预烘焙 3D 星盘陀螺环（纯 Java CCModel，热路径 0 JS 顶点循环）
+                            // 一次性预烘焙 3D 星盘陀螺环（丝带与四芒星节点分离至各自柔光贴图模型）
                             var bakedRings = []
                             var ringsSpec = Array.isArray(cfg.rings) ? cfg.rings : []
                             for (var ri = 0; ri < ringsSpec.length; ri++) {
                                 var rCfg = ringsSpec[ri]
                                 var rQuads = buildAstrolabeRingQuads(rCfg)
                                 var rModel = bakeQuadsToCCModel(rQuads, $CCModel, $Vertex5, $ColourAttribute, itemId + ':ring' + ri)
+                                var rStarQuads = buildAstrolabeRingStarQuads(rCfg)
+                                var rStarModel = bakeQuadsToCCModel(rStarQuads, $CCModel, $Vertex5, $ColourAttribute, itemId + ':ringStar' + ri)
                                 if (rModel != null) {
                                     var rVerts = rModel.verts ? rModel.verts.length : (rQuads.length * 4)
-                                    totalSurroundVerts += rVerts
+                                    var rsVerts = rStarModel != null ? (rStarModel.verts ? rStarModel.verts.length : (rStarQuads.length * 4)) : 0
+                                    totalSurroundVerts += rVerts + rsVerts
                                     var rU = (ringBaseU + Number(rCfg.uOffset || 0.0)) * PX_TO_UNIT
                                     bakedRings.push({
-                                        model: rModel,
-                                        verts: rVerts,
-                                        cx:    guardMX + uxModel * rU,
-                                        cy:    guardMY + uyModel * rU,
-                                        tiltU: Number(rCfg.tiltU || 0.0),
-                                        tiltV: Number(rCfg.tiltV || 0.0),
-                                        spd:   Number(rCfg.spd != null ? rCfg.spd : 1.0)
+                                        model:     rModel,
+                                        verts:     rVerts,
+                                        starModel: rStarModel,
+                                        starVerts: rsVerts,
+                                        cx:        guardMX + uxModel * rU,
+                                        cy:        guardMY + uyModel * rU,
+                                        tiltU:     Number(rCfg.tiltU || 0.0),
+                                        tiltV:     Number(rCfg.tiltV || 0.0),
+                                        spd:       Number(rCfg.spd != null ? rCfg.spd : 0.65)
                                     })
                                 }
                             }
 
-                            // 一次性预烘焙双螺旋缠刃光带（2 股合并为单个 CCModel，单次 Java 提交）
+                            // 一次性预烘焙双螺旋缠刃丝线（2 股连续 Frenet 曲线合并为单个 CCModel）
                             var bakedHelixModel = null
                             var bakedHelixVerts = 0
                             var bakedHelixStrands = 0
-                            var helixSpd = Number(cfg.helix && cfg.helix.speed != null ? cfg.helix.speed : 2.3)
+                            var helixSpd = Number(cfg.helix && cfg.helix.speed != null ? cfg.helix.speed : 1.15)
                             if (cfg.helix && cfg.helix.enabled !== false) {
                                 var combinedHelixQuads = []
                                 for (var hs = 0; hs < 2; hs++) {
@@ -1004,9 +1033,9 @@
                                 }
                             }
 
-                            // 一次性预烘焙 3D 游弋星屑与彗尾（2 个反向轨道簇）
+                            // 一次性预烘焙精选柔光漂浮四芒星点（2 个慢速反向轨道簇，克制清透）
                             var bakedMoteGroups = []
-                            var moteSpds = [1.18, -0.86]
+                            var moteSpds = [0.42, -0.34]
                             if (cfg.motes && cfg.motes.enabled !== false) {
                                 for (var mg = 0; mg < 2; mg++) {
                                     var mQuads = buildStarMotesQuads(cfg.motes, mg, 2)
@@ -1030,7 +1059,7 @@
                             var vecX        = $Vector3.X_POS
                             var vecY        = $Vector3.Y_POS
                             var vecZ        = $Vector3.Z_POS
-                            var speedMul    = Number(cfg.speed != null ? cfg.speed : 1.2)
+                            var speedMul    = Number(cfg.speed != null ? cfg.speed : 1.0)
                             var slashExpand = Number(cfg.slashExpand != null ? cfg.slashExpand : 0.45)
 
                             var cachedMc          = null
@@ -1158,24 +1187,22 @@
                                         }
                                     }
 
-                                    // 3. 预烘焙 3D 环绕特效（星盘陀螺环 + 双螺旋光带 + 游弋星屑）
-                                    //    纯 Java CCModel.render 提交至 entityTranslucentEmissive（全亮无红闪，实测 ~0.54ms）
-                                    if (CONFIG.surroundEnabled && vfxSurroundType != null) {
+                                    // 3. 预烘焙 3D 环绕特效（无闪烁加法发光双管线：先柔光丝带 glow_ribbon，再四芒星芒 star_flare）
+                                    if (CONFIG.surroundEnabled && vfxRibbonType != null) {
                                         try {
                                             var tSur0 = MONO_CLOCK.nowMs()
                                             var radScale = isGui ? CONFIG.guiSurroundScale : slashScale
                                             var ringLim  = isGui ? Math.min(bakedRings.length, CONFIG.guiRingLimit) : bakedRings.length
                                             var drawHelix = (!isGui || CONFIG.guiRenderHelix) && bakedHelixModel != null
                                             var drawMotes = (!isGui || CONFIG.guiRenderMotes) && bakedMoteGroups.length > 0
+                                            var surVerts = 0
 
-                                            if (ringLim > 0 || drawHelix || drawMotes) {
-                                                var surVerts = 0
+                                            // 3a. 柔光丝带批次（星盘双环 + 连续双螺旋丝线）
+                                            if (ringLim > 0 || drawHelix) {
                                                 ccrs.reset()
                                                 ccrs.computeLighting = false
                                                 ccrs.baseColour = -1
-                                                ccrs.brightness = 15728880
-                                                ccrs.overlay = 655360
-                                                ccrs.bind(vfxSurroundType, getter)
+                                                ccrs.bind(vfxRibbonType, getter)
 
                                                 for (var rIdx = 0; rIdx < ringLim; rIdx++) {
                                                     var br = bakedRings[rIdx]
@@ -1199,26 +1226,54 @@
                                                     bakedHelixModel.render(ccrs, workMat)
                                                     surVerts += bakedHelixVerts
                                                 }
+                                            }
 
-                                                if (drawMotes) {
-                                                    for (var mIdx = 0; mIdx < bakedMoteGroups.length; mIdx++) {
-                                                        var bm = bakedMoteGroups[mIdx]
-                                                        var bobU = Math.sin(t * 1.4 + bm.phase) * 1.2 * PX_TO_UNIT
+                                            // 3b. 柔光四芒星芒批次（星盘方位星芒 + 精选漂浮星点）
+                                            if (vfxStarType != null && (ringLim > 0 || drawMotes)) {
+                                                var hasRingStars = false
+                                                for (var rsChk = 0; rsChk < ringLim; rsChk++) {
+                                                    if (bakedRings[rsChk].starModel != null) { hasRingStars = true; break }
+                                                }
+                                                if (hasRingStars || drawMotes) {
+                                                    ccrs.reset()
+                                                    ccrs.computeLighting = false
+                                                    ccrs.baseColour = -1
+                                                    ccrs.bind(vfxStarType, getter)
+
+                                                    for (var rsIdx = 0; rsIdx < ringLim; rsIdx++) {
+                                                        var brs = bakedRings[rsIdx]
+                                                        if (brs.starModel == null) continue
                                                         workMat.set(baseMat)
-                                                        workMat.translate(guardMX + uxModel * bobU, guardMY + uyModel * bobU, 0.5)
+                                                        workMat.translate(brs.cx, brs.cy, 0.5)
                                                         workMat.rotate(bladeAng, vecZ)
-                                                        if (radScale !== 1.0) workMat.scale(1.0, radScale, radScale)
-                                                        workMat.rotate(t * bm.spd, vecX)
-                                                        bm.model.render(ccrs, workMat)
-                                                        surVerts += bm.verts
+                                                        if (radScale !== 1.0) workMat.scale(radScale)
+                                                        if (brs.tiltV !== 0.0) workMat.rotate(brs.tiltV, vecZ)
+                                                        if (brs.tiltU !== 0.0) workMat.rotate(brs.tiltU, vecY)
+                                                        workMat.rotate(t * brs.spd, vecX)
+                                                        brs.starModel.render(ccrs, workMat)
+                                                        surVerts += brs.starVerts
+                                                    }
+
+                                                    if (drawMotes) {
+                                                        for (var mIdx = 0; mIdx < bakedMoteGroups.length; mIdx++) {
+                                                            var bm = bakedMoteGroups[mIdx]
+                                                            var bobU = Math.sin(t * 1.1 + bm.phase) * 0.9 * PX_TO_UNIT
+                                                            workMat.set(baseMat)
+                                                            workMat.translate(guardMX + uxModel * bobU, guardMY + uyModel * bobU, 0.5)
+                                                            workMat.rotate(bladeAng, vecZ)
+                                                            if (radScale !== 1.0) workMat.scale(1.0, radScale, radScale)
+                                                            workMat.rotate(t * bm.spd, vecX)
+                                                            bm.model.render(ccrs, workMat)
+                                                            surVerts += bm.verts
+                                                        }
                                                     }
                                                 }
+                                            }
 
-                                                if (surVerts > 0) {
-                                                    drawnVerts += surVerts
-                                                    didSurround = true
-                                                    RUNTIME_STATS.surroundDraws++
-                                                }
+                                            if (surVerts > 0) {
+                                                drawnVerts += surVerts
+                                                didSurround = true
+                                                RUNTIME_STATS.surroundDraws++
                                             }
                                             surroundUs = Math.max(0, Math.round((MONO_CLOCK.nowMs() - tSur0) * 1000.0))
                                         } catch (eVfx) {
@@ -1358,15 +1413,17 @@
             }
         },
         _pure: {
-            packRgba:                packRgba,
-            normalizeItemSpec:       normalizeItemSpec,
-            pushCrossSegmentQuads:   pushCrossSegmentQuads,
-            pushStarPrism3DQuads:    pushStarPrism3DQuads,
-            buildCosmosOverlayQuads: buildCosmosOverlayQuads,
-            buildAstrolabeRingQuads: buildAstrolabeRingQuads,
-            buildHelixRibbonQuads:   buildHelixRibbonQuads,
-            buildStarMotesQuads:     buildStarMotesQuads,
-            validateQuadsFinite:     validateQuadsFinite
+            packRgba:                   packRgba,
+            normalizeItemSpec:          normalizeItemSpec,
+            pushCrossSegmentQuads:      pushCrossSegmentQuads,
+            pushStarFlare3DQuads:       pushStarFlare3DQuads,
+            pushStarPrism3DQuads:       pushStarPrism3DQuads,
+            buildCosmosOverlayQuads:    buildCosmosOverlayQuads,
+            buildAstrolabeRingQuads:    buildAstrolabeRingQuads,
+            buildAstrolabeRingStarQuads: buildAstrolabeRingStarQuads,
+            buildHelixRibbonQuads:      buildHelixRibbonQuads,
+            buildStarMotesQuads:        buildStarMotesQuads,
+            validateQuadsFinite:        validateQuadsFinite
         }
     }
 

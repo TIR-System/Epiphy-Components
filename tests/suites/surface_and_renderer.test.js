@@ -4467,9 +4467,9 @@ module.exports = function registerSuite(test, h) {
                     if (cls === 'net.minecraft.client.renderer.entity.ItemRenderer') return { m_115222_: function () { return 'foilVC' } }
                     if (cls === 'net.minecraft.client.renderer.ItemBlockRenderTypes') return { m_109279_: function () { return 'origItemRt' } }
                     if (cls === 'net.minecraft.world.item.ItemDisplayContext') return { GUI: GUI_CTX }
-                    if (cls === 'net.minecraft.client.renderer.RenderStateShard') return { f_110139_: 'TRANS', f_110136_: 'LIGHTNING', f_110110_: 'NO_CULL', f_110114_: 'CD_WRITE', f_110115_: 'C_WRITE' }
+                    if (cls === 'net.minecraft.client.renderer.RenderStateShard') return { f_110139_: 'TRANS', f_110136_: 'LIGHTNING', f_110110_: 'NO_CULL', f_110114_: 'CD_WRITE', f_110115_: 'C_WRITE', f_173101_: 'POS_COL_TEX_SHARD' }
                     if (cls === 'net.minecraft.client.renderer.RenderStateShard$ShaderStateShard') return function (sup) { this.sup = sup }
-                    if (cls === 'net.minecraft.client.renderer.RenderStateShard$TextureStateShard') return function (rl) { this.rl = rl }
+                    if (cls === 'net.minecraft.client.renderer.RenderStateShard$TextureStateShard') return function (rl, blur, mip) { this.rl = rl; this.blur = Boolean(blur); this.mipmap = Boolean(mip) }
                     if (cls === 'net.minecraft.client.renderer.RenderType$OutlineProperty') return { NONE: 'OUTLINE_NONE' }
                     if (cls === 'net.minecraft.client.renderer.RenderType$CompositeState') {
                         return {
@@ -4490,12 +4490,7 @@ module.exports = function registerSuite(test, h) {
                     if (cls === 'net.minecraft.client.renderer.RenderType') {
                         return {
                             m_173215_: function (name, fmt, mode, buf, cr, sort, state) {
-                                var rt = { name: name, fmt: fmt, mode: mode, state: state }
-                                createdRenderTypes.push(rt)
-                                return rt
-                            },
-                            m_234335_: function (tex, outline) {
-                                var rt = { name: 'entity_translucent_emissive', tex: String(tex), outline: Boolean(outline) }
+                                var rt = { name: name, fmt: fmt, mode: mode, sortOnUpload: Boolean(sort), state: state }
                                 createdRenderTypes.push(rt)
                                 return rt
                             }
@@ -4558,28 +4553,40 @@ module.exports = function registerSuite(test, h) {
         assert.ok(shaderFsh.indexOf('EpiphyYawPitch') >= 0 && shaderFsh.indexOf('evalHeroCrossStars') >= 0, 'fragment shader must implement camera-reactive cross-star cosmos')
         assert.ok(fs.existsSync(path.join(texDir, 'imperius_test.png')), 'static base blade texture must exist')
         assert.ok(fs.existsSync(path.join(texDir, 'imperius_test_cosmos_mask.png')), 'GPU cosmos window mask texture must exist')
-        assert.ok(fs.existsSync(path.join(ROOT_DIR, 'kubejs', 'assets', 'epiphy', 'textures', 'effect', 'white_pixel.png')), 'white_pixel.png must exist for surround VFX')
+        assert.ok(fs.existsSync(path.join(ROOT_DIR, 'kubejs', 'assets', 'epiphy', 'textures', 'effect', 'glow_ribbon.png')), 'glow_ribbon.png soft-glow ribbon texture must exist')
+        assert.ok(fs.existsSync(path.join(ROOT_DIR, 'kubejs', 'assets', 'epiphy', 'textures', 'effect', 'star_flare.png')), 'star_flare.png soft 4-point star flare texture must exist')
         assert.strictEqual(fs.existsSync(path.join(texDir, 'imperius_test.png.mcmeta')), false, 'obsolete animated mcmeta must be removed')
         var coreSrc = fs.readFileSync(FX3D_CORE_PATH, 'utf8')
         assert.strictEqual(coreSrc.indexOf('committee.nova.mods.avaritia'), -1, 'must NEVER call Avaritia renderer/shaders')
         assert.strictEqual(coreSrc.indexOf("Java.loadClass('java.lang.System')"), -1, 'must NEVER call Java.loadClass(java.lang.System) in hot path')
 
-        // 4. Verify RGBA byte order (0xRRGGBBAA) for CodeChickenLib ColourRGBA, pure pre-baked mesh counts & 0 NaN vertices
+        // 4. Verify RGBA byte order (0xRRGGBBAA), slender cohesive pre-baked geometry, exact seam continuity & 0 NaN vertices
         assert.strictEqual(FX3DCore._pure.packRgba(0x112233, 0x80) >>> 0, 0x11223380, 'CCL ColourRGBA must pack R in MSB and A in LSB (0xRRGGBBAA)')
         var impCfg = FX3D.getBoundItemConfig('epiphy:imperius_test')
         assert.ok(impCfg != null && impCfg.maskTexture === 'epiphy:textures/item/imperius_test_cosmos_mask.png', 'must auto-derive cosmos mask texture path')
-        var cosQuads   = FX3DCore._pure.buildCosmosOverlayQuads()
-        var ring0Quads = FX3DCore._pure.buildAstrolabeRingQuads(impCfg.rings[0])
-        var helixQuads = FX3DCore._pure.buildHelixRibbonQuads(impCfg.helix, 0)
-        var moteQuads  = FX3DCore._pure.buildStarMotesQuads(impCfg.motes, 0, 2)
+        assert.strictEqual(impCfg.rings.length, 2, 'refined imperius preset must keep 2 uncluttered interlocking astrolabe rings')
+        var cosQuads       = FX3DCore._pure.buildCosmosOverlayQuads()
+        var ring0Quads     = FX3DCore._pure.buildAstrolabeRingQuads(impCfg.rings[0])
+        var ring0StarQuads = FX3DCore._pure.buildAstrolabeRingStarQuads(impCfg.rings[0])
+        var helixQuads     = FX3DCore._pure.buildHelixRibbonQuads(impCfg.helix, 0)
+        var moteQuads      = FX3DCore._pure.buildStarMotesQuads(impCfg.motes, 0, 2)
         assert.strictEqual(cosQuads.length, 2, 'cosmos overlay must be exact 2 quads (front+back)')
-        assert.ok(ring0Quads.length >= 80 && ring0Quads.length <= 150, 'Ring 0 must bake lean bold cross-ribbons, ticks, and 4 3D star-prisms')
-        assert.ok(helixQuads.length >= 42 && helixQuads.length <= 100, 'Helix strand must bake lean smooth cross-ribbons along blade spine')
-        assert.ok(moteQuads.length >= 36, 'Star-mote group must bake 3D star heads + comet trails')
+        assert.ok(ring0Quads.length >= 72 && ring0Quads.length <= 140, 'Ring 0 must bake smooth slender connected cross-ribbon + micro ticks')
+        assert.strictEqual(ring0StarQuads.length, 6, 'Ring 0 must bake 2 soft 4-point star flare nodes * 3 orthogonal planes = 6 quads')
+        assert.strictEqual(helixQuads.length, 72, 'Helix strand must bake 36 smooth Frenet connected segments * 2 orthogonal ribbons = 72 quads')
+        assert.strictEqual(moteQuads.length, 9, 'Refined star-mote group (3 stars/group * 3 planes) must bake 9 clean star-flare quads without messy trails')
         assert.strictEqual(FX3DCore._pure.validateQuadsFinite(cosQuads).invalidCount, 0, 'cosmos quads must have 0 NaN/Infinity vertices')
         assert.strictEqual(FX3DCore._pure.validateQuadsFinite(ring0Quads).invalidCount, 0, 'ring0 quads must have 0 NaN/Infinity vertices')
+        assert.strictEqual(FX3DCore._pure.validateQuadsFinite(ring0StarQuads).invalidCount, 0, 'ring0 star quads must have 0 NaN/Infinity vertices')
         assert.strictEqual(FX3DCore._pure.validateQuadsFinite(helixQuads).invalidCount, 0, 'helix quads must have 0 NaN/Infinity vertices')
         assert.strictEqual(FX3DCore._pure.validateQuadsFinite(moteQuads).invalidCount, 0, 'mote quads must have 0 NaN/Infinity vertices')
+        // Verify exact vertex seam continuity (no stair-step breaks between adjacent ring or helix segments!)
+        function dist3(a, b) {
+            var dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2]
+            return Math.sqrt(dx * dx + dy * dy + dz * dz)
+        }
+        assert.ok(dist3(ring0Quads[0].p3, ring0Quads[2].p0) < 1e-6 && dist3(ring0Quads[0].p2, ring0Quads[2].p1) < 1e-6, 'adjacent ring ribbon segments must share exact seam vertices (zero cracks)')
+        assert.ok(dist3(helixQuads[0].p3, helixQuads[2].p0) < 1e-6 && dist3(helixQuads[0].p2, helixQuads[2].p1) < 1e-6, 'adjacent Frenet helix ribbon segments must share exact seam vertices (zero stair-stepping)')
         var badCheck = FX3DCore._pure.validateQuadsFinite([
             { p0: [0, NaN, 0], p1: [1, 0, 0], p2: [1, 1, 0], p3: [0, 1, 0], u0: 0, v0: 0, u1: 1, v1: 0, u2: 1, v2: 1, u3: 0, v3: 1 },
             cosQuads[0]
@@ -4602,7 +4609,7 @@ module.exports = function registerSuite(test, h) {
         assert.strictEqual(shStat.loaded, true)
         assert.strictEqual(shStat.hasUniforms, true, 'must resolve EpiphyTime, EpiphyYawPitch, EpiphyGuiMode uniforms')
 
-        // 6. Verify ModelEvent$ModifyBakingResult pre-bakes CCModels with computeNormals() ONCE, uses OutlineProperty.NONE + vanilla entityTranslucentEmissive, and wraps originalModel
+        // 6. Verify ModelEvent$ModifyBakingResult pre-bakes flicker-free additive RenderTypes (LIGHTNING_TRANSPARENCY + blur=true + sortOnUpload=false) & CCModels
         var modelsStore = {}
         var origModelStub = { m_6160_: function () { return 'bladeParticleSprite' } }
         modelsStore['epiphy:imperius_test#inventory'] = origModelStub
@@ -4618,19 +4625,24 @@ module.exports = function registerSuite(test, h) {
         assert.strictEqual(wrappedRenderer.getModelState(), 'DEFAULT_TOOL', 'sword IItemRenderer must use TransformUtils.DEFAULT_TOOL')
         assert.strictEqual(wrappedRenderer.isGui3d(), false, 'sword icon must keep crisp flat GUI lighting (isGui3d=false)')
         assert.strictEqual(wrappedRenderer.m_6160_(), 'bladeParticleSprite', 'getParticleIcon must delegate to originalModel')
-        assert.ok(outlinePropsUsed.length >= 1 && outlinePropsUsed.every(function (p) { return p === 'OUTLINE_NONE' }), 'custom RenderType must pass OutlineProperty.NONE')
-        assert.ok(createdRenderTypes.some(function (rt) { return rt.name === 'entity_translucent_emissive' && rt.outline === false }), 'surround VFX must use vanilla RenderType.entityTranslucentEmissive(white_pixel, false)')
-        // 1 cosmos + 3 rings + 1 combined helix + 2 mote groups = 7 pre-baked CCModels, ALL with computeNormals() & finite vertices
-        assert.strictEqual(bakedCCModels.length, 7, 'must pre-bake 1 cosmos + 3 rings + 1 merged helix + 2 mote groups = 7 CCModels')
+        assert.ok(outlinePropsUsed.length >= 3 && outlinePropsUsed.every(function (p) { return p === 'OUTLINE_NONE' }), 'custom RenderTypes must pass OutlineProperty.NONE')
+        var ribbonRt = createdRenderTypes.find(function (rt) { return rt.name === 'epiphy:fx3d_surround_ribbon' })
+        var starRt   = createdRenderTypes.find(function (rt) { return rt.name === 'epiphy:fx3d_surround_star' })
+        assert.ok(ribbonRt != null && ribbonRt.fmt === 'POSITION_COLOR_TEX' && ribbonRt.sortOnUpload === false, 'ribbon VFX RenderType must use POSITION_COLOR_TEX with sortOnUpload=false (zero sort-flip flicker)')
+        assert.ok(ribbonRt.state.trans === 'LIGHTNING' && ribbonRt.state.write === 'C_WRITE' && ribbonRt.state.cull === 'NO_CULL' && ribbonRt.state.tex.blur === true, 'ribbon VFX must use additive LIGHTNING_TRANSPARENCY + COLOR_WRITE + NO_CULL + bilinear blur')
+        assert.ok(starRt != null && starRt.fmt === 'POSITION_COLOR_TEX' && starRt.sortOnUpload === false, 'star VFX RenderType must use POSITION_COLOR_TEX with sortOnUpload=false')
+        assert.ok(starRt.state.trans === 'LIGHTNING' && starRt.state.write === 'C_WRITE' && starRt.state.tex.blur === true, 'star VFX must use additive LIGHTNING_TRANSPARENCY + COLOR_WRITE + bilinear blur')
+        // 1 cosmos + 2 ring ribbons + 2 ring stars + 1 merged helix + 2 mote groups = 8 pre-baked CCModels, ALL finite with normals computed
+        assert.strictEqual(bakedCCModels.length, 8, 'must pre-bake 1 cosmos + 2 ring ribbons + 2 ring stars + 1 merged helix + 2 mote groups = 8 CCModels')
         for (var bmIdx = 0; bmIdx < bakedCCModels.length; bmIdx++) {
-            assert.strictEqual(bakedCCModels[bmIdx].normalsComputed, true, 'every pre-baked CCModel MUST call computeNormals() for NEW_ENTITY compatibility')
+            assert.strictEqual(bakedCCModels[bmIdx].normalsComputed, true, 'every pre-baked CCModel MUST call computeNormals()')
             for (var bvIdx = 0; bvIdx < bakedCCModels[bmIdx].verts.length; bvIdx++) {
                 var vtx = bakedCCModels[bmIdx].verts[bvIdx]
                 assert.ok(isFinite(vtx.x) && isFinite(vtx.y) && isFinite(vtx.z), 'baked CCModel vertex must be finite (no NaN)')
             }
         }
 
-        // 7. Verify per-frame renderItem in FIRST_PERSON_RIGHT_HAND & lean GUI LOD via pure-Java CCModel.render fast path
+        // 7. Verify per-frame renderItem in FIRST_PERSON_RIGHT_HAND & lean GUI LOD via pure-Java CCModel.render additive dual-pass
         var mockPoseStack = { _mockPoseStack: true }
         var mockBufferSource = {
             m_109912_: function (rt) { flushedTypes.push(rt) }
@@ -4638,34 +4650,38 @@ module.exports = function registerSuite(test, h) {
         var mockStack = { m_41790_: function () { return true } }
         wrappedRenderer.renderItem(mockStack, HAND_CTX, mockPoseStack, mockBufferSource, 0x00F000F0, 0)
         assert.strictEqual(origModelDraws, 1, 'must draw originalModel once per renderItem')
-        var cosmosCallsHand   = renderDrawCalls.filter(function (c) { return c.rt && c.rt.name === 'epiphy:cosmos_epiphy_imperius_test' })
-        var surroundCallsHand = renderDrawCalls.filter(function (c) { return c.rt && c.rt.name === 'entity_translucent_emissive' })
+        var cosmosCallsHand = renderDrawCalls.filter(function (c) { return c.rt && c.rt.name === 'epiphy:cosmos_epiphy_imperius_test' })
+        var ribbonCallsHand = renderDrawCalls.filter(function (c) { return c.rt && c.rt.name === 'epiphy:fx3d_surround_ribbon' })
+        var starCallsHand   = renderDrawCalls.filter(function (c) { return c.rt && c.rt.name === 'epiphy:fx3d_surround_star' })
         assert.strictEqual(cosmosCallsHand.length, 1, 'cosmos window overlay must issue 1 CCModel draw')
         assert.strictEqual(cosmosCallsHand[0].verts, 8, 'cosmos window overlay must submit exact 8 vertices (2 quads front+back)')
-        assert.strictEqual(surroundCallsHand.length, 6, 'first-person hand render must submit 3 rings + 1 merged helix + 2 mote groups = 6 CCModel draws')
-        var handSurroundVertCount = surroundCallsHand.reduce(function (acc, c) { return acc + c.verts }, 0)
-        assert.ok(handSurroundVertCount >= 1600, 'first-person hand render must submit full-LOD surround vertices via CCModel.render, got ' + handSurroundVertCount)
-        assert.ok(surroundCallsHand.every(function (c) {
-            return c.brightness === 15728880 && c.overlay === 655360 && c.computeLighting === false && c.baseColour === -1 && c.normalsComputed === true
-        }), 'every surround CCModel draw must set FULL_BRIGHT (15728880), NO_OVERLAY (655360), computeLighting=false, baseColour=-1')
-        assert.ok(surroundCallsHand[0].scales.some(function (sc) { return Math.abs(sc[0] - 1.45) < 1e-4 }), 'swing=0.5 must apply 1.45x slash radial expansion to surround rings')
+        assert.strictEqual(ribbonCallsHand.length, 3, 'hand render must submit 2 ring ribbons + 1 merged helix = 3 ribbon CCModel draws')
+        assert.strictEqual(starCallsHand.length, 4, 'hand render must submit 2 ring star nodes + 2 floating mote groups = 4 star CCModel draws')
+        var handSurroundVertCount = ribbonCallsHand.concat(starCallsHand).reduce(function (acc, c) { return acc + c.verts }, 0)
+        assert.ok(handSurroundVertCount >= 1100 && handSurroundVertCount <= 1900, 'refined uncluttered hand render must stay lean & crisp, got ' + handSurroundVertCount)
+        assert.ok(ribbonCallsHand.concat(starCallsHand).every(function (c) {
+            return c.computeLighting === false && c.baseColour === -1 && c.normalsComputed === true
+        }), 'every surround CCModel draw must disable lighting and keep baseColour=-1')
+        assert.ok(ribbonCallsHand[0].scales.some(function (sc) { return Math.abs(sc[0] - 1.45) < 1e-4 }), 'swing=0.5 must apply 1.45x slash radial expansion to surround rings')
         assert.strictEqual(uniformValues.EpiphyGuiMode, 0.0, 'first-person render must set EpiphyGuiMode = 0.0')
         assert.ok(Array.isArray(uniformValues.EpiphyYawPitch) && isFinite(uniformValues.EpiphyYawPitch[0]) && Math.abs(uniformValues.EpiphyYawPitch[0] - 42.5 * 3.141592653589793 / 180) < 1e-4, 'must upload finite camera yaw/pitch radians to GPU shader')
         assert.strictEqual(flushedTypes.length, 2, 'hand render must flush origRt (depth write) + cosmosType (lock uniforms against Hand/GUI crosstalk)')
         assert.strictEqual(flushedTypes[0], 'origItemRt')
         assert.strictEqual(flushedTypes[1].name, 'epiphy:cosmos_epiphy_imperius_test')
 
-        // GUI slot render check: lean LOD (cosmos 8 verts + 2 hero rings only, strictly fewer surround verts than hand) and exact 2 flushes (origRt + cosmosType)!
+        // GUI slot render check: lean LOD (cosmos 8 verts + 2 hero rings & their star nodes only, strictly fewer surround verts than hand) and exact 2 flushes!
         renderDrawCalls.length = 0
         flushedTypes.length = 0
         wrappedRenderer.renderItem(mockStack, GUI_CTX, mockPoseStack, mockBufferSource, 0x00F000F0, 0)
-        var cosmosCallsGui   = renderDrawCalls.filter(function (c) { return c.rt && c.rt.name === 'epiphy:cosmos_epiphy_imperius_test' })
-        var surroundCallsGui = renderDrawCalls.filter(function (c) { return c.rt && c.rt.name === 'entity_translucent_emissive' })
-        var guiSurroundVertCount = surroundCallsGui.reduce(function (acc, c) { return acc + c.verts }, 0)
+        var cosmosCallsGui = renderDrawCalls.filter(function (c) { return c.rt && c.rt.name === 'epiphy:cosmos_epiphy_imperius_test' })
+        var ribbonCallsGui = renderDrawCalls.filter(function (c) { return c.rt && c.rt.name === 'epiphy:fx3d_surround_ribbon' })
+        var starCallsGui   = renderDrawCalls.filter(function (c) { return c.rt && c.rt.name === 'epiphy:fx3d_surround_star' })
+        var guiSurroundVertCount = ribbonCallsGui.concat(starCallsGui).reduce(function (acc, c) { return acc + c.verts }, 0)
         assert.strictEqual(uniformValues.EpiphyGuiMode, 1.0, 'GUI slot render must set EpiphyGuiMode = 1.0')
         assert.strictEqual(cosmosCallsGui.length, 1)
         assert.strictEqual(cosmosCallsGui[0].verts, 8, 'GUI slot render must submit exact 8 cosmos overlay vertices')
-        assert.strictEqual(surroundCallsGui.length, 2, 'GUI slot render must use lean LOD (2 hero rings only)')
+        assert.strictEqual(ribbonCallsGui.length, 2, 'GUI slot render must use lean LOD (2 hero ring ribbons only)')
+        assert.strictEqual(starCallsGui.length, 2, 'GUI slot render must include only 2 hero ring star nodes (no floating motes)')
         assert.ok(guiSurroundVertCount > 400 && guiSurroundVertCount < handSurroundVertCount, 'GUI slot surround verts must be strictly fewer than hand: ' + guiSurroundVertCount + ' vs ' + handSurroundVertCount)
         assert.strictEqual(flushedTypes.length, 2, 'GUI slot render must flush origRt + cosmosType (lock guiMode uniform)')
         var fxStatsAfter = FX3D.getStats()

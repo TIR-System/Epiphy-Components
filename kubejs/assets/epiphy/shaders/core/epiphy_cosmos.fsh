@@ -118,28 +118,28 @@ vec3 evalFastStars(vec2 uv, float gridScale, float periodCells, float t, float d
 }
 
 vec3 evalCosmosField(vec2 uv, float periodUV, float t, float isRift) {
-    // 1. Deep astral indigo-navy void base
-    vec3 col = vec3(0.020, 0.042, 0.095);
+    // 1. Deep midnight indigo-violet void base (high contrast for sharp cross-stars)
+    vec3 col = vec3(0.016, 0.022, 0.068);
 
-    // 2. Fast 2-layer flowing emerald-teal / cyan / astral-violet nebula clouds
-    float n1 = fbm2(uv * 8.0 + vec2(t * 0.032, -t * 0.022), periodUV * 8.0);
-    float n2 = fbm2(uv * 14.0 + vec2(-t * 0.026 + n1 * 0.55, t * 0.028 - n1 * 0.35), periodUV * 14.0);
+    // 2. Fast 2-layer flowing astral-violet / sapphire / luminous-cyan nebula clouds
+    float n1 = fbm2(uv * 8.0 + vec2(t * 0.024, -t * 0.016), periodUV * 8.0);
+    float n2 = fbm2(uv * 14.0 + vec2(-t * 0.020 + n1 * 0.55, t * 0.022 - n1 * 0.35), periodUV * 14.0);
 
-    float tealBand   = smoothstep(0.28, 0.78, n1 * 0.65 + n2 * 0.45);
-    float cyanPocket = smoothstep(0.46, 0.86, n2 * 0.78 + n1 * 0.30);
-    float violetWisp = smoothstep(0.42, 0.85, (1.0 - n1) * 0.58 + n2 * 0.55);
+    float indigoBand = smoothstep(0.32, 0.80, n1 * 0.65 + n2 * 0.45);
+    float cyanPocket = smoothstep(0.52, 0.88, n2 * 0.78 + n1 * 0.30);
+    float violetWisp = smoothstep(0.38, 0.84, (1.0 - n1) * 0.58 + n2 * 0.55);
 
-    col += vec3(0.05, 0.38, 0.44) * tealBand * 0.98;
-    col += vec3(0.14, 0.82, 0.88) * cyanPocket * 0.84;
-    col += vec3(0.36, 0.16, 0.76) * violetWisp * 0.64;
-    col += vec3(0.68, 0.22, 0.66) * smoothstep(0.58, 0.90, n2) * (0.34 + 0.38 * isRift);
+    col += vec3(0.06, 0.22, 0.44) * indigoBand * 0.72;
+    col += vec3(0.14, 0.68, 0.86) * cyanPocket * 0.64;
+    col += vec3(0.42, 0.16, 0.74) * violetWisp * 0.66;
+    col += vec3(0.68, 0.24, 0.62) * smoothstep(0.60, 0.92, n2) * (0.28 + 0.32 * isRift);
 
     // 3. Single 3x3 hero glowing 4-point cross-star layer (+)
-    col += evalHeroCrossStars(uv + vec2(t * 0.003, -t * 0.002), 18.0, periodUV * 18.0, t);
+    col += evalHeroCrossStars(uv + vec2(t * 0.0025, -t * 0.0018), 18.0, periodUV * 18.0, t) * 0.92;
 
     // 4. Two zero-loop 1x1 star layers for depth parallax (very cheap on GPU)
-    col += evalFastStars(uv + vec2(-t * 0.005, t * 0.004), 32.0, periodUV * 32.0, t * 1.15, 0.54, 48.0) * 0.92;
-    col += evalFastStars(uv + vec2(t * 0.002, t * 0.003), 54.0, periodUV * 54.0, t * 0.90, 0.48, 86.0) * 0.76;
+    col += evalFastStars(uv + vec2(-t * 0.004, t * 0.003), 32.0, periodUV * 32.0, t * 1.05, 0.52, 52.0) * 0.84;
+    col += evalFastStars(uv + vec2(t * 0.002, t * 0.0025), 54.0, periodUV * 54.0, t * 0.85, 0.46, 90.0) * 0.68;
 
     return col;
 }

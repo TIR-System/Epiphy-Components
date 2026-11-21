@@ -339,40 +339,37 @@
         renderInSlots:  true,
         cosmosWindow: {
             enabled:  true,
-            parallax: 1.8,
-            speed:    1.2
+            parallax: 1.6,
+            speed:    0.95
         },
         rings: [
             {
-                R: 8.8, tiltU: 0.46, tiltV: 0.15, spd: 1.15, segs: 48,
-                cCore: 0xFFF5D2, cGlow: 0xEBAF55, ticks: 24, prisms: 4, wBase: 1.35, uOffset: 0.0
+                R: 8.4, tiltU: 0.52, tiltV: 0.16, spd: 0.65, segs: 36,
+                cCore: 0xFFF4D6, cGlow: 0xF2C068, ticks: 16, prisms: 2, wBase: 0.68, uOffset: 0.0
             },
             {
-                R: 12.8, tiltU: -0.64, tiltV: -0.22, spd: -0.85, segs: 56,
-                cCore: 0xB9EBFF, cGlow: 0xC36EFF, ticks: 12, prisms: 2, wBase: 1.20, uOffset: 0.0
-            },
-            {
-                R: 6.2, tiltU: 0.18, tiltV: 0.0, spd: 1.75, segs: 36,
-                cCore: 0xFFE6A5, cGlow: 0xDC4678, ticks: 0, prisms: 0, wBase: 0.95, uOffset: -5.2
+                R: 11.2, tiltU: -0.78, tiltV: -0.26, spd: -0.48, segs: 40,
+                cCore: 0xD2EAFF, cGlow: 0x9C7EFF, ticks: 0, prisms: 2, wBase: 0.62, uOffset: 1.5
             }
         ],
         helix: {
             enabled: true,
-            steps:   56,
-            uStart:  2.0,
-            uSpan:   49.0,
-            radius:  5.4,
-            freq:    0.21,
-            speed:   2.3,
-            cCore0:  0xFFE6C3,
-            cGlow0:  0xF055A5,
-            cCore1:  0xB4F0FF,
-            cGlow1:  0x916EFF
+            steps:   36,
+            uStart:  3.0,
+            uSpan:   48.0,
+            radius:  4.5,
+            freq:    0.17,
+            speed:   1.15,
+            wBase:   0.52,
+            cCore0:  0xFFEAF4,
+            cGlow0:  0xFFA2CC,
+            cCore1:  0xD8F4FF,
+            cGlow1:  0x8CD8FF
         },
         motes: {
             enabled:    true,
-            count:      14,
-            trailSteps: 5
+            count:      6,
+            trailSteps: 0
         }
     })
 
