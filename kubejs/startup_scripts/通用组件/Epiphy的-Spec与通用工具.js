@@ -1,14 +1,16 @@
 // priority: 1200
 // ============================================================================
-// Epiphy 通用规范、共享协议契约与纯逻辑基座 (EpiphySpec + EpiphyProtocol v2.7.0)
+// Epiphy 通用规范、共享协议契约与纯逻辑基座 (EpiphySpec + EpiphyProtocol v2.8.0)
 //   许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //   所属阶段：startup_scripts（服务端与客户端共享，单一前置加载项）
 //   职责说明：
 //     1. 定义并导出 global.EpiphyProtocol（频道名、版本号、PRIORITY_MAP、HUD_FORBIDDEN_PRESETS）
 //        及 global.EpiphyMath / EpiphySpec.MATH（规避 kube-mods/rhino NativeMath 遗漏 PI/E 等 8 个常量导致 undefined 的上游缺陷，并提供跨阶段 ensureMathConstants 补丁）；
-//     2. 收拢跨组件复用的数值/布尔/时长/颜色/字号/倾角/命令解析器、球簇合并几何算法、有界 FIFO 缓存池 (`createBoundedCache`)
+//     2. 收拢跨组件复用的数值/布尔/时长/颜色/字号/倾角/命令解析器、球簇合并几何算法、有界 FIFO/LRU 缓存池 (`createBoundedCache`)
 //        与跨阶段向上预设注册表 (`createPresetRegistry` / `registerPreset` / `resolvePreset`)，导出 global.EpiphySpec；
-//     3. 服务端业务组件以本文件 + EpiphyServerBase 为底座；客户端渲染器/播放器在缺失本文件时仍可降级运行内置 v6 协议常量。
+//     3. 统一承载零第三方 Mod 依赖的客户端渲染相位桥接 (`global.EpiphyRenderHooks`)：
+//        `RenderGuiEvent$Pre`（2D 平面前置绘制桥接）与 `RenderLevelStageEvent`（世界 3D 空间特效零空闲开销桥接）；
+//     4. 服务端业务组件以本文件 + EpiphyServerBase 为底座；客户端渲染器/播放器在缺失本文件时仍可降级运行内置协议常量。
 //   语法规范：遵循 README-LLM.md §1 强制语法基准（与 docs/kube-mods-rhino-es5-es6-compatibility.md）
 // ============================================================================
 
@@ -103,7 +105,7 @@
         bossbar:   Object.freeze({ x: 0.25, y: 0.00, w: 0.50, h: 0.09 })
     };
 
-    var SPEC_VERSION          = '2.7.0';
+    var SPEC_VERSION          = '2.8.0';
 
     var DANMAKU_CHANNEL       = 'epiphy:screen_danmaku';
     var DANMAKU_PROTO_VERSION = 6;
@@ -1818,17 +1820,19 @@
             computeSphereMergeClusters: computeSphereMergeClusters
         };
 
-        // 客户端原生 Forge 前置渲染相位桥接（仅在客户端首次启动阶段挂接一次，专用服自动跳过）：
-        //   KubeJS ClientEvents.paintScreen 绑定于 RenderGuiEvent$Post / ScreenEvent$Render$Post，
-        //   绘制时机必然晚于原版物品栏/血条/小地图与 GUI 界面；此处在 startup 阶段通过 ForgeEvents
-        //   挂接 RenderGuiEvent$Pre 并动态转发给 global.Epiphy2DRenderer._onRenderGuiPre(event)，
-        //   使默认弹幕 (renderPriority: 0) 与默认自绘 HUD (renderPriority: 50) 均绘制在原版 HUD 与 GUI 之下，
-        //   同时保持自绘 HUD 位于弹幕之上；renderPriority >= aboveVanillaHudPriority (100) 时自动进入 Post 层。
+        // 客户端原生 Forge 渲染相位统一桥接（零第三方 Mod 依赖，仅在客户端首次启动阶段挂接一次，专用服自动跳过）：
+        //   1. RenderGuiEvent$Pre -> global.Epiphy2DRenderer._onRenderGuiPre(event)：
+        //      使默认弹幕 (renderPriority: 0) 与默认自绘 HUD (renderPriority: 50) 均绘制在原版 HUD 与 GUI 之下，
+        //      同时保持自绘 HUD 位于弹幕之上；renderPriority >= aboveVanillaHudPriority (100) 时自动进入 Post 层。
+        //   2. RenderLevelStageEvent -> global.Epiphy3DFX._onRenderLevelStage(event)：
+        //      承载世界空间 3D 特效 (`surface: 'world'`)，零活跃特效时 O(1) 短路零开销，彻底物理隔离于物品 3D 可选 CCL 管线。
         if (global.EpiphyRenderHooks == null || typeof global.EpiphyRenderHooks !== 'object') {
             global.EpiphyRenderHooks = {
-                preHudActive:     false,
-                preHudRegistered: false,
-                registered:       false
+                preHudActive:      false,
+                preHudRegistered:  false,
+                world3dActive:     false,
+                world3dRegistered: false,
+                registered:        false
             };
         }
         if (typeof ForgeEvents !== 'undefined' && ForgeEvents != null &&
@@ -1858,6 +1862,24 @@
                         try {
                             console.warn('[EpiphySpec] RenderGuiEvent$Pre 桥接挂接失败，客户端将自动回退至 ClientEvents.paintScreen: ' + ePreHook);
                         } catch (eLogHook) { }
+                    }
+                }
+                if (!global.EpiphyRenderHooks.world3dRegistered) {
+                    try {
+                        ForgeEvents.onEvent('net.minecraftforge.client.event.RenderLevelStageEvent', function (forgeEvent) {
+                            var fx3d = (typeof global !== 'undefined' && global != null) ? global.Epiphy3DFX : null;
+                            if (fx3d == null || typeof fx3d._hasActiveWorldFx !== 'function' || !fx3d._hasActiveWorldFx()) return;
+                            if (typeof fx3d._onRenderLevelStage === 'function') {
+                                fx3d._onRenderLevelStage(forgeEvent);
+                            }
+                        });
+                        global.EpiphyRenderHooks.world3dActive     = true;
+                        global.EpiphyRenderHooks.world3dRegistered = true;
+                    } catch (eWorldHook) {
+                        global.EpiphyRenderHooks.world3dActive = false;
+                        try {
+                            console.warn('[EpiphySpec] RenderLevelStageEvent 桥接挂接失败，世界 3D 特效渲染已跳过: ' + eWorldHook);
+                        } catch (eWorldLog) { }
                     }
                 }
             }

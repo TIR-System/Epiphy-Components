@@ -17,7 +17,7 @@ const CHECK_ONLY = process.argv.indexOf('--check') >= 0;
 
 const COMPONENT_SPECS = [
     { name: 'EpiphySpec',            file: 'kubejs/startup_scripts/通用组件/Epiphy的-Spec与通用工具.js',     docTags: ['EpiphySpec'] },
-    { name: 'Epiphy3DFXCore',        file: 'kubejs/startup_scripts/通用组件/Epiphy的-空间特效核心.js',       docTags: ['Epiphy3DFXCore'] },
+    { name: 'EpiphyItem3DRenderer',  file: 'kubejs/startup_scripts/通用组件/Epiphy的-物品三维渲染器.js',     docTags: ['EpiphyItem3DRenderer'] },
     { name: 'EpiphyCreativeTab',     file: 'kubejs/startup_scripts/通用组件/创造模式栏-epiphy.js',           docTags: ['EpiphyCreativeTab'] },
     { name: 'EpiphyLog',             file: 'kubejs/server_scripts/通用组件/Epiphy的-日志.js',               docTags: ['EpiphyLog'] },
     { name: 'EpiphyServerCore',      file: 'kubejs/server_scripts/通用组件/Epiphy的-服务端核心.js',          docTags: ['EpiphyServerCore / EpiphyServerBase'] },
@@ -126,7 +126,7 @@ function syncRoadmap(absPath, versions) {
     for (let i = 0; i < lines.length; i++) {
         if (lines[i].indexOf('**P3-2**') < 0) continue;
         let next = lines[i];
-        next = replaceVersionForTag(next, 'Epiphy3DFXCore', versions.Epiphy3DFXCore);
+        next = replaceVersionForTag(next, 'EpiphyItem3DRenderer', versions.EpiphyItem3DRenderer);
         next = replaceVersionForTag(next, 'Epiphy3DFXServer', versions.Epiphy3DFXServer);
         next = replaceVersionForTag(next, 'Epiphy3DFX', versions.Epiphy3DFX);
         if (next !== lines[i]) {
@@ -144,16 +144,16 @@ function syncReadmeLlm(absPath, versions) {
     let changed = false;
 
     const llmFileTags = [
-        { tag: 'Spec与通用工具.js',          ver: versions.EpiphySpec },
-        { tag: 'Epiphy的-空间特效核心.js',   ver: versions.Epiphy3DFXCore },
-        { tag: 'Epiphy的-空间特效组件.js',   ver: versions.Epiphy3DFXServer },
-        { tag: 'Epiphy的-空间特效渲染器.js', ver: versions.Epiphy3DFX },
-        { tag: '平面渲染组件.js',            ver: versions.Epiphy2DSurface },
-        { tag: '平面渲染器.js',              ver: versions.Epiphy2DRenderer },
-        { tag: '调试组件.js',                ver: versions.EpiphyDebug },
-        { tag: 'Epiphy3DFXCore',             ver: versions.Epiphy3DFXCore },
-        { tag: 'Epiphy3DFXServer',           ver: versions.Epiphy3DFXServer },
-        { tag: 'Epiphy3DFX',                 ver: versions.Epiphy3DFX }
+        { tag: 'Spec与通用工具.js',            ver: versions.EpiphySpec },
+        { tag: 'Epiphy的-物品三维渲染器.js',   ver: versions.EpiphyItem3DRenderer },
+        { tag: 'Epiphy的-空间特效组件.js',     ver: versions.Epiphy3DFXServer },
+        { tag: 'Epiphy的-空间特效渲染器.js',   ver: versions.Epiphy3DFX },
+        { tag: '平面渲染组件.js',              ver: versions.Epiphy2DSurface },
+        { tag: '平面渲染器.js',                ver: versions.Epiphy2DRenderer },
+        { tag: '调试组件.js',                  ver: versions.EpiphyDebug },
+        { tag: 'EpiphyItem3DRenderer',         ver: versions.EpiphyItem3DRenderer },
+        { tag: 'Epiphy3DFXServer',             ver: versions.Epiphy3DFXServer },
+        { tag: 'Epiphy3DFX',                   ver: versions.Epiphy3DFX }
     ];
 
     for (let i = 0; i < lines.length; i++) {

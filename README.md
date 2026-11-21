@@ -16,7 +16,7 @@
 
 | 第三方 Mod | 级别 | 涉及通用组件 | 用途与缺省降级行为 | 原生化（Phase 4）规划 |
 | :--- | :---: | :--- | :--- | :--- |
-| **CodeChickenLib** | 可选特例 | `Epiphy的-空间特效核心.js` | 仅作物品 3D 自定义渲染入口胶水与纯 Java 侧网格提交加速（`IItemRenderer` / `TransformUtils` / `CCShaderInstance` / `CCModel` / `CCRenderState` / `ColourAttribute` / `Matrix4` / `Vector3` / `Vertex5`，绕过 KubeJS 无法覆写 `Item.initializeClient` 及 Rhino 逐顶点性能瓶颈）；缺失时单次告警自动退回原版静态模型（**世界 3D `surface: 'world'` 100% 零 CCL 依赖**） | **彻底移除依赖并自主实现**（原生 `IClientItemExtensions` + `BEWLR` / 自有 Mixin + 原版 `ShaderInstance` + 原生 Java VBO/网格） |
+| **CodeChickenLib** | 可选特例 | `Epiphy的-物品三维渲染器.js` | 仅作物品 3D 自定义渲染入口胶水与纯 Java 侧网格提交加速（`IItemRenderer` / `TransformUtils` / `CCShaderInstance` / `CCModel` / `CCRenderState` / `ColourAttribute` / `Matrix4` / `Vector3` / `Vertex5`，绕过 KubeJS 无法覆写 `Item.initializeClient` 及 Rhino 逐顶点性能瓶颈）；缺失时单次告警自动退回原版静态模型（**世界 3D `surface: 'world'` 相位桥接位于 `Epiphy的-Spec与通用工具.js`，100% 物理零 CCL 依赖**） | **彻底移除依赖并自主实现**（原生 `IClientItemExtensions` + `BEWLR` / 自有 Mixin + 原版 `ShaderInstance` + 原生 Java VBO/网格） |
 | **ModernUI** | 可选快路径 | `Epiphy的-平面渲染器.js` | 存在时启用直连文字排版缓存与 SDF 单 Pass 描边；缺失时无感回退原版渲染管线 | 保留可选兼容分支 |
 | **Curios API** | 可选工具 | `Epiphy的-服务端核心.js` | 为 `findPlayerCurio` 等助手提供饰品栏查询；缺失时静默跳过饰品栏 | 保留可选软兼容 |
 
@@ -32,8 +32,8 @@
 ┌──────────────────────────────────────────────────────────────────────────────────┐
 │ Layer 1 · Startup 阶段（跨端契约与资产/内容注册，最先加载）                        │
 ├──────────────────────────────────────────────────────────────────────────────────┤
-│  Epiphy的-Spec与通用工具.js (P:1200) ──► global.EpiphySpec / EpiphyProtocol       │
-│  Epiphy的-空间特效核心.js   (P:1050) ──► global.Epiphy3DFXCore (可选: CCL 降级)   │
+│  Epiphy的-Spec与通用工具.js (P:1200) ──► EpiphySpec / EpiphyProtocol / 2D&3D桥接  │
+│  Epiphy的-物品三维渲染器.js (P:1050) ──► EpiphyItem3DRenderer (可选: CCL 降级)   │
 │  创造模式栏-epiphy.js       (P:1000) ──► global.EpiphyCreativeTab (epiphy:stuff)  │
 │     ├──► Epiphy的小玩意-原版_其他Mod的隐藏物品.js                                 │
 │     ├──► Epiphy的小玩意-终极拆解台_不稳定.js  (配合 assets/epiphy/ 贴图与模型)    │
@@ -81,8 +81,8 @@
 
 | 架构层 | 核心模块 | 阶段 / Priority | 核心导出 / 职责 |
 | :--- | :--- | :--- | :--- |
-| **L1 跨端契约** | `Epiphy的-Spec与通用工具.js` | `startup` / `1200` | `EpiphySpec v2.7.0`、`EpiphyProtocol`、`EpiphyMath`（含三端 `NativeMath` 常量修补、`RenderGuiEvent$Pre` 桥接与 2D/3D 计费） |
-| **L1 3D 核心** | `Epiphy的-空间特效核心.js` | `startup` / `1050` | `Epiphy3DFXCore v1.0.5`（自研 GLSL 星海着色器、预烘焙纯 Java `CCModel` 极速物品渲染〔~0.54ms〕、无 CCL 静默退回原版模型、`RenderLevelStageEvent` 桥接） |
+| **L1 跨端契约** | `Epiphy的-Spec与通用工具.js` | `startup` / `1200` | `EpiphySpec v2.8.0`、`EpiphyProtocol`、`EpiphyMath`（含三端 `NativeMath` 常量修补、`RenderGuiEvent$Pre` 2D 与 `RenderLevelStageEvent` 世界 3D 桥接及 2D/3D 计费） |
+| **L1 物品 3D** | `Epiphy的-物品三维渲染器.js` | `startup` / `1050` | `EpiphyItem3DRenderer v1.0.0`（v6 分层声明式通用物品 3D 管线、`fx()` 构造器、可扩展 `registerShader`/`registerLayerType`/`registerPart`/`registerPreset`、无闪烁加法发光与纯 Java `CCModel` ~0.54ms 渲染、无 CCL 静默退回原版模型） |
 | **L1 内容注册** | `创造模式栏-epiphy.js` | `startup` / `1000` | `EpiphyCreativeTab v1.0.0` (`epiphy:stuff`) |
 | **L1 内容注册** | 隐藏物品 / 测试方块 / 失稳拆解台 | `startup` | 物品、测试方块与 5 阶段失稳方块 |
 | **L2 基础设施** | `Epiphy的-日志.js` | `server` / `1100` | `EpiphyLog v1.2.0`（限频、去重、`catchWarn`、外部文本日志） |
@@ -96,7 +96,7 @@
 | **L3 业务调度** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.8.0`（独立调度模块，支持向上预设注册，禁止跨模块直接复用内部实现） |
 | **L3 玩法脚本** | `拆解台-混沌殉爆.v18.js` | `server` / `10` | 混沌殉爆事件链（强前置核心/世界/弹幕组件，含持久化、原生 2D 遥测预设与 `channel`/`slot` 自动增量 `patch`、防伪造遗物与主手钻石镐校验） |
 | **L3 玩法脚本** | `合成表-*`（原版 / 植物魔法 / 神秘遗物） | `server` / `0` | 独立合成表与配方微调脚本 |
-| **L4 客户端表现** | `平面渲染器` / `空间特效渲染器` / `音频播放器` / `拆解台描述` | `client` | `Epiphy2DRenderer / ScreenDanmakuClient v6.2.0`、`Epiphy3DFX v2.2.1`、`EpiphyAudioClient v5.6.0` |
+| **L4 客户端表现** | `平面渲染器` / `空间特效渲染器` / `音频播放器` / `拆解台描述` | `client` | `Epiphy2DRenderer / ScreenDanmakuClient v6.2.0`、`Epiphy3DFX v2.3.0`、`EpiphyAudioClient v5.6.0` |
 
 ### 3. 模块依赖与降级语义规范（YAML）
 
@@ -108,11 +108,11 @@ Epiphy的-Spec与通用工具.js:
     - EpiphyServerBase 与客户端引擎各自启用精简内置兜底
     - 服务端弹幕组件、空间特效组件与音频组件因缺少硬前置拒绝启动
 
-Epiphy的-空间特效核心.js:
+Epiphy的-物品三维渲染器.js:
   requires: { hard: [], optional: [CodeChickenLib, EpiphySpec] }
   on_missing:
-    no_CodeChickenLib: 客户端仅输出 1 条降级警告并跳过 3D 着色器与 IItemRenderer 烘焙，绑定物品自动退回原版静态模型正常显示（无紫黑块、无报错）
-    no_EpiphySpec:     启用内置单调钳制时钟兜底
+    no_CodeChickenLib: 客户端仅输出 1 条降级警告并跳过自定义着色器与 IItemRenderer 烘焙，绑定物品自动退回原版静态模型正常显示（无紫黑块、无报错）
+    no_EpiphySpec:     启用内置单调钳制时钟与本地预设表兜底
 
 创造模式栏-epiphy.js:
   requires: { hard: [], optional: [] }
@@ -195,8 +195,8 @@ Epiphy的-平面渲染器.js:
   on_missing: 缺 Startup Spec 时启用内置 v6 协议常量与基础工具兜底
 
 Epiphy的-空间特效渲染器.js:
-  requires: { paired: [Epiphy3DFXServer], optional: [Epiphy3DFXCore, EpiphySpec, EpiphyProtocol] }
-  on_missing: 缺 Startup Core/Spec 时使用同源默认配置与内置 v1 协议常量兜底，不中断世界 3D 包收发与生命周期管理
+  requires: { paired: [Epiphy3DFXServer], optional: [EpiphyItem3DRenderer, EpiphySpec, EpiphyProtocol] }
+  on_missing: 缺 Startup Spec/物品三维渲染器时使用同源默认配置与内置 v1 协议常量兜底，不中断世界 3D 包收发与生命周期管理
 
 Epiphy的-音频播放器.js:
   requires: { paired: [EpiphyAudio], optional: [EpiphySpec, EpiphyProtocol] }
@@ -214,7 +214,7 @@ Epiphy的-音频播放器.js:
    - **独立修复与诊断**：动态性能监控与健康自检（`EpiphyDebug v1.0.0`），以及零硬依赖的纯服务端退出 HP 保留与延迟恢复修复（`EpiphyBugfix v1.0.0`）。
 2. **双端交互表现引擎（含 `authorized` 玩家资源隔离）**：
    - **2D 平面合成与屏幕弹幕（`Epiphy2DSurface / ScreenDanmaku v6.2.0` / `Epiphy2DRenderer / ScreenDanmakuClient v6.2.0`）**：基于 `PROTO v6` 的 6 类 2D 图元树（`rect`/`sprite`/`nine_slice`/`item`/`text`/`group`）、`rect.fill`（`solid`/`outline`/`gradient`/`parallax`/`shader`）、双模裁剪（`local`/`scissor`）、客户端插值轨道（`lerp`/`trail`/`impulse`）、分组选项受控深合并（`layout`/`life`/`motion`/`style`/`data`/`tracks`）、未知键拼写一次性告警、`channel`/`slot` 有状态通道（自动全量/增量 `action: 'patch'` 切换）、`id` 前置紧凑链式 `ui()` 构造器（`steppedPlate`/`corners`/`steppedLine`/`ticks`/`boxes`/`texts`/`region`/`widget`）、内置 `'progress_bar'` 预设 + `progressTracks` 与向上预设/自定义复合单元注册（`registerPreset`/`registerWidget`）；端侧具备收包节点树预编译与静态矩形极速直绘轨、`stepHz` 离散微缓存、顶层零闭包连续矩形合批与帧内 `resolveEventCaps`、视差早期剔除、左对齐免测宽与节点字宽缓存、`'lru'` 共享文本排版缓存池、归一化屏幕坐标与 HUD 禁区避让、多段打字机、`per_char` 单字震动、描边/发光、局部富文本标签、`ModernUI (LGPL-3.0)` 专有深度优化及原版无感回退、`once` / `active` / `screen_session` 生命周期、持久化/进服延迟补发与按命名空间隔离的方块绑定；新增 `/epiphy danmaku self` 个人弹幕子指令，非 OP `authorized` 玩家命令进入 `'player'` 层级并受参数/人数（`>4` 人及跨维度需 `danmaku.broadcast`）/冷却限流、独立 `u:<uuid>` 命名空间清屏锁、端侧待处理队列上限（256）与每命名空间 `16` 条上限约束（JS API 与 OP/控制台/命令方块不受玩家限流）。
-   - **3D 空间特效子系统（`Epiphy3DFXCore v1.0.5` / `Epiphy3DFXServer v1.1.0` / `Epiphy3DFX v2.2.1`）**：与 2D 平面渲染器严格正交解耦；物品侧通过 `RegisterShadersEvent` + 扁平网格直写原版 `VertexConsumer`（绕开 `CCModel`/`CCRenderState` 兼顾 Embeddium `SodiumBufferBuilder` 堆外快路径）提供 100% 自研 GLSL 1.50 核心星空着色器（`epiphy:epiphy_cosmos`）与 3D 环绕星盘特效（缺 CodeChickenLib 时干净 Fail-Soft 退回原版物品模型）；世界侧（`surface: 'world'`，频道 `epiphy:spatial_fx`，协议 v1）提供服务端调度、配额/玩家层级隔离、`channel`/`slot` 增量 `patch`、可扩展约束链（`addConstraint`）、`followEntityUuid` 实体平滑插值追踪、内置 4 种纯原版默认图元渲染器（`ring`/`beam`/`helix`/`sphere`）与自定义图元注册（`registerShapeSchema` / `registerWorldShape`），客户端 `RenderLevelStageEvent` 桥接在零活跃特效时 $O(1)$ 短路零开销。
+   - **3D 空间特效与物品三维渲染子系统（`EpiphyItem3DRenderer v1.0.0` / `Epiphy3DFXServer v1.1.0` / `Epiphy3DFX v2.3.0`）**：与 2D 平面渲染器严格正交解耦，坚持「实现手段 → 通用能力 → 下游案例」原则。物品侧（`EpiphyItem3DRenderer`）采用与 `PROTO v6` 同源的分层声明式规范（`model`/`frame`/`motion`/`lod`/`layers`）与链式 `fx()` 构造器，提供自定义核心着色器注册（`registerShader`）、4 类通用预烘焙图元（`surface_overlay`/`ribbon_ring`/`ribbon_helix`/`sprite_cluster`）、可扩展图层/部件/预设注册（`registerLayerType`/`registerPart`/`registerPreset`）及无闪烁加法发光纯 Java `CCModel` 提交（缺 CodeChickenLib 时干净 Fail-Soft 退回原版静态模型）；世界侧（`surface: 'world'`，频道 `epiphy:spatial_fx`，协议 v1，100% 物理零 CCL 依赖）由 `Epiphy的-Spec与通用工具.js` 内的 `RenderLevelStageEvent` 相位桥接驱动（零活跃特效时 $O(1)$ 短路零开销），提供服务端调度、配额/玩家层级隔离、`channel`/`slot` 增量 `patch`、可扩展约束链（`addConstraint`）、`followEntityUuid` 实体平滑插值追踪、内置 4 种纯原版默认图元渲染器（`ring`/`beam`/`helix`/`sphere`）与自定义图元扩展（`registerShapeSchema` / `registerWorldShape`）。
    - **空间音频（`EpiphyAudio v5.8.0` / `EpiphyAudioClient v5.6.0`）**：固定位置/方块/追踪实体/维度/全局声场与向上预设注册（`registerPreset`/`playPreset`/`{ preset }`，含 `bindBlock` 预设解析）、衰减曲线、`Channel` 实时 3D 方位同步、静音/出界 `pause` 挂起保流、邻近同源方块扫描延迟聚合 `merge` 簇合并、按资源命名空间严格过滤的温和 `pause`/`unpause` 原版音乐避让（`duckMusic` 仅暂挂 `minecraft:` 频道并支持 `chanMap` 延迟恢复，彻底保护其他模组 BGM）与客户端断流退避重连；`configure` 参数严格校验、未启动超时清理、`pendingReset` 失败保留与后置方块追踪器自动升级；非 OP `authorized` 玩家命令进入 `'player'` 层级并受优先级 `<= 3`、`u:<uuid>:` key 隔离、`>4` 人/跨维度需 `audio.broadcast` 及双端单向淘汰保护。
 3. **内容与玩法拓展**：`epiphy:stuff` 创造模式物品栏与隐藏物品收录（含混沌晶体 CCL 3D OBJ + Chaos Shader 物品渲染）、`epiphy:rnfmabj_test` 测试方块、暮色森林终极拆解台 5 阶段失稳殉爆与遗物豁免机制，以及原版/植物魔法/神秘遗物部分配方调整。
 
@@ -228,7 +228,7 @@ Epiphy的-音频播放器.js:
 │   ├── assets/epiphy/            # 音效资源 (.ogg，说明见 docs/audio-assets.md)、着色器 (shaders/core/)、模型、材质、方块状态与语言文件
 │   ├── client_scripts/           # 客户端平面渲染器、空间特效渲染器 (Epiphy的-空间特效渲染器.js)、空间音频播放器与 Tooltip 描述
 │   ├── server_scripts/           # 服务端底座、权限/调试/Bug修复、平面渲染/空间特效 (Epiphy的-空间特效组件.js)/音频调度与玩法配方
-│   └── startup_scripts/          # 启动期 Spec/协议底座、空间特效核心 (Epiphy的-空间特效核心.js)、物品/方块/创造栏注册
+│   └── startup_scripts/          # 启动期 Spec/协议/2D&3D桥接底座、通用物品三维渲染器 (Epiphy的-物品三维渲染器.js)、物品/方块/创造栏注册与测试案例
 ├── docs/
 │   ├── audio-assets.md                           # 音频资源分发边界与本地自备说明
 │   ├── kube-mods-rhino-es5-es6-compatibility.md  # kube-mods/rhino 实测兼容性与语义偏移参考

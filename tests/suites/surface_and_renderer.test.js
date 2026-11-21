@@ -4257,20 +4257,20 @@ module.exports = function registerSuite(test, h) {
         assert.deepStrictEqual(fbOrder, ['DANMAKU_DEFAULT', 'OUR_HUD', 'ABOVE_VANILLA_HUD'], 'fallback single-pass paintScreen must render all layers in ascending renderPriority order')
     })
 
-    test('71. epiphy:imperius_test (英佩瑞斯-测试中) sword registration & decoupled GPU-Shader + Pre-Baked CCModel Epiphy3DFXCore', function () {
-        var FUNC_TEST_PATH = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的小玩意_功能测试.js')
-        var FX3D_CORE_PATH = h.FX3D_CORE_PATH
-        var FX3D_PATH      = h.FX3D_PATH
-        var modBusHooks    = {}
-        var forgeHooks     = {}
-        var cliPaints      = []
-        var regItems       = {}
-        var regBlocks      = {}
-        var regSounds      = []
+    test('71. Generic v6 declarative EpiphyItem3DRenderer (extensible shaders/layers/parts/presets) & epiphy:imperius_test downstream showcase', function () {
+        var FUNC_TEST_PATH       = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的小玩意_功能测试.js')
+        var ITEM3D_RENDERER_PATH = h.ITEM3D_RENDERER_PATH
+        var FX3D_PATH            = h.FX3D_PATH
+        var modBusHooks          = {}
+        var forgeHooks           = {}
+        var cliPaints            = []
+        var regItems             = {}
+        var regBlocks            = {}
+        var regSounds            = []
 
         // Mock Forge / MC / CodeChickenLib classes for RegisterShadersEvent + ModelEvent$ModifyBakingResult + IItemRenderer
-        var registeredShaders = []
-        var uniformValues     = { EpiphyTime: null, EpiphyYawPitch: null, EpiphyGuiMode: null }
+        var registeredShaders  = []
+        var uniformValues      = { EpiphyTime: null, EpiphyYawPitch: null, EpiphyGuiMode: null, CustomPulse: null }
         var createdRenderTypes = []
         var outlinePropsUsed   = []
         var bakedCCModels      = []
@@ -4458,7 +4458,7 @@ module.exports = function registerSuite(test, h) {
                     if (cls === 'codechicken.lib.render.CCModel') return MockCCModelClass
                     if (cls === 'codechicken.lib.render.CCRenderState') return { instance: function () { return mockCCRS } }
                     if (cls === 'codechicken.lib.render.item.IItemRenderer') return function (impl) { return impl }
-                    if (cls === 'codechicken.lib.util.TransformUtils') return { DEFAULT_TOOL: 'DEFAULT_TOOL' }
+                    if (cls === 'codechicken.lib.util.TransformUtils') return { DEFAULT_TOOL: 'DEFAULT_TOOL', DEFAULT_ITEM: 'DEFAULT_ITEM', DEFAULT_BLOCK: 'DEFAULT_BLOCK' }
                     if (cls === 'codechicken.lib.vec.Matrix4') return MockMatrix4
                     if (cls === 'codechicken.lib.vec.Vector3') return { X_POS: 'X', Y_POS: 'Y', Z_POS: 'Z' }
                     if (cls === 'codechicken.lib.vec.Vertex5') return MockVertex5
@@ -4467,7 +4467,7 @@ module.exports = function registerSuite(test, h) {
                     if (cls === 'net.minecraft.client.renderer.entity.ItemRenderer') return { m_115222_: function () { return 'foilVC' } }
                     if (cls === 'net.minecraft.client.renderer.ItemBlockRenderTypes') return { m_109279_: function () { return 'origItemRt' } }
                     if (cls === 'net.minecraft.world.item.ItemDisplayContext') return { GUI: GUI_CTX }
-                    if (cls === 'net.minecraft.client.renderer.RenderStateShard') return { f_110139_: 'TRANS', f_110136_: 'LIGHTNING', f_110110_: 'NO_CULL', f_110114_: 'CD_WRITE', f_110115_: 'C_WRITE', f_173101_: 'POS_COL_TEX_SHARD' }
+                    if (cls === 'net.minecraft.client.renderer.RenderStateShard') return { f_110139_: 'TRANS', f_110136_: 'LIGHTNING', f_110110_: 'NO_CULL', f_110158_: 'CULL', f_110114_: 'CD_WRITE', f_110115_: 'C_WRITE', f_173101_: 'POS_COL_TEX_SHARD' }
                     if (cls === 'net.minecraft.client.renderer.RenderStateShard$ShaderStateShard') return function (sup) { this.sup = sup }
                     if (cls === 'net.minecraft.client.renderer.RenderStateShard$TextureStateShard') return function (rl, blur, mip) { this.rl = rl; this.blur = Boolean(blur); this.mipmap = Boolean(mip) }
                     if (cls === 'net.minecraft.client.renderer.RenderType$OutlineProperty') return { NONE: 'OUTLINE_NONE' }
@@ -4507,14 +4507,27 @@ module.exports = function registerSuite(test, h) {
         sb.globalThis = sb
         vm.createContext(sb)
         loadStartupBase(sb)
-        runScriptIn(sb, FX3D_CORE_PATH)
+        runScriptIn(sb, ITEM3D_RENDERER_PATH)
+        // Before any downstream showcase loads, EpiphyItem3DRenderer MUST remain completely neutral & showcase-free!
+        var Item3D = sb.global.EpiphyItem3DRenderer
+        assert.ok(Item3D != null, 'EpiphyItem3DRenderer must be exported')
+        assert.strictEqual(Item3D.PROTO_VERSION, 6, 'EpiphyItem3DRenderer must follow v6 declarative schema')
+        assert.strictEqual(Item3D.listShaders().length, 0, 'generic EpiphyItem3DRenderer must NOT pre-register showcase-specific shaders')
+        assert.strictEqual(Item3D.getStats().boundCount, 0, 'generic EpiphyItem3DRenderer must start with 0 bound items')
+        var neutralSpec = Item3D._pure.getNeutralItemSpec()
+        assert.strictEqual(neutralSpec.proto, 6)
+        assert.strictEqual(neutralSpec.model.state, 'item')
+        assert.strictEqual(neutralSpec.layers.length, 0, 'neutral spec must have 0 default layers')
+        assert.deepStrictEqual(plain(Item3D.listLayerTypes()).sort(), ['ribbon_helix', 'ribbon_ring', 'sprite_cluster', 'surface_overlay'])
+
+        // Now load downstream showcase + 2D renderer + 3D client facade
         runScriptIn(sb, FUNC_TEST_PATH)
         runScriptIn(sb, RENDERER_PATH)
         var forgeHooksBeforeFx3d = Object.keys(forgeHooks).length
         var cliPaintsBeforeFx3d  = cliPaints.length
         runScriptIn(sb, FX3D_PATH)
 
-        // 1. Verify sword registration in Epiphy的小玩意_功能测试.js
+        // 1. Verify downstream showcase item registration in Epiphy的小玩意_功能测试.js
         var imp = regItems['epiphy:imperius_test']
         assert.ok(imp != null, 'epiphy:imperius_test must be registered in StartupEvents.registry("item")')
         assert.strictEqual(imp.type, 'sword', 'must be registered with "sword" builder for sword enchantments & sweep mechanics')
@@ -4528,19 +4541,18 @@ module.exports = function registerSuite(test, h) {
         assert.ok(Array.isArray(sb.global.EpiphyCreativeTabQueue) && sb.global.EpiphyCreativeTabQueue.indexOf('epiphy:imperius_test') >= 0, 'must be queued into EpiphyCreativeTab')
 
         // 2. Verify strict 2D vs 3D subsystem separation AND zero per-frame JS loops in Epiphy3DFX client facade
-        var R2D      = sb.global.Epiphy2DRenderer
-        var FX3DCore = sb.global.Epiphy3DFXCore
-        var FX3D     = sb.global.Epiphy3DFX
-        assert.ok(FX3DCore != null && FX3D != null && sb.global.EpiphySpatialFX === FX3D, 'Epiphy3DFXCore and Epiphy3DFX/EpiphySpatialFX must be exported')
+        var R2D  = sb.global.Epiphy2DRenderer
+        var FX3D = sb.global.Epiphy3DFX
+        assert.ok(Item3D != null && FX3D != null && sb.global.EpiphySpatialFX === FX3D, 'EpiphyItem3DRenderer and Epiphy3DFX/EpiphySpatialFX must be exported')
         assert.strictEqual(typeof R2D.bindItemVfx, 'undefined', '2D planar renderer must NOT contain 3D item VFX binding methods')
         assert.strictEqual(typeof R2D._pure.buildOrbit3DDrawables, 'undefined', '2D planar renderer must NOT contain 3D orbital mesh generation')
         assert.strictEqual(cliPaints.length, cliPaintsBeforeFx3d, 'Epiphy3DFX client facade must register ZERO per-frame ClientEvents.paintScreen loops')
         assert.strictEqual(Object.keys(forgeHooks).length, forgeHooksBeforeFx3d, 'Epiphy3DFX must register ZERO per-frame ForgeEvents (no RenderHandEvent/ContainerScreenEvent)')
         assert.strictEqual(typeof forgeHooks['net.minecraftforge.client.event.RenderHandEvent'], 'undefined')
-        assert.strictEqual(typeof modBusHooks['net.minecraftforge.client.event.RegisterShadersEvent'], 'function', 'Epiphy3DFXCore must hook RegisterShadersEvent on ForgeModEvents')
-        assert.strictEqual(typeof modBusHooks['net.minecraftforge.client.event.ModelEvent$ModifyBakingResult'], 'function', 'Epiphy3DFXCore must hook ModelEvent$ModifyBakingResult on ForgeModEvents')
+        assert.strictEqual(typeof modBusHooks['net.minecraftforge.client.event.RegisterShadersEvent'], 'function', 'EpiphyItem3DRenderer must hook RegisterShadersEvent on ForgeModEvents')
+        assert.strictEqual(typeof modBusHooks['net.minecraftforge.client.event.ModelEvent$ModifyBakingResult'], 'function', 'EpiphyItem3DRenderer must hook ModelEvent$ModifyBakingResult on ForgeModEvents')
 
-        // 3. Verify self-contained GPU shader assets & mask texture exist (and zero Avaritia references)
+        // 3. Verify self-contained GPU shader assets & mask/effect textures exist (and zero Avaritia references)
         var shaderDir = path.join(ROOT_DIR, 'kubejs', 'assets', 'epiphy', 'shaders', 'core')
         var texDir    = path.join(ROOT_DIR, 'kubejs', 'assets', 'epiphy', 'textures', 'item')
         var shaderJson = JSON.parse(fs.readFileSync(path.join(shaderDir, 'epiphy_cosmos.json'), 'utf8'))
@@ -4551,50 +4563,100 @@ module.exports = function registerSuite(test, h) {
         assert.deepStrictEqual(shaderJson.attributes, ['Position', 'Color', 'UV0'])
         assert.ok(shaderVsh.indexOf('#version 150') === 0 && shaderFsh.indexOf('#version 150') === 0, 'core shaders must be valid GLSL 150')
         assert.ok(shaderFsh.indexOf('EpiphyYawPitch') >= 0 && shaderFsh.indexOf('evalHeroCrossStars') >= 0, 'fragment shader must implement camera-reactive cross-star cosmos')
-        assert.ok(fs.existsSync(path.join(texDir, 'imperius_test.png')), 'static base blade texture must exist')
+        assert.ok(fs.existsSync(path.join(texDir, 'imperius_test.png')), 'static base item texture must exist')
         assert.ok(fs.existsSync(path.join(texDir, 'imperius_test_cosmos_mask.png')), 'GPU cosmos window mask texture must exist')
         assert.ok(fs.existsSync(path.join(ROOT_DIR, 'kubejs', 'assets', 'epiphy', 'textures', 'effect', 'glow_ribbon.png')), 'glow_ribbon.png soft-glow ribbon texture must exist')
         assert.ok(fs.existsSync(path.join(ROOT_DIR, 'kubejs', 'assets', 'epiphy', 'textures', 'effect', 'star_flare.png')), 'star_flare.png soft 4-point star flare texture must exist')
         assert.strictEqual(fs.existsSync(path.join(texDir, 'imperius_test.png.mcmeta')), false, 'obsolete animated mcmeta must be removed')
-        var coreSrc = fs.readFileSync(FX3D_CORE_PATH, 'utf8')
-        assert.strictEqual(coreSrc.indexOf('committee.nova.mods.avaritia'), -1, 'must NEVER call Avaritia renderer/shaders')
-        assert.strictEqual(coreSrc.indexOf("Java.loadClass('java.lang.System')"), -1, 'must NEVER call Java.loadClass(java.lang.System) in hot path')
+        var rendererSrc = fs.readFileSync(ITEM3D_RENDERER_PATH, 'utf8')
+        assert.strictEqual(rendererSrc.indexOf('committee.nova.mods.avaritia'), -1, 'must NEVER call Avaritia renderer/shaders')
+        assert.strictEqual(rendererSrc.indexOf("Java.loadClass('java.lang.System')"), -1, 'must NEVER call Java.loadClass(java.lang.System) in hot path')
 
-        // 4. Verify RGBA byte order (0xRRGGBBAA), slender cohesive pre-baked geometry, exact seam continuity & 0 NaN vertices
-        assert.strictEqual(FX3DCore._pure.packRgba(0x112233, 0x80) >>> 0, 0x11223380, 'CCL ColourRGBA must pack R in MSB and A in LSB (0xRRGGBBAA)')
+        // 4. Verify generic extensibility: registerPart + registerLayerType + fx() builder + registerPreset deep merge + custom shader
+        assert.strictEqual(Item3D.registerPart('dual_orb_part', function (p) {
+            return Item3D.fx()
+                .ribbonRing('orb_halo', {
+                    visibleIn: 'all',
+                    geometry: { radius: (p && p.radius) || 6.0, width: 0.5, segments: 16, markers: 0 }
+                })
+                .build()
+        }), true)
+        assert.strictEqual(Item3D.registerLayerType('custom_diamond', function (layerSpec, helpers) {
+            var q = []
+            helpers.pushQuad(q, [0.4, 0.4, 0.5], [0.6, 0.4, 0.5], [0.6, 0.6, 0.5], [0.4, 0.6, 0.5], 0, 0, 1, 1, helpers.packRgba(0x66EEFF, 220))
+            return {
+                id: layerSpec.id,
+                category: 'geometry',
+                visibleIn: layerSpec.visibleIn || 'all',
+                material: { texture: 'epiphy:textures/effect/star_flare.png', blend: 'additive', blur: true, cull: false, depthWrite: false, shader: null, flushAfter: false },
+                uniforms: null,
+                quads: q,
+                transform: { mode: 'identity' }
+            }
+        }), true)
+        assert.ok(Item3D.listLayerTypes().indexOf('custom_diamond') >= 0, 'custom layer type must be listed by listLayerTypes()')
+        assert.strictEqual(Item3D.registerPreset('generic_relic_preset', {
+            proto: 6,
+            model: { state: 'item', isGui3d: false },
+            frame: { pixelCanvas: 32, pixelOrigin: [16, 16, 0.5], axisDir: [1, 0] },
+            motion: { speed: 1.0, attackExpand: 0.2 },
+            layers: Item3D.fx()
+                .part('dual_orb_part', { radius: 7.0 })
+                .layer('center_diamond', 'custom_diamond', { visibleIn: 'all' })
+                .build()
+        }), true)
+        assert.strictEqual(Item3D.bindItem('epiphy:generic_orb', {
+            preset: 'generic_relic_preset',
+            motion: { speed: 2.0 }
+        }), true)
+        var orbCfg = Item3D.getBoundItemConfig('epiphy:generic_orb')
+        assert.ok(orbCfg != null && orbCfg.model.state === 'item' && orbCfg.motion.speed === 2.0 && orbCfg.motion.attackExpand === 0.2, 'preset deep merge must preserve sibling fields while overriding motion.speed')
+        assert.strictEqual(orbCfg.layers.length, 2, 'fx().part() + .layer() must expand into 2 declarative layers')
+        assert.strictEqual(orbCfg.layers[0].type, 'ribbon_ring')
+        assert.strictEqual(orbCfg.layers[1].type, 'custom_diamond')
+        var orbDiamondDescs = Item3D._pure.compileLayerToDescriptors(orbCfg.layers[1], orbCfg)
+        assert.strictEqual(orbDiamondDescs.length, 1)
+        assert.strictEqual(orbDiamondDescs[0].quads.length, 1, 'custom layer compiler must emit valid descriptor quads')
+        // Clean up temporary generic test binding & custom layer before showcase assertions
+        Item3D.unbindItem('epiphy:generic_orb')
+        assert.strictEqual(Item3D.unregisterLayerType('custom_diamond'), true)
+
+        // 5. Verify RGBA byte order (0xRRGGBBAA), v6 declarative compilation, exact seam continuity & 0 NaN vertices on epiphy:imperius_test
+        assert.strictEqual(Item3D._pure.packRgba(0x112233, 0x80) >>> 0, 0x11223380, 'CCL ColourRGBA must pack R in MSB and A in LSB (0xRRGGBBAA)')
         var impCfg = FX3D.getBoundItemConfig('epiphy:imperius_test')
-        assert.ok(impCfg != null && impCfg.maskTexture === 'epiphy:textures/item/imperius_test_cosmos_mask.png', 'must auto-derive cosmos mask texture path')
-        assert.strictEqual(impCfg.rings.length, 2, 'refined imperius preset must keep 2 uncluttered interlocking astrolabe rings')
-        var cosQuads       = FX3DCore._pure.buildCosmosOverlayQuads()
-        var ring0Quads     = FX3DCore._pure.buildAstrolabeRingQuads(impCfg.rings[0])
-        var ring0StarQuads = FX3DCore._pure.buildAstrolabeRingStarQuads(impCfg.rings[0])
-        var helixQuads     = FX3DCore._pure.buildHelixRibbonQuads(impCfg.helix, 0)
-        var moteQuads      = FX3DCore._pure.buildStarMotesQuads(impCfg.motes, 0, 2)
-        assert.strictEqual(cosQuads.length, 2, 'cosmos overlay must be exact 2 quads (front+back)')
-        assert.ok(ring0Quads.length >= 72 && ring0Quads.length <= 140, 'Ring 0 must bake smooth slender connected cross-ribbon + micro ticks')
-        assert.strictEqual(ring0StarQuads.length, 6, 'Ring 0 must bake 2 soft 4-point star flare nodes * 3 orthogonal planes = 6 quads')
-        assert.strictEqual(helixQuads.length, 72, 'Helix strand must bake 36 smooth Frenet connected segments * 2 orthogonal ribbons = 72 quads')
-        assert.strictEqual(moteQuads.length, 9, 'Refined star-mote group (3 stars/group * 3 planes) must bake 9 clean star-flare quads without messy trails')
-        assert.strictEqual(FX3DCore._pure.validateQuadsFinite(cosQuads).invalidCount, 0, 'cosmos quads must have 0 NaN/Infinity vertices')
-        assert.strictEqual(FX3DCore._pure.validateQuadsFinite(ring0Quads).invalidCount, 0, 'ring0 quads must have 0 NaN/Infinity vertices')
-        assert.strictEqual(FX3DCore._pure.validateQuadsFinite(ring0StarQuads).invalidCount, 0, 'ring0 star quads must have 0 NaN/Infinity vertices')
-        assert.strictEqual(FX3DCore._pure.validateQuadsFinite(helixQuads).invalidCount, 0, 'helix quads must have 0 NaN/Infinity vertices')
-        assert.strictEqual(FX3DCore._pure.validateQuadsFinite(moteQuads).invalidCount, 0, 'mote quads must have 0 NaN/Infinity vertices')
-        // Verify exact vertex seam continuity (no stair-step breaks between adjacent ring or helix segments!)
+        assert.ok(impCfg != null && impCfg.proto === 6 && impCfg.model.state === 'tool', 'epiphy:imperius_test must resolve as v6 tool spec')
+        assert.strictEqual(impCfg.layers.length, 5, 'epiphy:imperius_test showcase must declare 5 layers (1 overlay + 2 rings + 1 helix + 1 sprite cluster)')
+        var uScale         = impCfg.frame.unitScale
+        var cosQuads       = Item3D._pure.buildSurfaceOverlayQuads(impCfg.layers[0].geometry)
+        var ring0Quads     = Item3D._pure.buildRibbonRingQuads(impCfg.layers[1].geometry, uScale)
+        var ring0MarkQuads = Item3D._pure.buildRibbonRingMarkerQuads(impCfg.layers[1].geometry, uScale)
+        var helixQuads     = Item3D._pure.buildRibbonHelixStrandQuads(impCfg.layers[3].geometry, impCfg.layers[3].geometry.strands[0], uScale)
+        var clusterQuads   = Item3D._pure.buildSpriteClusterGroupQuads(impCfg.layers[4].geometry, 0, 2, uScale)
+        assert.strictEqual(cosQuads.length, 2, 'surface_overlay must bake exact 2 quads (front+back)')
+        assert.ok(ring0Quads.length >= 72 && ring0Quads.length <= 140, 'primary ribbon_ring must bake smooth slender connected cross-ribbon + micro ticks')
+        assert.strictEqual(ring0MarkQuads.length, 6, 'primary ribbon_ring must bake 2 soft marker nodes * 3 orthogonal planes = 6 quads')
+        assert.strictEqual(helixQuads.length, 72, 'ribbon_helix strand must bake 36 smooth Frenet connected segments * 2 orthogonal ribbons = 72 quads')
+        assert.strictEqual(clusterQuads.length, 9, 'sprite_cluster group (3 sprites/group * 3 planes) must bake 9 clean quads')
+        assert.strictEqual(Item3D._pure.validateQuadsFinite(cosQuads).invalidCount, 0, 'overlay quads must have 0 NaN/Infinity vertices')
+        assert.strictEqual(Item3D._pure.validateQuadsFinite(ring0Quads).invalidCount, 0, 'ring0 quads must have 0 NaN/Infinity vertices')
+        assert.strictEqual(Item3D._pure.validateQuadsFinite(ring0MarkQuads).invalidCount, 0, 'ring0 marker quads must have 0 NaN/Infinity vertices')
+        assert.strictEqual(Item3D._pure.validateQuadsFinite(helixQuads).invalidCount, 0, 'helix quads must have 0 NaN/Infinity vertices')
+        assert.strictEqual(Item3D._pure.validateQuadsFinite(clusterQuads).invalidCount, 0, 'cluster quads must have 0 NaN/Infinity vertices')
         function dist3(a, b) {
             var dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2]
             return Math.sqrt(dx * dx + dy * dy + dz * dz)
         }
-        assert.ok(dist3(ring0Quads[0].p3, ring0Quads[2].p0) < 1e-6 && dist3(ring0Quads[0].p2, ring0Quads[2].p1) < 1e-6, 'adjacent ring ribbon segments must share exact seam vertices (zero cracks)')
-        assert.ok(dist3(helixQuads[0].p3, helixQuads[2].p0) < 1e-6 && dist3(helixQuads[0].p2, helixQuads[2].p1) < 1e-6, 'adjacent Frenet helix ribbon segments must share exact seam vertices (zero stair-stepping)')
-        var badCheck = FX3DCore._pure.validateQuadsFinite([
+        assert.ok(dist3(ring0Quads[0].p3, ring0Quads[2].p0) < 1e-6 && dist3(ring0Quads[0].p2, ring0Quads[2].p1) < 1e-6, 'adjacent ribbon_ring segments must share exact seam vertices (zero cracks)')
+        assert.ok(dist3(helixQuads[0].p3, helixQuads[2].p0) < 1e-6 && dist3(helixQuads[0].p2, helixQuads[2].p1) < 1e-6, 'adjacent Frenet ribbon_helix segments must share exact seam vertices (zero stair-stepping)')
+        var badCheck = Item3D._pure.validateQuadsFinite([
             { p0: [0, NaN, 0], p1: [1, 0, 0], p2: [1, 1, 0], p3: [0, 1, 0], u0: 0, v0: 0, u1: 1, v1: 0, u2: 1, v2: 1, u3: 0, v3: 1 },
             cosQuads[0]
         ])
         assert.strictEqual(badCheck.invalidCount, 1, 'validateQuadsFinite must filter out NaN quad')
         assert.strictEqual(badCheck.valid.length, 1)
 
-        // 5. Verify RegisterShadersEvent loads epiphy:epiphy_cosmos via CCShaderInstance.create (zero Rhino constructor ambiguity!)
+        // 6. Verify RegisterShadersEvent loads showcase-registered epiphy:epiphy_cosmos via CCShaderInstance.create (zero Rhino constructor ambiguity!)
+        assert.deepStrictEqual(plain(Item3D.listShaders()), ['epiphy:epiphy_cosmos'])
         modBusHooks['net.minecraftforge.client.event.RegisterShadersEvent']({
             getResourceProvider: function () { return 'mockResProvider' },
             registerShader: function (inst, consumer) {
@@ -4602,16 +4664,17 @@ module.exports = function registerSuite(test, h) {
                 consumer.accept(inst)
             }
         })
-        assert.strictEqual(registeredShaders.length, 1, 'must register 1 custom core shader')
+        assert.strictEqual(registeredShaders.length, 1, 'must register 1 showcase-declared core shader')
         assert.strictEqual(registeredShaders[0].viaCCShader, true, 'must prefer single-overload CCShaderInstance.create to avoid Rhino constructor ambiguity')
         assert.strictEqual(String(registeredShaders[0].rl), 'epiphy:epiphy_cosmos')
-        var shStat = FX3D.getShaderStatus()
+        var shStat = FX3D.getShaderStatus('epiphy:epiphy_cosmos')
         assert.strictEqual(shStat.loaded, true)
         assert.strictEqual(shStat.hasUniforms, true, 'must resolve EpiphyTime, EpiphyYawPitch, EpiphyGuiMode uniforms')
+        assert.strictEqual(FX3D.getShaderStatus().loaded, true)
 
-        // 6. Verify ModelEvent$ModifyBakingResult pre-bakes flicker-free additive RenderTypes (LIGHTNING_TRANSPARENCY + blur=true + sortOnUpload=false) & CCModels
+        // 7. Verify ModelEvent$ModifyBakingResult pre-bakes material-pooled flicker-free RenderTypes & 8 CCModels
         var modelsStore = {}
-        var origModelStub = { m_6160_: function () { return 'bladeParticleSprite' } }
+        var origModelStub = { m_6160_: function () { return 'itemParticleSprite' } }
         modelsStore['epiphy:imperius_test#inventory'] = origModelStub
         var mockModelMap = {
             get: function (mrl) { return modelsStore[String(mrl)] || null },
@@ -4622,18 +4685,21 @@ module.exports = function registerSuite(test, h) {
         })
         var wrappedRenderer = modelsStore['epiphy:imperius_test#inventory']
         assert.ok(wrappedRenderer != null && wrappedRenderer !== origModelStub && typeof wrappedRenderer.renderItem === 'function', 'must wrap original model with IItemRenderer')
-        assert.strictEqual(wrappedRenderer.getModelState(), 'DEFAULT_TOOL', 'sword IItemRenderer must use TransformUtils.DEFAULT_TOOL')
-        assert.strictEqual(wrappedRenderer.isGui3d(), false, 'sword icon must keep crisp flat GUI lighting (isGui3d=false)')
-        assert.strictEqual(wrappedRenderer.m_6160_(), 'bladeParticleSprite', 'getParticleIcon must delegate to originalModel')
-        assert.ok(outlinePropsUsed.length >= 3 && outlinePropsUsed.every(function (p) { return p === 'OUTLINE_NONE' }), 'custom RenderTypes must pass OutlineProperty.NONE')
-        var ribbonRt = createdRenderTypes.find(function (rt) { return rt.name === 'epiphy:fx3d_surround_ribbon' })
-        var starRt   = createdRenderTypes.find(function (rt) { return rt.name === 'epiphy:fx3d_surround_star' })
-        assert.ok(ribbonRt != null && ribbonRt.fmt === 'POSITION_COLOR_TEX' && ribbonRt.sortOnUpload === false, 'ribbon VFX RenderType must use POSITION_COLOR_TEX with sortOnUpload=false (zero sort-flip flicker)')
-        assert.ok(ribbonRt.state.trans === 'LIGHTNING' && ribbonRt.state.write === 'C_WRITE' && ribbonRt.state.cull === 'NO_CULL' && ribbonRt.state.tex.blur === true, 'ribbon VFX must use additive LIGHTNING_TRANSPARENCY + COLOR_WRITE + NO_CULL + bilinear blur')
-        assert.ok(starRt != null && starRt.fmt === 'POSITION_COLOR_TEX' && starRt.sortOnUpload === false, 'star VFX RenderType must use POSITION_COLOR_TEX with sortOnUpload=false')
-        assert.ok(starRt.state.trans === 'LIGHTNING' && starRt.state.write === 'C_WRITE' && starRt.state.tex.blur === true, 'star VFX must use additive LIGHTNING_TRANSPARENCY + COLOR_WRITE + bilinear blur')
-        // 1 cosmos + 2 ring ribbons + 2 ring stars + 1 merged helix + 2 mote groups = 8 pre-baked CCModels, ALL finite with normals computed
-        assert.strictEqual(bakedCCModels.length, 8, 'must pre-bake 1 cosmos + 2 ring ribbons + 2 ring stars + 1 merged helix + 2 mote groups = 8 CCModels')
+        assert.strictEqual(wrappedRenderer.getModelState(), 'DEFAULT_TOOL', 'tool IItemRenderer must use TransformUtils.DEFAULT_TOOL')
+        assert.strictEqual(wrappedRenderer.isGui3d(), false, 'flat GUI icon must keep isGui3d=false')
+        assert.strictEqual(wrappedRenderer.m_6160_(), 'itemParticleSprite', 'getParticleIcon must delegate to originalModel')
+        assert.strictEqual(createdRenderTypes.length, 3, 'material pool must deduplicate into exactly 3 RenderTypes (1 shader overlay + 1 glow_ribbon additive + 1 star_flare additive)')
+        assert.ok(outlinePropsUsed.length === 3 && outlinePropsUsed.every(function (p) { return p === 'OUTLINE_NONE' }), 'custom RenderTypes must pass OutlineProperty.NONE')
+        var overlayRt = createdRenderTypes.find(function (rt) { return rt.name.indexOf('epiphy_epiphy_cosmos') >= 0 })
+        var ribbonRt  = createdRenderTypes.find(function (rt) { return rt.name.indexOf('glow_ribbon') >= 0 })
+        var starRt    = createdRenderTypes.find(function (rt) { return rt.name.indexOf('star_flare') >= 0 })
+        assert.ok(overlayRt != null && overlayRt.fmt === 'POSITION_COLOR_TEX' && overlayRt.state.trans === 'TRANS' && overlayRt.state.write === 'CD_WRITE', 'shader overlay RenderType must use translucent + COLOR_DEPTH_WRITE')
+        assert.ok(ribbonRt != null && ribbonRt.fmt === 'POSITION_COLOR_TEX' && ribbonRt.sortOnUpload === false, 'ribbon additive RenderType must use POSITION_COLOR_TEX with sortOnUpload=false')
+        assert.ok(ribbonRt.state.trans === 'LIGHTNING' && ribbonRt.state.write === 'C_WRITE' && ribbonRt.state.cull === 'NO_CULL' && ribbonRt.state.tex.blur === true && ribbonRt.state.shader === 'POS_COL_TEX_SHARD', 'ribbon additive RenderType must use LIGHTNING_TRANSPARENCY + COLOR_WRITE + NO_CULL + blur + static POSITION_COLOR_TEX_SHADER shard')
+        assert.ok(starRt != null && starRt.fmt === 'POSITION_COLOR_TEX' && starRt.sortOnUpload === false, 'star additive RenderType must use POSITION_COLOR_TEX with sortOnUpload=false')
+        assert.ok(starRt.state.trans === 'LIGHTNING' && starRt.state.write === 'C_WRITE' && starRt.state.tex.blur === true && starRt.state.shader === 'POS_COL_TEX_SHARD', 'star additive RenderType must use LIGHTNING_TRANSPARENCY + COLOR_WRITE + blur + static shard')
+        // 1 overlay + 2 ring ribbons + 2 ring markers + 1 merged helix + 2 sprite cluster groups = 8 pre-baked CCModels, ALL finite with normals computed
+        assert.strictEqual(bakedCCModels.length, 8, 'must pre-bake 1 overlay + 2 ring ribbons + 2 ring markers + 1 merged helix + 2 sprite cluster groups = 8 CCModels')
         for (var bmIdx = 0; bmIdx < bakedCCModels.length; bmIdx++) {
             assert.strictEqual(bakedCCModels[bmIdx].normalsComputed, true, 'every pre-baked CCModel MUST call computeNormals()')
             for (var bvIdx = 0; bvIdx < bakedCCModels[bmIdx].verts.length; bvIdx++) {
@@ -4642,7 +4708,7 @@ module.exports = function registerSuite(test, h) {
             }
         }
 
-        // 7. Verify per-frame renderItem in FIRST_PERSON_RIGHT_HAND & lean GUI LOD via pure-Java CCModel.render additive dual-pass
+        // 8. Verify per-frame renderItem in FIRST_PERSON_RIGHT_HAND & lean GUI LOD via pure-Java CCModel.render
         var mockPoseStack = { _mockPoseStack: true }
         var mockBufferSource = {
             m_109912_: function (rt) { flushedTypes.push(rt) }
@@ -4650,66 +4716,66 @@ module.exports = function registerSuite(test, h) {
         var mockStack = { m_41790_: function () { return true } }
         wrappedRenderer.renderItem(mockStack, HAND_CTX, mockPoseStack, mockBufferSource, 0x00F000F0, 0)
         assert.strictEqual(origModelDraws, 1, 'must draw originalModel once per renderItem')
-        var cosmosCallsHand = renderDrawCalls.filter(function (c) { return c.rt && c.rt.name === 'epiphy:cosmos_epiphy_imperius_test' })
-        var ribbonCallsHand = renderDrawCalls.filter(function (c) { return c.rt && c.rt.name === 'epiphy:fx3d_surround_ribbon' })
-        var starCallsHand   = renderDrawCalls.filter(function (c) { return c.rt && c.rt.name === 'epiphy:fx3d_surround_star' })
-        assert.strictEqual(cosmosCallsHand.length, 1, 'cosmos window overlay must issue 1 CCModel draw')
-        assert.strictEqual(cosmosCallsHand[0].verts, 8, 'cosmos window overlay must submit exact 8 vertices (2 quads front+back)')
+        var overlayCallsHand = renderDrawCalls.filter(function (c) { return c.rt === overlayRt })
+        var ribbonCallsHand  = renderDrawCalls.filter(function (c) { return c.rt === ribbonRt })
+        var starCallsHand    = renderDrawCalls.filter(function (c) { return c.rt === starRt })
+        assert.strictEqual(overlayCallsHand.length, 1, 'surface_overlay must issue 1 CCModel draw')
+        assert.strictEqual(overlayCallsHand[0].verts, 8, 'surface_overlay must submit exact 8 vertices (2 quads front+back)')
         assert.strictEqual(ribbonCallsHand.length, 3, 'hand render must submit 2 ring ribbons + 1 merged helix = 3 ribbon CCModel draws')
-        assert.strictEqual(starCallsHand.length, 4, 'hand render must submit 2 ring star nodes + 2 floating mote groups = 4 star CCModel draws')
-        var handSurroundVertCount = ribbonCallsHand.concat(starCallsHand).reduce(function (acc, c) { return acc + c.verts }, 0)
-        assert.ok(handSurroundVertCount >= 1100 && handSurroundVertCount <= 1900, 'refined uncluttered hand render must stay lean & crisp, got ' + handSurroundVertCount)
+        assert.strictEqual(starCallsHand.length, 4, 'hand render must submit 2 ring marker nodes + 2 floating sprite cluster groups = 4 star CCModel draws')
+        var handGeomVertCount = ribbonCallsHand.concat(starCallsHand).reduce(function (acc, c) { return acc + c.verts }, 0)
+        assert.ok(handGeomVertCount >= 1100 && handGeomVertCount <= 1900, 'refined uncluttered hand render must stay lean & crisp, got ' + handGeomVertCount)
         assert.ok(ribbonCallsHand.concat(starCallsHand).every(function (c) {
             return c.computeLighting === false && c.baseColour === -1 && c.normalsComputed === true
-        }), 'every surround CCModel draw must disable lighting and keep baseColour=-1')
-        assert.ok(ribbonCallsHand[0].scales.some(function (sc) { return Math.abs(sc[0] - 1.45) < 1e-4 }), 'swing=0.5 must apply 1.45x slash radial expansion to surround rings')
+        }), 'every geometry CCModel draw must disable lighting and keep baseColour=-1')
+        assert.ok(ribbonCallsHand[0].scales.some(function (sc) { return Math.abs(sc[0] - 1.45) < 1e-4 }), 'swing=0.5 must apply 1.45x attackExpand radial expansion to rings')
         assert.strictEqual(uniformValues.EpiphyGuiMode, 0.0, 'first-person render must set EpiphyGuiMode = 0.0')
         assert.ok(Array.isArray(uniformValues.EpiphyYawPitch) && isFinite(uniformValues.EpiphyYawPitch[0]) && Math.abs(uniformValues.EpiphyYawPitch[0] - 42.5 * 3.141592653589793 / 180) < 1e-4, 'must upload finite camera yaw/pitch radians to GPU shader')
-        assert.strictEqual(flushedTypes.length, 2, 'hand render must flush origRt (depth write) + cosmosType (lock uniforms against Hand/GUI crosstalk)')
+        assert.strictEqual(flushedTypes.length, 2, 'hand render must flush origRt (depth write) + shader overlay RenderType (lock uniforms against Hand/GUI crosstalk)')
         assert.strictEqual(flushedTypes[0], 'origItemRt')
-        assert.strictEqual(flushedTypes[1].name, 'epiphy:cosmos_epiphy_imperius_test')
+        assert.strictEqual(flushedTypes[1], overlayRt)
 
-        // GUI slot render check: lean LOD (cosmos 8 verts + 2 hero rings & their star nodes only, strictly fewer surround verts than hand) and exact 2 flushes!
+        // GUI slot render check: lean LOD (overlay 8 verts + 2 rings & their marker nodes only, strictly fewer geometry verts than hand) and exact 2 flushes!
         renderDrawCalls.length = 0
         flushedTypes.length = 0
         wrappedRenderer.renderItem(mockStack, GUI_CTX, mockPoseStack, mockBufferSource, 0x00F000F0, 0)
-        var cosmosCallsGui = renderDrawCalls.filter(function (c) { return c.rt && c.rt.name === 'epiphy:cosmos_epiphy_imperius_test' })
-        var ribbonCallsGui = renderDrawCalls.filter(function (c) { return c.rt && c.rt.name === 'epiphy:fx3d_surround_ribbon' })
-        var starCallsGui   = renderDrawCalls.filter(function (c) { return c.rt && c.rt.name === 'epiphy:fx3d_surround_star' })
-        var guiSurroundVertCount = ribbonCallsGui.concat(starCallsGui).reduce(function (acc, c) { return acc + c.verts }, 0)
+        var overlayCallsGui = renderDrawCalls.filter(function (c) { return c.rt === overlayRt })
+        var ribbonCallsGui  = renderDrawCalls.filter(function (c) { return c.rt === ribbonRt })
+        var starCallsGui    = renderDrawCalls.filter(function (c) { return c.rt === starRt })
+        var guiGeomVertCount = ribbonCallsGui.concat(starCallsGui).reduce(function (acc, c) { return acc + c.verts }, 0)
         assert.strictEqual(uniformValues.EpiphyGuiMode, 1.0, 'GUI slot render must set EpiphyGuiMode = 1.0')
-        assert.strictEqual(cosmosCallsGui.length, 1)
-        assert.strictEqual(cosmosCallsGui[0].verts, 8, 'GUI slot render must submit exact 8 cosmos overlay vertices')
-        assert.strictEqual(ribbonCallsGui.length, 2, 'GUI slot render must use lean LOD (2 hero ring ribbons only)')
-        assert.strictEqual(starCallsGui.length, 2, 'GUI slot render must include only 2 hero ring star nodes (no floating motes)')
-        assert.ok(guiSurroundVertCount > 400 && guiSurroundVertCount < handSurroundVertCount, 'GUI slot surround verts must be strictly fewer than hand: ' + guiSurroundVertCount + ' vs ' + handSurroundVertCount)
-        assert.strictEqual(flushedTypes.length, 2, 'GUI slot render must flush origRt + cosmosType (lock guiMode uniform)')
+        assert.strictEqual(overlayCallsGui.length, 1)
+        assert.strictEqual(overlayCallsGui[0].verts, 8, 'GUI slot render must submit exact 8 overlay vertices')
+        assert.strictEqual(ribbonCallsGui.length, 2, 'GUI slot render must obey visibleIn="all" LOD (2 ring ribbons only)')
+        assert.strictEqual(starCallsGui.length, 2, 'GUI slot render must include only 2 ring marker nodes (no hand-only cluster)')
+        assert.ok(guiGeomVertCount > 400 && guiGeomVertCount < handGeomVertCount, 'GUI slot geometry verts must be strictly fewer than hand: ' + guiGeomVertCount + ' vs ' + handGeomVertCount)
+        assert.strictEqual(flushedTypes.length, 2, 'GUI slot render must flush origRt + shader overlay RenderType')
         var fxStatsAfter = FX3D.getStats()
         assert.strictEqual(fxStatsAfter.bakedCount, 1)
-        assert.strictEqual(fxStatsAfter.coreAvailable, true)
+        assert.strictEqual(fxStatsAfter.itemRendererAvailable, true)
         assert.strictEqual(fxStatsAfter.envState, 'client')
         assert.ok(fxStatsAfter.runtime != null && fxStatsAfter.runtime.renderCalls === 2 && fxStatsAfter.runtime.handCalls === 1 && fxStatsAfter.runtime.guiCalls === 1, 'runtime telemetry must track hand & GUI renderItem calls')
-        assert.strictEqual(fxStatsAfter.runtime.cosmosDraws, 2)
-        assert.strictEqual(fxStatsAfter.runtime.surroundDraws, 2)
+        assert.strictEqual(fxStatsAfter.runtime.overlayDraws, 2)
+        assert.strictEqual(fxStatsAfter.runtime.geometryDraws, 11, 'Hand (3 ribbons + 4 stars = 7) + GUI (2 ribbons + 2 stars = 4) = 11 geometry draws')
 
-        // 8. Verify _pure.pushStarPrism3DQuads & pushCrossSegmentQuads geometry helpers
-        var prismList = []
-        FX3DCore._pure.pushStarPrism3DQuads(prismList, 0, 0, 0, [1, 0, 0], [0, 1, 0], [0, 0, 1], 0.05, 0xFFAA00AA, 0xFFFFFFFF)
-        assert.strictEqual(prismList.length, 6, 'pushStarPrism3DQuads must emit 3 orthogonal pairs * (glow + core) = 6 quads')
+        // 9. Verify _pure.pushOrthoSpriteQuads & pushCrossSegmentQuads geometry helpers
+        var spriteList = []
+        Item3D._pure.pushOrthoSpriteQuads(spriteList, 0, 0, 0, [1, 0, 0], [0, 1, 0], [0, 0, 1], 0.05, 0xFFAA00AA)
+        assert.strictEqual(spriteList.length, 3, 'pushOrthoSpriteQuads must emit 3 orthogonal sprite planes')
         var crossList = []
-        FX3DCore._pure.pushCrossSegmentQuads(crossList, [0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], 0.02, 0xFFFFFFFF)
+        Item3D._pure.pushCrossSegmentQuads(crossList, [0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], 0.02, 0xFFFFFFFF)
         assert.strictEqual(crossList.length, 2, 'pushCrossSegmentQuads must emit 2 orthogonal ribbon quads')
 
-        // 9. Verify BAKED_ITEMS clears cleanly across reloads after unbindItem (no stale entries!)
+        // 10. Verify BAKED_ITEMS clears cleanly across reloads after unbindItem (no stale entries!)
         FX3D.unbindItem('epiphy:imperius_test')
-        delete sb.global.Epiphy3DFXItemBindings['epiphy:imperius_test']
+        delete sb.global.EpiphyItem3DBindings['epiphy:imperius_test']
         modBusHooks['net.minecraftforge.client.event.ModelEvent$ModifyBakingResult']({
             getModels: function () { return mockModelMap }
         })
         assert.strictEqual(FX3D.getStats().bakedCount, 0, 'reload after unbindItem must reset bakedCount to 0')
         assert.deepStrictEqual(plain(FX3D.getStats().bakedItems), {}, 'reload after unbindItem must clear stale BAKED_ITEMS entries')
 
-        // 10. Verify client facade FALLBACK_CONFIG exact parity with Epiphy3DFXCore.CONFIG (no dual-source drift!)
+        // 11. Verify client facade FALLBACK_CONFIG exact parity with EpiphyItem3DRenderer.CONFIG (no dual-source drift!)
         var facadeOnlySb = {
             console: { info: function () {}, warn: function () {}, error: function () {} },
             global: {}
@@ -4717,10 +4783,10 @@ module.exports = function registerSuite(test, h) {
         facadeOnlySb.globalThis = facadeOnlySb
         vm.createContext(facadeOnlySb)
         runScriptIn(facadeOnlySb, FX3D_PATH)
-        assert.deepStrictEqual(plain(facadeOnlySb.global.Epiphy3DFX.CONFIG), plain(FX3DCore.CONFIG), 'facade FALLBACK_CONFIG must match Epiphy3DFXCore.CONFIG 1:1')
-        assert.strictEqual(facadeOnlySb.global.Epiphy3DFX.getStats().coreAvailable, false)
+        assert.deepStrictEqual(plain(facadeOnlySb.global.Epiphy3DFX.CONFIG), plain(Item3D.CONFIG), 'facade FALLBACK_CONFIG must match EpiphyItem3DRenderer.CONFIG 1:1')
+        assert.strictEqual(facadeOnlySb.global.Epiphy3DFX.getStats().itemRendererAvailable, false)
 
-        // 11. Verify isClientSide() probe exception emits explicit warning & sets envState='probe_error'
+        // 12. Verify isClientSide() probe exception emits explicit warning & sets envState='probe_error'
         var probeWarns = []
         var errSb = {
             console: { info: function () {}, warn: function (m) { probeWarns.push(String(m)) }, error: function () {} },
@@ -4731,11 +4797,11 @@ module.exports = function registerSuite(test, h) {
         errSb.globalThis = errSb
         vm.createContext(errSb)
         loadStartupBase(errSb)
-        runScriptIn(errSb, FX3D_CORE_PATH)
-        assert.strictEqual(errSb.global.Epiphy3DFXCore.getStats().envState, 'probe_error')
+        runScriptIn(errSb, ITEM3D_RENDERER_PATH)
+        assert.strictEqual(errSb.global.EpiphyItem3DRenderer.getStats().envState, 'probe_error')
         assert.ok(probeWarns.some(function (w) { return w.indexOf('boom_platform') >= 0 }), 'isClientSide probe exception must emit visible console.warn')
 
-        // 12. Verify EpiphySpec.createMonotonicClock (mc_util_nanos primary + NTP-jump-proof clamped Date.now fallback)
+        // 13. Verify EpiphySpec.createMonotonicClock (mc_util_nanos primary + NTP-jump-proof clamped Date.now fallback)
         var fakeNanos = 1000000000
         var utilClockSb = {
             console: { info: function () {}, warn: function () {}, error: function () {} },
@@ -4769,16 +4835,14 @@ module.exports = function registerSuite(test, h) {
         fakeDate += 50
         var t1 = clkDate.elapsedSec()
         assert.ok(Math.abs(t1 - 0.05) < 1e-4)
-        // Simulate NTP backward jump (-5000ms) -> must NOT go backwards!
         fakeDate -= 5000
         var t2 = clkDate.elapsedSec()
         assert.ok(t2 >= t1, 'NTP backward jump must never move monotonic clock backwards')
-        // Simulate NTP forward jump (+60000ms) -> must clamp to clampStepMs (16ms)!
         fakeDate += 60000
         var t3 = clkDate.elapsedSec()
         assert.ok((t3 - t2) <= 0.02, 'NTP forward jump must be clamped cleanly')
 
-        // 13. Verify missing CodeChickenLib degrades cleanly (Fail-Soft: 1 console.warn, 0 console.error, vanilla BakedModel untouched!)
+        // 14. Verify missing CodeChickenLib degrades cleanly (Fail-Soft: 1 console.warn, 0 console.error, vanilla BakedModel untouched!)
         var noCclWarns = []
         var noCclErrors = []
         var noCclModHooks = {}
@@ -4805,8 +4869,9 @@ module.exports = function registerSuite(test, h) {
         noCclSb.globalThis = noCclSb
         vm.createContext(noCclSb)
         loadStartupBase(noCclSb)
-        runScriptIn(noCclSb, FX3D_CORE_PATH)
-        noCclSb.global.Epiphy3DFXCore.bindItem('epiphy:imperius_test', { bladeAxisDeg: 45 })
+        runScriptIn(noCclSb, ITEM3D_RENDERER_PATH)
+        noCclSb.global.EpiphyItem3DRenderer.registerShader('epiphy:epiphy_cosmos', { uniforms: ['EpiphyTime'] })
+        noCclSb.global.EpiphyItem3DRenderer.bindItem('epiphy:imperius_test', { model: { state: 'tool' } })
         noCclModHooks['net.minecraftforge.client.event.RegisterShadersEvent']({
             getResourceProvider: function () { return {} },
             registerShader: function () { throw new Error('must not register shader without CCL') }
@@ -4822,13 +4887,12 @@ module.exports = function registerSuite(test, h) {
         assert.strictEqual(noCclErrors.length, 0, 'missing CCL must NOT spam console.error')
         assert.strictEqual(noCclWarns.length, 1, 'missing CCL must emit exactly 1 clear Fail-Soft console.warn')
         assert.ok(noCclWarns[0].indexOf('CodeChickenLib') >= 0)
-        assert.strictEqual(noCclSb.global.Epiphy3DFXCore.getStats().cclAvailable, false)
-        assert.strictEqual(noCclSb.global.Epiphy3DFXCore.getStats().backendMode, 'vanilla_fallback')
+        assert.strictEqual(noCclSb.global.EpiphyItem3DRenderer.getStats().cclAvailable, false)
+        assert.strictEqual(noCclSb.global.EpiphyItem3DRenderer.getStats().backendMode, 'vanilla_fallback')
         assert.strictEqual(noCclModels['epiphy:imperius_test#inventory'], noCclVanillaModel, 'vanilla BakedModel must stay untouched when CCL is absent')
     })
 
-    test('72. Epiphy3DFXServer & Epiphy3DFX surface=world closed loop: quotas, extensible constraints/shapes/presets, channel/slot, tier isolation & RenderLevelStageEvent bridge', function () {
-        var FX3D_CORE_PATH   = h.FX3D_CORE_PATH
+    test('72. Epiphy3DFXServer & Epiphy3DFX surface=world closed loop (100% zero-CCL via EpiphySpec RenderLevelStageEvent bridge)', function () {
         var FX3D_SERVER_PATH = h.FX3D_SERVER_PATH
         var FX3D_PATH        = h.FX3D_PATH
 
@@ -4950,7 +5014,7 @@ module.exports = function registerSuite(test, h) {
         assert.strictEqual(sentPkts[2].pkt.action, 'push', 'tick rewind (5 < 100) must force full resync push')
         assert.strictEqual(sentPkts[3].pkt.action, 'deactivate')
 
-        // 6. Setup Client Sandbox (Startup Core RenderLevelStageEvent bridge + Client Consumer)
+        // 6. Setup Client Sandbox (ZERO CCL / ZERO Item3DRenderer — pure EpiphySpec RenderLevelStageEvent bridge + Client Consumer!)
         var cliNow = 10000
         var netHandlers = {}
         var cliLogoutCb = null
@@ -4981,13 +5045,13 @@ module.exports = function registerSuite(test, h) {
         cliSb.globalThis = cliSb
         vm.createContext(cliSb)
         loadStartupBase(cliSb)
-        runScriptIn(cliSb, FX3D_CORE_PATH)
         runScriptIn(cliSb, FX3D_PATH)
 
         var FxCli = cliSb.global.Epiphy3DFX
         var levelStageHook = forgeEventHooks['net.minecraftforge.client.event.RenderLevelStageEvent']
-        assert.strictEqual(typeof levelStageHook, 'function', 'Epiphy3DFXCore must register RenderLevelStageEvent bridge on client')
-        assert.strictEqual(cliSb.global.Epiphy3DFXCore.getStats().worldHookRegistered, true)
+        assert.strictEqual(typeof cliSb.global.EpiphyItem3DRenderer, 'undefined', 'world 3D pipeline must operate completely without loading EpiphyItem3DRenderer / CCL')
+        assert.strictEqual(typeof levelStageHook, 'function', 'EpiphySpec must register RenderLevelStageEvent bridge on client')
+        assert.ok(cliSb.global.EpiphyRenderHooks != null && cliSb.global.EpiphyRenderHooks.world3dRegistered === true && cliSb.global.EpiphyRenderHooks.world3dActive === true, 'EpiphyRenderHooks must report world3dRegistered & world3dActive = true')
 
         // O(1) idle short-circuit check: with 0 active world FX, RenderLevelStageEvent must not touch event methods!
         levelStageHook({

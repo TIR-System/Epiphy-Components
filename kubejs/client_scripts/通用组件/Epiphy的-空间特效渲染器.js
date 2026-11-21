@@ -1,24 +1,24 @@
 // ============================================================================
-//  Epiphy 的通用组件 —— 空间特效渲染器与世界消费端 (Epiphy3DFX / EpiphySpatialFX v2.2.1 · Client)
+//  Epiphy 的通用组件 —— 空间特效渲染器与世界消费端 (Epiphy3DFX / EpiphySpatialFX v2.3.0 · Client)
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-空间特效渲染器.js
 //  架构定位：
 //    - 视觉表现层【子系统 B】(详见 docs/rendering-subsystem-roadmap.md §1、§2 功能六 & §8.1 P3-2)
 //    - 与【子系统 A】2D 平面渲染器 (Epiphy的-平面渲染器.js / Epiphy2DRenderer) 严格正交解耦；
 //    - 承担两大职责：
-//      1. 物品 3D 渲染门面：转发至 `startup_scripts/通用组件/Epiphy的-空间特效核心.js` (global.Epiphy3DFXCore)，
-//         提供运行时开关、绑定管理与诊断统计，不在客户端脚本注册任何逐帧物品 JS 顶点循环；
-//      2. 世界 3D 空间特效消费端 (`surface: 'world'`, 频道 `epiphy:spatial_fx`, 协议 v1)：
+//      1. 世界 3D 空间特效消费端 (`surface: 'world'`, 频道 `epiphy:spatial_fx`, 协议 v1，100% 零第三方 Mod 依赖)：
+//         由 `Epiphy的-Spec与通用工具.js` 内的 `RenderLevelStageEvent` 相位桥接直接驱动（零活跃特效时 O(1) 短路零开销）；
 //         负责 Fail-Closed 协议校验、Mojmap/SRG 全兼容 NBT 解码、待处理队列与同槽 `patch` 合并、
 //         `'player'`/`'system'` 隔离与单向淘汰、`once`/`active` 生命周期与淡入淡出包络、
 //         `followEntityUuid` 实体平滑插值追踪、内置 4 种纯原版图元默认渲染器 (`ring`/`beam`/`helix`/`sphere`)，
-//         以及通过 `registerWorldShape(kind, fn)` 覆写/扩展的 `RenderLevelStageEvent` 渲染分发
-//         （零活跃特效时 O(1) 短路零开销，严格 try/finally 状态还原）。
+//         以及通过 `registerWorldShape(kind, fn)` 覆写/扩展的渲染分发（严格 try/finally 状态还原）；
+//      2. 物品 3D 渲染轻量门面：可选转发至 `startup_scripts/通用组件/Epiphy的-物品三维渲染器.js` (`global.EpiphyItem3DRenderer`)，
+//         不在客户端脚本注册任何逐帧物品 JS 顶点循环。
 //  语法规范：遵循 README-LLM.md §1 强制 Rhino ES5 语法基准（纯 var、禁止 ??/let/const/简写/展开）。
 // ============================================================================
 
 ;(function () {
-    var VERSION = '2.2.1'
+    var VERSION = '2.3.0'
     var SPEC    = (typeof global !== 'undefined' && global != null) ? global.EpiphySpec : null
     var E_MATH  = (typeof global !== 'undefined' && global != null && global.EpiphyMath != null)
         ? global.EpiphyMath
@@ -44,15 +44,12 @@
     }
 
     var LOCAL_BINDINGS = {}
-    // 兜底默认值与 Epiphy3DFXCore.CONFIG 严格保持一致（由 Test 71 锁死防双源漂移）
+    // 兜底默认值与 EpiphyItem3DRenderer.CONFIG 严格保持一致（由 Test 71 锁死防双源漂移）
     var FALLBACK_CONFIG = {
-        enabled:          true,
-        cosmosEnabled:    true,
-        surroundEnabled:  true,
-        guiSurroundScale: 0.86,
-        guiRingLimit:     2,
-        guiRenderHelix:   false,
-        guiRenderMotes:   false
+        enabled:         true,
+        overlaysEnabled: true,
+        geometryEnabled: true,
+        guiGlobalScale:  1.0
     }
 
     var WORLD_CONFIG = {
@@ -1269,23 +1266,23 @@
     }
 
     // ------------------------------------------------------------------------
-    // 3. 物品 3D 门面（转发至 Epiphy3DFXCore）
+    // 3. 物品 3D 门面（可选转发至 EpiphyItem3DRenderer）
     // ------------------------------------------------------------------------
-    function getCore() {
-        return (typeof global !== 'undefined' && global != null && global.Epiphy3DFXCore) ? global.Epiphy3DFXCore : null
+    function getItemRenderer() {
+        return (typeof global !== 'undefined' && global != null && global.EpiphyItem3DRenderer) ? global.EpiphyItem3DRenderer : null
     }
 
     function getConfigObj() {
-        var core = getCore()
-        return (core != null && core.CONFIG) ? core.CONFIG : FALLBACK_CONFIG
+        var r = getItemRenderer()
+        return (r != null && r.CONFIG) ? r.CONFIG : FALLBACK_CONFIG
     }
 
     function bindItem(itemId, spec) {
         if (typeof itemId !== 'string' || !itemId) return false
         LOCAL_BINDINGS[itemId] = spec || {}
-        var core = getCore()
-        if (core != null && typeof core.bindItem === 'function') {
-            return core.bindItem(itemId, spec)
+        var r = getItemRenderer()
+        if (r != null && typeof r.bindItem === 'function') {
+            return r.bindItem(itemId, spec)
         }
         return true
     }
@@ -1293,20 +1290,20 @@
     function unbindItem(itemId) {
         if (typeof itemId !== 'string' || !itemId) return false
         delete LOCAL_BINDINGS[itemId]
-        var core = getCore()
-        if (core != null && typeof core.unbindItem === 'function') {
-            return core.unbindItem(itemId)
+        var r = getItemRenderer()
+        if (r != null && typeof r.unbindItem === 'function') {
+            return r.unbindItem(itemId)
         }
         return true
     }
 
     function absorbGlobalBindings() {
-        var core = getCore()
-        if (core != null && typeof core.absorbGlobalBindings === 'function') {
-            core.absorbGlobalBindings()
+        var r = getItemRenderer()
+        if (r != null && typeof r.absorbGlobalBindings === 'function') {
+            r.absorbGlobalBindings()
             return
         }
-        var map = (typeof global !== 'undefined' && global != null) ? global.Epiphy3DFXItemBindings : null
+        var map = (typeof global !== 'undefined' && global != null) ? global.EpiphyItem3DBindings : null
         if (map != null && typeof map === 'object' && !Array.isArray(map)) {
             for (var id in map) {
                 if (Object.prototype.hasOwnProperty.call(map, id)) {
@@ -1317,9 +1314,9 @@
     }
 
     function getBoundItemConfig(itemId) {
-        var core = getCore()
-        if (core != null && typeof core.getBoundItemConfig === 'function') {
-            return core.getBoundItemConfig(itemId)
+        var r = getItemRenderer()
+        if (r != null && typeof r.getBoundItemConfig === 'function') {
+            return r.getBoundItemConfig(itemId)
         }
         if (!Object.prototype.hasOwnProperty.call(LOCAL_BINDINGS, itemId)) {
             absorbGlobalBindings()
@@ -1331,20 +1328,20 @@
         getConfigObj().enabled = Boolean(flag)
     }
 
-    function setCosmosEnabled(flag) {
-        getConfigObj().cosmosEnabled = Boolean(flag)
+    function setOverlaysEnabled(flag) {
+        getConfigObj().overlaysEnabled = Boolean(flag)
     }
 
-    function setSurroundEnabled(flag) {
-        getConfigObj().surroundEnabled = Boolean(flag)
+    function setGeometryEnabled(flag) {
+        getConfigObj().geometryEnabled = Boolean(flag)
     }
 
-    function getShaderStatus() {
-        var core = getCore()
-        if (core != null && typeof core.getShaderStatus === 'function') {
-            return core.getShaderStatus()
+    function getShaderStatus(shaderId) {
+        var r = getItemRenderer()
+        if (r != null && typeof r.getShaderStatus === 'function') {
+            return r.getShaderStatus(shaderId)
         }
-        return { registered: false, loaded: false, hasUniforms: false, lastError: 'core_unavailable' }
+        return { registered: false, loaded: false, hasUniforms: false, lastError: 'item_renderer_unavailable' }
     }
 
     function listWorldShapes() {
@@ -1384,24 +1381,24 @@
     }
 
     function getStats() {
-        var core = getCore()
-        if (core != null && typeof core.getStats === 'function') {
-            var st = core.getStats()
-            st.clientFacadeVersion = VERSION
-            st.coreAvailable       = true
-            st.world               = getWorldStats()
+        var r = getItemRenderer()
+        if (r != null && typeof r.getStats === 'function') {
+            var st = r.getStats()
+            st.clientFacadeVersion   = VERSION
+            st.itemRendererAvailable = true
+            st.world                 = getWorldStats()
             return st
         }
         return {
-            version:             VERSION,
-            clientFacadeVersion: VERSION,
-            coreAvailable:       false,
-            enabled:             getConfigObj().enabled,
-            boundCount:          Object.keys(LOCAL_BINDINGS).length,
-            bakedCount:          0,
-            bakedItems:          {},
-            shaderLoaded:        false,
-            world:               getWorldStats()
+            version:               VERSION,
+            clientFacadeVersion:   VERSION,
+            itemRendererAvailable: false,
+            enabled:               getConfigObj().enabled,
+            boundCount:            Object.keys(LOCAL_BINDINGS).length,
+            bakedCount:            0,
+            bakedItems:            {},
+            shaderLoaded:          false,
+            world:                 getWorldStats()
         }
     }
 
@@ -1421,21 +1418,21 @@
 
     absorbGlobalBindings()
 
-    var coreRef = getCore()
+    var itemRenRef = getItemRenderer()
     var API = {
         VERSION:              VERSION,
         CHANNEL:              CHANNEL,
         PROTO_VERSION:        PROTO_VERSION,
         CONFIG:               getConfigObj(),
         WORLD_CONFIG:         WORLD_CONFIG,
-        // 物品 3D 门面 API
+        // 物品 3D 门面 API（透传 EpiphyItem3DRenderer）
         bindItem:             bindItem,
         unbindItem:           unbindItem,
         absorbGlobalBindings: absorbGlobalBindings,
         getBoundItemConfig:   getBoundItemConfig,
         setEnabled:           setEnabled,
-        setCosmosEnabled:     setCosmosEnabled,
-        setSurroundEnabled:   setSurroundEnabled,
+        setOverlaysEnabled:   setOverlaysEnabled,
+        setGeometryEnabled:   setGeometryEnabled,
         getShaderStatus:      getShaderStatus,
         getStats:             getStats,
         // 世界 3D 消费端 API (`surface: 'world'`)
@@ -1554,7 +1551,7 @@
         _onRenderLevelStage:  onRenderLevelStage,
         _stepWorldNow:        function (nowMs) { drainAndStepWorldFx(nowMs != null ? nowMs : MONO_CLOCK.nowMs()) },
         _nbtToPlainJs:        nbtToPlainJs,
-        _pure:                (coreRef != null && coreRef._pure) ? coreRef._pure : {}
+        _pure:                (itemRenRef != null && itemRenRef._pure) ? itemRenRef._pure : {}
     }
 
     if (typeof global !== 'undefined') {

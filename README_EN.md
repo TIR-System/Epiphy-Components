@@ -16,7 +16,7 @@ A collection of shared server/client infrastructure modules, audiovisual present
 
 | Third-Party Mod | Level | Affected Common Component | Role & Fallback Behavior | Native Mod (Phase 4) Plan |
 | :--- | :---: | :--- | :--- | :--- |
-| **CodeChickenLib** | Optional Exception | `Epiphy的-空间特效核心.js` | Entry-point hook & pure-Java mesh submission fast path for custom 3D item rendering (`IItemRenderer` / `TransformUtils` / `CCShaderInstance` / `CCModel` / `CCRenderState` / `ColourAttribute` / `Matrix4` / `Vector3` / `Vertex5`, working around KubeJS lacking `Item.initializeClient` and Rhino per-vertex overhead); falls back cleanly to vanilla static item models with a single warning when absent (**World 3D `surface: 'world'` has 0% CCL dependency**) | **Remove completely & self-implement** (native `IClientItemExtensions` + `BEWLR` / own Mixin + vanilla `ShaderInstance` + native Java VBO/mesh) |
+| **CodeChickenLib** | Optional Exception | `Epiphy的-物品三维渲染器.js` | Entry-point hook & pure-Java mesh submission fast path for custom 3D item rendering (`IItemRenderer` / `TransformUtils` / `CCShaderInstance` / `CCModel` / `CCRenderState` / `ColourAttribute` / `Matrix4` / `Vector3` / `Vertex5`, working around KubeJS lacking `Item.initializeClient` and Rhino per-vertex overhead); falls back cleanly to vanilla static item models with a single warning when absent (**World 3D `surface: 'world'` event bridge lives in `Epiphy的-Spec与通用工具.js`, physically 0% CCL dependency**) | **Remove completely & self-implement** (native `IClientItemExtensions` + `BEWLR` / own Mixin + vanilla `ShaderInstance` + native Java VBO/mesh) |
 | **ModernUI** | Optional Fast Path | `Epiphy的-平面渲染器.js` | Enables direct text layout cache and single-pass SDF outline when installed; transparently falls back to vanilla pipeline when absent | Keep as optional compatibility branch |
 | **Curios API** | Optional Utility | `Epiphy的-服务端核心.js` | Powers Curios slot lookups (`findPlayerCurio`); safely skipped when absent | Keep as optional soft compatibility |
 
@@ -32,8 +32,8 @@ A collection of shared server/client infrastructure modules, audiovisual present
 ┌──────────────────────────────────────────────────────────────────────────────────┐
 │ Layer 1 · Startup Stage (Cross-Side Contracts & Asset/Content Registrations)     │
 ├──────────────────────────────────────────────────────────────────────────────────┤
-│  Epiphy的-Spec与通用工具.js (P:1200) ──► global.EpiphySpec / EpiphyProtocol       │
-│  Epiphy的-空间特效核心.js   (P:1050) ──► global.Epiphy3DFXCore (opt: CCL fallback)│
+│  Epiphy的-Spec与通用工具.js (P:1200) ──► EpiphySpec / Protocol / 2D&3D Hooks     │
+│  Epiphy的-物品三维渲染器.js (P:1050) ──► EpiphyItem3DRenderer (opt: CCL fallback)│
 │  创造模式栏-epiphy.js       (P:1000) ──► global.EpiphyCreativeTab (epiphy:stuff)  │
 │     ├──► Epiphy的小玩意-原版_其他Mod的隐藏物品.js                                 │
 │     ├──► Epiphy的小玩意-终极拆解台_不稳定.js  (paired with assets/epiphy/)        │
@@ -81,8 +81,8 @@ A collection of shared server/client infrastructure modules, audiovisual present
 
 | Layer | Modules | Stage / Priority | Primary Exports / Role |
 | :--- | :--- | :--- | :--- |
-| **L1 Cross-Side Spec** | `Epiphy的-Spec与通用工具.js` | `startup` / `1200` | `EpiphySpec v2.7.0`, `EpiphyProtocol`, `EpiphyMath` (incl. cross-stage `NativeMath` constant polyfill, `RenderGuiEvent$Pre` bridge & 2D/3D cost models) |
-| **L1 3D Core** | `Epiphy的-空间特效核心.js` | `startup` / `1050` | `Epiphy3DFXCore v1.0.5` (custom GLSL cosmos shader, pre-baked pure-Java `CCModel` fast item FX [~0.54ms], Fail-Soft vanilla fallback without CCL, `RenderLevelStageEvent` bridge) |
+| **L1 Cross-Side Spec** | `Epiphy的-Spec与通用工具.js` | `startup` / `1200` | `EpiphySpec v2.8.0`, `EpiphyProtocol`, `EpiphyMath` (incl. cross-stage `NativeMath` polyfill, `RenderGuiEvent$Pre` 2D & `RenderLevelStageEvent` World-3D bridges, 2D/3D cost models) |
+| **L1 Item 3D** | `Epiphy的-物品三维渲染器.js` | `startup` / `1050` | `EpiphyItem3DRenderer v1.0.0` (generic v6 layered declarative item 3D pipeline, `fx()` DSL, extensible `registerShader`/`registerLayerType`/`registerPart`/`registerPreset`, flicker-free additive pure-Java `CCModel` ~0.54ms, Fail-Soft vanilla fallback without CCL) |
 | **L1 Content Reg** | `创造模式栏-epiphy.js` | `startup` / `1000` | `EpiphyCreativeTab v1.0.0` (`epiphy:stuff`) |
 | **L1 Content Reg** | Hidden Items / Test Block / Unstable Table | `startup` | Custom items, test block & 5-stage blocks |
 | **L2 Infrastructure** | `Epiphy的-日志.js` | `server` / `1100` | `EpiphyLog v1.2.0` (rate-limit, `once`, `catchWarn`, external `.log` sink) |
@@ -96,7 +96,7 @@ A collection of shared server/client infrastructure modules, audiovisual present
 | **L3 Presentation** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.8.0` (standalone scheduler with preset registry; internal logic not for cross-module reuse) |
 | **L3 Gameplay** | `拆解台-混沌殉爆.v18.js` | `server` / `10` | Meltdown progression (hard-requiring Core/WorldOps/Danmaku; persisted countdown, native 2D preset HUD + `channel`/`slot` incremental `patch`, anti-spoof relic & mainhand pickaxe check) |
 | **L3 Gameplay** | `合成表-*` (Vanilla / Botania / Enigmatic) | `server` / `0` | Standalone recipe adjustments |
-| **L4 Client** | `平面渲染器` / `空间特效渲染器` / `音频播放器` / `拆解台描述` | `client` | `Epiphy2DRenderer / ScreenDanmakuClient v6.2.0`, `Epiphy3DFX v2.2.1`, `EpiphyAudioClient v5.6.0` |
+| **L4 Client** | `平面渲染器` / `空间特效渲染器` / `音频播放器` / `拆解台描述` | `client` | `Epiphy2DRenderer / ScreenDanmakuClient v6.2.0`, `Epiphy3DFX v2.3.0`, `EpiphyAudioClient v5.6.0` |
 
 ### 3. Dependency & Fallback Specification (YAML)
 
@@ -108,11 +108,11 @@ Epiphy的-Spec与通用工具.js:
     - EpiphyServerBase and client engines fall back to slim built-in helpers
     - Server danmaku, spatial FX, and audio engines refuse to boot without hard dependency
 
-Epiphy的-空间特效核心.js:
+Epiphy的-物品三维渲染器.js:
   requires: { hard: [], optional: [CodeChickenLib, EpiphySpec] }
   on_missing:
-    no_CodeChickenLib: Emits a single warning and skips 3D shader/IItemRenderer baking; bound items fall back cleanly to their vanilla static item models (no missing-texture cube, no errors)
-    no_EpiphySpec:     Uses built-in monotonic clamped clock fallback
+    no_CodeChickenLib: Emits a single warning and skips custom shader/IItemRenderer baking; bound items fall back cleanly to their vanilla static item models (no missing-texture cube, no errors)
+    no_EpiphySpec:     Uses built-in monotonic clamped clock and local preset registry fallback
 
 创造模式栏-epiphy.js:
   requires: { hard: [], optional: [] }
@@ -195,8 +195,8 @@ Epiphy的-平面渲染器.js:
   on_missing: Uses built-in v6 protocol constants & basic helpers when Startup Spec is absent
 
 Epiphy的-空间特效渲染器.js:
-  requires: { paired: [Epiphy3DFXServer], optional: [Epiphy3DFXCore, EpiphySpec, EpiphyProtocol] }
-  on_missing: Uses mirrored default config & built-in v1 protocol constants when Startup Core/Spec is absent, keeping world 3D queue & lifecycle active
+  requires: { paired: [Epiphy3DFXServer], optional: [EpiphyItem3DRenderer, EpiphySpec, EpiphyProtocol] }
+  on_missing: Uses mirrored default config & built-in v1 protocol constants when Startup Spec/Item3DRenderer is absent, keeping world 3D queue & lifecycle active
 
 Epiphy的-音频播放器.js:
   requires: { paired: [EpiphyAudio], optional: [EpiphySpec, EpiphyProtocol] }
@@ -214,7 +214,7 @@ Epiphy的-音频播放器.js:
    - **Diagnostics & Standalone Fix**: Live health/perf inspector (`EpiphyDebug v1.0.0`) and standalone server-authoritative logout HP restoration (`EpiphyBugfix v1.0.0`).
 2. **Audiovisual Presentation Engines (with Non-OP Player Resource Isolation)**:
    - **2D Planar Compositor & Screen Danmaku (`Epiphy2DSurface / ScreenDanmaku v6.2.0` / `Epiphy2DRenderer / ScreenDanmakuClient v6.2.0`)**: `PROTO v6` declarative 6-type 2D scene graph (`rect`, `sprite`, `nine_slice`, `item`, `text`, `group`), unified `rect.fill` (`solid`, `outline`, `gradient`, `parallax`, `shader`), dual-mode clipping (`local`, `scissor`), client interpolation tracks (`lerp`, `trail`, `impulse`), grouped option deep-merge (`layout`/`life`/`motion`/`style`/`data`/`tracks`), unknown-key typo warnings, scoped `channel`/`slot` handles (automatic full push vs incremental `action: 'patch'`), `id`-first chainable `ui()` DSL (`steppedPlate`, `corners`, `steppedLine`, `ticks`, `boxes`, `texts`, `region`, `widget`), built-in `'progress_bar'` preset + `progressTracks`, and upward preset/custom widget registration (`registerPreset`, `registerWidget`); client hot-path optimizations include arrival-time declarative node precompilation (`isStaticFastRect` fast path), `stepHz` micro-caching, hoisted zero-closure rect batching + per-frame `resolveEventCaps`, parallax early culling, left-anchor zero-`font.width` skip + per-node text width caching, `'lru'` shared text layout cache, normalized coordinates with HUD zone avoidance, typewriter reveals, `per_char` glyph shake, outlines/glow, inline rich tags, dedicated `ModernUI (LGPL-3.0)` fast-path optimizations with automatic vanilla fallback, `once`/`active`/`screen_session` lifecycles, persisted/login-delayed emission, and namespace-isolated block bindings. Adds `/epiphy danmaku self` for individual player banners; non-OP `authorized` commands stay in `'player'` tier with parameter/rate/target clamping, while JS API, OP, console, and command blocks remain unrestricted.
-   - **3D Spatial FX Subsystem (`Epiphy3DFXCore v1.0.5` / `Epiphy3DFXServer v1.1.0` / `Epiphy3DFX v2.2.1`)**: Strictly decoupled from the 2D planar renderer. Item rendering registers a self-contained GLSL 1.50 core cosmos shader (`epiphy:epiphy_cosmos`) and pre-baked flat-mesh `IItemRenderer` submitting directly to vanilla `VertexConsumer` (hitting Embeddium `SodiumBufferBuilder`'s off-heap fast path, cleanly falling back to vanilla static models when CodeChickenLib is absent). World FX (`surface: 'world'`, channel `epiphy:spatial_fx`, proto v1) provides server-side scheduling, `'player'`/`'system'` quota & eviction isolation, stateful `channel`/`slot` incremental `patch`, extensible `addConstraint` rule pipelines, smooth `followEntityUuid` entity interpolation, built-in pure-vanilla renderers for all 4 core shapes (`ring`/`beam`/`helix`/`sphere`), and `registerShapeSchema` / `registerWorldShape` hooks with O(1) idle short-circuit on `RenderLevelStageEvent`.
+   - **3D Spatial FX & Declarative Item 3D Subsystem (`EpiphyItem3DRenderer v1.0.0` / `Epiphy3DFXServer v1.1.0` / `Epiphy3DFX v2.3.0`)**: Strictly decoupled from the 2D planar renderer and designed around capability-first principles (implementation -> generic capability -> downstream showcases). Item rendering (`EpiphyItem3DRenderer`) shares the layered declarative `PROTO v6` schema (`model`/`frame`/`motion`/`lod`/`layers`) and chainable `fx()` DSL, offering extensible `registerShader`, 4 built-in pre-baked primitives (`surface_overlay`/`ribbon_ring`/`ribbon_helix`/`sprite_cluster`), `registerLayerType`/`registerPart`/`registerPreset`, and flicker-free additive pure-Java `CCModel` submission (~0.54ms, cleanly falling back to vanilla static models when CodeChickenLib is absent). World FX (`surface: 'world'`, channel `epiphy:spatial_fx`, proto v1, physically 0% CCL dependency) is driven by the `RenderLevelStageEvent` bridge in `Epiphy的-Spec与通用工具.js` (O(1) idle short-circuit), providing server-side scheduling, `'player'`/`'system'` quota & eviction isolation, stateful `channel`/`slot` incremental `patch`, extensible `addConstraint` rule pipelines, smooth `followEntityUuid` entity interpolation, built-in pure-vanilla renderers for all 4 core shapes (`ring`/`beam`/`helix`/`sphere`), and `registerShapeSchema` / `registerWorldShape` hooks.
    - **Spatial Audio (`EpiphyAudio v5.8.0` / `EpiphyAudioClient v5.6.0`)**: Fixed coordinate, block, tracked entity, dimension, and server-wide handles with upward preset registration (`registerPreset`, `playPreset`, `{ preset }`, including `bindBlock` preset resolution); attenuation curves; live 3D `Channel` selfPosition syncing; `pause` standby on category mute/out-of-range; coalesced scan `merge` cluster consolidation; namespace-filtered gentle `pause`/`unpause` vanilla music ducking (`duckMusic` pauses only `minecraft:` `MUSIC` channels, preserves `duckedMusicInsts` when `chanMap` is transiently null, and never pauses or stops other mods' BGM); validated `configure`; unstarted timeout cleanup; late tracker upgrade; and retry-safe `pendingReset`. Non-OP `authorized` commands enter `'player'` tier (`priority <= 3`, `u:<uuid>:` key prefix, `audio.broadcast` required for `>4` targets or cross-dim, and one-way eviction protecting `'system'` audio).
 3. **Gameplay Content & Tweaks**: `epiphy:stuff` creative tab and hidden-item collection (including Chaos Crystal CCL 3D OBJ + Chaos Shader rendering), `epiphy:rnfmabj_test` broadcast test block, the 5-stage Twilight Forest Uncrafting Table chaotic meltdown event with supreme-relic exemptions, and recipe adjustments.
 
@@ -228,7 +228,7 @@ Epiphy的-音频播放器.js:
 │   ├── assets/epiphy/            # Sound assets (.ogg, see docs/audio-assets.md), core shaders (shaders/core/), models, textures, blockstates, zh_cn lang
 │   ├── client_scripts/           # Client 2D renderer, 3D spatial FX client (Epiphy的-空间特效渲染器.js), audio player, custom item tooltips
 │   ├── server_scripts/           # Server foundation, valve/debug/bugfix, 2D/3D FX (Epiphy的-空间特效组件.js)/audio schedulers, gameplay scripts
-│   └── startup_scripts/          # Startup Spec/Protocol base, 3D FX core (Epiphy的-空间特效核心.js), item/block/creative-tab registrations
+│   └── startup_scripts/          # Startup Spec/Protocol/2D&3D hooks, generic declarative item 3D renderer (Epiphy的-物品三维渲染器.js), item/block/tab registrations & showcases
 ├── docs/
 │   ├── audio-assets.md                           # Audio asset exclusion & BYO placement notes
 │   ├── kube-mods-rhino-es5-es6-compatibility.md  # Bytecode & runtime audit of kube-mods/rhino

@@ -4,8 +4,8 @@
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/server_scripts/通用组件/Epiphy的-空间特效组件.js
-//  配套客户端渲染器：kubejs/client_scripts/通用组件/Epiphy的-空间特效渲染器.js (Epiphy3DFX >= 2.1.0, <= 2.99.x，协议 v1)
-//  配套启动期核心：kubejs/startup_scripts/通用组件/Epiphy的-空间特效核心.js (Epiphy3DFXCore >= 1.0.0, <= 1.99.x)
+//  配套客户端渲染器：kubejs/client_scripts/通用组件/Epiphy的-空间特效渲染器.js (Epiphy3DFX >= 2.3.0, <= 2.99.x，协议 v1)
+//  配套世界 3D 桥接：kubejs/startup_scripts/通用组件/Epiphy的-Spec与通用工具.js (EpiphySpec >= 2.8.0，物理 100% 零第三方 Mod 依赖)
 //
 //  依赖与缺失降级行为：
 //    - 必需前置：kubejs/startup_scripts/通用组件/Epiphy的-Spec与通用工具.js (EpiphySpec / EpiphyProtocol, priority: 1200)

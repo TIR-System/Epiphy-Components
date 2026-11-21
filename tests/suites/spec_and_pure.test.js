@@ -350,7 +350,7 @@ module.exports = function registerSuite(test, h) {
         runScriptIn(sb, AUDIO_CLIENT_PATH)
         runScriptIn(sb, DANMAKU_PATH)
         runScriptIn(sb, RENDERER_PATH)
-        runScriptIn(sb, h.FX3D_CORE_PATH)
+        runScriptIn(sb, h.ITEM3D_RENDERER_PATH)
         runScriptIn(sb, h.FX3D_SERVER_PATH)
         runScriptIn(sb, h.FX3D_PATH)
 
@@ -386,7 +386,7 @@ module.exports = function registerSuite(test, h) {
             { name: 'EpiphyAudioClient',     docTag: 'EpiphyAudioClient',                         obj: sb.global.EpiphyAudioClient,     file: AUDIO_CLIENT_PATH },
             { name: 'Epiphy2DSurface',       docTag: 'Epiphy2DSurface / ScreenDanmaku',           obj: sb.global.Epiphy2DSurface,       file: DANMAKU_PATH },
             { name: 'Epiphy2DRenderer',      docTag: 'Epiphy2DRenderer / ScreenDanmakuClient',    obj: sb.global.Epiphy2DRenderer,      file: RENDERER_PATH },
-            { name: 'Epiphy3DFXCore',        docTag: 'Epiphy3DFXCore',                            obj: sb.global.Epiphy3DFXCore,        file: h.FX3D_CORE_PATH },
+            { name: 'EpiphyItem3DRenderer',  docTag: 'EpiphyItem3DRenderer',                      obj: sb.global.EpiphyItem3DRenderer,  file: h.ITEM3D_RENDERER_PATH },
             { name: 'Epiphy3DFXServer',      docTag: 'Epiphy3DFXServer',                          obj: sb.global.Epiphy3DFXServer,      file: h.FX3D_SERVER_PATH },
             { name: 'Epiphy3DFX',            docTag: 'Epiphy3DFX',                                obj: sb.global.Epiphy3DFX,            file: h.FX3D_PATH }
         ]
@@ -458,12 +458,12 @@ module.exports = function registerSuite(test, h) {
         assert.ok(checkedDocVersions >= 15 && checkedDocVersions === componentMatrix.length, 'Test 67 must strictly verify all >=15 managed components across README.md & README_EN.md')
 
         var p32Line = roadmapDoc.split(/\r?\n/).find(function (l) { return l.indexOf('**P3-2**') >= 0 }) || ''
-        assert.ok(hasExactDocVersion(p32Line, 'Epiphy3DFXCore', sb.global.Epiphy3DFXCore.VERSION), 'roadmap §8.1 P3-2 must match exact Epiphy3DFXCore v' + sb.global.Epiphy3DFXCore.VERSION)
+        assert.ok(hasExactDocVersion(p32Line, 'EpiphyItem3DRenderer', sb.global.EpiphyItem3DRenderer.VERSION), 'roadmap §8.1 P3-2 must match exact EpiphyItem3DRenderer v' + sb.global.EpiphyItem3DRenderer.VERSION)
         assert.ok(hasExactDocVersion(p32Line, 'Epiphy3DFXServer', sb.global.Epiphy3DFXServer.VERSION), 'roadmap §8.1 P3-2 must match exact Epiphy3DFXServer v' + sb.global.Epiphy3DFXServer.VERSION)
         assert.ok(hasExactDocVersion(p32Line, 'Epiphy3DFX', sb.global.Epiphy3DFX.VERSION), 'roadmap §8.1 P3-2 must match exact Epiphy3DFX v' + sb.global.Epiphy3DFX.VERSION)
 
         var llmP32Line = readmeLlm.split(/\r?\n/).find(function (l) { return l.indexOf('`P3-2`') >= 0 }) || ''
-        assert.ok(hasExactDocVersion(llmP32Line, 'Epiphy3DFXCore', sb.global.Epiphy3DFXCore.VERSION), 'README-LLM.md §4 P3-2 must match exact Epiphy3DFXCore v' + sb.global.Epiphy3DFXCore.VERSION)
+        assert.ok(hasExactDocVersion(llmP32Line, 'EpiphyItem3DRenderer', sb.global.EpiphyItem3DRenderer.VERSION), 'README-LLM.md §4 P3-2 must match exact EpiphyItem3DRenderer v' + sb.global.EpiphyItem3DRenderer.VERSION)
         assert.ok(hasExactDocVersion(llmP32Line, 'Epiphy3DFXServer', sb.global.Epiphy3DFXServer.VERSION), 'README-LLM.md §4 P3-2 must match exact Epiphy3DFXServer v' + sb.global.Epiphy3DFXServer.VERSION)
         assert.ok(hasExactDocVersion(llmP32Line, 'Epiphy3DFX', sb.global.Epiphy3DFX.VERSION), 'README-LLM.md §4 P3-2 must match exact Epiphy3DFX v' + sb.global.Epiphy3DFX.VERSION)
 
@@ -521,6 +521,22 @@ module.exports = function registerSuite(test, h) {
             }
         }
         assert.ok(checkedThirdPartyHits >= 5, 'third-party mod header guard must audit all known third-party class references')
+
+        // 3d. Capability-first anti-leakage guard (README-LLM.md §3.6):
+        // Managed generic common components MUST NOT hardcode downstream showcase/weapon-specific identifiers or terms!
+        var forbiddenShowcaseTerms = ['imperius_test', 'epiphy_cosmos', '英佩瑞斯', '剑身', '剑格', '剑刃', '护手']
+        for (var gi = 0; gi < componentMatrix.length; gi++) {
+            var compFile = componentMatrix[gi].file
+            var compSrc  = fs.readFileSync(compFile, 'utf8')
+            var compRel  = path.relative(ROOT_DIR, compFile)
+            for (var fti = 0; fti < forbiddenShowcaseTerms.length; fti++) {
+                assert.strictEqual(
+                    compSrc.indexOf(forbiddenShowcaseTerms[fti]),
+                    -1,
+                    'Generic common component ' + compRel + ' must NOT leak downstream showcase term "' + forbiddenShowcaseTerms[fti] + '" (README-LLM.md §3.6)'
+                )
+            }
+        }
 
         // 4. Out-of-range dependency version MUST be rejected fail-fast by downstream hard-dependent component
         var badCases = ['2.4.9', '3.0.0']

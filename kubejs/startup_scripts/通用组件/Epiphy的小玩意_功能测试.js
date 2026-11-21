@@ -3,8 +3,8 @@
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/startup_scripts/通用组件/Epiphy的小玩意_功能测试.js
 //  依赖组件：
-//    - kubejs/startup_scripts/通用组件/Epiphy的-空间特效核心.js  (global.Epiphy3DFXCore · GPU 星空着色器 & 预烘焙 CCModel)
-//    - kubejs/client_scripts/通用组件/Epiphy的-空间特效渲染器.js (global.Epiphy3DFX / global.EpiphySpatialFX)
+//    - kubejs/startup_scripts/通用组件/Epiphy的-物品三维渲染器.js (global.EpiphyItem3DRenderer · v6 声明式物品 3D 渲染管线)
+//    - kubejs/client_scripts/通用组件/Epiphy的-空间特效渲染器.js  (global.Epiphy3DFX / global.EpiphySpatialFX)
 //    - kubejs/client_scripts/通用组件/Epiphy的-平面渲染器.js     (Epiphy2DRenderer / ScreenDanmakuClient)
 //    - kubejs/server_scripts/通用组件/Epiphy的-平面渲染组件.js   (global.Epiphy2DSurface / global.ScreenDanmaku)
 //    - kubejs/client_scripts/通用组件/Epiphy的-音频播放器.js     (EpiphyAudioClient)
@@ -319,76 +319,118 @@
         })
     }
 
-    // ======================================================================== 4. 注册【英佩瑞斯-测试中】局部 3D 星轨环绕与视角视差星窗预设并绑定至 Epiphy3DFX
+    // ======================================================================== 4. 案例装配：调用通用 EpiphyItem3DRenderer (v6 声明式格式) 装配【英佩瑞斯-测试中】
+    var ITEM3D = (typeof global !== 'undefined' && global != null) ? global.EpiphyItem3DRenderer : null
     var IMPERIUS_3DFX_PRESET_ID = 'imperius_test_cosmos_vfx'
+    var IMPERIUS_SHADER_ID      = 'epiphy:epiphy_cosmos'
 
-    SPEC.registerPreset('fx3d', IMPERIUS_3DFX_PRESET_ID, {
-        scheme:         's1',
-        speed:          1.2,
-        slashExpand:    0.45,
-        fov:            520.0,
-        originX:        -9.5,
-        originY:        9.5,
-        ux:             0.698,
-        uy:             -0.716,
-        vx:             0.716,
-        vy:             0.698,
-        ringCenterU:    9.6,
-        renderInHand:   true,
-        renderInHotbar: true,
-        renderInSlots:  true,
-        cosmosWindow: {
-            enabled:  true,
-            parallax: 1.6,
-            speed:    0.95
+    // 4.1 由下游案例按需向通用渲染器注册本案例使用的核心着色器
+    if (ITEM3D && typeof ITEM3D.registerShader === 'function') {
+        ITEM3D.registerShader(IMPERIUS_SHADER_ID, {
+            vertexFormat: 'POSITION_COLOR_TEX',
+            uniforms:     ['EpiphyTime', 'EpiphyYawPitch', 'EpiphyGuiMode']
+        })
+    }
+
+    // 4.2 使用 v6 分层声明式格式（model / frame / motion / lod / layers）与 fx() 构造器组合具体视觉效果
+    var imperiusLayers = (ITEM3D && typeof ITEM3D.fx === 'function')
+        ? ITEM3D.fx()
+            .surfaceOverlay('cosmos_window', IMPERIUS_SHADER_ID, 'epiphy:textures/item/imperius_test_cosmos_mask.png', {
+                visibleIn: 'all',
+                geometry:  { zFront: 0.5330, zBack: 0.4670 },
+                uniforms:  {
+                    EpiphyTime:     'time',
+                    EpiphyYawPitch: 'viewYawPitch',
+                    EpiphyGuiMode:  'isGui'
+                }
+            })
+            .ribbonRing('primary_gold_ring', {
+                visibleIn: 'all',
+                material:       { texture: 'epiphy:textures/effect/glow_ribbon.png', blend: 'additive', blur: true },
+                markerMaterial: { texture: 'epiphy:textures/effect/star_flare.png',  blend: 'additive', blur: true },
+                transform:      { axisOffset: 9.6, tiltU: 0.52, tiltV: 0.16, spinSpeed: 0.65, scaleWithAttack: 'uniform' },
+                geometry:       { radius: 8.4, width: 0.68, segments: 36, color: 0xF2C068, coreColor: 0xFFF4D6, ticks: 16, markers: 2, markerRadius: 2.35 }
+            })
+            .ribbonRing('secondary_violet_ring', {
+                visibleIn: 'all',
+                material:       { texture: 'epiphy:textures/effect/glow_ribbon.png', blend: 'additive', blur: true },
+                markerMaterial: { texture: 'epiphy:textures/effect/star_flare.png',  blend: 'additive', blur: true },
+                transform:      { axisOffset: 11.1, tiltU: -0.78, tiltV: -0.26, spinSpeed: -0.48, scaleWithAttack: 'uniform' },
+                geometry:       { radius: 11.2, width: 0.62, segments: 40, color: 0x9C7EFF, coreColor: 0xD2EAFF, ticks: 0, markers: 2, markerRadius: 2.35 }
+            })
+            .ribbonHelix('dual_spiral_threads', {
+                visibleIn: 'hand',
+                material:  { texture: 'epiphy:textures/effect/glow_ribbon.png', blend: 'additive', blur: true },
+                transform: { axisOffset: 0.0, spinSpeed: 1.15, scaleWithAttack: 'radial' },
+                geometry:  {
+                    steps: 36, start: 3.0, span: 48.0, radius: 4.5, freq: 0.17, width: 0.52,
+                    strands: [
+                        { phase: 0.0,               color: 0xFFA2CC, coreColor: 0xFFEAF4 },
+                        { phase: 3.141592653589793, color: 0x8CD8FF, coreColor: 0xD8F4FF }
+                    ]
+                }
+            })
+            .spriteCluster('floating_star_flares', {
+                visibleIn: 'hand',
+                material:  { texture: 'epiphy:textures/effect/star_flare.png', blend: 'additive', blur: true },
+                transform: { orbitSpeeds: [0.42, -0.34], bobAmp: 0.9, bobFreq: 1.1, scaleWithAttack: 'radial' },
+                geometry:  {
+                    count: 6, groups: 2, spanStart: 14.0, spanLength: 34.0,
+                    orbitMin: 5.2, orbitMax: 9.4, spriteMin: 1.85, spriteMax: 2.70,
+                    palette: [0xFFD6EC, 0xB8EAFF, 0xFFF2D0, 0xE2C4FF],
+                    alpha: 158
+                }
+            })
+            .build()
+        : []
+
+    var imperiusPresetSpec = {
+        proto: 6,
+        model: {
+            state:            'tool',
+            isGui3d:          false,
+            usesBlockLight:   false,
+            ambientOcclusion: false,
+            renderBase:       true,
+            flushBase:        true
         },
-        rings: [
-            {
-                R: 8.4, tiltU: 0.52, tiltV: 0.16, spd: 0.65, segs: 36,
-                cCore: 0xFFF4D6, cGlow: 0xF2C068, ticks: 16, prisms: 2, wBase: 0.68, uOffset: 0.0
-            },
-            {
-                R: 11.2, tiltU: -0.78, tiltV: -0.26, spd: -0.48, segs: 40,
-                cCore: 0xD2EAFF, cGlow: 0x9C7EFF, ticks: 0, prisms: 2, wBase: 0.62, uOffset: 1.5
-            }
-        ],
-        helix: {
-            enabled: true,
-            steps:   36,
-            uStart:  3.0,
-            uSpan:   48.0,
-            radius:  4.5,
-            freq:    0.17,
-            speed:   1.15,
-            wBase:   0.52,
-            cCore0:  0xFFEAF4,
-            cGlow0:  0xFFA2CC,
-            cCore1:  0xD8F4FF,
-            cGlow1:  0x8CD8FF
+        frame: {
+            pixelCanvas: 64,
+            pixelOrigin: [22.5, 41.5, 0.5],
+            axisDir:     [0.698, 0.716]
         },
-        motes: {
-            enabled:    true,
-            count:      6,
-            trailSteps: 0
-        }
-    })
+        motion: {
+            speed:        1.0,
+            attackExpand: 0.45
+        },
+        lod: {
+            guiScale: 0.86
+        },
+        layers: imperiusLayers
+    }
+
+    if (ITEM3D && typeof ITEM3D.registerPreset === 'function') {
+        ITEM3D.registerPreset(IMPERIUS_3DFX_PRESET_ID, imperiusPresetSpec)
+    } else if (SPEC && typeof SPEC.registerPreset === 'function') {
+        SPEC.registerPreset('item3d', IMPERIUS_3DFX_PRESET_ID, imperiusPresetSpec)
+    }
 
     var imperius3DFXBindingSpec = { preset: IMPERIUS_3DFX_PRESET_ID }
 
-    if (!global.Epiphy3DFXItemBindings || typeof global.Epiphy3DFXItemBindings !== 'object') {
-        global.Epiphy3DFXItemBindings = {}
+    if (!global.EpiphyItem3DBindings || typeof global.EpiphyItem3DBindings !== 'object') {
+        global.EpiphyItem3DBindings = {}
     }
-    global.Epiphy3DFXItemBindings[SWORD_ID] = imperius3DFXBindingSpec
+    global.EpiphyItem3DBindings[SWORD_ID] = imperius3DFXBindingSpec
 
-    // 若通用组件已加载，立即调用 bindBlock / Epiphy3DFX.bindItem 生效
+    // 若通用组件已加载，立即调用 bindBlock / EpiphyItem3DRenderer.bindItem 生效
     if (global.EpiphyAudio && typeof global.EpiphyAudio.bindBlock === 'function') {
         global.EpiphyAudio.bindBlock(BLOCK_ID, audioBindingSpec)
     }
     if (global.ScreenDanmaku && typeof global.ScreenDanmaku.bindBlock === 'function') {
         global.ScreenDanmaku.bindBlock(BLOCK_ID, buildDanmakuSpec, danmakuBindingExtra)
     }
-    if (global.Epiphy3DFXCore && typeof global.Epiphy3DFXCore.bindItem === 'function') {
-        global.Epiphy3DFXCore.bindItem(SWORD_ID, imperius3DFXBindingSpec)
+    if (ITEM3D && typeof ITEM3D.bindItem === 'function') {
+        ITEM3D.bindItem(SWORD_ID, imperius3DFXBindingSpec)
     }
     if (global.Epiphy3DFX && typeof global.Epiphy3DFX.bindItem === 'function') {
         global.Epiphy3DFX.bindItem(SWORD_ID, imperius3DFXBindingSpec)
