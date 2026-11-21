@@ -1,30 +1,39 @@
 // priority: 1050
 // ============================================================================
-//  Epiphy 的通用组件 —— 空间特效渲染核心 (Epiphy3DFXCore v1.0.3 · Startup/ModBus)
+//  Epiphy 的通用组件 —— 空间特效渲染核心 (Epiphy3DFXCore v1.0.4 · Startup/ModBus)
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/startup_scripts/通用组件/Epiphy的-空间特效核心.js
 //  第三方 Mod 可选特例（原则见 README-LLM.md §3.3）：
-//    - CodeChickenLib（可选特例：`IItemRenderer` / `TransformUtils` / `CCShaderInstance`）：
-//      仅因 KubeJS 1.20.1 物品注册未暴露 `Item.initializeClient` 而临时借作物品 3D 渲染入口胶水；
+//    - CodeChickenLib（可选特例：`IItemRenderer` / `TransformUtils` / `CCShaderInstance` / `CCModel` / `CCRenderState` / `ColourAttribute` / `Matrix4` / `Vector3` / `Vertex5`）：
+//      仅因 KubeJS 1.20.1 物品注册未暴露 `Item.initializeClient` 且 Rhino 纯解释器逐顶点写 `VertexConsumer` 耗时高（8~25ms）
+//      而临时借作物品 3D 渲染入口胶水与纯 Java 侧预烘焙网格加速（实测 ~0.54ms，提速 15~46 倍）；
 //      缺失时单次 console.warn 自动 Fail-Soft 退回原版静态物品模型，不影响世界 3D (`surface: 'world'`) 零 CCL 运行；
-//      迁出为独立原生 Mod（Phase 4）时必须彻底移除 CCL 依赖，改用 Forge 原生 `IClientItemExtensions` + `BEWLR` / 自有 Mixin + 原版 `ShaderInstance` 自主实现。
+//      迁出为独立原生 Mod（Phase 4）时必须彻底移除全部 CCL 依赖，改用 Forge 原生 `IClientItemExtensions` + `BEWLR` / 自有 Mixin + 原版 `ShaderInstance` + 原生 Java 网格/VBO 自主实现。
 //  架构定位：
 //    - 视觉表现层【子系统 B】(详见 docs/rendering-subsystem-roadmap.md §1、§2 功能六 & §8.1 P3-2)
 //    - 彻底与【子系统 A】2D 平面渲染器 (Epiphy的-平面渲染器.js) 解耦，专职三维物品渲染管线：
 //      1. 通过 RegisterShadersEvent + CodeChickenLib CCShaderInstance.create（单重载工厂，根治 Rhino
 //         ShaderInstance 构造二义性）注册 100% 自研 GLSL 核心着色器 `epiphy:epiphy_cosmos`；
 //      2. 通过 ModelEvent$ModifyBakingResult 挂载 CodeChickenLib IItemRenderer，在烘焙期一次性预烘焙
-//         扁平顶点网格（星窗面片、3D 星盘陀螺环、度盘刻度与四芒星棱晶、双螺旋缠刃光带及游弋星屑），
-//         热路径直写原版 VertexConsumer（兼容 Embeddium SodiumBufferBuilder 离堆快轨，绕开 CCRenderState 黑盒）；
-//      3. 热路径零每帧反射、零临时矩阵分配、零 ClassFilter 异常：纯 JS 仿射矩阵合成 + 14 参单调用写顶点 + GUI 轻量 LOD。
-//  语法规范：遵循 README-LLM.md §1 强制 Rhino ES5 语法基准。
+//         带法线（`computeNormals()`）且经过有限值校验的 `CCModel`（星窗面片、3D 星盘陀螺环、度盘刻度与四芒星棱晶、
+//         双螺旋缠刃光带及游弋星屑），热路径由纯 Java `CCModel.render` 提交至 `RenderType.entityTranslucentEmissive`
+//         （`brightness=FULL_BRIGHT` / `overlay=NO_OVERLAY`）；
+//      3. 热路径零 JS 逐顶点循环、零每帧矩阵分配、零 ClassFilter 异常，`cosmosType` 单次 flush 防 Hand/GUI uniform 串扰，
+//         配合 GUI 轻量 LOD 稳定保持 < 1ms。
+//  语法规范：遵循 README-LLM.md §1 强制 Rhino ES5 语法基准（严禁读取 Math.PI 等 NativeMath 缺失常量）。
 // ============================================================================
 
 ;(function () {
-    var VERSION    = '1.0.3'
-    var PI         = Math.PI
-    var TWO_PI     = Math.PI * 2.0
-    var DEG_TO_RAD = Math.PI / 180.0
+    var VERSION    = '1.0.4'
+    var E_MATH     = (typeof global !== 'undefined' && global != null && global.EpiphyMath != null)
+        ? global.EpiphyMath
+        : ((typeof global !== 'undefined' && global != null && global.EpiphySpec && global.EpiphySpec.MATH) ? global.EpiphySpec.MATH : null)
+    if (typeof global !== 'undefined' && global != null && global.EpiphySpec && typeof global.EpiphySpec.ensureMathConstants === 'function') {
+        global.EpiphySpec.ensureMathConstants(typeof Math !== 'undefined' ? Math : null)
+    }
+    var PI         = (E_MATH && typeof E_MATH.PI === 'number') ? E_MATH.PI : 3.141592653589793
+    var TWO_PI     = (E_MATH && typeof E_MATH.TWO_PI === 'number') ? E_MATH.TWO_PI : 6.283185307179586
+    var DEG_TO_RAD = (E_MATH && typeof E_MATH.DEG_TO_RAD === 'number') ? E_MATH.DEG_TO_RAD : 0.017453292519943295
     var PX_TO_UNIT = 1.0 / 64.0
     var ENV_STATE  = 'unknown'
     var BACKEND_STATUS = {
@@ -571,176 +580,65 @@
         return quads
     }
 
-    // 将预烘焙 Quad 列表压平为紧凑标量数组（每顶点 9 浮点：[x, y, z, r, g, b, a, u, v]），零每帧对象读取与 GC
-    function bakeQuadsToFlatMesh(quads) {
-        if (!Array.isArray(quads) || quads.length === 0) return null
-        var vCount = quads.length * 4
-        var data = new Array(vCount * 9)
-        var off = 0
+    // 校验预烘焙 Quad 列表所有坐标与 UV 均为有限数，拦截任何 NaN/Infinity 顶点静默流入 GPU
+    function validateQuadsFinite(quads) {
+        var valid = []
+        var invalidCount = 0
+        if (!Array.isArray(quads)) return { valid: valid, invalidCount: 0 }
         for (var i = 0; i < quads.length; i++) {
             var q = quads[i]
-            var rgba = q.rgba
-            var r = ((rgba >>> 24) & 0xFF) / 255.0
-            var g = ((rgba >>> 16) & 0xFF) / 255.0
-            var b = ((rgba >>> 8) & 0xFF) / 255.0
-            var a = (rgba & 0xFF) / 255.0
-            data[off]     = q.p0[0]; data[off + 1] = q.p0[1]; data[off + 2] = q.p0[2]
-            data[off + 3] = r; data[off + 4] = g; data[off + 5] = b; data[off + 6] = a
-            data[off + 7] = q.u0; data[off + 8] = q.v0
-            off += 9
-            data[off]     = q.p1[0]; data[off + 1] = q.p1[1]; data[off + 2] = q.p1[2]
-            data[off + 3] = r; data[off + 4] = g; data[off + 5] = b; data[off + 6] = a
-            data[off + 7] = q.u1; data[off + 8] = q.v1
-            off += 9
-            data[off]     = q.p2[0]; data[off + 1] = q.p2[1]; data[off + 2] = q.p2[2]
-            data[off + 3] = r; data[off + 4] = g; data[off + 5] = b; data[off + 6] = a
-            data[off + 7] = q.u2; data[off + 8] = q.v2
-            off += 9
-            data[off]     = q.p3[0]; data[off + 1] = q.p3[1]; data[off + 2] = q.p3[2]
-            data[off + 3] = r; data[off + 4] = g; data[off + 5] = b; data[off + 6] = a
-            data[off + 7] = q.u3; data[off + 8] = q.v3
-            off += 9
-        }
-        return { data: data, vertexCount: vCount }
-    }
-
-    // 纯 JS 3x4 仿射矩阵合成：out = Pose * T(tx,ty,tz) * Rz(bladeAng) * S(sx,sy,sz) * Rz(tiltV) * Ry(tiltU) * Rx(spin)
-    // Pose 按 JOML Matrix4f 列主序存放于 poseArr[0..11] = [m00,m10,m20,m30, m01,m11,m21,m31, m02,m12,m22,m32]
-    function composeLocalTransform(out, pose, tx, ty, tz, bladeAng, sx, sy, sz, tiltV, tiltU, spin) {
-        // 先算 R = Rz(tiltV) * Ry(tiltU) * Rx(spin)
-        var cz = Math.cos(tiltV), sz0 = Math.sin(tiltV)
-        var cy = Math.cos(tiltU), sy0 = Math.sin(tiltU)
-        var cx = Math.cos(spin),  sx0 = Math.sin(spin)
-        // Ry * Rx
-        var a00 = cy,        a01 = sy0 * sx0,  a02 = sy0 * cx
-        var a10 = 0.0,       a11 = cx,         a12 = -sx0
-        var a20 = -sy0,      a21 = cy * sx0,   a22 = cy * cx
-        // Rz(tiltV) * (Ry * Rx)
-        var b00 = cz * a00 - sz0 * a10, b01 = cz * a01 - sz0 * a11, b02 = cz * a02 - sz0 * a12
-        var b10 = sz0 * a00 + cz * a10, b11 = sz0 * a01 + cz * a11, b12 = sz0 * a02 + cz * a12
-        var b20 = a20,                  b21 = a21,                  b22 = a22
-        // S(sx, sy, sz) * B
-        b00 *= sx; b01 *= sx; b02 *= sx
-        b10 *= sy; b11 *= sy; b12 *= sy
-        b20 *= sz; b21 *= sz; b22 *= sz
-        // Rz(bladeAng) * (S * B)
-        var cb = Math.cos(bladeAng), sb = Math.sin(bladeAng)
-        var l00 = cb * b00 - sb * b10, l01 = cb * b01 - sb * b11, l02 = cb * b02 - sb * b12
-        var l10 = sb * b00 + cb * b10, l11 = sb * b01 + cb * b11, l12 = sb * b02 + cb * b12
-        var l20 = b20,                 l21 = b21,                 l22 = b22
-        // Pose * [L | t]
-        var p00 = pose[0], p10 = pose[1], p20 = pose[2],  p30 = pose[3]
-        var p01 = pose[4], p11 = pose[5], p21 = pose[6],  p31 = pose[7]
-        var p02 = pose[8], p12 = pose[9], p22 = pose[10], p32 = pose[11]
-        out[0]  = p00 * l00 + p10 * l10 + p20 * l20
-        out[1]  = p00 * l01 + p10 * l11 + p20 * l21
-        out[2]  = p00 * l02 + p10 * l12 + p20 * l22
-        out[3]  = p00 * tx  + p10 * ty  + p20 * tz + p30
-        out[4]  = p01 * l00 + p11 * l10 + p21 * l20
-        out[5]  = p01 * l01 + p11 * l11 + p21 * l21
-        out[6]  = p01 * l02 + p11 * l12 + p21 * l22
-        out[7]  = p01 * tx  + p11 * ty  + p21 * tz + p31
-        out[8]  = p02 * l00 + p12 * l10 + p22 * l20
-        out[9]  = p02 * l01 + p12 * l11 + p22 * l21
-        out[10] = p02 * l02 + p12 * l12 + p22 * l22
-        out[11] = p02 * tx  + p12 * ty  + p22 * tz + p32
-    }
-
-    function readPoseMatrixTo(mStack, outPose) {
-        outPose[0] = 1.0; outPose[1] = 0.0; outPose[2] = 0.0;  outPose[3] = 0.0
-        outPose[4] = 0.0; outPose[5] = 1.0; outPose[6] = 0.0;  outPose[7] = 0.0
-        outPose[8] = 0.0; outPose[9] = 0.0; outPose[10] = 1.0; outPose[11] = 0.0
-        if (mStack == null) return false
-        var poseObj = null
-        if (typeof mStack.last === 'function') poseObj = mStack.last()
-        else if (typeof mStack.m_85850_ === 'function') poseObj = mStack.m_85850_()
-        if (poseObj == null) return false
-        var mat = null
-        if (typeof poseObj.pose === 'function') mat = poseObj.pose()
-        else if (typeof poseObj.m_252922_ === 'function') mat = poseObj.m_252922_()
-        if (mat == null) return false
-        if (typeof mat.m00 === 'function') {
-            outPose[0]  = Number(mat.m00()); outPose[1]  = Number(mat.m10()); outPose[2]  = Number(mat.m20()); outPose[3]  = Number(mat.m30())
-            outPose[4]  = Number(mat.m01()); outPose[5]  = Number(mat.m11()); outPose[6]  = Number(mat.m21()); outPose[7]  = Number(mat.m31())
-            outPose[8]  = Number(mat.m02()); outPose[9]  = Number(mat.m12()); outPose[10] = Number(mat.m22()); outPose[11] = Number(mat.m32())
-            return true
-        }
-        return false
-    }
-
-    function emitPosColTexMesh(vc, mesh, mat) {
-        if (vc == null || mesh == null) return 0
-        var fnV   = resolveMcMethod(vc, 'vertex', 'm_5483_')
-        var fnC   = resolveMcMethod(vc, 'color', 'm_6122_')
-        var fnU   = resolveMcMethod(vc, 'uv', 'm_7421_')
-        var fnEnd = resolveMcMethod(vc, 'endVertex', 'm_5752_')
-        if (fnV == null || fnC == null || fnU == null || fnEnd == null) return 0
-        var d = mesh.data
-        var len = d.length
-        var m00 = mat[0], m10 = mat[1], m20 = mat[2],  m30 = mat[3]
-        var m01 = mat[4], m11 = mat[5], m21 = mat[6],  m31 = mat[7]
-        var m02 = mat[8], m12 = mat[9], m22 = mat[10], m32 = mat[11]
-        for (var i = 0; i < len; i += 9) {
-            var x = d[i], y = d[i + 1], z = d[i + 2]
-            var wx = m00 * x + m10 * y + m20 * z + m30
-            var wy = m01 * x + m11 * y + m21 * z + m31
-            var wz = m02 * x + m12 * y + m22 * z + m32
-            fnV.call(vc, wx, wy, wz)
-            fnC.call(vc, Math.round(d[i + 3] * 255), Math.round(d[i + 4] * 255), Math.round(d[i + 5] * 255), Math.round(d[i + 6] * 255))
-            fnU.call(vc, d[i + 7], d[i + 8])
-            fnEnd.call(vc)
-        }
-        return mesh.vertexCount
-    }
-
-    // 直写 NEW_ENTITY 顶点：优先单调用 14 参 vertex()（直命中 Embeddium SodiumBufferBuilder 离堆快轨），缺失时回退链式调用
-    function emitNewEntityMesh(vc, mesh, mat, overlay, light) {
-        if (vc == null || mesh == null) return 0
-        var d = mesh.data
-        var len = d.length
-        var m00 = mat[0], m10 = mat[1], m20 = mat[2],  m30 = mat[3]
-        var m01 = mat[4], m11 = mat[5], m21 = mat[6],  m31 = mat[7]
-        var m02 = mat[8], m12 = mat[9], m22 = mat[10], m32 = mat[11]
-        var fnFull = resolveMcMethod(vc, 'vertex', 'm_5954_')
-        if (fnFull != null && vc._preferChained !== true) {
-            try {
-                for (var i = 0; i < len; i += 9) {
-                    var x = d[i], y = d[i + 1], z = d[i + 2]
-                    fnFull.call(
-                        vc,
-                        m00 * x + m10 * y + m20 * z + m30,
-                        m01 * x + m11 * y + m21 * z + m31,
-                        m02 * x + m12 * y + m22 * z + m32,
-                        d[i + 3], d[i + 4], d[i + 5], d[i + 6],
-                        d[i + 7], d[i + 8],
-                        overlay, light,
-                        0.0, 1.0, 0.0
-                    )
-                }
-                return mesh.vertexCount
-            } catch (eFull) {
-                // 回退至逐字段链式调用（如 mock VertexConsumer 仅实现 3 参 vertex）
+            if (q == null || !q.p0 || !q.p1 || !q.p2 || !q.p3) {
+                invalidCount++
+                continue
+            }
+            if (
+                isFinite(q.p0[0]) && isFinite(q.p0[1]) && isFinite(q.p0[2]) &&
+                isFinite(q.p1[0]) && isFinite(q.p1[1]) && isFinite(q.p1[2]) &&
+                isFinite(q.p2[0]) && isFinite(q.p2[1]) && isFinite(q.p2[2]) &&
+                isFinite(q.p3[0]) && isFinite(q.p3[1]) && isFinite(q.p3[2]) &&
+                isFinite(q.u0) && isFinite(q.v0) &&
+                isFinite(q.u1) && isFinite(q.v1) &&
+                isFinite(q.u2) && isFinite(q.v2) &&
+                isFinite(q.u3) && isFinite(q.v3)
+            ) {
+                valid.push(q)
+            } else {
+                invalidCount++
             }
         }
-        var fnV   = resolveMcMethod(vc, 'vertex', 'm_5483_')
-        var fnC   = resolveMcMethod(vc, 'color', 'm_6122_')
-        var fnU   = resolveMcMethod(vc, 'uv', 'm_7421_')
-        var fnOv  = resolveMcMethod(vc, 'overlayCoords', 'm_86008_')
-        var fnLt  = resolveMcMethod(vc, 'uv2', 'm_85969_')
-        var fnN   = resolveMcMethod(vc, 'normal', 'm_5601_')
-        var fnEnd = resolveMcMethod(vc, 'endVertex', 'm_5752_')
-        if (fnV == null || fnC == null || fnU == null || fnEnd == null) return 0
-        for (var j = 0; j < len; j += 9) {
-            var lx = d[j], ly = d[j + 1], lz = d[j + 2]
-            fnV.call(vc, m00 * lx + m10 * ly + m20 * lz + m30, m01 * lx + m11 * ly + m21 * lz + m31, m02 * lx + m12 * ly + m22 * lz + m32)
-            fnC.call(vc, Math.round(d[j + 3] * 255), Math.round(d[j + 4] * 255), Math.round(d[j + 5] * 255), Math.round(d[j + 6] * 255))
-            fnU.call(vc, d[j + 7], d[j + 8])
-            if (fnOv != null) fnOv.call(vc, overlay)
-            if (fnLt != null) fnLt.call(vc, light)
-            if (fnN != null) fnN.call(vc, 0.0, 1.0, 0.0)
-            fnEnd.call(vc)
+        return { valid: valid, invalidCount: invalidCount }
+    }
+
+    // 烘焙期将 Quad 列表一次性编译为 CodeChickenLib CCModel（强制计算法线以兼容 NEW_ENTITY 格式）
+    function bakeQuadsToCCModel(quads, $CCModel, $Vertex5, $ColourAttribute, tag) {
+        if (!Array.isArray(quads) || quads.length === 0) return null
+        var check = validateQuadsFinite(quads)
+        if (check.invalidCount > 0) {
+            try {
+                console.error('[Epiphy3DFXCore] 烘焙期检测到 ' + check.invalidCount + ' 个含非有限数 (NaN/Infinity) 的非法面片已丢弃' + (tag ? (' [' + tag + ']') : ''))
+            } catch (eNan) { }
         }
-        return mesh.vertexCount
+        var validQuads = check.valid
+        if (validQuads.length === 0) return null
+        var vCount = validQuads.length * 4
+        var model = $CCModel.quadModel(vCount)
+        var colours = model.getOrAllocate($ColourAttribute.attributeKey)
+        var idx = 0
+        for (var i = 0; i < validQuads.length; i++) {
+            var q = validQuads[i]
+            model.verts[idx]     = new $Vertex5(q.p0[0], q.p0[1], q.p0[2], q.u0, q.v0)
+            colours[idx]         = q.rgba
+            model.verts[idx + 1] = new $Vertex5(q.p1[0], q.p1[1], q.p1[2], q.u1, q.v1)
+            colours[idx + 1]     = q.rgba
+            model.verts[idx + 2] = new $Vertex5(q.p2[0], q.p2[1], q.p2[2], q.u2, q.v2)
+            colours[idx + 2]     = q.rgba
+            model.verts[idx + 3] = new $Vertex5(q.p3[0], q.p3[1], q.p3[2], q.u3, q.v3)
+            colours[idx + 3]     = q.rgba
+            idx += 4
+        }
+        // NEW_ENTITY (RenderType.entityTranslucentEmissive) 绑定时 NormalAttribute 强制要求存在法线属性
+        model.computeNormals()
+        return model
     }
 
     // ======================================================================== 4. 绑定管理 API
@@ -823,7 +721,14 @@
         BACKEND_STATUS.cclChecked = true
         var reqClasses = [
             'codechicken.lib.render.shader.CCShaderInstance',
-            'codechicken.lib.render.item.IItemRenderer'
+            'codechicken.lib.render.item.IItemRenderer',
+            'codechicken.lib.util.TransformUtils',
+            'codechicken.lib.render.CCModel',
+            'codechicken.lib.render.CCRenderState',
+            'codechicken.lib.render.pipeline.attribute.ColourAttribute',
+            'codechicken.lib.vec.Matrix4',
+            'codechicken.lib.vec.Vector3',
+            'codechicken.lib.vec.Vertex5'
         ]
         for (var ci = 0; ci < reqClasses.length; ci++) {
             var clsName = reqClasses[ci]
@@ -911,6 +816,12 @@
                     var $ResourceLocation      = Java.loadClass('net.minecraft.resources.ResourceLocation')
                     var $IItemRenderer         = Java.loadClass('codechicken.lib.render.item.IItemRenderer')
                     var $TransformUtils        = Java.loadClass('codechicken.lib.util.TransformUtils')
+                    var $CCModel               = Java.loadClass('codechicken.lib.render.CCModel')
+                    var $CCRenderState         = Java.loadClass('codechicken.lib.render.CCRenderState')
+                    var $ColourAttribute       = Java.loadClass('codechicken.lib.render.pipeline.attribute.ColourAttribute')
+                    var $Matrix4               = Java.loadClass('codechicken.lib.vec.Matrix4')
+                    var $Vector3               = Java.loadClass('codechicken.lib.vec.Vector3')
+                    var $Vertex5               = Java.loadClass('codechicken.lib.vec.Vertex5')
                     var $Minecraft             = Java.loadClass('net.minecraft.client.Minecraft')
                     var $GameRenderer          = Java.loadClass('net.minecraft.client.renderer.GameRenderer')
                     var $ItemRenderer          = Java.loadClass('net.minecraft.client.renderer.entity.ItemRenderer')
@@ -942,7 +853,7 @@
                     var fnGetFoilBufDirect = resolveMcMethod($ItemRenderer, 'getFoilBufferDirect', 'm_115222_')
 
                     // 共享 3D 环绕特效 RenderType：优先直接使用原版纯 Java entityTranslucentEmissive(white_pixel, false)
-                    // （与混沌晶体一致的 NEW_ENTITY 顶点格式 + 纯自发光 + 零每帧 Rhino Supplier 代理跨边界开销）
+                    // （NEW_ENTITY 顶点格式 + NO_CULL + COLOR_WRITE + 纯自发光 + 半透明排序 + 零每帧 Rhino Supplier 代理开销）
                     var whitePixelLoc = new $ResourceLocation('epiphy', 'textures/effect/white_pixel.png')
                     var vfxSurroundType = null
                     try {
@@ -991,7 +902,9 @@
                         }
                     }
 
-                    var cosmosOverlayMesh = bakeQuadsToFlatMesh(buildCosmosOverlayQuads())
+                    var cosmosOverlayQuads = buildCosmosOverlayQuads()
+                    var cosmosOverlayVerts = cosmosOverlayQuads.length * 4
+                    var cosmosOverlayModel = bakeQuadsToCCModel(cosmosOverlayQuads, $CCModel, $Vertex5, $ColourAttribute, 'cosmos_overlay')
                     var modelsMap = event.getModels()
                     var fnFalse = function () { return false }
                     var bakedThisPass = 0
@@ -1047,17 +960,20 @@
 
                             var totalSurroundVerts = 0
 
-                            // 一次性预烘焙 3D 星盘陀螺环（紧凑扁平标量网格，零 CCModel / CCRenderState 黑盒）
+                            // 一次性预烘焙 3D 星盘陀螺环（纯 Java CCModel，热路径 0 JS 顶点循环）
                             var bakedRings = []
                             var ringsSpec = Array.isArray(cfg.rings) ? cfg.rings : []
                             for (var ri = 0; ri < ringsSpec.length; ri++) {
                                 var rCfg = ringsSpec[ri]
-                                var rMesh = bakeQuadsToFlatMesh(buildAstrolabeRingQuads(rCfg))
-                                if (rMesh != null) {
-                                    totalSurroundVerts += rMesh.vertexCount
+                                var rQuads = buildAstrolabeRingQuads(rCfg)
+                                var rModel = bakeQuadsToCCModel(rQuads, $CCModel, $Vertex5, $ColourAttribute, itemId + ':ring' + ri)
+                                if (rModel != null) {
+                                    var rVerts = rModel.verts ? rModel.verts.length : (rQuads.length * 4)
+                                    totalSurroundVerts += rVerts
                                     var rU = (ringBaseU + Number(rCfg.uOffset || 0.0)) * PX_TO_UNIT
                                     bakedRings.push({
-                                        mesh:  rMesh,
+                                        model: rModel,
+                                        verts: rVerts,
                                         cx:    guardMX + uxModel * rU,
                                         cy:    guardMY + uyModel * rU,
                                         tiltU: Number(rCfg.tiltU || 0.0),
@@ -1067,8 +983,9 @@
                                 }
                             }
 
-                            // 一次性预烘焙双螺旋缠刃光带（2 股合并为单个扁平网格）
-                            var bakedHelixMesh = null
+                            // 一次性预烘焙双螺旋缠刃光带（2 股合并为单个 CCModel，单次 Java 提交）
+                            var bakedHelixModel = null
+                            var bakedHelixVerts = 0
                             var bakedHelixStrands = 0
                             var helixSpd = Number(cfg.helix && cfg.helix.speed != null ? cfg.helix.speed : 2.3)
                             if (cfg.helix && cfg.helix.enabled !== false) {
@@ -1080,9 +997,10 @@
                                         for (var hqi = 0; hqi < hq.length; hqi++) combinedHelixQuads.push(hq[hqi])
                                     }
                                 }
-                                bakedHelixMesh = bakeQuadsToFlatMesh(combinedHelixQuads)
-                                if (bakedHelixMesh != null) {
-                                    totalSurroundVerts += bakedHelixMesh.vertexCount
+                                bakedHelixModel = bakeQuadsToCCModel(combinedHelixQuads, $CCModel, $Vertex5, $ColourAttribute, itemId + ':helix')
+                                if (bakedHelixModel != null) {
+                                    bakedHelixVerts = bakedHelixModel.verts ? bakedHelixModel.verts.length : (combinedHelixQuads.length * 4)
+                                    totalSurroundVerts += bakedHelixVerts
                                 }
                             }
 
@@ -1091,21 +1009,27 @@
                             var moteSpds = [1.18, -0.86]
                             if (cfg.motes && cfg.motes.enabled !== false) {
                                 for (var mg = 0; mg < 2; mg++) {
-                                    var mMesh = bakeQuadsToFlatMesh(buildStarMotesQuads(cfg.motes, mg, 2))
-                                    if (mMesh != null) {
-                                        totalSurroundVerts += mMesh.vertexCount
+                                    var mQuads = buildStarMotesQuads(cfg.motes, mg, 2)
+                                    var mModel = bakeQuadsToCCModel(mQuads, $CCModel, $Vertex5, $ColourAttribute, itemId + ':motes' + mg)
+                                    if (mModel != null) {
+                                        var mVerts = mModel.verts ? mModel.verts.length : (mQuads.length * 4)
+                                        totalSurroundVerts += mVerts
                                         bakedMoteGroups.push({
-                                            mesh:  mMesh,
+                                            model: mModel,
+                                            verts: mVerts,
                                             spd:   moteSpds[mg],
-                                            phase: mg * 3.14159
+                                            phase: mg * PI
                                         })
                                     }
                                 }
                             }
 
-                            // 热路径复用的纯 JS 3x4 矩阵缓冲与方法句柄缓存（零 GC 分配、零每帧反射与缺键探测）
-                            var poseBuf = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]
-                            var workBuf = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]
+                            // 热路径复用的 Matrix4 与轴向量（零每帧对象分配、零 JS 逐顶点循环）
+                            var baseMat     = new $Matrix4()
+                            var workMat     = new $Matrix4()
+                            var vecX        = $Vector3.X_POS
+                            var vecY        = $Vector3.Y_POS
+                            var vecZ        = $Vector3.Z_POS
                             var speedMul    = Number(cfg.speed != null ? cfg.speed : 1.2)
                             var slashExpand = Number(cfg.slashExpand != null ? cfg.slashExpand : 0.45)
 
@@ -1114,8 +1038,6 @@
                             var fnRenderLists     = null
                             var fnGetFrameTime    = null
                             var fnHasFoil         = null
-                            var fnGetBuffer       = null
-                            var cachedGetterForBuf = null
                             var playerFieldKey    = null
                             var fnGetViewYRot     = null
                             var fnGetViewXRot     = null
@@ -1144,10 +1066,6 @@
                                     if (fnHasFoil == null && stack != null) {
                                         fnHasFoil = resolveMcMethod(stack, 'hasFoil', 'm_41790_')
                                     }
-                                    if (getter !== cachedGetterForBuf && getter != null) {
-                                        cachedGetterForBuf = getter
-                                        fnGetBuffer = resolveMcMethod(getter, 'getBuffer', 'm_6299_')
-                                    }
 
                                     var isGui = (displayContext === guiContextEnum)
                                     var didOrig = false
@@ -1155,13 +1073,12 @@
                                     var didSurround = false
                                     var drawnVerts = 0
                                     var origUs = 0, flushUs = 0, cosmosUs = 0, surroundUs = 0
-                                    var vcCosCls = 'none', vcVfxCls = 'none'
 
                                     RUNTIME_STATS.renderCalls++
                                     if (isGui) RUNTIME_STATS.guiCalls++
                                     else RUNTIME_STATS.handCalls++
 
-                                    // 1. 绘制原版 64x64 立体挤出剑身模型（含附魔光效）
+                                    // 1. 绘制原版 64x64 立体挤出剑身模型（含附魔光效）并刷新写入深度缓冲
                                     if (cachedItemRen != null && fnRenderLists != null && originalModel != null) {
                                         try {
                                             var tOrig0 = MONO_CLOCK.nowMs()
@@ -1180,9 +1097,10 @@
                                         }
                                     }
 
-                                    if (!CONFIG.enabled || fnGetBuffer == null) return
+                                    if (!CONFIG.enabled || getter == null) return
 
                                     var t = nowSeconds() * speedMul
+                                    if (!isFinite(t)) t = 0.0
                                     var yawRad = 0.0
                                     var pitchRad = 0.0
                                     var slashScale = 1.0
@@ -1197,36 +1115,43 @@
                                                 fnGetAttackAnim = resolveMcMethod(player, 'getAttackAnim', 'm_21324_')
                                             }
                                             var partial = fnGetFrameTime != null ? Number(fnGetFrameTime.call(cachedMc) || 0.0) : 0.0
-                                            if (fnGetViewYRot != null) yawRad   = Number(fnGetViewYRot.call(player, partial) || 0.0) * DEG_TO_RAD
-                                            if (fnGetViewXRot != null) pitchRad = Number(fnGetViewXRot.call(player, partial) || 0.0) * DEG_TO_RAD
+                                            if (fnGetViewYRot != null) {
+                                                var yv = Number(fnGetViewYRot.call(player, partial) || 0.0) * DEG_TO_RAD
+                                                if (isFinite(yv)) yawRad = yv
+                                            }
+                                            if (fnGetViewXRot != null) {
+                                                var pv = Number(fnGetViewXRot.call(player, partial) || 0.0) * DEG_TO_RAD
+                                                if (isFinite(pv)) pitchRad = pv
+                                            }
                                             if (fnGetAttackAnim != null) {
                                                 var swing = Number(fnGetAttackAnim.call(player, partial) || 0.0)
                                                 if (swing > 0.001 && swing < 0.999) {
-                                                    slashScale = 1.0 + Math.sin(swing * PI) * slashExpand
+                                                    var ss = 1.0 + Math.sin(swing * PI) * slashExpand
+                                                    if (isFinite(ss)) slashScale = ss
                                                 }
                                             }
                                         }
                                     }
 
-                                    var hasPose = readPoseMatrixTo(mStack, poseBuf)
+                                    var ccrs = $CCRenderState.instance()
+                                    baseMat.set(mStack)
 
-                                    // 2. GPU 核心着色器深空星空窗口（仅 2 quad = 8 顶点，直写 VertexConsumer，绕开 CCRenderState）
-                                    if (CONFIG.cosmosEnabled && cosmosType != null && cosmosOverlayMesh != null && COSMOS_SHADER != null) {
+                                    // 2. GPU 核心着色器深空星空窗口（仅 2 quad = 8 顶点；绘制后立即 flush 锁定 uniform 防 Hand/GUI 串扰）
+                                    if (CONFIG.cosmosEnabled && cosmosType != null && cosmosOverlayModel != null && COSMOS_SHADER != null) {
                                         try {
                                             var tCos0 = MONO_CLOCK.nowMs()
                                             if (SHADER_UNIFORMS.fnTime != null) SHADER_UNIFORMS.fnTime.call(SHADER_UNIFORMS.time, t)
                                             if (SHADER_UNIFORMS.fnYawPitch != null) SHADER_UNIFORMS.fnYawPitch.call(SHADER_UNIFORMS.yawPitch, yawRad, pitchRad)
                                             if (SHADER_UNIFORMS.fnGuiMode != null) SHADER_UNIFORMS.fnGuiMode.call(SHADER_UNIFORMS.guiMode, isGui ? 1.0 : 0.0)
-                                            var vcCos = fnGetBuffer.call(getter, cosmosType)
-                                            if (vcCos != null) {
-                                                if (typeof vcCos.getClass === 'function') vcCosCls = String(vcCos.getClass().getSimpleName())
-                                                var nCos = emitPosColTexMesh(vcCos, cosmosOverlayMesh, poseBuf)
-                                                if (nCos > 0) {
-                                                    didCosmos = true
-                                                    drawnVerts += nCos
-                                                    RUNTIME_STATS.cosmosDraws++
-                                                }
-                                            }
+                                            ccrs.reset()
+                                            ccrs.computeLighting = false
+                                            ccrs.baseColour = -1
+                                            ccrs.bind(cosmosType, getter)
+                                            cosmosOverlayModel.render(ccrs, baseMat)
+                                            flushRenderType(getter, cosmosType)
+                                            didCosmos = true
+                                            drawnVerts += cosmosOverlayVerts
+                                            RUNTIME_STATS.cosmosDraws++
                                             cosmosUs = Math.max(0, Math.round((MONO_CLOCK.nowMs() - tCos0) * 1000.0))
                                         } catch (eCos) {
                                             logErrorThrottled('renderCosmos_' + itemId, eCos)
@@ -1234,45 +1159,65 @@
                                     }
 
                                     // 3. 预烘焙 3D 环绕特效（星盘陀螺环 + 双螺旋光带 + 游弋星屑）
-                                    //    直写原版 NEW_ENTITY + entityTranslucentEmissive VertexConsumer（14 参离堆快轨，零 CCModel/CCRenderState）
+                                    //    纯 Java CCModel.render 提交至 entityTranslucentEmissive（全亮无红闪，实测 ~0.54ms）
                                     if (CONFIG.surroundEnabled && vfxSurroundType != null) {
                                         try {
                                             var tSur0 = MONO_CLOCK.nowMs()
                                             var radScale = isGui ? CONFIG.guiSurroundScale : slashScale
                                             var ringLim  = isGui ? Math.min(bakedRings.length, CONFIG.guiRingLimit) : bakedRings.length
-                                            var drawHelix = (!isGui || CONFIG.guiRenderHelix) && bakedHelixMesh != null
+                                            var drawHelix = (!isGui || CONFIG.guiRenderHelix) && bakedHelixModel != null
                                             var drawMotes = (!isGui || CONFIG.guiRenderMotes) && bakedMoteGroups.length > 0
 
                                             if (ringLim > 0 || drawHelix || drawMotes) {
-                                                var vcVfx = fnGetBuffer.call(getter, vfxSurroundType)
-                                                if (vcVfx != null) {
-                                                    if (typeof vcVfx.getClass === 'function') vcVfxCls = String(vcVfx.getClass().getSimpleName())
-                                                    var surVerts = 0
-                                                    for (var rIdx = 0; rIdx < ringLim; rIdx++) {
-                                                        var br = bakedRings[rIdx]
-                                                        composeLocalTransform(workBuf, poseBuf, br.cx, br.cy, 0.5, bladeAng, radScale, radScale, radScale, br.tiltV, br.tiltU, t * br.spd)
-                                                        surVerts += emitNewEntityMesh(vcVfx, br.mesh, workBuf, 655360, 15728880)
-                                                    }
+                                                var surVerts = 0
+                                                ccrs.reset()
+                                                ccrs.computeLighting = false
+                                                ccrs.baseColour = -1
+                                                ccrs.brightness = 15728880
+                                                ccrs.overlay = 655360
+                                                ccrs.bind(vfxSurroundType, getter)
 
-                                                    if (drawHelix) {
-                                                        composeLocalTransform(workBuf, poseBuf, guardMX, guardMY, 0.5, bladeAng, 1.0, radScale, radScale, 0.0, 0.0, t * helixSpd)
-                                                        surVerts += emitNewEntityMesh(vcVfx, bakedHelixMesh, workBuf, 655360, 15728880)
-                                                    }
+                                                for (var rIdx = 0; rIdx < ringLim; rIdx++) {
+                                                    var br = bakedRings[rIdx]
+                                                    workMat.set(baseMat)
+                                                    workMat.translate(br.cx, br.cy, 0.5)
+                                                    workMat.rotate(bladeAng, vecZ)
+                                                    if (radScale !== 1.0) workMat.scale(radScale)
+                                                    if (br.tiltV !== 0.0) workMat.rotate(br.tiltV, vecZ)
+                                                    if (br.tiltU !== 0.0) workMat.rotate(br.tiltU, vecY)
+                                                    workMat.rotate(t * br.spd, vecX)
+                                                    br.model.render(ccrs, workMat)
+                                                    surVerts += br.verts
+                                                }
 
-                                                    if (drawMotes) {
-                                                        for (var mIdx = 0; mIdx < bakedMoteGroups.length; mIdx++) {
-                                                            var bm = bakedMoteGroups[mIdx]
-                                                            var bobU = Math.sin(t * 1.4 + bm.phase) * 1.2 * PX_TO_UNIT
-                                                            composeLocalTransform(workBuf, poseBuf, guardMX + uxModel * bobU, guardMY + uyModel * bobU, 0.5, bladeAng, 1.0, radScale, radScale, 0.0, 0.0, t * bm.spd)
-                                                            surVerts += emitNewEntityMesh(vcVfx, bm.mesh, workBuf, 655360, 15728880)
-                                                        }
-                                                    }
+                                                if (drawHelix) {
+                                                    workMat.set(baseMat)
+                                                    workMat.translate(guardMX, guardMY, 0.5)
+                                                    workMat.rotate(bladeAng, vecZ)
+                                                    if (radScale !== 1.0) workMat.scale(1.0, radScale, radScale)
+                                                    workMat.rotate(t * helixSpd, vecX)
+                                                    bakedHelixModel.render(ccrs, workMat)
+                                                    surVerts += bakedHelixVerts
+                                                }
 
-                                                    if (surVerts > 0) {
-                                                        drawnVerts += surVerts
-                                                        didSurround = true
-                                                        RUNTIME_STATS.surroundDraws++
+                                                if (drawMotes) {
+                                                    for (var mIdx = 0; mIdx < bakedMoteGroups.length; mIdx++) {
+                                                        var bm = bakedMoteGroups[mIdx]
+                                                        var bobU = Math.sin(t * 1.4 + bm.phase) * 1.2 * PX_TO_UNIT
+                                                        workMat.set(baseMat)
+                                                        workMat.translate(guardMX + uxModel * bobU, guardMY + uyModel * bobU, 0.5)
+                                                        workMat.rotate(bladeAng, vecZ)
+                                                        if (radScale !== 1.0) workMat.scale(1.0, radScale, radScale)
+                                                        workMat.rotate(t * bm.spd, vecX)
+                                                        bm.model.render(ccrs, workMat)
+                                                        surVerts += bm.verts
                                                     }
+                                                }
+
+                                                if (surVerts > 0) {
+                                                    drawnVerts += surVerts
+                                                    didSurround = true
+                                                    RUNTIME_STATS.surroundDraws++
                                                 }
                                             }
                                             surroundUs = Math.max(0, Math.round((MONO_CLOCK.nowMs() - tSur0) * 1000.0))
@@ -1294,10 +1239,6 @@
                                             console.info('[Epiphy3DFXCore] 首次渲染命中 ' + itemId +
                                                 ' (ctx=' + String(displayContext) +
                                                 ', isGui=' + isGui +
-                                                ', hasPose=' + hasPose +
-                                                ', p=[' + poseBuf[3].toFixed(2) + ',' + poseBuf[7].toFixed(2) + ',' + poseBuf[11].toFixed(2) + ']' +
-                                                ', vcCos=' + vcCosCls +
-                                                ', vcVfx=' + vcVfxCls +
                                                 ', orig=' + didOrig + '(' + origUs + 'us)' +
                                                 ', flush=' + flushUs + 'us' +
                                                 ', cosmos=' + didCosmos + '(' + cosmosUs + 'us)' +
@@ -1425,8 +1366,7 @@
             buildAstrolabeRingQuads: buildAstrolabeRingQuads,
             buildHelixRibbonQuads:   buildHelixRibbonQuads,
             buildStarMotesQuads:     buildStarMotesQuads,
-            bakeQuadsToFlatMesh:     bakeQuadsToFlatMesh,
-            composeLocalTransform:   composeLocalTransform
+            validateQuadsFinite:     validateQuadsFinite
         }
     }
 

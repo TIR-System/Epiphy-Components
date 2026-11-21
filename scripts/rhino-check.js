@@ -119,6 +119,17 @@ function parseAllWithAcorn(files) {
 }
 
 // 阶段 1：始终执行的 kube-mods/rhino 语义偏移与高危语法守卫（AST 驱动，含 Unicode/中文标识符）
+var RHINO_BROKEN_MATH_CONSTS = {
+    E:       true,
+    PI:      true,
+    LN2:     true,
+    LN10:    true,
+    LOG2E:   true,
+    LOG10E:  true,
+    SQRT1_2: true,
+    SQRT2:   true
+};
+
 function runSemanticDriftChecks(parsedList) {
     var errors = [];
     for (var i = 0; i < parsedList.length; i++) {
@@ -134,6 +145,16 @@ function runSemanticDriftChecks(parsedList) {
                 errors.push(rel + ':' + line + ' [nullish-assign (??=)] kube-mods/rhino 不支持/存在数值栈风险，请改用显式 != null 判断');
             } else if (node.type === 'Literal' && node.regex != null && /[uy]/.test(String(node.regex.flags || ''))) {
                 errors.push(rel + ':' + line + ' [regex /u or /y flag] kube-mods/rhino 仅支持 /g /i /m 正则标志');
+            } else if (node.type === 'MemberExpression' && node.object && node.object.type === 'Identifier' && node.object.name === 'Math') {
+                var mathProp = null;
+                if (!node.computed && node.property && node.property.type === 'Identifier') {
+                    mathProp = node.property.name;
+                } else if (node.computed && node.property && node.property.type === 'Literal' && typeof node.property.value === 'string') {
+                    mathProp = node.property.value;
+                }
+                if (mathProp != null && Object.prototype.hasOwnProperty.call(RHINO_BROKEN_MATH_CONSTS, mathProp)) {
+                    errors.push(rel + ':' + line + ' [rhino-math-const (Math.' + mathProp + ')] kube-mods/rhino NativeMath.findPrototypeId 遗漏了 E/PI/LN2/LN10/LOG2E/LOG10E/SQRT1_2/SQRT2（运行期返回 undefined），请改用 global.EpiphyMath.' + mathProp + ' 或精确数值字面量');
+                }
             }
         });
     }

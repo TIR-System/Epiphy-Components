@@ -1,6 +1,6 @@
 // priority: 1050
 // ============================================================================
-//  通用方块追踪与区块地形批处理组件 (EpiphyBlockTracker / EpiphyChunkEngine v2.5.0)
+//  通用方块追踪与区块地形批处理组件 (EpiphyBlockTracker / EpiphyChunkEngine v2.5.1)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/server_scripts/通用组件/Epiphy的-方块与区块组件.js
@@ -20,13 +20,15 @@
 // ============================================================================
 
 ;(function () {
-    var VERSION         = '2.5.0'
+    var VERSION         = '2.5.1'
     var PERSIST_KEY     = 'epiphy_tracked_blocks_v2'
     // 注意：trackedBlocks 记录物理方块坐标状态，须随存档备份还原同步回滚，因此刻意保存在 saves/<world>/ 而非抗回滚的 epiphy-data/（见 README-LLM.md §5.1）
     var WORLD_FILE_NAME = 'kubejs_epiphy_tracked_blocks.json'
     var FALLBACK_DIR    = 'kubejs/config/epiphy_tracked_blocks'
 
-    var SPEC = (typeof global !== 'undefined' && global.EpiphySpec != null) ? global.EpiphySpec : null
+    var SPEC   = (typeof global !== 'undefined' && global.EpiphySpec != null) ? global.EpiphySpec : null
+    var E_MATH = (typeof global !== 'undefined' && global.EpiphyMath != null) ? global.EpiphyMath : (SPEC && SPEC.MATH ? SPEC.MATH : null)
+    var TWO_PI = (E_MATH && typeof E_MATH.TWO_PI === 'number') ? E_MATH.TWO_PI : 6.283185307179586
     var BASE = (typeof global !== 'undefined') ? (global.EpiphyServerCore || global.EpiphyServerBase) : null
     if (!BASE) {
         throw new Error('[EpiphyBlockTracker] 缺少硬依赖 global.EpiphyServerBase，请确认 server_scripts/通用组件/Epiphy的-服务端核心.js 已加载')
@@ -1445,12 +1447,12 @@
         var width         = (options.width != null && isFinite(Number(options.width))) ? Math.max(1, Math.floor(Number(options.width))) : 2
         var thickness     = (options.thickness != null && isFinite(Number(options.thickness))) ? Math.max(1, Math.floor(Number(options.thickness))) : 3
         var onDone        = (typeof options.onDone === 'function') ? options.onDone : null
-        var circumference = Math.max(1, Math.floor(2 * Math.PI * radius))
+        var circumference = Math.max(1, Math.floor(TWO_PI * radius))
         var seenCols      = {}
         var columns       = []
 
         for (var step = 0; step < circumference; step++) {
-            var angle = (step / circumference) * Math.PI * 2
+            var angle = (step / circumference) * TWO_PI
             var cosA  = Math.cos(angle)
             var sinA  = Math.sin(angle)
             for (var w = 0; w < width; w++) {

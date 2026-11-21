@@ -572,7 +572,7 @@ module.exports = function registerSuite(test, h) {
             var rCnLet = runCheckerOnSnippet('cn_let.js', 'for (let 索引 = 0; 索引 < 3; 索引++) {}\n')
             assertRejected(rCnLet, 'for (let 索引 ...)', /let\/const|RHINO FAIL|语义漂移/i)
 
-            // 2. Documented kube-mods/rhino SyntaxErrors MUST fail in local AST mode
+            // 2. Documented kube-mods/rhino SyntaxErrors & NativeMath missing constants MUST fail in local AST mode
             var badSnippets = [
                 ['shorthand.js',     'var x = 1; var o = { x };\n',             /RHINO|shorthand|简写/i],
                 ['computed.js',      'var k = "a"; var o = { [k]: 1 };\n',      /RHINO|computed|计算属性/i],
@@ -581,7 +581,11 @@ module.exports = function registerSuite(test, h) {
                 ['spread.js',        'var a = [1, 2]; var b = [...a];\n',       /RHINO|展开|Spread/i],
                 ['new_target.js',    'function F() { return new.target; }\n',   /RHINO|new\.target|MetaProperty/i],
                 ['nullish.js',       'var v = null ?? 9;\n',                    /RHINO|\?\?|空值合并/i],
-                ['regex_u.js',       'var r = /abc/u;\n',                       /RHINO|正则|\/u/i]
+                ['regex_u.js',       'var r = /abc/u;\n',                       /RHINO|正则|\/u/i],
+                ['math_pi.js',       'var a = Math.PI * 2;\n',                  /rhino-math-const|Math\.PI/i],
+                ['math_e.js',        'var e = Math.E;\n',                       /rhino-math-const|Math\.E/i],
+                ['math_sqrt2.js',    'var s = Math.SQRT2;\n',                   /rhino-math-const|Math\.SQRT2/i],
+                ['math_pi_idx.js',   'var b = Math["PI"];\n',                   /rhino-math-const|Math\.PI/i]
             ]
             for (var bi = 0; bi < badSnippets.length; bi++) {
                 var rBad = runCheckerOnSnippet(badSnippets[bi][0], badSnippets[bi][1])

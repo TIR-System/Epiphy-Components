@@ -23,6 +23,11 @@
 // ============================================================================
 
 ;(function () {
+    // 服务端最高优先级入口：为当前 server_scripts 独立 Rhino 作用域补齐 NativeMath 缺失的 8 个常量
+    if (typeof global !== 'undefined' && global != null && global.EpiphySpec && typeof global.EpiphySpec.ensureMathConstants === 'function') {
+        global.EpiphySpec.ensureMathConstants(typeof Math !== 'undefined' ? Math : null)
+    }
+
     var DEFAULT_INTERVAL_MS = 5000
     var MAX_BUCKET_ENTRIES  = 2048
     var buckets             = {} // '<module>|<level>|<tag>' -> { lastAt, suppressed }

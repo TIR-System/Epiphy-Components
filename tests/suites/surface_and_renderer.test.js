@@ -4315,9 +4315,17 @@ module.exports = function registerSuite(test, h) {
             }
             this.computeNormals = function () { this.normalsComputed = true; return this }
             this.render = function (ccrs, mat) {
+                if (ccrs.boundRt && ccrs.boundRt.name === 'entity_translucent_emissive' && !this.normalsComputed) {
+                    throw new Error('IllegalStateException: Normals requested by NEW_ENTITY but computeNormals() was not called!')
+                }
                 renderDrawCalls.push({
                     rt: ccrs.boundRt,
                     verts: this.verts.length,
+                    normalsComputed: this.normalsComputed,
+                    brightness: ccrs.brightness,
+                    overlay: ccrs.overlay,
+                    computeLighting: ccrs.computeLighting,
+                    baseColour: ccrs.baseColour,
                     scales: mat.scales.slice(),
                     rotCount: mat.rots.length
                 })
@@ -4344,7 +4352,16 @@ module.exports = function registerSuite(test, h) {
         var mockCCRS = {
             boundRt: null,
             baseColour: -1,
-            reset: function () { this.boundRt = null; this.baseColour = -1 },
+            brightness: 0,
+            overlay: 0,
+            computeLighting: true,
+            reset: function () {
+                this.boundRt = null
+                this.baseColour = -1
+                this.brightness = 0
+                this.overlay = 0
+                this.computeLighting = true
+            },
             bind: function (rt) { this.boundRt = rt }
         }
 
@@ -4547,14 +4564,28 @@ module.exports = function registerSuite(test, h) {
         assert.strictEqual(coreSrc.indexOf('committee.nova.mods.avaritia'), -1, 'must NEVER call Avaritia renderer/shaders')
         assert.strictEqual(coreSrc.indexOf("Java.loadClass('java.lang.System')"), -1, 'must NEVER call Java.loadClass(java.lang.System) in hot path')
 
-        // 4. Verify RGBA byte order (0xRRGGBBAA) for CodeChickenLib ColourRGBA & pure pre-baked mesh counts
+        // 4. Verify RGBA byte order (0xRRGGBBAA) for CodeChickenLib ColourRGBA, pure pre-baked mesh counts & 0 NaN vertices
         assert.strictEqual(FX3DCore._pure.packRgba(0x112233, 0x80) >>> 0, 0x11223380, 'CCL ColourRGBA must pack R in MSB and A in LSB (0xRRGGBBAA)')
         var impCfg = FX3D.getBoundItemConfig('epiphy:imperius_test')
         assert.ok(impCfg != null && impCfg.maskTexture === 'epiphy:textures/item/imperius_test_cosmos_mask.png', 'must auto-derive cosmos mask texture path')
-        assert.strictEqual(FX3DCore._pure.buildCosmosOverlayQuads().length, 2, 'cosmos overlay must be exact 2 quads (front+back)')
-        assert.ok(FX3DCore._pure.buildAstrolabeRingQuads(impCfg.rings[0]).length >= 80 && FX3DCore._pure.buildAstrolabeRingQuads(impCfg.rings[0]).length <= 150, 'Ring 0 must bake lean bold cross-ribbons, ticks, and 4 3D star-prisms')
-        assert.ok(FX3DCore._pure.buildHelixRibbonQuads(impCfg.helix, 0).length >= 42 && FX3DCore._pure.buildHelixRibbonQuads(impCfg.helix, 0).length <= 100, 'Helix strand must bake lean smooth cross-ribbons along blade spine')
-        assert.ok(FX3DCore._pure.buildStarMotesQuads(impCfg.motes, 0, 2).length >= 36, 'Star-mote group must bake 3D star heads + comet trails')
+        var cosQuads   = FX3DCore._pure.buildCosmosOverlayQuads()
+        var ring0Quads = FX3DCore._pure.buildAstrolabeRingQuads(impCfg.rings[0])
+        var helixQuads = FX3DCore._pure.buildHelixRibbonQuads(impCfg.helix, 0)
+        var moteQuads  = FX3DCore._pure.buildStarMotesQuads(impCfg.motes, 0, 2)
+        assert.strictEqual(cosQuads.length, 2, 'cosmos overlay must be exact 2 quads (front+back)')
+        assert.ok(ring0Quads.length >= 80 && ring0Quads.length <= 150, 'Ring 0 must bake lean bold cross-ribbons, ticks, and 4 3D star-prisms')
+        assert.ok(helixQuads.length >= 42 && helixQuads.length <= 100, 'Helix strand must bake lean smooth cross-ribbons along blade spine')
+        assert.ok(moteQuads.length >= 36, 'Star-mote group must bake 3D star heads + comet trails')
+        assert.strictEqual(FX3DCore._pure.validateQuadsFinite(cosQuads).invalidCount, 0, 'cosmos quads must have 0 NaN/Infinity vertices')
+        assert.strictEqual(FX3DCore._pure.validateQuadsFinite(ring0Quads).invalidCount, 0, 'ring0 quads must have 0 NaN/Infinity vertices')
+        assert.strictEqual(FX3DCore._pure.validateQuadsFinite(helixQuads).invalidCount, 0, 'helix quads must have 0 NaN/Infinity vertices')
+        assert.strictEqual(FX3DCore._pure.validateQuadsFinite(moteQuads).invalidCount, 0, 'mote quads must have 0 NaN/Infinity vertices')
+        var badCheck = FX3DCore._pure.validateQuadsFinite([
+            { p0: [0, NaN, 0], p1: [1, 0, 0], p2: [1, 1, 0], p3: [0, 1, 0], u0: 0, v0: 0, u1: 1, v1: 0, u2: 1, v2: 1, u3: 0, v3: 1 },
+            cosQuads[0]
+        ])
+        assert.strictEqual(badCheck.invalidCount, 1, 'validateQuadsFinite must filter out NaN quad')
+        assert.strictEqual(badCheck.valid.length, 1)
 
         // 5. Verify RegisterShadersEvent loads epiphy:epiphy_cosmos via CCShaderInstance.create (zero Rhino constructor ambiguity!)
         modBusHooks['net.minecraftforge.client.event.RegisterShadersEvent']({
@@ -4571,7 +4602,7 @@ module.exports = function registerSuite(test, h) {
         assert.strictEqual(shStat.loaded, true)
         assert.strictEqual(shStat.hasUniforms, true, 'must resolve EpiphyTime, EpiphyYawPitch, EpiphyGuiMode uniforms')
 
-        // 6. Verify ModelEvent$ModifyBakingResult pre-bakes compact flat meshes ONCE, uses OutlineProperty.NONE + vanilla entityTranslucentEmissive, and wraps originalModel
+        // 6. Verify ModelEvent$ModifyBakingResult pre-bakes CCModels with computeNormals() ONCE, uses OutlineProperty.NONE + vanilla entityTranslucentEmissive, and wraps originalModel
         var modelsStore = {}
         var origModelStub = { m_6160_: function () { return 'bladeParticleSprite' } }
         modelsStore['epiphy:imperius_test#inventory'] = origModelStub
@@ -4589,69 +4620,54 @@ module.exports = function registerSuite(test, h) {
         assert.strictEqual(wrappedRenderer.m_6160_(), 'bladeParticleSprite', 'getParticleIcon must delegate to originalModel')
         assert.ok(outlinePropsUsed.length >= 1 && outlinePropsUsed.every(function (p) { return p === 'OUTLINE_NONE' }), 'custom RenderType must pass OutlineProperty.NONE')
         assert.ok(createdRenderTypes.some(function (rt) { return rt.name === 'entity_translucent_emissive' && rt.outline === false }), 'surround VFX must use vanilla RenderType.entityTranslucentEmissive(white_pixel, false)')
+        // 1 cosmos + 3 rings + 1 combined helix + 2 mote groups = 7 pre-baked CCModels, ALL with computeNormals() & finite vertices
+        assert.strictEqual(bakedCCModels.length, 7, 'must pre-bake 1 cosmos + 3 rings + 1 merged helix + 2 mote groups = 7 CCModels')
+        for (var bmIdx = 0; bmIdx < bakedCCModels.length; bmIdx++) {
+            assert.strictEqual(bakedCCModels[bmIdx].normalsComputed, true, 'every pre-baked CCModel MUST call computeNormals() for NEW_ENTITY compatibility')
+            for (var bvIdx = 0; bvIdx < bakedCCModels[bmIdx].verts.length; bvIdx++) {
+                var vtx = bakedCCModels[bmIdx].verts[bvIdx]
+                assert.ok(isFinite(vtx.x) && isFinite(vtx.y) && isFinite(vtx.z), 'baked CCModel vertex must be finite (no NaN)')
+            }
+        }
 
-        // 7. Verify per-frame renderItem in FIRST_PERSON_RIGHT_HAND & lean GUI LOD via direct VertexConsumer fast path
-        var cosmosVerts = []
-        var surroundVerts = []
-        function makeMockVc(targetArr) {
-            var curV = null
-            var vc = {
-                m_5954_: function (x, y, z, r, g, b, a, u, v, ov, li, nx, ny, nz) {
-                    targetArr.push({ x: x, y: y, z: z, r: r, g: g, b: b, a: a, u: u, v: v, fast14: true })
-                },
-                m_5483_: function (x, y, z) { curV = { x: x, y: y, z: z }; return vc },
-                m_6122_: function (r, g, b, a) { if (curV) { curV.r = r; curV.g = g; curV.b = b; curV.a = a } return vc },
-                m_7421_: function (u, v) { if (curV) { curV.u = u; curV.v = v } return vc },
-                m_5752_: function () { if (curV) { targetArr.push(curV); curV = null } }
-            }
-            return vc
-        }
-        var mockPoseMat = {
-            m00: function () { return 1 }, m10: function () { return 0 }, m20: function () { return 0 }, m30: function () { return 0 },
-            m01: function () { return 0 }, m11: function () { return 1 }, m21: function () { return 0 }, m31: function () { return 0 },
-            m02: function () { return 0 }, m12: function () { return 0 }, m22: function () { return 1 }, m32: function () { return 0 },
-            m03: function () { return 0 }, m13: function () { return 0 }, m23: function () { return 0 }, m33: function () { return 1 }
-        }
-        var mockPoseStack = {
-            m_85850_: function () {
-                return { m_252922_: function () { return mockPoseMat } }
-            }
-        }
+        // 7. Verify per-frame renderItem in FIRST_PERSON_RIGHT_HAND & lean GUI LOD via pure-Java CCModel.render fast path
+        var mockPoseStack = { _mockPoseStack: true }
         var mockBufferSource = {
-            m_6299_: function (rt) {
-                if (rt && rt.name === 'entity_translucent_emissive') return makeMockVc(surroundVerts)
-                return makeMockVc(cosmosVerts)
-            },
             m_109912_: function (rt) { flushedTypes.push(rt) }
         }
         var mockStack = { m_41790_: function () { return true } }
         wrappedRenderer.renderItem(mockStack, HAND_CTX, mockPoseStack, mockBufferSource, 0x00F000F0, 0)
         assert.strictEqual(origModelDraws, 1, 'must draw originalModel once per renderItem')
-        assert.strictEqual(cosmosVerts.length, 8, 'cosmos window overlay must submit exact 8 vertices (2 quads front+back)')
-        assert.ok(surroundVerts.length >= 1600, 'first-person hand render must submit full-LOD surround vertices directly to VertexConsumer, got ' + surroundVerts.length)
-        assert.ok(surroundVerts.every(function (v) { return v.fast14 === true }), 'surround VFX must hit 14-arg VertexConsumer.m_5954_ fast path (Embeddium SodiumBufferBuilder compatible)')
+        var cosmosCallsHand   = renderDrawCalls.filter(function (c) { return c.rt && c.rt.name === 'epiphy:cosmos_epiphy_imperius_test' })
+        var surroundCallsHand = renderDrawCalls.filter(function (c) { return c.rt && c.rt.name === 'entity_translucent_emissive' })
+        assert.strictEqual(cosmosCallsHand.length, 1, 'cosmos window overlay must issue 1 CCModel draw')
+        assert.strictEqual(cosmosCallsHand[0].verts, 8, 'cosmos window overlay must submit exact 8 vertices (2 quads front+back)')
+        assert.strictEqual(surroundCallsHand.length, 6, 'first-person hand render must submit 3 rings + 1 merged helix + 2 mote groups = 6 CCModel draws')
+        var handSurroundVertCount = surroundCallsHand.reduce(function (acc, c) { return acc + c.verts }, 0)
+        assert.ok(handSurroundVertCount >= 1600, 'first-person hand render must submit full-LOD surround vertices via CCModel.render, got ' + handSurroundVertCount)
+        assert.ok(surroundCallsHand.every(function (c) {
+            return c.brightness === 15728880 && c.overlay === 655360 && c.computeLighting === false && c.baseColour === -1 && c.normalsComputed === true
+        }), 'every surround CCModel draw must set FULL_BRIGHT (15728880), NO_OVERLAY (655360), computeLighting=false, baseColour=-1')
+        assert.ok(surroundCallsHand[0].scales.some(function (sc) { return Math.abs(sc[0] - 1.45) < 1e-4 }), 'swing=0.5 must apply 1.45x slash radial expansion to surround rings')
         assert.strictEqual(uniformValues.EpiphyGuiMode, 0.0, 'first-person render must set EpiphyGuiMode = 0.0')
-        assert.ok(Array.isArray(uniformValues.EpiphyYawPitch) && Math.abs(uniformValues.EpiphyYawPitch[0] - 42.5 * Math.PI / 180) < 1e-4, 'must upload camera yaw/pitch radians to GPU shader')
-        assert.strictEqual(flushedTypes.length, 1, 'hand render must flush only origRt once (cosmos/surround auto-flush via BufferSource)')
+        assert.ok(Array.isArray(uniformValues.EpiphyYawPitch) && isFinite(uniformValues.EpiphyYawPitch[0]) && Math.abs(uniformValues.EpiphyYawPitch[0] - 42.5 * 3.141592653589793 / 180) < 1e-4, 'must upload finite camera yaw/pitch radians to GPU shader')
+        assert.strictEqual(flushedTypes.length, 2, 'hand render must flush origRt (depth write) + cosmosType (lock uniforms against Hand/GUI crosstalk)')
+        assert.strictEqual(flushedTypes[0], 'origItemRt')
+        assert.strictEqual(flushedTypes[1].name, 'epiphy:cosmos_epiphy_imperius_test')
 
-        // Verify pure flat-mesh baker & affine slash expansion transform (swing=0.5 -> sin(PI/2)=1.0 -> 1.45x)
-        var bakedTest = FX3DCore._pure.bakeQuadsToFlatMesh(FX3DCore._pure.buildCosmosOverlayQuads())
-        assert.strictEqual(bakedTest.vertexCount, 8)
-        assert.strictEqual(bakedTest.data.length, 72)
-        var slashMat = new Array(12)
-        FX3DCore._pure.composeLocalTransform(slashMat, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], 0.5, 0.5, 0.5, 0, 1.0, 1.45, 1.45, 0, 0, 0)
-        assert.ok(Math.abs(slashMat[5] - 1.45) < 1e-4, 'composeLocalTransform must apply 1.45x slash radial expansion on Y axis')
-
-        // GUI slot render check: lean LOD (cosmos 8 verts + 2 hero rings only, strictly fewer surround verts than hand) and exact 1 origRt flush!
-        var handSurroundVertCount = surroundVerts.length
-        cosmosVerts.length = 0
-        surroundVerts.length = 0
+        // GUI slot render check: lean LOD (cosmos 8 verts + 2 hero rings only, strictly fewer surround verts than hand) and exact 2 flushes (origRt + cosmosType)!
+        renderDrawCalls.length = 0
         flushedTypes.length = 0
         wrappedRenderer.renderItem(mockStack, GUI_CTX, mockPoseStack, mockBufferSource, 0x00F000F0, 0)
+        var cosmosCallsGui   = renderDrawCalls.filter(function (c) { return c.rt && c.rt.name === 'epiphy:cosmos_epiphy_imperius_test' })
+        var surroundCallsGui = renderDrawCalls.filter(function (c) { return c.rt && c.rt.name === 'entity_translucent_emissive' })
+        var guiSurroundVertCount = surroundCallsGui.reduce(function (acc, c) { return acc + c.verts }, 0)
         assert.strictEqual(uniformValues.EpiphyGuiMode, 1.0, 'GUI slot render must set EpiphyGuiMode = 1.0')
-        assert.strictEqual(cosmosVerts.length, 8, 'GUI slot render must submit exact 8 cosmos overlay vertices')
-        assert.ok(surroundVerts.length > 400 && surroundVerts.length < handSurroundVertCount, 'GUI slot render must use lean LOD (2 hero rings only), got ' + surroundVerts.length + ' vs hand ' + handSurroundVertCount)
-        assert.strictEqual(flushedTypes.length, 1, 'GUI slot render must flush only origRt once before translucent cosmos/surround')
+        assert.strictEqual(cosmosCallsGui.length, 1)
+        assert.strictEqual(cosmosCallsGui[0].verts, 8, 'GUI slot render must submit exact 8 cosmos overlay vertices')
+        assert.strictEqual(surroundCallsGui.length, 2, 'GUI slot render must use lean LOD (2 hero rings only)')
+        assert.ok(guiSurroundVertCount > 400 && guiSurroundVertCount < handSurroundVertCount, 'GUI slot surround verts must be strictly fewer than hand: ' + guiSurroundVertCount + ' vs ' + handSurroundVertCount)
+        assert.strictEqual(flushedTypes.length, 2, 'GUI slot render must flush origRt + cosmosType (lock guiMode uniform)')
         var fxStatsAfter = FX3D.getStats()
         assert.strictEqual(fxStatsAfter.bakedCount, 1)
         assert.strictEqual(fxStatsAfter.coreAvailable, true)

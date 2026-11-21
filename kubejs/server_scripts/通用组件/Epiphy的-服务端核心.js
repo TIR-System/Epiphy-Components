@@ -23,6 +23,9 @@
 
     var VERSION = '2.6.0';
     var spec = (typeof global !== 'undefined' && global.EpiphySpec != null) ? global.EpiphySpec : null;
+    if (spec && typeof spec.ensureMathConstants === 'function') {
+        spec.ensureMathConstants(typeof Math !== 'undefined' ? Math : null);
+    }
     if (!spec) {
         try {
             console.warn('[EpiphyServerBase] 未检测到 global.EpiphySpec (Epiphy的-Spec与通用工具.js)，维度归一化与类数组判断将启用内置降级。');

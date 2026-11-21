@@ -1,5 +1,5 @@
 // ============================================================================
-//  Epiphy 的通用组件 —— 空间特效渲染器与世界消费端 (Epiphy3DFX / EpiphySpatialFX v2.2.0 · Client)
+//  Epiphy 的通用组件 —— 空间特效渲染器与世界消费端 (Epiphy3DFX / EpiphySpatialFX v2.2.1 · Client)
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-空间特效渲染器.js
 //  架构定位：
@@ -18,8 +18,17 @@
 // ============================================================================
 
 ;(function () {
-    var VERSION = '2.2.0'
+    var VERSION = '2.2.1'
     var SPEC    = (typeof global !== 'undefined' && global != null) ? global.EpiphySpec : null
+    var E_MATH  = (typeof global !== 'undefined' && global != null && global.EpiphyMath != null)
+        ? global.EpiphyMath
+        : (SPEC && SPEC.MATH ? SPEC.MATH : null)
+    if (SPEC && typeof SPEC.ensureMathConstants === 'function') {
+        SPEC.ensureMathConstants(typeof Math !== 'undefined' ? Math : null)
+    }
+    var PI      = (E_MATH && typeof E_MATH.PI === 'number') ? E_MATH.PI : 3.141592653589793
+    var TWO_PI  = (E_MATH && typeof E_MATH.TWO_PI === 'number') ? E_MATH.TWO_PI : 6.283185307179586
+    var HALF_PI = (E_MATH && typeof E_MATH.HALF_PI === 'number') ? E_MATH.HALF_PI : 1.5707963267948966
     var PROTO   = (typeof global !== 'undefined' && global != null && global.EpiphyProtocol != null)
         ? global.EpiphyProtocol
         : (SPEC && SPEC.PROTOCOL ? SPEC.PROTOCOL : null)
@@ -999,7 +1008,7 @@
         var segs   = Math.max(8, Math.min(64, Math.round(readNum(sh, 'segments', 24))))
         var rIn    = Math.max(0.02, radius - halfW)
         var rOut   = radius + halfW
-        var step   = (Math.PI * 2.0) / segs
+        var step   = TWO_PI / segs
         var mat    = ctx.poseMatrix
         for (var i = 0; i < segs; i++) {
             var a0 = i * step
@@ -1057,12 +1066,12 @@
         var turns  = Math.max(0.5, readNum(sh, 'turns', 2.0))
         var mat    = ctx.poseMatrix
         for (var strand = 0; strand < 2; strand++) {
-            var phase = strand * Math.PI
+            var phase = strand * PI
             for (var i = 0; i < segs; i++) {
                 var t0 = i / segs
                 var t1 = (i + 1) / segs
-                var a0 = phase + t0 * turns * Math.PI * 2.0
-                var a1 = phase + t1 * turns * Math.PI * 2.0
+                var a0 = phase + t0 * turns * TWO_PI
+                var a1 = phase + t1 * turns * TWO_PI
                 var y0 = t0 * h
                 var y1 = t1 * h
                 var x0 = Math.cos(a0) * radius
@@ -1090,13 +1099,13 @@
         var latSegs = Math.max(4, Math.min(12, Math.round(lonSegs * 0.5)))
         var mat     = ctx.poseMatrix
         for (var la = 0; la < latSegs; la++) {
-            var phi0 = -Math.PI * 0.5 + (la / latSegs) * Math.PI
-            var phi1 = -Math.PI * 0.5 + ((la + 1) / latSegs) * Math.PI
+            var phi0 = -HALF_PI + (la / latSegs) * PI
+            var phi1 = -HALF_PI + ((la + 1) / latSegs) * PI
             var cp0 = Math.cos(phi0), sp0 = Math.sin(phi0)
             var cp1 = Math.cos(phi1), sp1 = Math.sin(phi1)
             for (var lo = 0; lo < lonSegs; lo++) {
-                var th0 = (lo / lonSegs) * Math.PI * 2.0
-                var th1 = ((lo + 1) / lonSegs) * Math.PI * 2.0
+                var th0 = (lo / lonSegs) * TWO_PI
+                var th1 = ((lo + 1) / lonSegs) * TWO_PI
                 var ct0 = Math.cos(th0), st0 = Math.sin(th0)
                 var ct1 = Math.cos(th1), st1 = Math.sin(th1)
                 emitTransformedQuad(

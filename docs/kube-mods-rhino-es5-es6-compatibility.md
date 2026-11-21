@@ -31,6 +31,7 @@
 | ES6 箭头函数 / 模板字符串 / `function*` / `for...of` | ✅ 可用 | 词法 `this`/`arguments`、标签模板 `.raw`、ES6 生成器与迭代器正常 |
 | ES6 `Map` / `Set` / `WeakMap` / `WeakSet` / `Symbol` | ✅ 可用 | 集合类、自定义 `[Symbol.iterator]`、`Symbol.for`、`getOwnPropertySymbols` 正常 |
 | ES6 `Object` / `Array` / `String` / `Number` / `Math` 新方法 | ✅ 较全 | `assign`/`is`/`entries`/`values`、`from`/`of`/`find`/`includes`、`padStart`/`trimStart`/`codePointAt` 等均在 |
+| `Math.PI` / `Math.E` 等 8 个 `Math` 常量 | ❌ 致命 Bug | `NativeMath.findPrototypeId` 仅含 36 个方法分支，**完全遗漏 8 个常量**（`E`/`PI`/`LN2`/`LN10`/`LOG2E`/`LOG10E`/`SQRT1_2`/`SQRT2`），运行期恒返回 **`undefined`**（运算全部污染为 `NaN`） |
 | ES6 `let` / `const` | ⚠️ 严重偏移 | **无 TDZ**、**`for(let)` 无每轮独立绑定**、`const` 可无初始值且非严格模式重写静默失败 |
 | ES6 `{ fn() {} }` 对象方法简写 | ✅ 可用 | `var o = { fn(x) { return x; } }` 正常 |
 | ES6 `{ x, y }` 对象属性简写 / `{ [k]: v }` 计算属性 | ❌ 缺失 | 分别报 `SyntaxError: invalid object initializer` 与 `invalid property id` |
@@ -146,7 +147,9 @@
 
 ---
 
-## 五、特别警示：ES2020 `??`（空值合并）的解释器栈 Bug
+## 五、特别警示：`kube-mods/rhino` 两大解释器/内置库致命 Bug
+
+### 5.1 ES2020 `??`（空值合并）的解释器栈 Bug
 
 虽然 `kube-mods/rhino` 在 `Token` 中加入了 `OPTIONAL_CHAINING`（`?.`）、`POW`（`**`）和 `NULLISH_COALESCING`（`??`），但 `??` 在解释器中存在严重的数值栈损坏 Bug：
 
@@ -161,12 +164,26 @@
   - 在前置计算占据栈槽的复杂表达式 `({a:{b:7}})?.a?.b + ',' + (null ?? 9) + ',' + (2 ** 3)` 中，甚至会读到相邻槽位残留数字 `1`，输出 `7,1,8`。
   - 相反，左值非空或兜底值为非数字时（如 `false ?? 9` → `false`、`'' ?? 'fallback'` → `''`、`({a: 42}).a ?? 9` → `42`）则不会立刻踩中该槽位覆写。
 
+### 5.2 `NativeMath` 8 个内置常量全部返回 `undefined` 的字节码 Bug
+
+经 `javap -c` 反编译 `rhino-forge-2001.2.3-build.10.jar` 的 `dev.latvian.mods.rhino.NativeMath` 并真机复现确认：
+
+- `NativeMath.initPrototypeId(int id)` 完整定义了 44 个成员（ID `1..36` 为方法，ID `37..44` 为 8 个常量：`E`、`PI`、`LN10`、`LN2`、`LOG2E`、`LOG10E`、`SQRT1_2`、`SQRT2`）；
+- 但 `NativeMath.findPrototypeId(String s)` 的 `lookupswitch` **只生成了前 36 个方法的分支，彻底遗漏了 ID `37..44` 这 8 个常量**！当 JS 读取 `Math.PI` 等属性时，`findPrototypeId("PI")` 直接返回 `0`，最终在运行期静默求值为 **`undefined`**；
+- 后果：`Math.PI * 2.0`、`Math.PI / 180.0` 全部变成 **`NaN`**，且不抛任何异常——所有三角坐标、3D 网格顶点、GLSL 视差角度 uniform 会被静默污染成 `NaN`（GPU 直接丢弃图元或刷出纯黑方块，Node/V8 单测中因原生存在 `Math.PI` 而无法发现）；
+- 实测另确认：KubeJS 分别为 `startup_scripts`、`server_scripts`、`client_scripts` 初始化各自独立的顶层 `Scriptable` 与 `Math` 实例（仅 `global` 跨阶段共享）。
+- **本仓库三层防御规范**：
+  1. `Epiphy的-Spec与通用工具.js`（`v2.7.0+`）统一导出 `global.EpiphyMath` / `EpiphySpec.MATH`（精确 IEEE-754 字面量）与幂等修补函数 `EpiphySpec.ensureMathConstants(Math)`；
+  2. `startup`（`Spec`）、`server`（`EpiphyLog` / `EpiphyServerCore`）、`client`（`Epiphy2DRenderer` / `Epiphy3DFX`）三端入口均在加载伊始执行 `ensureMathConstants(Math)`，预先把各自作用域内缺失的 8 个常量补齐为只读属性；
+  3. 仓库业务脚本仍统一优先使用 `global.EpiphyMath` / 字面量常量，且 `scripts/rhino-check.js` 永久 AST 门禁直接拦截一切 `Math.PI` / `Math.E` / `Math.LN2` / `Math.LN10` / `Math.LOG2E` / `Math.LOG10E` / `Math.SQRT1_2` / `Math.SQRT2` 写法。
+
 ---
 
 ## 六、项目编码落地建议
 
-1. **安全语法基准**：把业务脚本收敛在 **“严格模式兼容的 ES5 子集 + `const`/`let`（仅放在 `{}` 块内，不依赖 TDZ 与循环闭包独立性）+ 箭头函数 + 模板字符串 + `Map`/`Set`”**。
+1. **安全语法基准**：把业务脚本收敛在 **“严格模式兼容的 ES5 子集 + `var` + 箭头函数 + 模板字符串 + `Map`/`Set`”**。
 2. **明确禁用清单**：
+   - 不要直接读取 `Math.PI` / `Math.E` / `Math.LN2` / `Math.LN10` / `Math.LOG2E` / `Math.LOG10E` / `Math.SQRT1_2` / `Math.SQRT2`（统一改用 `global.EpiphyMath` 或精确数值字面量，由 `rhino-check.js` 静态强制拦截）；
    - 不要使用 `{ x, y }` 属性简写与 `{ [k]: v }` 计算属性名（对象字面量保持 `k: v` 完整写法）；
    - 不要在 `for (let ...)` 头部内直接创建依赖循环变量的闭包（需要捕获循环变量时继续用 IIFE / 显式传参，或明确用 ES5 风格循环结构）；
    - 不要使用 `??` 做数值默认值兜底（请显式写 `(v !== null && v !== undefined) ? v : fallback` 或在确定范围时处理 `== null`）；

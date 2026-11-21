@@ -55,6 +55,9 @@
     // ------------------------------------------------------------------------
     // 基础配置项
     // ------------------------------------------------------------------------
+    var TWO_PI    = (typeof global !== 'undefined' && global.EpiphyMath && typeof global.EpiphyMath.TWO_PI === 'number')
+        ? global.EpiphyMath.TWO_PI
+        : 6.283185307179586
     var TARGET_ID = 'twilightforest:uncrafting_table'
     var SAFE_TOOL = 'minecraft:diamond_pickaxe'
 
@@ -2450,7 +2453,7 @@
             // 7. 能量坍缩粒子环 + 电弧闪烁
             if (job.t % PARTICLE_INTERVAL === 0) {
                 for (var kIdx = 0; kIdx < 3; kIdx++) {
-                    var a = Math.random() * Math.PI * 2
+                    var a = Math.random() * TWO_PI
                     var r = (1.0 - p * 0.5) * (3.5 + Math.random() * 6.5)
                     var px = job.x + 0.5 + Math.cos(a) * r
                     var py = job.y + 0.5 + (Math.random() - 0.5) * 4.0
@@ -3090,7 +3093,7 @@
         if (r > maxR) return
 
         for (var i = 0; i < FX_RING_PARTICLES; i++) {
-            var a = Math.random() * Math.PI * 2
+            var a = Math.random() * TWO_PI
             var px = job.x + 0.5 + Math.cos(a) * r
             var pz = job.z + 0.5 + Math.sin(a) * r
             var ix = Math.floor(px), iz = Math.floor(pz)

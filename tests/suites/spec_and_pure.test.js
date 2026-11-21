@@ -542,5 +542,26 @@ module.exports = function registerSuite(test, h) {
                 runScriptIn(badSb, AUDIO_PATH)
             }, /版本不兼容/, 'EpiphyAudio must reject EpiphyServerCore version ' + badCases[bi] + ' outside [2.5.0, 2.99.99]')
         }
+
+        // 5. EpiphyMath / EpiphySpec.MATH & ensureMathConstants (rhino-forge NativeMath missing 8 constants guard)
+        assert.ok(Spec.MATH != null && sb.global.EpiphyMath === Spec.MATH, 'EpiphySpec.MATH and global.EpiphyMath must share the same frozen math constant table')
+        assert.ok(Math.abs(Spec.MATH.PI - 3.141592653589793) < 1e-15)
+        assert.ok(Math.abs(Spec.MATH.TWO_PI - 6.283185307179586) < 1e-15)
+        assert.ok(Math.abs(Spec.MATH.HALF_PI - 1.5707963267948966) < 1e-15)
+        assert.ok(Math.abs(Spec.MATH.DEG_TO_RAD - (3.141592653589793 / 180.0)) < 1e-15)
+        assert.ok(Math.abs(Spec.MATH.E - 2.718281828459045) < 1e-15)
+        assert.ok(Math.abs(Spec.MATH.SQRT2 - 1.4142135623730951) < 1e-15)
+        var brokenRhinoMath = { sin: Math.sin, cos: Math.cos }
+        var patchedCnt = Spec.ensureMathConstants(brokenRhinoMath)
+        assert.strictEqual(patchedCnt, 8, 'ensureMathConstants must patch all 8 missing NativeMath constants (E/PI/LN2/LN10/LOG2E/LOG10E/SQRT1_2/SQRT2)')
+        assert.strictEqual(brokenRhinoMath.PI, Spec.MATH.PI)
+        assert.strictEqual(brokenRhinoMath.E, Spec.MATH.E)
+        assert.strictEqual(brokenRhinoMath.LN2, Spec.MATH.LN2)
+        assert.strictEqual(brokenRhinoMath.LN10, Spec.MATH.LN10)
+        assert.strictEqual(brokenRhinoMath.LOG2E, Spec.MATH.LOG2E)
+        assert.strictEqual(brokenRhinoMath.LOG10E, Spec.MATH.LOG10E)
+        assert.strictEqual(brokenRhinoMath.SQRT1_2, Spec.MATH.SQRT1_2)
+        assert.strictEqual(brokenRhinoMath.SQRT2, Spec.MATH.SQRT2)
+        assert.strictEqual(Spec.ensureMathConstants(brokenRhinoMath), 0, 'ensureMathConstants must be strictly idempotent on already-patched Math')
     })
 }

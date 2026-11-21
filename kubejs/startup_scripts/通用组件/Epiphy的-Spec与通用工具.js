@@ -1,10 +1,11 @@
 // priority: 1200
 // ============================================================================
-// Epiphy 通用规范、共享协议契约与纯逻辑基座 (EpiphySpec + EpiphyProtocol v2.6.0)
+// Epiphy 通用规范、共享协议契约与纯逻辑基座 (EpiphySpec + EpiphyProtocol v2.7.0)
 //   许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //   所属阶段：startup_scripts（服务端与客户端共享，单一前置加载项）
 //   职责说明：
-//     1. 定义并导出 global.EpiphyProtocol（频道名、版本号、PRIORITY_MAP、HUD_FORBIDDEN_PRESETS）；
+//     1. 定义并导出 global.EpiphyProtocol（频道名、版本号、PRIORITY_MAP、HUD_FORBIDDEN_PRESETS）
+//        及 global.EpiphyMath / EpiphySpec.MATH（规避 kube-mods/rhino NativeMath 遗漏 PI/E 等 8 个常量导致 undefined 的上游缺陷，并提供跨阶段 ensureMathConstants 补丁）；
 //     2. 收拢跨组件复用的数值/布尔/时长/颜色/字号/倾角/命令解析器、球簇合并几何算法、有界 FIFO 缓存池 (`createBoundedCache`)
 //        与跨阶段向上预设注册表 (`createPresetRegistry` / `registerPreset` / `resolvePreset`)，导出 global.EpiphySpec；
 //     3. 服务端业务组件以本文件 + EpiphyServerBase 为底座；客户端渲染器/播放器在缺失本文件时仍可降级运行内置 v6 协议常量。
@@ -13,6 +14,62 @@
 
 ;(function () {
     'use strict';
+
+    // ------------------------------------------------------------------------
+    // 0. 跨阶段安全数学常量与 kube-mods/rhino NativeMath 缺失常量自动修补
+    //    说明：rhino-forge-2001.2.3-build.10.jar 的 NativeMath.findPrototypeId 仅含 36 个方法分支，
+    //    遗漏了 initPrototypeId 中声明的 8 个常量 (E/PI/LN2/LN10/LOG2E/LOG10E/SQRT1_2/SQRT2)，
+    //    导致在 Rhino 中读取 Math.PI 等恒返回 undefined。此处统一提供单一事实源并幂等补齐当前作用域 Math。
+    // ------------------------------------------------------------------------
+    var MATH_CONSTANTS = Object.freeze({
+        E:          2.718281828459045,
+        PI:         3.141592653589793,
+        TWO_PI:     6.283185307179586,
+        HALF_PI:    1.5707963267948966,
+        DEG_TO_RAD: 0.017453292519943295,
+        RAD_TO_DEG: 57.29577951308232,
+        LN2:        0.6931471805599453,
+        LN10:       2.302585092994046,
+        LOG2E:      1.4426950408889634,
+        LOG10E:     0.4342944819032518,
+        SQRT1_2:    0.7071067811865476,
+        SQRT2:      1.4142135623730951
+    });
+
+    var RHINO_MISSING_MATH_KEYS = ['E', 'PI', 'LN2', 'LN10', 'LOG2E', 'LOG10E', 'SQRT1_2', 'SQRT2'];
+
+    function ensureMathConstants(targetMath) {
+        var m = targetMath != null ? targetMath : (typeof Math !== 'undefined' ? Math : null);
+        if (m == null) return 0;
+        var patched = 0;
+        for (var i = 0; i < RHINO_MISSING_MATH_KEYS.length; i++) {
+            var k = RHINO_MISSING_MATH_KEYS[i];
+            var cur;
+            try { cur = m[k]; } catch (eGet) { cur = undefined; }
+            if (typeof cur === 'number' && isFinite(cur)) continue;
+            var val = MATH_CONSTANTS[k];
+            try {
+                Object.defineProperty(m, k, {
+                    value: val,
+                    writable: false,
+                    enumerable: false,
+                    configurable: false
+                });
+                patched++;
+            } catch (eDef) {
+                try {
+                    m[k] = val;
+                    patched++;
+                } catch (eSet) { }
+            }
+        }
+        return patched;
+    }
+
+    ensureMathConstants(typeof Math !== 'undefined' ? Math : null);
+    if (typeof global !== 'undefined' && global != null) {
+        global.EpiphyMath = MATH_CONSTANTS;
+    }
 
     // ------------------------------------------------------------------------
     // 1. 共享协议常量与版本契约 (global.EpiphyProtocol)
@@ -46,7 +103,7 @@
         bossbar:   Object.freeze({ x: 0.25, y: 0.00, w: 0.50, h: 0.09 })
     };
 
-    var SPEC_VERSION          = '2.6.0';
+    var SPEC_VERSION          = '2.7.0';
 
     var DANMAKU_CHANNEL       = 'epiphy:screen_danmaku';
     var DANMAKU_PROTO_VERSION = 6;
@@ -1705,6 +1762,8 @@
     if (typeof global !== 'undefined') {
         global.EpiphySpec = {
             VERSION:                    SPEC_VERSION,
+            MATH:                       MATH_CONSTANTS,
+            ensureMathConstants:        ensureMathConstants,
             PROTOCOL:                   PROTOCOL,
             PROTO:                      PROTOCOL,
             parseSemver:                parseSemver,

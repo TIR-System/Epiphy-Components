@@ -115,6 +115,9 @@
 
     var PI         = 3.141592653589793
     var DEG_TO_RAD = PI / 180.0
+    if (SPEC && typeof SPEC.ensureMathConstants === 'function') {
+        SPEC.ensureMathConstants(typeof Math !== 'undefined' ? Math : null)
+    }
 
     var FADE_POOL  = ['shrink', 'char_first', 'char_last', 'blink', 'shatter', 'blur', 'split']
     // 注意：'per_char' 逐字震动因开销较高，遵循“未显式调用则默认关闭”原则，不放入 SHAKE_POOL 随机池
