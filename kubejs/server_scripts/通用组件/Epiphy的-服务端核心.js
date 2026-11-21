@@ -7,6 +7,8 @@
 //   可选依赖：
 //     - global.EpiphySpec (Epiphy的-Spec与通用工具.js)：缺失时维度/数组工具自动使用内置精简降级实现
 //     - global.EpiphyLog (Epiphy的-日志.js)：缺失时自动降级为基础 console 限频日志，不阻断服务端模块加载
+//   第三方 Mod 可选特例（原则见 README-LLM.md §3.3）：
+//     - Curios API（可选工具：`CuriosApi`）：仅用于 `findPlayerCurio` 等饰品槽位检索助手；缺失时静默跳过饰品栏扫描，不影响主副手与背包检索。
 //   定位    ：收拢服务端日志包装与降级、Java 类缓存、MC 对象访问器（`resolveLevel` 无效维度 fail-closed 拒绝回落主世界）、
 //            世界/实体/玩家高频工具（范围玩家与实体遍历、主副手/背包/Curios 安全物品与遗物检索、免指令消息/状态栏/粒子/音效工具）、
 //            外部统一数据根 `epiphy-data/`（config/worlds/players/events/logs/presets/backups）、`.tmp`+`.bak` 原子读写、

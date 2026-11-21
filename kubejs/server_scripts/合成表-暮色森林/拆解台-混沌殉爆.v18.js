@@ -9,6 +9,8 @@
 //    - kubejs/server_scripts/通用组件/Epiphy的-方块与区块组件.js (EpiphyWorldOps, priority: 1050)
 //    - kubejs/server_scripts/通用组件/Epiphy的-平面渲染组件.js (Epiphy2DSurface / ScreenDanmaku, priority: 500)
 //  可选增强：kubejs/server_scripts/通用组件/Epiphy的-音频组件.js (EpiphyAudio, priority: 500)
+//  第三方 Mod 联动依赖（玩法专属，不影响通用组件独立运行）：
+//    - Twilight Forest（终极拆解台本体）、Draconic Evolution / BrandonsCore（混沌湮灭波前与伤害）、Enigmatic Legacy（遗物豁免，缺失时安全回退）
 //  [语法规范] 遵循 README-LLM.md §1 强制语法基准（与 docs/kube-mods-rhino-es5-es6-compatibility.md）
 //  资源位置：kubejs/assets/epiphy/（models / textures / blockstates / lang）—— 加载根，普通文件；
 //            另有纯备份副本位于 kubejs/startup_scripts/拆解台-混沌殉爆/models/，不参与加载。

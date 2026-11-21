@@ -11,6 +11,8 @@
 //    - 可选前置：kubejs/startup_scripts/通用组件/Epiphy的-Spec与通用工具.js (EpiphySpec / EpiphyProtocol, priority: 1200)
 //      缺失时启动输出 console.warn 并降级至内置 v6 协议常量与精简数值/布尔工具；收包仍严格执行 fail-closed 版本校验。
 //    - 必需配套：kubejs/server_scripts/通用组件/Epiphy的-平面渲染组件.js（缺失时客户端处于待命状态，无弹幕数据包驱动）
+//    - 第三方 Mod 可选特例（原则见 README-LLM.md §3.3）：
+//      * ModernUI（可选快路径：`TextLayoutEngine` / `ModernTextRenderer`）：存在时启用直连排版缓存与 SDF 单 Pass 描边；缺失或异常时无感回退原版渲染管线。
 //
 //  功能概述：
 //    1. 屏幕相对坐标 (rx, ry)、旋转角 (angle)、字号缩放 (scale)、RGB/HEX 颜色与阴影；

@@ -3,6 +3,9 @@
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/startup_scripts/通用组件/Epiphy的小玩意-原版_其他Mod的隐藏物品.js
 //  依赖模块：kubejs/startup_scripts/通用组件/创造模式栏-epiphy.js (epiphy:stuff)
+//  第三方 Mod 联动与可选特例（原则见 README-LLM.md §3.3）：
+//    - Draconic Evolution / BrandonsCore / CodeChickenLib（可选）：仅用于 `epiphy:chaos_crystal` 的混沌晶体放置、伤害源及 3D OBJ + Chaos Shader 物品渲染；缺失对应 Mod 时跳过相关类/模型绑定，不影响其余原版隐藏物品。
+//    - Enigmatic Legacy / Goety Revelation（可选）：仅用于将其隐藏物品归入 `epiphy:stuff` 创造模式栏。
 //
 //  收录物品清单：
 //    - 屏障 (minecraft:barrier)

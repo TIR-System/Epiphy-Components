@@ -3,6 +3,11 @@
 //  Epiphy 的通用组件 —— 空间特效渲染核心 (Epiphy3DFXCore v1.0.3 · Startup/ModBus)
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/startup_scripts/通用组件/Epiphy的-空间特效核心.js
+//  第三方 Mod 可选特例（原则见 README-LLM.md §3.3）：
+//    - CodeChickenLib（可选特例：`IItemRenderer` / `TransformUtils` / `CCShaderInstance`）：
+//      仅因 KubeJS 1.20.1 物品注册未暴露 `Item.initializeClient` 而临时借作物品 3D 渲染入口胶水；
+//      缺失时单次 console.warn 自动 Fail-Soft 退回原版静态物品模型，不影响世界 3D (`surface: 'world'`) 零 CCL 运行；
+//      迁出为独立原生 Mod（Phase 4）时必须彻底移除 CCL 依赖，改用 Forge 原生 `IClientItemExtensions` + `BEWLR` / 自有 Mixin + 原版 `ShaderInstance` 自主实现。
 //  架构定位：
 //    - 视觉表现层【子系统 B】(详见 docs/rendering-subsystem-roadmap.md §1、§2 功能六 & §8.1 P3-2)
 //    - 彻底与【子系统 A】2D 平面渲染器 (Epiphy的-平面渲染器.js) 解耦，专职三维物品渲染管线：

@@ -484,6 +484,44 @@ module.exports = function registerSuite(test, h) {
         }
         assert.ok(readmeLlm.indexOf('P3-2') >= 0 && readmeLlm.indexOf('Epiphy3DFXServer') >= 0, 'README-LLM.md §4 must record P3-2 3D subsystem baseline')
 
+        // 3c. Third-party mod dependency header & README anti-drift guard:
+        // Any kubejs/*.js referencing a third-party mod class MUST declare that mod in its top 30 header lines AND in README.md / README_EN.md top 40 lines!
+        var thirdPartyRules = [
+            { mod: 'CodeChickenLib',     pkgRe: /['"]codechicken\.lib\./ },
+            { mod: 'ModernUI',           pkgRe: /['"]icyllis\.modernui\./ },
+            { mod: 'Curios',             pkgRe: /['"]top\.theillusivec4\.curios\./ },
+            { mod: 'Draconic Evolution', pkgRe: /['"]com\.brandon3055\.draconicevolution\./ },
+            { mod: 'BrandonsCore',       pkgRe: /['"]com\.brandon3055\.brandonscore\./ }
+        ]
+        var readmeZhTop = readmeZh.split(/\r?\n/).slice(0, 40).join('\n')
+        var readmeEnTop = readmeEn.split(/\r?\n/).slice(0, 40).join('\n')
+        var kubejsFiles = []
+        function walkKubeJs(dir) {
+            var entries = fs.readdirSync(dir, { withFileTypes: true })
+            for (var wi = 0; wi < entries.length; wi++) {
+                var full = path.join(dir, entries[wi].name)
+                if (entries[wi].isDirectory()) walkKubeJs(full)
+                else if (entries[wi].name.slice(-3) === '.js') kubejsFiles.push(full)
+            }
+        }
+        walkKubeJs(path.join(ROOT_DIR, 'kubejs'))
+        var checkedThirdPartyHits = 0
+        for (var fi = 0; fi < kubejsFiles.length; fi++) {
+            var fp = kubejsFiles[fi]
+            var srcText = fs.readFileSync(fp, 'utf8')
+            var headerTop = srcText.split(/\r?\n/).slice(0, 30).join('\n')
+            var relFp = path.relative(ROOT_DIR, fp)
+            for (var ti = 0; ti < thirdPartyRules.length; ti++) {
+                var rule = thirdPartyRules[ti]
+                if (!rule.pkgRe.test(srcText)) continue
+                checkedThirdPartyHits++
+                assert.ok(headerTop.indexOf(rule.mod) >= 0, relFp + ' loads ' + rule.mod + ' classes and MUST declare "' + rule.mod + '" in its top 30 header lines!')
+                assert.ok(readmeZhTop.indexOf(rule.mod) >= 0, 'README.md top dependency section must declare third-party mod: ' + rule.mod)
+                assert.ok(readmeEnTop.indexOf(rule.mod) >= 0, 'README_EN.md top dependency section must declare third-party mod: ' + rule.mod)
+            }
+        }
+        assert.ok(checkedThirdPartyHits >= 5, 'third-party mod header guard must audit all known third-party class references')
+
         // 4. Out-of-range dependency version MUST be rejected fail-fast by downstream hard-dependent component
         var badCases = ['2.4.9', '3.0.0']
         for (var bi = 0; bi < badCases.length; bi++) {
