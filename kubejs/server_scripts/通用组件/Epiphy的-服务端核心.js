@@ -1,6 +1,6 @@
 // priority: 1080
 // ============================================================================
-// Epiphy 服务端核心与世界工具 (EpiphyServerCore / EpiphyServerBase v2.6)
+// Epiphy 服务端核心与世界工具 (EpiphyServerCore / EpiphyServerBase v2.6.0)
 //   许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //   放置位置：kubejs/server_scripts/通用组件/Epiphy的-服务端核心.js
 //   所属阶段：server_scripts

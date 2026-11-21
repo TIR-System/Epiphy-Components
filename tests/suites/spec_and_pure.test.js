@@ -351,6 +351,7 @@ module.exports = function registerSuite(test, h) {
         runScriptIn(sb, DANMAKU_PATH)
         runScriptIn(sb, RENDERER_PATH)
         runScriptIn(sb, h.FX3D_CORE_PATH)
+        runScriptIn(sb, h.FX3D_SERVER_PATH)
         runScriptIn(sb, h.FX3D_PATH)
 
         var Spec  = sb.global.EpiphySpec
@@ -373,20 +374,21 @@ module.exports = function registerSuite(test, h) {
 
         // 3. Every common component under kubejs/*/通用组件/*.js MUST be managed (auto-discovered, no silent escape)
         var componentMatrix = [
-            { name: 'EpiphySpec',            obj: sb.global.EpiphySpec,            file: SPEC_PATH },
-            { name: 'EpiphyCreativeTab',     obj: sb.global.EpiphyCreativeTab,     file: CREATIVE_TAB_PATH },
-            { name: 'EpiphyLog',             obj: sb.global.EpiphyLog,             file: LOG_PATH },
-            { name: 'EpiphyServerCore',      obj: sb.global.EpiphyServerCore,      file: SERVER_BASE_PATH },
-            { name: 'EpiphyBlockTracker',    obj: sb.global.EpiphyBlockTracker,    file: TRACKER_PATH },
-            { name: 'EpiphyPermissionValve', obj: sb.global.EpiphyPermissionValve, file: VALVE_PATH },
-            { name: 'EpiphyDebug',           obj: sb.global.EpiphyDebug,           file: DEBUG_PATH },
-            { name: 'EpiphyBugfix',          obj: sb.global.EpiphyBugfix,          file: BUGFIX_PATH },
-            { name: 'EpiphyAudio',           obj: sb.global.EpiphyAudio,           file: AUDIO_PATH },
-            { name: 'EpiphyAudioClient',     obj: sb.global.EpiphyAudioClient,     file: AUDIO_CLIENT_PATH },
-            { name: 'Epiphy2DSurface',       obj: sb.global.Epiphy2DSurface,       file: DANMAKU_PATH },
-            { name: 'Epiphy2DRenderer',      obj: sb.global.Epiphy2DRenderer,      file: RENDERER_PATH },
-            { name: 'Epiphy3DFXCore',        obj: sb.global.Epiphy3DFXCore,        file: h.FX3D_CORE_PATH },
-            { name: 'Epiphy3DFX',            obj: sb.global.Epiphy3DFX,            file: h.FX3D_PATH }
+            { name: 'EpiphySpec',            docTag: 'EpiphySpec',                                obj: sb.global.EpiphySpec,            file: SPEC_PATH },
+            { name: 'EpiphyCreativeTab',     docTag: 'EpiphyCreativeTab',                         obj: sb.global.EpiphyCreativeTab,     file: CREATIVE_TAB_PATH },
+            { name: 'EpiphyLog',             docTag: 'EpiphyLog',                                 obj: sb.global.EpiphyLog,             file: LOG_PATH },
+            { name: 'EpiphyServerCore',      docTag: 'EpiphyServerCore / EpiphyServerBase',       obj: sb.global.EpiphyServerCore,      file: SERVER_BASE_PATH },
+            { name: 'EpiphyBlockTracker',    docTag: 'EpiphyBlockTracker / EpiphyWorldOps',       obj: sb.global.EpiphyBlockTracker,    file: TRACKER_PATH },
+            { name: 'EpiphyPermissionValve', docTag: 'EpiphyPermissionValve',                     obj: sb.global.EpiphyPermissionValve, file: VALVE_PATH },
+            { name: 'EpiphyDebug',           docTag: 'EpiphyDebug',                               obj: sb.global.EpiphyDebug,           file: DEBUG_PATH },
+            { name: 'EpiphyBugfix',          docTag: 'EpiphyBugfix',                              obj: sb.global.EpiphyBugfix,          file: BUGFIX_PATH },
+            { name: 'EpiphyAudio',           docTag: 'EpiphyAudio',                               obj: sb.global.EpiphyAudio,           file: AUDIO_PATH },
+            { name: 'EpiphyAudioClient',     docTag: 'EpiphyAudioClient',                         obj: sb.global.EpiphyAudioClient,     file: AUDIO_CLIENT_PATH },
+            { name: 'Epiphy2DSurface',       docTag: 'Epiphy2DSurface / ScreenDanmaku',           obj: sb.global.Epiphy2DSurface,       file: DANMAKU_PATH },
+            { name: 'Epiphy2DRenderer',      docTag: 'Epiphy2DRenderer / ScreenDanmakuClient',    obj: sb.global.Epiphy2DRenderer,      file: RENDERER_PATH },
+            { name: 'Epiphy3DFXCore',        docTag: 'Epiphy3DFXCore',                            obj: sb.global.Epiphy3DFXCore,        file: h.FX3D_CORE_PATH },
+            { name: 'Epiphy3DFXServer',      docTag: 'Epiphy3DFXServer',                          obj: sb.global.Epiphy3DFXServer,      file: h.FX3D_SERVER_PATH },
+            { name: 'Epiphy3DFX',            docTag: 'Epiphy3DFX',                                obj: sb.global.Epiphy3DFX,            file: h.FX3D_PATH }
         ]
         // Pure content/item/block-registration scripts with no exported global component API
         var exemptCommonScripts = [
@@ -422,21 +424,65 @@ module.exports = function registerSuite(test, h) {
             var parsed = Spec.parseSemver(row.obj.VERSION)
             assert.ok(parsed != null, row.name + ' VERSION must be valid semver: ' + row.obj.VERSION)
             var headLines = fs.readFileSync(row.file, 'utf8').split(/\r?\n/).slice(0, 6).join('\n')
-            var expectedHeaderTag = 'v' + parsed.major + '.' + parsed.minor
-            assert.ok(headLines.indexOf(expectedHeaderTag) >= 0, row.name + ' header must declare ' + expectedHeaderTag + ' matching exported VERSION ' + row.obj.VERSION)
+            var exactHeaderRe = new RegExp('\\bv' + parsed.major + '\\.' + parsed.minor + '\\.' + parsed.patch + '(?![.\\d])')
+            assert.ok(exactHeaderRe.test(headLines), row.name + ' header must declare exact v' + row.obj.VERSION + ' (run `npm run sync-docs`)')
         }
         assert.strictEqual(sb.global.EpiphyAudio.VERSION, '5.8.0', 'EpiphyAudio must report its own 5.8.0 version')
         assert.strictEqual(sb.global.EpiphyAudioClient.VERSION, '5.6.0', 'EpiphyAudioClient must report its own 5.6.0 version')
         assert.strictEqual(sb.global.EpiphyDebug.VERSION, '1.0.0', 'EpiphyDebug must report its own 1.0.0 version')
         assert.strictEqual(sb.global.EpiphyBugfix.VERSION, '1.0.0', 'EpiphyBugfix must report its own 1.0.0 version')
 
-        // 3b. Cross-document major.minor parity check for roadmap §8.1 P3-2 (prevent doc version drift)
+        // 3b. Cross-document exact 3-segment semver parity & anti-drift guard (README.md, README_EN.md, README-LLM.md, roadmap)
         var roadmapDoc = fs.readFileSync(path.join(ROOT_DIR, 'docs', 'rendering-subsystem-roadmap.md'), 'utf8')
+        var readmeZh   = fs.readFileSync(path.join(ROOT_DIR, 'README.md'), 'utf8')
+        var readmeEn   = fs.readFileSync(path.join(ROOT_DIR, 'README_EN.md'), 'utf8')
+        var readmeLlm  = fs.readFileSync(path.join(ROOT_DIR, 'README-LLM.md'), 'utf8')
+
+        function hasExactDocVersion(text, label, verStr) {
+            var esc = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+            var re  = new RegExp(esc + '\\s+v' + verStr.replace(/\./g, '\\.') + '(?![.\\d])')
+            return re.test(text)
+        }
+
+        // All 15 managed common components MUST have exact 3-segment vX.Y.Z parity in README.md AND README_EN.md
+        var checkedDocVersions = 0
+        for (var ri = 0; ri < componentMatrix.length; ri++) {
+            var comp = componentMatrix[ri]
+            var baseName = path.basename(comp.file)
+            assert.ok(readmeZh.indexOf(baseName) >= 0, 'README.md must list common component: ' + baseName)
+            assert.ok(readmeEn.indexOf(baseName) >= 0, 'README_EN.md must list common component: ' + baseName)
+            assert.ok(hasExactDocVersion(readmeZh, comp.docTag, comp.obj.VERSION), 'README.md must declare exact `' + comp.docTag + ' v' + comp.obj.VERSION + '` (run `npm run sync-docs`)')
+            assert.ok(hasExactDocVersion(readmeEn, comp.docTag, comp.obj.VERSION), 'README_EN.md must declare exact `' + comp.docTag + ' v' + comp.obj.VERSION + '` (run `npm run sync-docs`)')
+            checkedDocVersions++
+        }
+        assert.ok(checkedDocVersions >= 15 && checkedDocVersions === componentMatrix.length, 'Test 67 must strictly verify all >=15 managed components across README.md & README_EN.md')
+
         var p32Line = roadmapDoc.split(/\r?\n/).find(function (l) { return l.indexOf('**P3-2**') >= 0 }) || ''
-        var coreVer = Spec.parseSemver(sb.global.Epiphy3DFXCore.VERSION)
-        var fxVer   = Spec.parseSemver(sb.global.Epiphy3DFX.VERSION)
-        assert.ok(p32Line.indexOf('Epiphy3DFXCore v' + coreVer.major + '.' + coreVer.minor) >= 0, 'roadmap §8.1 P3-2 must match Epiphy3DFXCore major.minor')
-        assert.ok(p32Line.indexOf('Epiphy3DFX v' + fxVer.major + '.' + fxVer.minor) >= 0, 'roadmap §8.1 P3-2 must match Epiphy3DFX major.minor')
+        assert.ok(hasExactDocVersion(p32Line, 'Epiphy3DFXCore', sb.global.Epiphy3DFXCore.VERSION), 'roadmap §8.1 P3-2 must match exact Epiphy3DFXCore v' + sb.global.Epiphy3DFXCore.VERSION)
+        assert.ok(hasExactDocVersion(p32Line, 'Epiphy3DFXServer', sb.global.Epiphy3DFXServer.VERSION), 'roadmap §8.1 P3-2 must match exact Epiphy3DFXServer v' + sb.global.Epiphy3DFXServer.VERSION)
+        assert.ok(hasExactDocVersion(p32Line, 'Epiphy3DFX', sb.global.Epiphy3DFX.VERSION), 'roadmap §8.1 P3-2 must match exact Epiphy3DFX v' + sb.global.Epiphy3DFX.VERSION)
+
+        var llmP32Line = readmeLlm.split(/\r?\n/).find(function (l) { return l.indexOf('`P3-2`') >= 0 }) || ''
+        assert.ok(hasExactDocVersion(llmP32Line, 'Epiphy3DFXCore', sb.global.Epiphy3DFXCore.VERSION), 'README-LLM.md §4 P3-2 must match exact Epiphy3DFXCore v' + sb.global.Epiphy3DFXCore.VERSION)
+        assert.ok(hasExactDocVersion(llmP32Line, 'Epiphy3DFXServer', sb.global.Epiphy3DFXServer.VERSION), 'README-LLM.md §4 P3-2 must match exact Epiphy3DFXServer v' + sb.global.Epiphy3DFXServer.VERSION)
+        assert.ok(hasExactDocVersion(llmP32Line, 'Epiphy3DFX', sb.global.Epiphy3DFX.VERSION), 'README-LLM.md §4 P3-2 must match exact Epiphy3DFX v' + sb.global.Epiphy3DFX.VERSION)
+
+        var requiredInfraRefs = ['proto_v6_schema.json', 'rhino-check.js', 'sync-doc-versions.js']
+        for (var ii = 0; ii < requiredInfraRefs.length; ii++) {
+            assert.ok(readmeZh.indexOf(requiredInfraRefs[ii]) >= 0, 'README.md must reference ' + requiredInfraRefs[ii])
+            assert.ok(readmeEn.indexOf(requiredInfraRefs[ii]) >= 0, 'README_EN.md must reference ' + requiredInfraRefs[ii])
+        }
+        // Guard against stale hardcoded test counts in top-level docs
+        var docSet = [
+            { name: 'README.md', text: readmeZh },
+            { name: 'README_EN.md', text: readmeEn },
+            { name: 'README-LLM.md', text: readmeLlm },
+            { name: 'docs/rendering-subsystem-roadmap.md', text: roadmapDoc }
+        ]
+        for (var di = 0; di < docSet.length; di++) {
+            assert.strictEqual(/(?:共\s*69\s*项|69\s*test cases|69\/69)/.test(docSet[di].text), false, docSet[di].name + ' must not carry stale hardcoded 69 test count')
+        }
+        assert.ok(readmeLlm.indexOf('P3-2') >= 0 && readmeLlm.indexOf('Epiphy3DFXServer') >= 0, 'README-LLM.md §4 must record P3-2 3D subsystem baseline')
 
         // 4. Out-of-range dependency version MUST be rejected fail-fast by downstream hard-dependent component
         var badCases = ['2.4.9', '3.0.0']

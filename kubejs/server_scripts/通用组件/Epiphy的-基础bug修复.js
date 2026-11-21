@@ -1,6 +1,6 @@
 // priority: 900
 // ============================================================================
-//  基础 Bug 修复组件 (EpiphyBugfix v1.0)
+//  基础 Bug 修复组件 (EpiphyBugfix v1.0.0)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/server_scripts/通用组件/Epiphy的-基础bug修复.js

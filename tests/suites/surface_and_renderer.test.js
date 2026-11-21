@@ -4476,6 +4476,11 @@ module.exports = function registerSuite(test, h) {
                                 var rt = { name: name, fmt: fmt, mode: mode, state: state }
                                 createdRenderTypes.push(rt)
                                 return rt
+                            },
+                            m_234335_: function (tex, outline) {
+                                var rt = { name: 'entity_translucent_emissive', tex: String(tex), outline: Boolean(outline) }
+                                createdRenderTypes.push(rt)
+                                return rt
                             }
                         }
                     }
@@ -4533,10 +4538,10 @@ module.exports = function registerSuite(test, h) {
         assert.strictEqual(shaderJson.fragment, 'epiphy:epiphy_cosmos')
         assert.deepStrictEqual(shaderJson.attributes, ['Position', 'Color', 'UV0'])
         assert.ok(shaderVsh.indexOf('#version 150') === 0 && shaderFsh.indexOf('#version 150') === 0, 'core shaders must be valid GLSL 150')
-        assert.ok(shaderFsh.indexOf('EpiphyYawPitch') >= 0 && shaderFsh.indexOf('evalCrossStarLayer') >= 0, 'fragment shader must implement camera-reactive cross-star cosmos')
+        assert.ok(shaderFsh.indexOf('EpiphyYawPitch') >= 0 && shaderFsh.indexOf('evalHeroCrossStars') >= 0, 'fragment shader must implement camera-reactive cross-star cosmos')
         assert.ok(fs.existsSync(path.join(texDir, 'imperius_test.png')), 'static base blade texture must exist')
         assert.ok(fs.existsSync(path.join(texDir, 'imperius_test_cosmos_mask.png')), 'GPU cosmos window mask texture must exist')
-        assert.ok(fs.existsSync(path.join(ROOT_DIR, 'kubejs', 'assets', 'epiphy', 'textures', 'effect', 'white_pixel.png')), 'white_pixel.png must exist for POSITION_COLOR_TEX surround VFX')
+        assert.ok(fs.existsSync(path.join(ROOT_DIR, 'kubejs', 'assets', 'epiphy', 'textures', 'effect', 'white_pixel.png')), 'white_pixel.png must exist for surround VFX')
         assert.strictEqual(fs.existsSync(path.join(texDir, 'imperius_test.png.mcmeta')), false, 'obsolete animated mcmeta must be removed')
         var coreSrc = fs.readFileSync(FX3D_CORE_PATH, 'utf8')
         assert.strictEqual(coreSrc.indexOf('committee.nova.mods.avaritia'), -1, 'must NEVER call Avaritia renderer/shaders')
@@ -4547,9 +4552,9 @@ module.exports = function registerSuite(test, h) {
         var impCfg = FX3D.getBoundItemConfig('epiphy:imperius_test')
         assert.ok(impCfg != null && impCfg.maskTexture === 'epiphy:textures/item/imperius_test_cosmos_mask.png', 'must auto-derive cosmos mask texture path')
         assert.strictEqual(FX3DCore._pure.buildCosmosOverlayQuads().length, 2, 'cosmos overlay must be exact 2 quads (front+back)')
-        assert.ok(FX3DCore._pure.buildAstrolabeRingQuads(impCfg.rings[0]).length >= 100 && FX3DCore._pure.buildAstrolabeRingQuads(impCfg.rings[0]).length <= 180, 'Ring 0 must bake lean bold cross-ribbons, ticks, and 4 3D star-prisms')
-        assert.ok(FX3DCore._pure.buildHelixRibbonQuads(impCfg.helix, 0).length >= 60 && FX3DCore._pure.buildHelixRibbonQuads(impCfg.helix, 0).length <= 140, 'Helix strand must bake lean smooth cross-ribbons along blade spine')
-        assert.ok(FX3DCore._pure.buildStarMotesQuads(impCfg.motes, 0, 2).length >= 40, 'Star-mote group must bake 3D star heads + comet trails')
+        assert.ok(FX3DCore._pure.buildAstrolabeRingQuads(impCfg.rings[0]).length >= 80 && FX3DCore._pure.buildAstrolabeRingQuads(impCfg.rings[0]).length <= 150, 'Ring 0 must bake lean bold cross-ribbons, ticks, and 4 3D star-prisms')
+        assert.ok(FX3DCore._pure.buildHelixRibbonQuads(impCfg.helix, 0).length >= 42 && FX3DCore._pure.buildHelixRibbonQuads(impCfg.helix, 0).length <= 100, 'Helix strand must bake lean smooth cross-ribbons along blade spine')
+        assert.ok(FX3DCore._pure.buildStarMotesQuads(impCfg.motes, 0, 2).length >= 36, 'Star-mote group must bake 3D star heads + comet trails')
 
         // 5. Verify RegisterShadersEvent loads epiphy:epiphy_cosmos via CCShaderInstance.create (zero Rhino constructor ambiguity!)
         modBusHooks['net.minecraftforge.client.event.RegisterShadersEvent']({
@@ -4566,7 +4571,7 @@ module.exports = function registerSuite(test, h) {
         assert.strictEqual(shStat.loaded, true)
         assert.strictEqual(shStat.hasUniforms, true, 'must resolve EpiphyTime, EpiphyYawPitch, EpiphyGuiMode uniforms')
 
-        // 6. Verify ModelEvent$ModifyBakingResult pre-bakes CCModels ONCE, uses OutlineProperty.NONE, and wraps originalModel
+        // 6. Verify ModelEvent$ModifyBakingResult pre-bakes compact flat meshes ONCE, uses OutlineProperty.NONE + vanilla entityTranslucentEmissive, and wraps originalModel
         var modelsStore = {}
         var origModelStub = { m_6160_: function () { return 'bladeParticleSprite' } }
         modelsStore['epiphy:imperius_test#inventory'] = origModelStub
@@ -4582,37 +4587,78 @@ module.exports = function registerSuite(test, h) {
         assert.strictEqual(wrappedRenderer.getModelState(), 'DEFAULT_TOOL', 'sword IItemRenderer must use TransformUtils.DEFAULT_TOOL')
         assert.strictEqual(wrappedRenderer.isGui3d(), false, 'sword icon must keep crisp flat GUI lighting (isGui3d=false)')
         assert.strictEqual(wrappedRenderer.m_6160_(), 'bladeParticleSprite', 'getParticleIcon must delegate to originalModel')
-        assert.ok(outlinePropsUsed.length >= 2 && outlinePropsUsed.every(function (p) { return p === 'OUTLINE_NONE' }), 'all RenderTypes must pass OutlineProperty.NONE')
-        // 1 cosmos overlay + 3 rings + 2 helices + 2 mote groups = 8 pre-baked CCModels
-        assert.strictEqual(bakedCCModels.length, 8, 'must pre-bake exact 8 native CCModels (1 cosmos + 3 rings + 2 helices + 2 mote groups)')
+        assert.ok(outlinePropsUsed.length >= 1 && outlinePropsUsed.every(function (p) { return p === 'OUTLINE_NONE' }), 'custom RenderType must pass OutlineProperty.NONE')
+        assert.ok(createdRenderTypes.some(function (rt) { return rt.name === 'entity_translucent_emissive' && rt.outline === false }), 'surround VFX must use vanilla RenderType.entityTranslucentEmissive(white_pixel, false)')
 
-        // 7. Verify per-frame renderItem in FIRST_PERSON_RIGHT_HAND & lean GUI LOD (zero JS vertex loop!)
+        // 7. Verify per-frame renderItem in FIRST_PERSON_RIGHT_HAND & lean GUI LOD via direct VertexConsumer fast path
+        var cosmosVerts = []
+        var surroundVerts = []
+        function makeMockVc(targetArr) {
+            var curV = null
+            var vc = {
+                m_5954_: function (x, y, z, r, g, b, a, u, v, ov, li, nx, ny, nz) {
+                    targetArr.push({ x: x, y: y, z: z, r: r, g: g, b: b, a: a, u: u, v: v, fast14: true })
+                },
+                m_5483_: function (x, y, z) { curV = { x: x, y: y, z: z }; return vc },
+                m_6122_: function (r, g, b, a) { if (curV) { curV.r = r; curV.g = g; curV.b = b; curV.a = a } return vc },
+                m_7421_: function (u, v) { if (curV) { curV.u = u; curV.v = v } return vc },
+                m_5752_: function () { if (curV) { targetArr.push(curV); curV = null } }
+            }
+            return vc
+        }
+        var mockPoseMat = {
+            m00: function () { return 1 }, m10: function () { return 0 }, m20: function () { return 0 }, m30: function () { return 0 },
+            m01: function () { return 0 }, m11: function () { return 1 }, m21: function () { return 0 }, m31: function () { return 0 },
+            m02: function () { return 0 }, m12: function () { return 0 }, m22: function () { return 1 }, m32: function () { return 0 },
+            m03: function () { return 0 }, m13: function () { return 0 }, m23: function () { return 0 }, m33: function () { return 1 }
+        }
+        var mockPoseStack = {
+            m_85850_: function () {
+                return { m_252922_: function () { return mockPoseMat } }
+            }
+        }
         var mockBufferSource = {
+            m_6299_: function (rt) {
+                if (rt && rt.name === 'entity_translucent_emissive') return makeMockVc(surroundVerts)
+                return makeMockVc(cosmosVerts)
+            },
             m_109912_: function (rt) { flushedTypes.push(rt) }
         }
         var mockStack = { m_41790_: function () { return true } }
-        wrappedRenderer.renderItem(mockStack, HAND_CTX, new MockMatrix4(), mockBufferSource, 0x00F000F0, 0)
+        wrappedRenderer.renderItem(mockStack, HAND_CTX, mockPoseStack, mockBufferSource, 0x00F000F0, 0)
         assert.strictEqual(origModelDraws, 1, 'must draw originalModel once per renderItem')
-        assert.strictEqual(renderDrawCalls.length, 8, 'first-person hand render must emit exact 8 pre-baked CCModel draw calls (zero JS vertex loop)')
+        assert.strictEqual(cosmosVerts.length, 8, 'cosmos window overlay must submit exact 8 vertices (2 quads front+back)')
+        assert.ok(surroundVerts.length >= 1600, 'first-person hand render must submit full-LOD surround vertices directly to VertexConsumer, got ' + surroundVerts.length)
+        assert.ok(surroundVerts.every(function (v) { return v.fast14 === true }), 'surround VFX must hit 14-arg VertexConsumer.m_5954_ fast path (Embeddium SodiumBufferBuilder compatible)')
         assert.strictEqual(uniformValues.EpiphyGuiMode, 0.0, 'first-person render must set EpiphyGuiMode = 0.0')
         assert.ok(Array.isArray(uniformValues.EpiphyYawPitch) && Math.abs(uniformValues.EpiphyYawPitch[0] - 42.5 * Math.PI / 180) < 1e-4, 'must upload camera yaw/pitch radians to GPU shader')
-        assert.strictEqual(flushedTypes.length, 3, 'hand render must flush origRt -> cosmosRt -> vfxSurroundType in exact depth-occlusion order')
-        // Verify slash expansion applied to ring/helix/mote transforms (swing=0.5 -> sin(PI/2)=1.0 -> 1.45x)
-        var hasSlashScale = renderDrawCalls.some(function (dc) {
-            return dc.scales.some(function (sc) { return Math.abs(sc[1] - 1.45) < 1e-4 })
-        })
-        assert.ok(hasSlashScale, 'swingProgress=0.5 must expand 3D surround scale to 1.45x via Matrix4')
+        assert.strictEqual(flushedTypes.length, 1, 'hand render must flush only origRt once (cosmos/surround auto-flush via BufferSource)')
 
-        // GUI slot render check: lean LOD (1 cosmos + 2 hero rings = 3 draw calls) and NO mid-GUI origRt flush!
-        renderDrawCalls.length = 0
+        // Verify pure flat-mesh baker & affine slash expansion transform (swing=0.5 -> sin(PI/2)=1.0 -> 1.45x)
+        var bakedTest = FX3DCore._pure.bakeQuadsToFlatMesh(FX3DCore._pure.buildCosmosOverlayQuads())
+        assert.strictEqual(bakedTest.vertexCount, 8)
+        assert.strictEqual(bakedTest.data.length, 72)
+        var slashMat = new Array(12)
+        FX3DCore._pure.composeLocalTransform(slashMat, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], 0.5, 0.5, 0.5, 0, 1.0, 1.45, 1.45, 0, 0, 0)
+        assert.ok(Math.abs(slashMat[5] - 1.45) < 1e-4, 'composeLocalTransform must apply 1.45x slash radial expansion on Y axis')
+
+        // GUI slot render check: lean LOD (cosmos 8 verts + 2 hero rings only, strictly fewer surround verts than hand) and exact 1 origRt flush!
+        var handSurroundVertCount = surroundVerts.length
+        cosmosVerts.length = 0
+        surroundVerts.length = 0
         flushedTypes.length = 0
-        wrappedRenderer.renderItem(mockStack, GUI_CTX, new MockMatrix4(), mockBufferSource, 0x00F000F0, 0)
+        wrappedRenderer.renderItem(mockStack, GUI_CTX, mockPoseStack, mockBufferSource, 0x00F000F0, 0)
         assert.strictEqual(uniformValues.EpiphyGuiMode, 1.0, 'GUI slot render must set EpiphyGuiMode = 1.0')
-        assert.strictEqual(renderDrawCalls.length, 3, 'GUI slot render must use lean LOD (1 cosmos + 2 hero rings = 3 draw calls)')
-        assert.strictEqual(flushedTypes.length, 2, 'GUI slot render must NOT flush origRt mid-hotbar batch')
-        assert.strictEqual(FX3D.getStats().bakedCount, 1)
-        assert.strictEqual(FX3D.getStats().coreAvailable, true)
-        assert.strictEqual(FX3D.getStats().envState, 'client')
+        assert.strictEqual(cosmosVerts.length, 8, 'GUI slot render must submit exact 8 cosmos overlay vertices')
+        assert.ok(surroundVerts.length > 400 && surroundVerts.length < handSurroundVertCount, 'GUI slot render must use lean LOD (2 hero rings only), got ' + surroundVerts.length + ' vs hand ' + handSurroundVertCount)
+        assert.strictEqual(flushedTypes.length, 1, 'GUI slot render must flush only origRt once before translucent cosmos/surround')
+        var fxStatsAfter = FX3D.getStats()
+        assert.strictEqual(fxStatsAfter.bakedCount, 1)
+        assert.strictEqual(fxStatsAfter.coreAvailable, true)
+        assert.strictEqual(fxStatsAfter.envState, 'client')
+        assert.ok(fxStatsAfter.runtime != null && fxStatsAfter.runtime.renderCalls === 2 && fxStatsAfter.runtime.handCalls === 1 && fxStatsAfter.runtime.guiCalls === 1, 'runtime telemetry must track hand & GUI renderItem calls')
+        assert.strictEqual(fxStatsAfter.runtime.cosmosDraws, 2)
+        assert.strictEqual(fxStatsAfter.runtime.surroundDraws, 2)
 
         // 8. Verify _pure.pushStarPrism3DQuads & pushCrossSegmentQuads geometry helpers
         var prismList = []
@@ -4699,5 +4745,558 @@ module.exports = function registerSuite(test, h) {
         fakeDate += 60000
         var t3 = clkDate.elapsedSec()
         assert.ok((t3 - t2) <= 0.02, 'NTP forward jump must be clamped cleanly')
+
+        // 13. Verify missing CodeChickenLib degrades cleanly (Fail-Soft: 1 console.warn, 0 console.error, vanilla BakedModel untouched!)
+        var noCclWarns = []
+        var noCclErrors = []
+        var noCclModHooks = {}
+        var noCclVanillaModel = { _vanillaModel: 'imperius_test_handheld_2d' }
+        var noCclModels = { 'epiphy:imperius_test#inventory': noCclVanillaModel }
+        var noCclSb = {
+            console: {
+                info:  function () {},
+                warn:  function (m) { noCclWarns.push(String(m)) },
+                error: function (m) { noCclErrors.push(String(m)) }
+            },
+            Platform: { isClientEnvironment: function () { return true } },
+            ForgeModEvents: { onEvent: function (cls, fn) { noCclModHooks[cls] = fn } },
+            Java: {
+                loadClass: function (cls) {
+                    if (String(cls).indexOf('codechicken.lib.') === 0) {
+                        throw new Error('java.lang.ClassNotFoundException: ' + cls)
+                    }
+                    return null
+                }
+            },
+            global: {}
+        }
+        noCclSb.globalThis = noCclSb
+        vm.createContext(noCclSb)
+        loadStartupBase(noCclSb)
+        runScriptIn(noCclSb, FX3D_CORE_PATH)
+        noCclSb.global.Epiphy3DFXCore.bindItem('epiphy:imperius_test', { bladeAxisDeg: 45 })
+        noCclModHooks['net.minecraftforge.client.event.RegisterShadersEvent']({
+            getResourceProvider: function () { return {} },
+            registerShader: function () { throw new Error('must not register shader without CCL') }
+        })
+        noCclModHooks['net.minecraftforge.client.event.ModelEvent$ModifyBakingResult']({
+            getModels: function () {
+                return {
+                    get: function (k) { return noCclModels[String(k)] },
+                    put: function (k, v) { noCclModels[String(k)] = v }
+                }
+            }
+        })
+        assert.strictEqual(noCclErrors.length, 0, 'missing CCL must NOT spam console.error')
+        assert.strictEqual(noCclWarns.length, 1, 'missing CCL must emit exactly 1 clear Fail-Soft console.warn')
+        assert.ok(noCclWarns[0].indexOf('CodeChickenLib') >= 0)
+        assert.strictEqual(noCclSb.global.Epiphy3DFXCore.getStats().cclAvailable, false)
+        assert.strictEqual(noCclSb.global.Epiphy3DFXCore.getStats().backendMode, 'vanilla_fallback')
+        assert.strictEqual(noCclModels['epiphy:imperius_test#inventory'], noCclVanillaModel, 'vanilla BakedModel must stay untouched when CCL is absent')
+    })
+
+    test('72. Epiphy3DFXServer & Epiphy3DFX surface=world closed loop: quotas, extensible constraints/shapes/presets, channel/slot, tier isolation & RenderLevelStageEvent bridge', function () {
+        var FX3D_CORE_PATH   = h.FX3D_CORE_PATH
+        var FX3D_SERVER_PATH = h.FX3D_SERVER_PATH
+        var FX3D_PATH        = h.FX3D_PATH
+
+        // 1. Setup Server Sandbox (verify Issue #6: toPlayer('Tester', ...) works BEFORE first ServerEvents.tick!)
+        var srvWarns = []
+        var sentPkts = []
+        var tickCb = null
+        var loadedCbs = []
+        var mockPlayer = {
+            username: 'Tester',
+            x: 10, y: 64, z: 20,
+            sendData: function (ch, pkt) { sentPkts.push({ ch: ch, pkt: JSON.parse(JSON.stringify(pkt)) }) }
+        }
+        var mockServerObj = {
+            getPlayer: function (name) { return name === 'Tester' ? mockPlayer : null },
+            players: [mockPlayer]
+        }
+        var srvSb = {
+            console: {
+                info:  function () {},
+                warn:  function (m) { srvWarns.push(String(m)) },
+                error: function (m) { throw new Error('unexpected server error: ' + m) },
+                debug: function () {},
+                log:   function () {}
+            },
+            Utils: { server: mockServerObj },
+            ServerEvents: {
+                loaded: function (fn) { loadedCbs.push(fn) },
+                unloaded: function () {},
+                tick: function (fn) { tickCb = fn },
+                commandRegistry: function () {}
+            },
+            BlockEvents: { placed: function () {}, broken: function () {} },
+            PlayerEvents: { loggedIn: function () {}, loggedOut: function () {} },
+            Java: { loadClass: function () { return null } },
+            global: {}
+        }
+        srvSb.globalThis = srvSb
+        vm.createContext(srvSb)
+        loadServerBase(srvSb)
+        runScriptIn(srvSb, FX3D_SERVER_PATH)
+        var FxSrv = srvSb.global.Epiphy3DFXServer
+        assert.strictEqual(FxSrv.CHANNEL, 'epiphy:spatial_fx')
+        assert.strictEqual(FxSrv.PROTO_VERSION, 1)
+
+        // Issue #6 check: send by string player name BEFORE any tickCb() or loadedCb() has fired!
+        var preTickSent = FxSrv.toPlayer('Tester', { key: 'early_boot', worldPos: [10, 64, 20], kind: 'ring' })
+        assert.strictEqual(preTickSent, 1, 'toPlayer(stringName) must succeed BEFORE first ServerEvents.tick via Utils.server / BASE.resolveServer')
+        assert.strictEqual(sentPkts.length, 1)
+        assert.strictEqual(sentPkts[0].pkt.key, 'early_boot')
+        // Also verify ServerEvents.loaded populates SERVER_REF even when Utils.server is absent
+        srvSb.Utils.server = null
+        for (var li = 0; li < loadedCbs.length; li++) loadedCbs[li]({ server: mockServerObj })
+        var afterLoadedSent = FxSrv.toPlayer('Tester', { key: 'after_loaded', worldPos: [10, 64, 20], kind: 'ring' })
+        assert.strictEqual(afterLoadedSent, 1, 'toPlayer(stringName) must succeed after ServerEvents.loaded without waiting for ServerEvents.tick')
+        sentPkts.length = 0
+
+        var mockLevel = {
+            dimension: 'minecraft:overworld',
+            players: [mockPlayer]
+        }
+
+        // 2. Cost quota gate ('player' <= 16 vs 'system' <= 64)
+        var heavyShapes = [
+            { kind: 'sphere', radius: 4, segments: 24 }, // 6
+            { kind: 'sphere', radius: 5, segments: 24 }, // 6
+            { kind: 'sphere', radius: 6, segments: 24 }  // 6 => total 18 > 16
+        ]
+        var rejectedPlayerPkt = FxSrv.buildPacket({
+            tier: 'player', namespace: 'u:p1', worldPos: [10, 64, 20], shapes: heavyShapes
+        })
+        assert.strictEqual(rejectedPlayerPkt, null, 'player packet with cost 18 > 16 must be rejected')
+        var acceptedSystemPkt = FxSrv.buildPacket({
+            worldPos: [10, 64, 20], shapes: heavyShapes
+        })
+        assert.ok(acceptedSystemPkt != null && acceptedSystemPkt.cost === 18 && acceptedSystemPkt.surface === 'world' && acceptedSystemPkt.proto === 1)
+
+        // 3. Extensible constraint pipeline (addConstraint / fail-closed / removeConstraint)
+        assert.strictEqual(FxSrv.addConstraint('no_nether', function (pkt) {
+            if (pkt.dimension === 'minecraft:the_nether') return { ok: false, reason: 'nether_blocked' }
+            return { ok: true }
+        }), true)
+        assert.deepStrictEqual(plain(FxSrv.listConstraints()), ['no_nether'])
+        assert.strictEqual(FxSrv.buildPacket({ dimension: 'the_nether', worldPos: [0, 64, 0], kind: 'ring' }), null, 'custom constraint must block nether packet')
+        assert.ok(FxSrv.buildPacket({ dimension: 'overworld', worldPos: [0, 64, 0], kind: 'ring' }) != null)
+        // Throwing constraint must fail-closed
+        FxSrv.addConstraint('throwing_rule', function () { throw new Error('constraint_boom') })
+        assert.strictEqual(FxSrv.buildPacket({ worldPos: [0, 64, 0], kind: 'ring' }), null, 'throwing constraint must fail-closed')
+        assert.strictEqual(FxSrv.removeConstraint('throwing_rule'), true)
+        assert.strictEqual(FxSrv.removeConstraint('no_nether'), true)
+
+        // 4. Extensible shape schema + upward preset registration
+        assert.strictEqual(FxSrv.registerShapeSchema('rune_circle', function (raw, base) {
+            base.runes = Math.max(1, Number(raw.runes || 6))
+            return base
+        }, function (sh) { return 5 }), true)
+        assert.strictEqual(FxSrv.registerPreset('boss_seal', function (ov) {
+            return {
+                lifeMode: 'active',
+                activeHold: 40,
+                shapes: [{ kind: 'rune_circle', radius: ov.radius || 3.0, runes: ov.runes || 8 }]
+            }
+        }), true)
+        var presetPkt = FxSrv.buildPacket({ preset: 'boss_seal', worldPos: [10, 64, 20], runes: 12 })
+        assert.ok(presetPkt != null && presetPkt.cost === 5 && presetPkt.shapes[0].kind === 'rune_circle' && presetPkt.shapes[0].runes === 12)
+
+        // 5. Stateful channel().slot().syncNear() (push -> patch -> tick-rewind full push -> closeNear)
+        sentPkts.length = 0
+        var ch3d = FxSrv.channel({ namespace: 'ns_3d', group: 'g_3d', resyncTicks: 30 })
+        var sl3d = ch3d.slot('pillar_1', { preset: 'boss_seal', resyncTicks: 30 })
+        sl3d.syncNear(mockLevel, 10, 64, 20, 32, { variant: 'phase1', tick: 100, vars: { charge: 0.25 } })
+        sl3d.syncNear(mockLevel, 10, 64, 20, 32, { variant: 'phase1', tick: 110, vars: { charge: 0.60 } })
+        sl3d.syncNear(mockLevel, 10, 64, 20, 32, { variant: 'phase1', tick: 5,   vars: { charge: 0.90 } })
+        sl3d.closeNear(mockLevel, 10, 64, 20, 32, 2)
+        assert.strictEqual(sentPkts.length, 4)
+        assert.strictEqual(sentPkts[0].ch, 'epiphy:spatial_fx')
+        assert.strictEqual(sentPkts[0].pkt.action, 'push')
+        assert.strictEqual(sentPkts[1].pkt.action, 'patch')
+        assert.strictEqual(sentPkts[2].pkt.action, 'push', 'tick rewind (5 < 100) must force full resync push')
+        assert.strictEqual(sentPkts[3].pkt.action, 'deactivate')
+
+        // 6. Setup Client Sandbox (Startup Core RenderLevelStageEvent bridge + Client Consumer)
+        var cliNow = 10000
+        var netHandlers = {}
+        var cliLogoutCb = null
+        var cliTickCb   = null
+        var forgeEventHooks = {}
+        var cliWarns = []
+        var cliSb = {
+            console: {
+                info:  function () {},
+                warn:  function (m) { cliWarns.push(String(m)) },
+                error: function (m) { throw new Error('unexpected client error: ' + m) },
+                debug: function () {},
+                log:   function () {}
+            },
+            Date: { now: function () { return cliNow } },
+            Platform: { isClientEnvironment: function () { return true } },
+            Client: { level: { dimension: 'minecraft:overworld' } },
+            ForgeEvents: { onEvent: function (cls, fn) { forgeEventHooks[cls] = fn } },
+            ForgeModEvents: { onEvent: function () {} },
+            NetworkEvents: { dataReceived: function (ch, fn) { netHandlers[ch] = fn } },
+            ClientEvents: {
+                loggedOut: function (fn) { cliLogoutCb = fn },
+                tick:      function (fn) { cliTickCb = fn }
+            },
+            Java: { loadClass: function () { return null } },
+            global: {}
+        }
+        cliSb.globalThis = cliSb
+        vm.createContext(cliSb)
+        loadStartupBase(cliSb)
+        runScriptIn(cliSb, FX3D_CORE_PATH)
+        runScriptIn(cliSb, FX3D_PATH)
+
+        var FxCli = cliSb.global.Epiphy3DFX
+        var levelStageHook = forgeEventHooks['net.minecraftforge.client.event.RenderLevelStageEvent']
+        assert.strictEqual(typeof levelStageHook, 'function', 'Epiphy3DFXCore must register RenderLevelStageEvent bridge on client')
+        assert.strictEqual(cliSb.global.Epiphy3DFXCore.getStats().worldHookRegistered, true)
+
+        // O(1) idle short-circuit check: with 0 active world FX, RenderLevelStageEvent must not touch event methods!
+        levelStageHook({
+            getStage: function () { throw new Error('idle O(1) guard must exit before inspecting stage') }
+        })
+
+        // Protocol version fail-closed check
+        netHandlers['epiphy:spatial_fx']({ data: { proto: 99, surface: 'world', action: 'push', worldPos: [10, 64, 20], shapes: [{ kind: 'ring' }] } })
+        assert.strictEqual(FxCli.countWorld(), 0)
+        assert.strictEqual(FxCli.getWorldStats().droppedMismatch, 1)
+
+        // Round-trip server push + in-queue patch coalescing + orphan patch drop
+        netHandlers['epiphy:spatial_fx']({ data: { proto: 1, surface: 'world', action: 'patch', slotId: 'ghost_slot', vars: { x: 1 } } })
+        netHandlers['epiphy:spatial_fx']({ data: sentPkts[0].pkt }) // push pillar_1 (charge=0.25)
+        FxCli._stepWorldNow(cliNow)
+        assert.strictEqual(FxCli.listWorld().length, 1)
+        assert.strictEqual(FxCli.listWorld()[0].vars.charge, 0.25)
+
+        // Queue two patches for same slot before drain -> must coalesce into 1 pending action
+        netHandlers['epiphy:spatial_fx']({ data: { proto: 1, surface: 'world', action: 'patch', namespace: 'ns_3d', slotId: 'pillar_1', vars: { charge: 0.50, phase: 'a' } } })
+        netHandlers['epiphy:spatial_fx']({ data: { proto: 1, surface: 'world', action: 'patch', namespace: 'ns_3d', slotId: 'pillar_1', vars: { charge: 0.88 } } })
+        assert.strictEqual(FxCli.getWorldStats().pendingCount, 1, 'multiple pending patches for same slotId must coalesce in queue')
+        FxCli._stepWorldNow(cliNow + 50)
+        assert.strictEqual(FxCli.listWorld()[0].vars.charge, 0.88)
+        assert.strictEqual(FxCli.listWorld()[0].vars.phase, 'a')
+
+        // Player tier isolation: player clear/deactivate MUST NOT touch system FX
+        netHandlers['epiphy:spatial_fx']({ data: { proto: 1, surface: 'world', action: 'push', tier: 'player', namespace: 'u:alice', slotId: 'p_ring', worldPos: [10, 64, 20], shapes: [{ kind: 'ring' }] } })
+        FxCli._stepWorldNow(cliNow + 100)
+        assert.strictEqual(FxCli.listWorld().length, 2)
+        netHandlers['epiphy:spatial_fx']({ data: { proto: 1, surface: 'world', action: 'clear', tier: 'player', namespace: 'u:alice', group: '*' } })
+        FxCli._stepWorldNow(cliNow + 120)
+        assert.strictEqual(FxCli.listWorld().length, 1, 'player clear must remove only own player FX and protect system FX')
+        assert.strictEqual(FxCli.listWorld()[0].tier, 'system')
+
+        // RenderLevelStageEvent rendering + extensible registerWorldShape + try/finally PoseStack symmetry on throw
+        cliNow += 250
+        var drawnKinds = []
+        var pushCount = 0
+        var popCount  = 0
+        FxCli.registerWorldShape('rune_circle', function (ctx, sh) {
+            drawnKinds.push(sh.kind + ':' + ctx.fx.vars.charge)
+            throw new Error('simulated_shape_render_error')
+        })
+        levelStageHook({
+            getStage: function () { return 'AFTER_TRANSLUCENT_BLOCKS' },
+            getCamera: function () { return { getPosition: function () { return { x: 10, y: 64, z: 18 } } } },
+            getPoseStack: function () {
+                return {
+                    pushPose: function () { pushCount++ },
+                    translate: function () {},
+                    popPose: function () { popCount++ }
+                }
+            },
+            getPartialTick: function () { return 0.5 }
+        })
+        assert.deepStrictEqual(drawnKinds, ['rune_circle:0.88'], 'registered custom world shape renderer must execute with live patched vars')
+        assert.strictEqual(pushCount, 1)
+        assert.strictEqual(popCount, 1, 'PoseStack.popPose() MUST run in finally even when shape renderer throws')
+
+        // 7. Issue #1: Built-in 4 default world shapes (ring/beam/helix/sphere) render real vertices with ZERO registerWorldShape calls + unknown shape warns & counts
+        cliLogoutCb()
+        assert.deepStrictEqual(plain(FxCli.getWorldStats().builtinShapes).sort(), ['beam', 'helix', 'ring', 'sphere'])
+        var builtinVerts = []
+        var builtinFlushCount = 0
+        var mockWorldBs = {
+            getBuffer: function () {
+                return {
+                    m_5954_: function (x, y, z, r, g, b, a) {
+                        builtinVerts.push({ x: x, y: y, z: z, r: r, g: g, b: b, a: a })
+                    }
+                }
+            },
+            endBatch: function () { builtinFlushCount++ }
+        }
+        var builtinKinds = ['ring', 'beam', 'helix', 'sphere']
+        for (var bi = 0; bi < builtinKinds.length; bi++) {
+            var bk = builtinKinds[bi]
+            builtinVerts.length = 0
+            builtinFlushCount = 0
+            FxCli.clearWorld('*')
+            FxCli._stepWorldNow(cliNow)
+            var srvBuiltPkt = FxSrv.buildPacket({
+                key: 'builtin_' + bk,
+                worldPos: [10, 64, 20],
+                shapes: [{ kind: bk, radius: 2.0, height: 5.0, width: 0.3, segments: 12, color: 0x7CEBFF, alpha: 0.9 }]
+            })
+            assert.ok(srvBuiltPkt != null, 'server must build default shape packet for ' + bk)
+            netHandlers['epiphy:spatial_fx']({ data: srvBuiltPkt })
+            FxCli._stepWorldNow(cliNow)
+            cliNow += 250
+            levelStageHook({
+                getStage: function () { return 'AFTER_TRANSLUCENT_BLOCKS' },
+                getCamera: function () { return { getPosition: function () { return { x: 10, y: 64, z: 16 } } } },
+                getPoseStack: function () { return { pushPose: function () {}, translate: function () {}, popPose: function () {} } },
+                getPartialTick: function () { return 0.5 },
+                bufferSource: mockWorldBs
+            })
+            assert.ok(builtinVerts.length >= 16, 'built-in world shape "' + bk + '" must emit real quad vertices without registerWorldShape, got ' + builtinVerts.length)
+            assert.strictEqual(builtinFlushCount, 1, 'built-in world shape "' + bk + '" must flush bufferSource once')
+        }
+        // Custom override + unregister restores built-in
+        var overrideHit = 0
+        FxCli.registerWorldShape('ring', function () { overrideHit++ })
+        FxCli.clearWorld('*')
+        FxCli._stepWorldNow(cliNow)
+        FxCli.pushWorld({ key: 'ov_ring', fadeIn: 0, worldPos: [10, 64, 20], shapes: [{ kind: 'ring' }] })
+        FxCli._stepWorldNow(cliNow)
+        cliNow += 250
+        levelStageHook({
+            getStage: function () { return 'AFTER_TRANSLUCENT_BLOCKS' },
+            getCamera: function () { return { getPosition: function () { return { x: 10, y: 64, z: 18 } } } },
+            getPoseStack: function () { return { pushPose: function () {}, translate: function () {}, popPose: function () {} } },
+            getPartialTick: function () { return 0.0 },
+            bufferSource: mockWorldBs
+        })
+        assert.strictEqual(overrideHit, 1, 'registerWorldShape must allow overriding built-in kind')
+        FxCli.unregisterWorldShape('ring')
+        assert.ok(FxCli.listWorldShapes().indexOf('ring') >= 0, 'unregisterWorldShape must restore built-in ring')
+        // Unknown shape kind increments skippedUnknownShapes and logs throttled warning
+        var warnsBeforeUnknown = cliWarns.length
+        FxCli.pushWorld({ key: 'unk_fx', fadeIn: 0, worldPos: [10, 64, 20], shapes: [{ kind: 'totally_unknown_shape' }] })
+        FxCli._stepWorldNow(cliNow)
+        cliNow += 250
+        levelStageHook({
+            getStage: function () { return 'AFTER_TRANSLUCENT_BLOCKS' },
+            getCamera: function () { return { getPosition: function () { return { x: 10, y: 64, z: 18 } } } },
+            getPoseStack: function () { return { pushPose: function () {}, translate: function () {}, popPose: function () {} } },
+            getPartialTick: function () { return 0.0 },
+            bufferSource: mockWorldBs
+        })
+        assert.strictEqual(FxCli.getWorldStats().skippedUnknownShapes, 1, 'unregistered shape kind must increment skippedUnknownShapes')
+        assert.ok(cliWarns.length > warnsBeforeUnknown, 'unregistered shape kind must emit throttled console.warn')
+
+        // 8. Issue #2: followEntityUuid without worldPos interpolates entity pos + offset, and skips (NEVER renders at 0,0,0) when entity is missing/removed
+        FxCli.clearWorld('*')
+        FxCli._stepWorldNow(cliNow)
+        var followOnlyPkt = FxSrv.buildPacket({
+            key: 'boss_aura',
+            fadeIn: 0,
+            followEntityUuid: '11111111-2222-3333-4444-555555555555',
+            offset: [0, 2.5, 0],
+            shapes: [{ kind: 'ring', radius: 2.0 }]
+        })
+        assert.ok(followOnlyPkt != null)
+        assert.strictEqual(followOnlyPkt.hasWorldPos, false, 'server must NOT synthesize fake worldPos [0,0,0] for followEntityUuid-only packet')
+        assert.strictEqual(followOnlyPkt.worldPos, undefined, 'server must omit worldPos when followEntityUuid-only')
+        netHandlers['epiphy:spatial_fx']({ data: followOnlyPkt })
+        FxCli._stepWorldNow(cliNow)
+        var translates = []
+        // Entity missing -> must skip rendering completely (zero translate calls, NOT drawn at 0,0,0!)
+        cliSb.Client.level.entities = []
+        cliNow += 300
+        levelStageHook({
+            getStage: function () { return 'AFTER_TRANSLUCENT_BLOCKS' },
+            getCamera: function () { return { getPosition: function () { return { x: 0, y: 0, z: 0 } } } },
+            getPoseStack: function () {
+                return {
+                    pushPose: function () {},
+                    translate: function (x, y, z) { translates.push([x, y, z]) },
+                    popPose: function () {}
+                }
+            },
+            getPartialTick: function () { return 0.5 },
+            bufferSource: mockWorldBs
+        })
+        assert.strictEqual(translates.length, 0, 'followEntityUuid with missing entity and no worldPos must skip frame (never draw at 0,0,0)')
+
+        // Entity present -> advance monotonic clock past 250ms re-lookup throttle in normal <=250ms steps (avoiding NTP clamp)
+        var mockBossEnt = {
+            uuid: '11111111-2222-3333-4444-555555555555',
+            xo: 100, yo: 70, zo: 200,
+            x:  104, y:  72, z:  206,
+            removed: false,
+            isRemoved: function () { return this.removed }
+        }
+        cliSb.Client.level.entities = [mockBossEnt]
+        cliNow += 150
+        FxCli._stepWorldNow()
+        cliNow += 150
+        levelStageHook({
+            getStage: function () { return 'AFTER_TRANSLUCENT_BLOCKS' },
+            getCamera: function () { return { getPosition: function () { return { x: 100, y: 70, z: 200 } } } },
+            getPoseStack: function () {
+                return {
+                    pushPose: function () {},
+                    translate: function (x, y, z) { translates.push([x, y, z]) },
+                    popPose: function () {}
+                }
+            },
+            getPartialTick: function () { return 0.5 },
+            bufferSource: mockWorldBs
+        })
+        assert.strictEqual(translates.length, 1, 'followEntityUuid must render once entity is found')
+        // Interp pos = (102, 71, 203) + offset (0, 2.5, 0) - cam (100, 70, 200) = (2, 3.5, 3)
+        assert.ok(Math.abs(translates[0][0] - 2.0) < 1e-4 && Math.abs(translates[0][1] - 3.5) < 1e-4 && Math.abs(translates[0][2] - 3.0) < 1e-4,
+            'followEntityUuid must apply partialTick interpolation + offset, got ' + JSON.stringify(translates[0]))
+        // Entity removed -> must immediately stop rendering
+        mockBossEnt.removed = true
+        translates.length = 0
+        cliNow += 300
+        levelStageHook({
+            getStage: function () { return 'AFTER_TRANSLUCENT_BLOCKS' },
+            getCamera: function () { return { getPosition: function () { return { x: 100, y: 70, z: 200 } } } },
+            getPoseStack: function () {
+                return {
+                    pushPose: function () {},
+                    translate: function (x, y, z) { translates.push([x, y, z]) },
+                    popPose: function () {}
+                }
+            },
+            getPartialTick: function () { return 0.5 },
+            bufferSource: mockWorldBs
+        })
+        assert.strictEqual(translates.length, 0, 'followEntityUuid must skip frame once tracked entity is removed')
+
+        // 9. Issue #3: deactivateNear/deactivateWorld string shorthand stops ONLY key, NEVER accidentally stops same-named group!
+        FxCli.clearWorld('*')
+        FxCli._stepWorldNow(cliNow)
+        FxCli.pushWorld({ key: 'pillar_alpha', group: 'boss_seal', lifeMode: 'active', activeHold: 200, fadeOut: 2, worldPos: [10, 64, 20], shapes: [{ kind: 'ring' }] })
+        FxCli.pushWorld({ key: 'pillar_beta',  group: 'boss_seal', lifeMode: 'active', activeHold: 200, fadeOut: 2, worldPos: [12, 64, 20], shapes: [{ kind: 'ring' }] })
+        FxCli._stepWorldNow(cliNow)
+        assert.strictEqual(FxCli.listWorld().length, 2)
+        // Server deactivateNear with non-matching key='boss_seal' (which equals the group name!)
+        sentPkts.length = 0
+        FxSrv.deactivateNear(mockLevel, 10, 64, 20, 32, 'boss_seal', 1)
+        assert.strictEqual(sentPkts.length, 1)
+        assert.strictEqual(sentPkts[0].pkt.key, 'boss_seal')
+        assert.strictEqual(sentPkts[0].pkt.group, '', 'deactivateNear(string) must leave group empty so key miss never falls back to group')
+        netHandlers['epiphy:spatial_fx']({ data: sentPkts[0].pkt })
+        FxCli._stepWorldNow(cliNow + 50)
+        // Advance past fadeOut (50ms) -> BOTH group='boss_seal' entries MUST still be active!
+        FxCli._stepWorldNow(cliNow + 500)
+        assert.strictEqual(FxCli.listWorld().length, 2, 'key-only deactivate("boss_seal") MUST NOT stop unrelated entries in group="boss_seal"')
+        // Now explicit deactivateGroupNear('boss_seal') MUST stop the whole group!
+        sentPkts.length = 0
+        FxSrv.deactivateGroupNear(mockLevel, 10, 64, 20, 32, 'boss_seal', 1)
+        assert.strictEqual(sentPkts.length, 1)
+        assert.strictEqual(sentPkts[0].pkt.key, '')
+        assert.strictEqual(sentPkts[0].pkt.group, 'boss_seal')
+        netHandlers['epiphy:spatial_fx']({ data: sentPkts[0].pkt })
+        FxCli._stepWorldNow(cliNow + 550)
+        FxCli._stepWorldNow(cliNow + 800)
+        assert.strictEqual(FxCli.listWorld().length, 0, 'explicit deactivateGroupNear("boss_seal") must deactivate all entries in group="boss_seal"')
+
+        // 10. Issue #4: Full real-NBT CompoundTag/ListTag/FloatTag/DoubleTag/IntTag/ByteTag/StringTag round-trip (Mojmap + SRG-only!)
+        function makeMockNbt(val, srgOnly) {
+            if (typeof val === 'string') {
+                return srgOnly
+                    ? { m_7060_: function () { return 8 }, m_7916_: function () { return val } }
+                    : { getId: function () { return 8 }, getAsString: function () { return val } }
+            }
+            if (typeof val === 'boolean') {
+                var bv = val ? 1 : 0
+                return srgOnly
+                    ? { m_7060_: function () { return 1 }, m_7063_: function () { return bv }, m_7061_: function () { return bv }, m_7916_: function () { return bv + 'b' } }
+                    : { getId: function () { return 1 }, getAsByte: function () { return bv }, getAsDouble: function () { return bv }, getAsString: function () { return bv + 'b' } }
+            }
+            if (typeof val === 'number') {
+                if (Number.isInteger(val)) {
+                    return srgOnly
+                        ? { m_7060_: function () { return 3 }, m_7047_: function () { return val }, m_7061_: function () { return val }, m_7916_: function () { return String(val) } }
+                        : { getId: function () { return 3 }, getAsInt: function () { return val }, getAsDouble: function () { return val }, getAsString: function () { return String(val) } }
+                }
+                // FloatTag simulation (32-bit float via Math.fround)
+                var fv = Math.fround(val)
+                return srgOnly
+                    ? { m_7060_: function () { return 5 }, m_7057_: function () { return fv }, m_7061_: function () { return fv }, m_7916_: function () { return fv + 'f' } }
+                    : { getId: function () { return 5 }, getAsFloat: function () { return fv }, getAsDouble: function () { return fv }, getAsString: function () { return fv + 'f' } }
+            }
+            if (Array.isArray(val)) {
+                var items = val.map(function (el) { return makeMockNbt(el, srgOnly) })
+                return {
+                    size: function () { return items.length },
+                    get: function (idx) { return items[idx] }
+                }
+            }
+            if (val != null && typeof val === 'object') {
+                var map = {}
+                var ks = Object.keys(val)
+                for (var ki = 0; ki < ks.length; ki++) map[ks[ki]] = makeMockNbt(val[ks[ki]], srgOnly)
+                var keySet = { toArray: function () { return ks.slice() } }
+                return srgOnly
+                    ? { m_7060_: function () { return 10 }, m_128431_: function () { return keySet }, m_128423_: function (k) { return map[k] } }
+                    : { getId: function () { return 10 }, getAllKeys: function () { return keySet }, get: function (k) { return map[k] } }
+            }
+            return val
+        }
+        var nbtSamplePkt = {
+            proto: 1,
+            surface: 'world',
+            action: 'push',
+            key: 'nbt_test_fx',
+            group: 'nbt_grp',
+            worldPos: [12.5, 64.25, -8.75],
+            hasWorldPos: true,
+            shapes: [
+                { kind: 'ring', radius: 3.25, width: 0.25, segments: 16, alpha: 0.75 },
+                { kind: 'beam', height: 9.5, width: 0.5, alpha: 0.8 }
+            ],
+            vars: { count: 1, ratio: 0.5, label: 'ok' }
+        }
+        var modes = [false, true]
+        for (var md = 0; md < modes.length; md++) {
+            var isSrg = modes[md]
+            FxCli.clearWorld('*')
+            FxCli._stepWorldNow(cliNow)
+            var wrappedTag = makeMockNbt(nbtSamplePkt, isSrg)
+            netHandlers['epiphy:spatial_fx']({ data: wrappedTag })
+            FxCli._stepWorldNow(cliNow + 10)
+            var listNbt = FxCli.listWorld()
+            assert.strictEqual(listNbt.length, 1, 'real NBT (' + (isSrg ? 'SRG' : 'Mojmap') + ') push must decode into active world FX')
+            assert.strictEqual(listNbt[0].key, 'nbt_test_fx')
+            assert.strictEqual(listNbt[0].shapeCount, 2, 'ListTag shapes array must preserve all elements')
+            assert.ok(Math.abs(listNbt[0].worldPos[0] - 12.5) < 1e-4 && Math.abs(listNbt[0].worldPos[2] - (-8.75)) < 1e-4, 'FloatTag worldPos precision must survive NBT round-trip')
+            assert.strictEqual(typeof listNbt[0].vars.count, 'number', 'IntTag inside vars must stay JS number, not string ("1")')
+            assert.strictEqual(listNbt[0].vars.count, 1)
+            assert.strictEqual(typeof listNbt[0].vars.ratio, 'number', 'FloatTag inside vars must stay JS number, not string ("0.5f")')
+            assert.strictEqual(listNbt[0].vars.label, 'ok')
+        }
+
+        // LoggedOut auto-clears all world FX
+        cliLogoutCb()
+        assert.strictEqual(FxCli.countWorld(), 0, 'ClientEvents.loggedOut must clear active & pending world FX')
+
+        // Spec-absent client still degrades gracefully and fail-closed rejects mismatched proto
+        var noSpecNet = {}
+        var noSpecSb = {
+            console: { info: function () {}, warn: function () {}, error: function () {} },
+            Date: { now: function () { return 5000 } },
+            NetworkEvents: { dataReceived: function (ch, fn) { noSpecNet[ch] = fn } },
+            ClientEvents: { loggedOut: function () {}, tick: function () {} },
+            global: {}
+        }
+        noSpecSb.globalThis = noSpecSb
+        vm.createContext(noSpecSb)
+        runScriptIn(noSpecSb, FX3D_PATH)
+        noSpecNet['epiphy:spatial_fx']({ data: { proto: 2, surface: 'world', action: 'push', worldPos: [0, 64, 0], shapes: [{ kind: 'ring' }] } })
+        assert.strictEqual(noSpecSb.global.Epiphy3DFX.countWorld(), 0, 'Spec-absent client must still fail-closed reject mismatched proto')
+        noSpecNet['epiphy:spatial_fx']({ data: { proto: 1, surface: 'world', action: 'push', worldPos: [0, 64, 0], shapes: [{ kind: 'ring' }] } })
+        noSpecSb.global.Epiphy3DFX._stepWorldNow(5050)
+        assert.strictEqual(noSpecSb.global.Epiphy3DFX.listWorld().length, 1, 'Spec-absent client must still consume valid v1 world FX')
     })
 }

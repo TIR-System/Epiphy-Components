@@ -1,6 +1,6 @@
 // priority: 1200
 // ============================================================================
-// Epiphy 通用规范、共享协议契约与纯逻辑基座 (EpiphySpec + EpiphyProtocol v2.6)
+// Epiphy 通用规范、共享协议契约与纯逻辑基座 (EpiphySpec + EpiphyProtocol v2.6.0)
 //   许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //   所属阶段：startup_scripts（服务端与客户端共享，单一前置加载项）
 //   职责说明：
@@ -53,6 +53,26 @@
 
     var AUDIO_CHANNEL         = 'epiphy:audio';
     var AUDIO_PROTO_VERSION   = 5;
+
+    var FX3D_CHANNEL          = 'epiphy:spatial_fx';
+    var FX3D_PROTO_VERSION    = 1;
+    var FX3D_QUOTA            = Object.freeze({
+        playerMaxCost:         16,
+        systemMaxCost:         64,
+        playerMaxPerNamespace: 8,
+        systemMaxTotal:        64,
+        maxPendingActions:     128
+    });
+    var FX3D_VALID_SURFACES   = Object.freeze({
+        world: true
+    });
+    var FX3D_VALID_KINDS      = Object.freeze({
+        ring:   true,
+        beam:   true,
+        helix:  true,
+        sphere: true,
+        custom: true
+    });
 
     function isProtoCompatible(expectedVer, incomingVer) {
         if (incomingVer === undefined || incomingVer === null) return false;
@@ -165,6 +185,9 @@
         DANMAKU_PROTO_VERSION: DANMAKU_PROTO_VERSION,
         AUDIO_CHANNEL:         AUDIO_CHANNEL,
         AUDIO_PROTO_VERSION:   AUDIO_PROTO_VERSION,
+        FX3D_CHANNEL:          FX3D_CHANNEL,
+        FX3D_PROTO_VERSION:    FX3D_PROTO_VERSION,
+        FX3D_QUOTA:            FX3D_QUOTA,
         PRIORITY_MAP:                PRIORITY_MAP,
         PRIORITY_CANON_NAMES:        PRIORITY_CANON_NAMES,
         DEPRECATED_PRIORITY_ALIASES: DEPRECATED_PRIORITY_ALIASES,
@@ -1087,6 +1110,39 @@
         return cost;
     }
 
+    function computeSpatialFxShapeCost(shape, extraCostRules) {
+        if (!isObjectLike(shape)) return 1;
+        var kind = String(shape.kind || shape.type || 'ring').trim().toLowerCase();
+        if (isObjectLike(extraCostRules) && typeof extraCostRules[kind] === 'function') {
+            var customVal = Number(extraCostRules[kind](shape));
+            if (isFinite(customVal) && customVal >= 1) return Math.ceil(customVal);
+        }
+        var segs = Number(shape.segments != null ? shape.segments : 24);
+        if (!isFinite(segs) || segs < 4) segs = 24;
+        var segMul = segs > 48 ? Math.ceil(segs / 32) : 1;
+        if (kind === 'beam')   return 2 + (segMul > 1 ? segMul - 1 : 0);
+        if (kind === 'ring')   return 3 * segMul;
+        if (kind === 'helix')  return 4 * segMul;
+        if (kind === 'sphere') return 6 * segMul;
+        return 4 * segMul;
+    }
+
+    function computeSpatialFxCost(pkt, extraCostRules) {
+        if (!isObjectLike(pkt)) return 0;
+        var shapes = Array.isArray(pkt.shapes) ? pkt.shapes : null;
+        if (shapes != null && shapes.length > 0) {
+            var total = 0;
+            for (var i = 0; i < shapes.length; i++) {
+                total += computeSpatialFxShapeCost(shapes[i], extraCostRules);
+            }
+            return total;
+        }
+        if (pkt.kind || pkt.shape) {
+            return computeSpatialFxShapeCost(isObjectLike(pkt.shape) ? pkt.shape : pkt, extraCostRules);
+        }
+        return 1;
+    }
+
     // [已淘汰，未来不再做兼容/不再新增映射表——意味着不支持后续新功能]
     // 仅保留历史扁平 v5 写法的冻结适配层；新业务与客户端调用请一律直接使用原生 v6 结构 (proto: 6 + nodes[])。
     function adaptV5ToV6(rawPkt) {
@@ -1667,6 +1723,10 @@
             normalizeDanmakuAliases:    normalizeDanmakuAliases,
             computeNodeListCost:        computeNodeListCost,
             computeOverlayCost:         computeOverlayCost,
+            FX3D_VALID_SURFACES:        FX3D_VALID_SURFACES,
+            FX3D_VALID_KINDS:           FX3D_VALID_KINDS,
+            computeSpatialFxShapeCost:  computeSpatialFxShapeCost,
+            computeSpatialFxCost:       computeSpatialFxCost,
             adaptV5ToV6:                adaptV5ToV6,
             createBoundedCache:         createBoundedCache,
             createMonotonicClock:       createMonotonicClock,

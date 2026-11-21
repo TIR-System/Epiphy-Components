@@ -1,5 +1,5 @@
 // ============================================================================
-//  通用平面渲染与屏幕弹幕组件 —— 客户端渲染引擎 (Epiphy2DRenderer / ScreenDanmakuClient v6.2)
+//  通用平面渲染与屏幕弹幕组件 —— 客户端渲染引擎 (Epiphy2DRenderer / ScreenDanmakuClient v6.2.0)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-平面渲染器.js

@@ -16,7 +16,9 @@
     "test": "node tests/run.js && node scripts/rhino-check.js",
     "test:unit": "node tests/run.js",
     "test:rhino": "node scripts/rhino-check.js",
-    "test:rhino-local": "node scripts/rhino-check.js --force-local"
+    "test:rhino-local": "node scripts/rhino-check.js --force-local",
+    "sync-docs": "node scripts/sync-doc-versions.js",
+    "sync-docs:check": "node scripts/sync-doc-versions.js --check"
   },
   "devDependencies": {
     "acorn": "^8.19.0"

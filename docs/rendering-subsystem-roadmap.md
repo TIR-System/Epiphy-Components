@@ -323,7 +323,7 @@
 
 ## 6. 测试验证方案与性能帧预算（Verification & Performance Budget）
 
-所有新增能力必须同步扩展 [`tests/pure_functions.test.js`](../tests/pure_functions.test.js)（当前基线 **69/69 passed**，首次执行前须先 `npm install` 安装 `acorn`）并通过 [`scripts/rhino-check.js`](../scripts/rhino-check.js) 校验（自动接入 `npm test`；缺 `acorn` 直接硬失败，有本地 `rhino-forge` Jar 与 JDK 时执行真实 `Context.compileString`，仅 Jar/JDK 缺失时降级为 `local-acorn-ast`），并在实机通过 `/epiphy debug renderperf on|dump` 输出 `epiphy-data/logs/client_render_perf.json` 核验帧耗时预算：
+所有新增能力必须同步扩展 [`tests/run.js`](../tests/run.js) 下对应的 `tests/suites/*.test.js` 套件（具体用例数以 `npm test` 汇总输出为准，首次执行前须先 `npm install` 安装 `acorn`）并通过 [`scripts/rhino-check.js`](../scripts/rhino-check.js) 校验（自动接入 `npm test`；缺 `acorn` 直接硬失败，有本地 `rhino-forge` Jar 与 JDK 时执行真实 `Context.compileString`，仅 Jar/JDK 缺失时降级为 `local-acorn-ast`），并在实机通过 `/epiphy debug renderperf on|dump` 输出 `epiphy-data/logs/client_render_perf.json` 核验帧耗时预算：
 
 ### 6.1 沙盒单元测试必测项（`npm test` 新增用例清单）
 1. **`adaptV5ToV6` 无损往返与等价性测试**：遍历全部 45 个 `v5` 字段输入，断言转换后的 `v6` 包在顶层 Envelope 与 `nodes[0]` 上数值 100% 精确对齐，且 `ScreenDanmakuClient` 对 `proto: 5` 与 `proto: 6` 包产生完全相同的内部 Overlay 状态与渲染调用序列；
@@ -368,7 +368,7 @@ Phase 3 (多载体扩展 B & 3D 协议先行：世界 2D 平面 + Epiphy3DFX 契
 Phase 4 (Kotlin + Java 原生模组迁移：彻底移除淘汰别名 + 硬件级加速)
   ├─ 正式移除 §5.2 淘汰列表中的冗余别名，冻结原生 API
   ├─ 2D 平面渲染器接入 fill.mask 单 Pass 双采样器蒙版 Shader、TextureTarget (FBO) 离屏缓存池（含声明式节点树整树/静态子树离屏缓存，默认关闭、按需开启）、GuiGraphics Mixin 与世界平面射线交互 GUI
-  └─ 3D 空间特效接入自有 Core/Post Shader、VBO 程序化网格生成与原生 BlockEntityRenderer
+  └─ 3D 空间特效彻底移除 KubeJS 阶段临时借用的 CodeChickenLib 挂接特例，自主实现原生 IClientItemExtensions / BlockEntityWithoutLevelRenderer（或自有 ItemRenderer Mixin）、原版 ShaderInstance Core/Post Shader、VBO 程序化网格生成与原生 BlockEntityRenderer
 ```
 
 ---
@@ -393,8 +393,8 @@ Phase 4 (Kotlin + Java 原生模组迁移：彻底移除淘汰别名 + 硬件级
 | [~] | **P2-3** | **承载面 `surface: 'slot'` 物品槽位 2D 叠加层**：已完成 `slotMatch` 与局部偏移绘制（`renderPriority: 200`）及单测；**明确前置边界**：**单槽 `renderSlot` 物品底层夹心与高性能多槽批绘制阻塞于 Phase 4 原生模组 Mixin（KubeJS Rhino 逐槽循环存在实测帧率天花板），非 KubeJS 阶段可优雅完成** | `Epiphy的-平面渲染器.js` | 槽位匹配与局部坐标裁剪单测 | 部分完成（**阻塞于 Phase 4 Mixin，非 KubeJS 可完成**） |
 | [x] | **P2-4** | **双端正式更名并挂载 `Epiphy2DSurface` / `Epiphy2DRenderer`**：更名脚本文件并保留 `ScreenDanmaku` / `ScreenDanmakuClient` 兼容别名 | `Epiphy的-平面渲染组件.js`<br>`Epiphy的-平面渲染器.js`<br>`README*.md` | 别名等价性回归单测 | `0b5a013` (2026-11-19) |
 | [ ] | **P3-1** | **承载面 `surface: 'world_plane'`（世界 2D 平面 / 高级告示牌）**：实现 `saves/<world>/kubejs_epiphy_world_planes.json` 持久化、`billboard` 朝向控制、`seeThrough` 穿透开关与 1.20.1 `Display` 实体轨驱动 | 服务端/客户端平面渲染组件 | 跨重启持久化回滚单测 + 视距增量同步单测 | 待开始 |
-| [~] | **P3-2** | **`Epiphy3DFX` 空间特效子系统协议与桥接层**：已落地独立三维物品渲染底座 `Epiphy的-空间特效核心.js` (`Epiphy3DFXCore v1.0`) 与客户端门面 `Epiphy的-空间特效渲染器.js` (`Epiphy3DFX v2.0`)，与 2D 平面渲染器彻底解耦；支持 100% 自研 GLSL 1.50 核心星空着色器 `epiphy:epiphy_cosmos`（`CCShaderInstance` 单重载加载、360° 无缝相机视差与四芒星芒，零外部模组着色器依赖）及烘焙期预烘焙原生 `CCModel` 3D 环绕特效（真实硬件深度前后遮挡 + GUI 轻量 LOD）；服务端 3D 调度协议与配额隔离待后续补齐 | `Epiphy的-Spec与通用工具.js`<br>`Epiphy的-空间特效核心.js`<br>`Epiphy的-空间特效渲染器.js` | 2D/3D 解耦断言 + GPU 着色器/预烘焙 `CCModel`/`IItemRenderer` 回归单测 (71/71) | 客户端底座已落地 (2026-11-21) |
-| [ ] | **P4-1** | **Kotlin + Java 原生模组迁移**：移除 `DEPRECATED_ALIASES`、接入 `fill.mask` 单 Pass 着色器、`TextureTarget` (FBO) 离屏缓存池（含声明式节点树整树/静态子树离屏缓存，默认关闭按需开启）、`GuiGraphics` Mixin、世界平面射线交互 GUI 与原生 3D VBO/Shader | 独立模组工程 | 原生模组集成测试 | 待开始 |
+| [x] | **P3-2** | **`Epiphy3DFX` 空间特效子系统双端闭环基座**：已落地物品 3D 渲染核心 `Epiphy的-空间特效核心.js` (`Epiphy3DFXCore v1.0.3`，100% 自研 GLSL 1.50 核心星空着色器 `epiphy:epiphy_cosmos` + 扁平网格直写原版 `VertexConsumer` + 临时可选 CCL `IItemRenderer` 挂接特例〔无 CCL 单告警退回原版静态模型；Phase 4 独立 Mod 须自实现去 CCL〕+ `RenderLevelStageEvent` O(1) 短路桥接）、服务端世界 3D 调度器 `Epiphy的-空间特效组件.js` (`Epiphy3DFXServer v1.1.0`，`epiphy:spatial_fx` 协议 `v1`、`surface: 'world'`、`computeSpatialFxCost` 配额、`channel`/`slot`、`addConstraint` 可扩展约束链与 `registerShapeSchema`/`registerPreset`）及客户端消费端 `Epiphy的-空间特效渲染器.js` (`Epiphy3DFX v2.2.0`，100% 零 CCL 依赖、内置 4 种纯原版图元默认渲染器、`followEntityUuid` 实体平滑插值追踪、同槽 `patch` 合并、`'player'`/`'system'` 隔离淘汰、`once`/`active` 生命周期与 `registerWorldShape` 渲染扩展） | `Epiphy的-Spec与通用工具.js`<br>`Epiphy的-空间特效核心.js`<br>`Epiphy的-空间特效组件.js`<br>`Epiphy的-空间特效渲染器.js` | 2D/3D 解耦 + 无 CCL 降级 + 双端 `surface: 'world'` 闭环与约束链回归单测 | 已完成 (2026-11-22) |
+| [ ] | **P4-1** | **Kotlin + Java 原生模组迁移**：移除 `DEPRECATED_ALIASES`；**彻底移除 KubeJS 阶段临时借用的 `CodeChickenLib` 特例依赖（改用 Forge 原生 `IClientItemExtensions` + `BEWLR` / 自有 Mixin + 原版 `ShaderInstance` 自主实现物品 3D 渲染）**；接入 `fill.mask` 单 Pass 着色器、`TextureTarget` (FBO) 离屏缓存池（含声明式节点树整树/静态子树离屏缓存，默认关闭按需开启）、`GuiGraphics` Mixin、世界平面射线交互 GUI 与原生 3D VBO/Shader | 独立模组工程 | 原生模组集成测试 | 待开始 |
 
 ### 8.2 变更日志（Changelog）
 
@@ -442,8 +442,11 @@ Phase 4 (Kotlin + Java 原生模组迁移：彻底移除淘汰别名 + 硬件级
     3. 批处理状态机 `openRectBatch`/`closeRectBatch`/`emitOutlineIntoOpenBatch` 提升至模块顶层（每帧 0 闭包分配），新增帧内 `resolveEventCaps(event)` 消除 5 处 `drawRect*` 重复 `typeof` JNI 探测；
     4. 真正的声明式节点树整树 / 静态子树离屏缓存（`TextureTarget` FBO，默认关闭）正式记入 Phase 4 原生模组路线图。
   - **`EpiphyServerCore v2.6` & 业务收口**：新增状态化 JSON 持久化门面 `openJsonStore(filePath, opts)`（统一 `load`/`save`/`isCorrupt` 与 `lockOnCorrupt` 防损坏覆写，根治底层的读/写参数反序问题），迁移 `方块与区块组件`、`权限阀`、`v18`；`v18` 同步修复 `DANMAKU_NAMESPACE` 声明顺序并全面迁至 `HUD_CH`/`slot`/`id` 前置 `ui()` + `.region()`；单测扩至 `66/66` 且全过真实 Rhino 编译检查。
-- **2026-11-21 (`P3-2` 客户端底座 / `Epiphy3DFXCore v1.0.0` + `Epiphy3DFX v2.0.0` GPU 核心着色器与预烘焙 `CCModel` 架构重构)**：
+- **2026-11-21 (`P3-2` 客户端底座 / `Epiphy3DFXCore v1.0.1` + `Epiphy3DFX v2.0.0` GPU 核心着色器与预烘焙 `CCModel` 架构重构)**：
   - 彻底淘汰高 CPU 开销的逐顶点 JS 循环（`RenderHandEvent` / `ContainerScreenEvent` / `PaintScreenEventJS` 桥接已全部移除，恢复 `Epiphy的-Spec与通用工具.js` 零额外每帧桥接开销），在 [`kubejs/startup_scripts/通用组件/Epiphy的-空间特效核心.js`](../kubejs/startup_scripts/通用组件/Epiphy的-空间特效核心.js) 建立子系统 B 原生 GPU + 预烘焙 `CCModel` 核心；
   - 通过 `RegisterShadersEvent` 注册 100% 自研 GLSL 1.50 核心着色器 `epiphy:epiphy_cosmos`（[`epiphy_cosmos.{json,vsh,fsh}`](../kubejs/assets/epiphy/shaders/core/epiphy_cosmos.fsh)），以原生屏幕分辨率逐像素计算 360° 无缝相机视角视差深空星海、三层四芒十字星芒（`+`/`✦`）+ 柔和径向光晕与多倍频翡翠青/星穹紫体积星云，并严格限定在 `imperius_test_cosmos_mask.png` 下段剑身星窗与 1px 裂隙内，绝不调用无尽贪婪等外部渲染器；
-  - 通过 `ModelEvent$ModifyBakingResult` + CodeChickenLib `IItemRenderer` 在模型烘焙期一次性将 2 面星窗面片、3 道带刻度与三维四芒星棱晶的星盘陀螺环、双螺旋缠刃光带及 3 簇 14 枚 3D 拖尾星屑预烘焙为 9 个原生 Java `CCModel` 网格，运行时仅约 9 次原生 `CCModel.render()` + 复用 `Matrix4` 旋转（零 JS 顶点循环、零 GC 分配），依托硬件深度缓冲在第一人称（含 Better First Person）、第三人称、快捷栏与背包槽位实现真实剑身前后遮挡与零卡顿渲染；全量单测 `71/71` 通过 + 22/22 脚本 Rhino 检查通过。
+  - 通过 `ModelEvent$ModifyBakingResult` + CodeChickenLib `IItemRenderer` 在模型烘焙期一次性将 2 面星窗面片、3 道带刻度与三维四芒星棱晶的星盘陀螺环、双螺旋缠刃光带及 3 簇 14 枚 3D 拖尾星屑预烘焙为原生 Java `CCModel` 网格，运行时零 JS 顶点循环、零 GC 分配，依托硬件深度缓冲在第一人称、第三人称、快捷栏与背包槽位实现真实剑身前后遮挡与零卡顿渲染。
+- **2026-11-22 (`P3-2` 世界 3D 双端闭环基座 & 无 CCL Fail-Soft 降级 / `Epiphy3DFXCore v1.0.2` + `Epiphy3DFXServer v1.0.0` + `Epiphy3DFX v2.1.0`)**：
+  - **无 CCL 干净 Fail-Soft 退回原版模型**：`Epiphy3DFXCore` 在 `RegisterShadersEvent` 与 `ModelEvent$ModifyBakingResult` 入口前置一次性 `probeCclBackend()` 探测；缺 CodeChickenLib 时仅输出 1 条 `console.warn`、置 `backendMode: 'vanilla_fallback'` 并跳过烘焙，绑定物品自动保留原版静态 `BakedModel` 正常显示（零 `console.error` 噪声）；
+  - **世界 3D (`surface: 'world'`) 服务端-客户端可扩展闭环**：在 `EpiphyProtocol` 新增 `FX3D_CHANNEL = 'epiphy:spatial_fx'`、`FX3D_PROTO_VERSION = 1`、`FX3D_QUOTA` 与 `EpiphySpec.computeSpatialFxCost`；新增服务端调度器 [`Epiphy的-空间特效组件.js`](../kubejs/server_scripts/通用组件/Epiphy的-空间特效组件.js)（支持 `push`/`patch`/`deactivate`/`clear`、`channel().slot()` 自动全量/增量与 tick 回绕重同步、`addConstraint` 可扩展约束链、`registerShapeSchema` 与向上 `registerPreset`）；升级客户端 [`Epiphy的-空间特效渲染器.js`](../kubejs/client_scripts/通用组件/Epiphy的-空间特效渲染器.js) 接入 `NetworkEvents.dataReceived('epiphy:spatial_fx')`（同槽 `patch` 合并、`'player'`/`'system'` 隔离与单向淘汰、`once`/`active` 生命周期与 `registerWorldShape` 扩展），并通过 `Epiphy3DFXCore` 挂接 `RenderLevelStageEvent`（零活跃特效时 $O(1)$ 短路零开销，渲染阶段严格 `try/finally` `PoseStack` 还原）。
 

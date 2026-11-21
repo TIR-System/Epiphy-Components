@@ -1,6 +1,6 @@
 // priority: 1000
 // ============================================================================
-//  通用创造模式物品栏模块 (EpiphyCreativeTab v1.0) —— [Epiphy的小玩意] (epiphy:stuff)
+//  通用创造模式物品栏模块 (EpiphyCreativeTab v1.0.0) —— [Epiphy的小玩意] (epiphy:stuff)
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/startup_scripts/通用组件/创造模式栏-epiphy.js
 //
