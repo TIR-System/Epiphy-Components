@@ -261,12 +261,7 @@ function resolveRhinoJar() {
 }
 
 function runRealRhinoCompile(jarPath, files) {
-    var tmpDir    = process.env.RHINO_CACHE_DIR
-        ? path.resolve(process.env.RHINO_CACHE_DIR)
-        : path.join(os.tmpdir(), 'epiphy_rhino_check_v3');
-    fs.mkdirSync(tmpDir, { recursive: true });
-    var javaSrc   = path.join(tmpDir, 'RhinoBatchCheck.java');
-    var classFile = path.join(tmpDir, 'RhinoBatchCheck.class');
+    var crypto = require('crypto');
     var javaCode  = [
         'import java.io.*;',
         'import java.nio.file.*;',
@@ -300,6 +295,15 @@ function runRealRhinoCompile(jarPath, files) {
         '}'
     ].join('\n');
 
+    // 内容哈希隔离缓存目录 + 临时子目录编译后原子替换，兼顾跨进程并发安全与重复运行零重编
+    var cacheKey  = crypto.createHash('sha1').update(javaCode + '|' + path.resolve(jarPath)).digest('hex').slice(0, 12);
+    var tmpDir    = process.env.RHINO_CACHE_DIR
+        ? path.resolve(process.env.RHINO_CACHE_DIR)
+        : path.join(os.tmpdir(), 'epiphy_rhino_check_v4_' + cacheKey);
+    fs.mkdirSync(tmpDir, { recursive: true });
+    var javaSrc   = path.join(tmpDir, 'RhinoBatchCheck.java');
+    var classFile = path.join(tmpDir, 'RhinoBatchCheck.class');
+
     var needCompile = !fs.existsSync(classFile);
     if (!needCompile) {
         try {
@@ -311,19 +315,34 @@ function runRealRhinoCompile(jarPath, files) {
     var javaBin  = process.env.RHINO_JAVA_BIN  || 'java';
 
     if (needCompile) {
-        fs.writeFileSync(javaSrc, javaCode, 'utf8');
-        var jc = cp.spawnSync(javacBin, ['-encoding', 'UTF-8', '-cp', jarPath, '-d', tmpDir, javaSrc], { encoding: 'utf8' });
-        if (jc.error) {
-            if (jc.error.code === 'ENOENT') {
-                return { status: 'no-jdk', reason: '未检测到 ' + javacBin + ' (ENOENT)' };
+        var buildDir = path.join(tmpDir, '.build-' + process.pid + '-' + Date.now() + '-' + Math.floor(Math.random() * 1e6));
+        fs.mkdirSync(buildDir, { recursive: true });
+        var buildSrc   = path.join(buildDir, 'RhinoBatchCheck.java');
+        var buildClass = path.join(buildDir, 'RhinoBatchCheck.class');
+        try {
+            fs.writeFileSync(buildSrc, javaCode, 'utf8');
+            var jc = cp.spawnSync(javacBin, ['-encoding', 'UTF-8', '-cp', jarPath, '-d', buildDir, buildSrc], { encoding: 'utf8' });
+            if (jc.error) {
+                if (jc.error.code === 'ENOENT') {
+                    return { status: 'no-jdk', reason: '未检测到 ' + javacBin + ' (ENOENT)' };
+                }
+                return { status: 'toolchain-error', stderr: 'javac 启动异常: ' + jc.error.message };
             }
-            return { status: 'toolchain-error', stderr: 'javac 启动异常: ' + jc.error.message };
-        }
-        if (jc.status !== 0) {
-            return {
-                status: 'toolchain-error',
-                stderr: 'javac 编译 RhinoBatchCheck 失败 (exit ' + jc.status + '):\n' + (jc.stderr || jc.stdout || '').trim()
-            };
+            if (jc.status !== 0) {
+                return {
+                    status: 'toolchain-error',
+                    stderr: 'javac 编译 RhinoBatchCheck 失败 (exit ' + jc.status + '):\n' + (jc.stderr || jc.stdout || '').trim()
+                };
+            }
+            // 原子落位（并发进程若已抢先落位则复用即可）
+            try { fs.renameSync(buildClass, classFile); } catch (eRenC) {
+                if (!fs.existsSync(classFile)) fs.copyFileSync(buildClass, classFile);
+            }
+            try { fs.renameSync(buildSrc, javaSrc); } catch (eRenS) {
+                if (!fs.existsSync(javaSrc)) fs.copyFileSync(buildSrc, javaSrc);
+            }
+        } finally {
+            try { fs.rmSync(buildDir, { recursive: true, force: true }); } catch (eRm) { }
         }
     }
 

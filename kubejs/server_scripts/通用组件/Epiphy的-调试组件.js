@@ -454,13 +454,47 @@
         return 1
     }
 
-    function dispatchRenderPerf(sourceOrTarget, mode) {
+    function extractPlayerUsername(p) {
+        if (p == null) return ''
+        try { if (p.username != null) return String(p.username) } catch (e0) { }
+        try { if (typeof p.getUsername === 'function') return String(p.getUsername()) } catch (e1) { }
+        try { if (typeof p.getGameProfile === 'function') return String(p.getGameProfile().getName()) } catch (e2) { }
+        try { if (p.name != null && typeof p.name.getString === 'function') return String(p.name.getString()) } catch (e3) { }
+        return ''
+    }
+
+    function collectOnlinePlayersFromServer(srv) {
+        var out = []
+        if (srv == null) return out
+        try {
+            var list = (srv.players != null) ? srv.players : (typeof srv.getPlayerList === 'function' ? srv.getPlayerList().getPlayers() : null)
+            if (list != null) {
+                if (typeof list.iterator === 'function') {
+                    var it = list.iterator()
+                    while (it.hasNext()) {
+                        var p = it.next()
+                        if (p != null && typeof p.sendData === 'function') out.push(p)
+                    }
+                } else if (Array.isArray(list)) {
+                    for (var pi = 0; pi < list.length; pi++) {
+                        if (list[pi] != null && typeof list[pi].sendData === 'function') out.push(list[pi])
+                    }
+                }
+            }
+        } catch (eSrvP) {
+            logCatch('dispatchRenderPerf.collectPlayers', eSrvP)
+        }
+        return out
+    }
+
+    function dispatchRenderPerf(sourceOrTarget, mode, targetSelector) {
         var normMode = normalizeName(mode)
         if (normMode !== 'on' && normMode !== 'off' && normMode !== 'dump' && normMode !== 'reset') {
             return { ok: false, sent: 0, message: '不支持的 renderperf 动作: ' + String(mode) + '（可选 on|off|dump|reset）' }
         }
+        var normSel = (targetSelector != null) ? String(targetSelector).trim() : ''
         var targets = []
-        if (sourceOrTarget != null && typeof sourceOrTarget.sendData === 'function') {
+        if (sourceOrTarget != null && typeof sourceOrTarget.sendData === 'function' && !normSel) {
             targets.push(sourceOrTarget)
         } else if (sourceOrTarget != null) {
             var srcPlayer = null
@@ -468,30 +502,37 @@
                 if (sourceOrTarget.player != null) srcPlayer = sourceOrTarget.player
                 else if (typeof sourceOrTarget.getPlayer === 'function') srcPlayer = sourceOrTarget.getPlayer()
             } catch (eSrcP) { }
-            if (srcPlayer != null && typeof srcPlayer.sendData === 'function') {
+
+            if (!normSel && srcPlayer != null && typeof srcPlayer.sendData === 'function') {
                 targets.push(srcPlayer)
             } else {
                 var srv = null
                 try { srv = sourceOrTarget.server || (typeof sourceOrTarget.getServer === 'function' ? sourceOrTarget.getServer() : null) } catch (eSrcS) { }
                 if (srv == null) srv = SERVER_REF
-                if (srv != null) {
-                    try {
-                        var list = (srv.players != null) ? srv.players : (typeof srv.getPlayerList === 'function' ? srv.getPlayerList().getPlayers() : null)
-                        if (list != null) {
-                            if (typeof list.iterator === 'function') {
-                                var it = list.iterator()
-                                while (it.hasNext()) {
-                                    var p = it.next()
-                                    if (p != null && typeof p.sendData === 'function') targets.push(p)
-                                }
-                            } else if (Array.isArray(list)) {
-                                for (var pi = 0; pi < list.length; pi++) {
-                                    if (list[pi] != null && typeof list[pi].sendData === 'function') targets.push(list[pi])
-                                }
-                            }
+
+                if (!normSel) {
+                    // 安全默认（Fail-Narrow）：非玩家源（控制台/命令方块）无目标执行 on/dump 时拒绝盲广播全服客户端写盘
+                    if (normMode === 'on' || normMode === 'dump') {
+                        return {
+                            ok: false,
+                            sent: 0,
+                            message: '控制台执行 renderperf ' + normMode + ' 必须显式指定目标玩家或 @all（用法: /epiphy debug renderperf ' + normMode + ' <玩家名|@all>）'
                         }
-                    } catch (eSrvP) {
-                        logCatch('dispatchRenderPerf.collectPlayers', eSrvP)
+                    }
+                    targets = collectOnlinePlayersFromServer(srv)
+                } else if (normSel === '@all' || normSel === '*') {
+                    targets = collectOnlinePlayersFromServer(srv)
+                } else {
+                    var allPlayers = collectOnlinePlayersFromServer(srv)
+                    var wantLower = normSel.toLowerCase()
+                    for (var wi = 0; wi < allPlayers.length; wi++) {
+                        if (extractPlayerUsername(allPlayers[wi]).toLowerCase() === wantLower) {
+                            targets.push(allPlayers[wi])
+                            break
+                        }
+                    }
+                    if (targets.length === 0) {
+                        return { ok: false, sent: 0, message: '未找到在线玩家: ' + normSel }
                     }
                 }
             }
@@ -510,7 +551,7 @@
             return { ok: false, sent: 0, message: '未找到可下发的在线玩家客户端（renderperf=' + normMode + '）' }
         }
         var descMap = {
-            on:    '已开启客户端渲染性能打点（于 ClientEvents.tick 节流写入 epiphy-data/logs/client_render_perf.json）',
+            on:    '已开启客户端渲染性能打点（于 ClientEvents.tick 节流写入 epiphy-data/logs/client_render_perf.json，默认 10 分钟后自动关闭）',
             off:   '已关闭客户端渲染性能打点落盘',
             dump:  '已请求客户端立即导出当前渲染性能快照至 epiphy-data/logs/client_render_perf.json',
             reset: '已重置客户端渲染性能统计桶'
@@ -518,8 +559,8 @@
         return { ok: true, sent: sent, message: descMap[normMode] + ' [已下发 ' + sent + ' 个客户端]' }
     }
 
-    function execRenderPerfCommand(source, mode) {
-        var res = dispatchRenderPerf(source, mode)
+    function execRenderPerfCommand(source, mode, targetSelector) {
+        var res = dispatchRenderPerf(source, mode, targetSelector)
         sendSourceMsg(source, (res.ok ? '§a[EpiphyDebug] ' : '§c[EpiphyDebug] ') + res.message)
         return res.ok ? 1 : 0
     }
@@ -563,10 +604,38 @@
                 }),
                 b.literal('renderperf', {
                     children: [
-                        b.literal('on',    function (ctx) { return execRenderPerfCommand(ctx.source, 'on') }),
-                        b.literal('off',   function (ctx) { return execRenderPerfCommand(ctx.source, 'off') }),
-                        b.literal('dump',  function (ctx) { return execRenderPerfCommand(ctx.source, 'dump') }),
-                        b.literal('reset', function (ctx) { return execRenderPerfCommand(ctx.source, 'reset') })
+                        b.literal('on', {
+                            exec: function (ctx) { return execRenderPerfCommand(ctx.source, 'on', null) },
+                            children: [
+                                b.arg({ name: 'target', type: 'word' }, function (ctx) {
+                                    return execRenderPerfCommand(ctx.source, 'on', b.readArg(ctx, 'target', 'word'))
+                                })
+                            ]
+                        }),
+                        b.literal('off', {
+                            exec: function (ctx) { return execRenderPerfCommand(ctx.source, 'off', null) },
+                            children: [
+                                b.arg({ name: 'target', type: 'word' }, function (ctx) {
+                                    return execRenderPerfCommand(ctx.source, 'off', b.readArg(ctx, 'target', 'word'))
+                                })
+                            ]
+                        }),
+                        b.literal('dump', {
+                            exec: function (ctx) { return execRenderPerfCommand(ctx.source, 'dump', null) },
+                            children: [
+                                b.arg({ name: 'target', type: 'word' }, function (ctx) {
+                                    return execRenderPerfCommand(ctx.source, 'dump', b.readArg(ctx, 'target', 'word'))
+                                })
+                            ]
+                        }),
+                        b.literal('reset', {
+                            exec: function (ctx) { return execRenderPerfCommand(ctx.source, 'reset', null) },
+                            children: [
+                                b.arg({ name: 'target', type: 'word' }, function (ctx) {
+                                    return execRenderPerfCommand(ctx.source, 'reset', b.readArg(ctx, 'target', 'word'))
+                                })
+                            ]
+                        })
                     ]
                 })
             ]
@@ -582,7 +651,7 @@
         '§e3. 全模块健康自检：   §f/epiphy debug checks',
         '§e4. 统一切换日志开关： §f/epiphy debug log <模块|*> <on|off>',
         '§e5. 执行维护诊断动作： §f/epiphy debug action <模块> <动作名>',
-        '§e6. 客户端渲染性能盘： §f/epiphy debug renderperf <on|off|dump|reset>',
+        '§e6. 客户端渲染性能盘： §f/epiphy debug renderperf <on|off|dump|reset> [玩家名|@all]',
         '§3§l----------------------------------------------------'
     ]
 

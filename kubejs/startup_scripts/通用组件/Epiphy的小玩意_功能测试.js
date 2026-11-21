@@ -1,10 +1,12 @@
 // ============================================================================
-//  Epiphy 的小玩意 —— 功能测试组件 ([rnfmabj-测试] 指令广播方块)
+//  Epiphy 的小玩意 —— 功能测试组件 ([rnfmabj-测试] 指令广播方块 & [英佩瑞斯-测试中] 局部 3D 星轨长剑)
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/startup_scripts/通用组件/Epiphy的小玩意_功能测试.js
 //  依赖组件：
-//    - kubejs/client_scripts/通用组件/Epiphy的-平面渲染器.js   (Epiphy2DRenderer / ScreenDanmakuClient)
-//    - kubejs/server_scripts/通用组件/Epiphy的-平面渲染组件.js (global.Epiphy2DSurface / global.ScreenDanmaku)
+//    - kubejs/startup_scripts/通用组件/Epiphy的-空间特效核心.js  (global.Epiphy3DFXCore · GPU 星空着色器 & 预烘焙 CCModel)
+//    - kubejs/client_scripts/通用组件/Epiphy的-空间特效渲染器.js (global.Epiphy3DFX / global.EpiphySpatialFX)
+//    - kubejs/client_scripts/通用组件/Epiphy的-平面渲染器.js     (Epiphy2DRenderer / ScreenDanmakuClient)
+//    - kubejs/server_scripts/通用组件/Epiphy的-平面渲染组件.js   (global.Epiphy2DSurface / global.ScreenDanmaku)
 //    - kubejs/client_scripts/通用组件/Epiphy的-音频播放器.js     (EpiphyAudioClient)
 //    - kubejs/server_scripts/通用组件/Epiphy的-音频组件.js       (global.EpiphyAudio)
 //    - kubejs/startup_scripts/通用组件/创造模式栏-epiphy.js
@@ -14,6 +16,9 @@
 
 ;(function () {
     var BLOCK_ID       = 'epiphy:rnfmabj_test'
+    var SWORD_ID       = 'epiphy:imperius_test'
+    var SWORD_NAME     = '英佩瑞斯-测试中'
+    var SWORD_DAMAGE   = 50.0
     // 公开仓库因版权与体积原因不随库分发 children_of_the_city.ogg（详见 docs/audio-assets.md）；
     // 仍保留该 SoundEvent 槽位供本地自备或替换为自定义音频，缺省时测试方块的其余功能可正常运行。
     var SOUND_ID       = 'epiphy:children_of_the_city'
@@ -74,10 +79,40 @@
         registerToEpiphyTab(BLOCK_ID)
     })
 
-    registerToEpiphyTab(BLOCK_ID)
+    StartupEvents.registry('item', function (event) {
+        var sb = event.create(SWORD_ID, 'sword')
+        if (sb != null) {
+            if (typeof sb.displayName === 'function') sb.displayName(SWORD_NAME)
+            if (typeof sb.tier === 'function') sb.tier('netherite')
+            if (typeof sb.attackDamageBaseline === 'function') sb.attackDamageBaseline(SWORD_DAMAGE)
+            if (typeof sb.attackDamageBonus === 'function') sb.attackDamageBonus(0.0)
+            if (typeof sb.maxDamage === 'function') sb.maxDamage(0)
+            if (typeof sb.unstackable === 'function') sb.unstackable()
+            if (typeof sb.modifyTier === 'function') {
+                sb.modifyTier(function (tier) {
+                    if (tier != null) {
+                        tier.uses              = 0
+                        tier.attackDamageBonus = 0.0
+                        tier.enchantmentValue  = 22
+                    }
+                })
+            }
+            if (typeof sb.texture === 'function') sb.texture('epiphy:item/imperius_test')
+            if (typeof sb.parentModel === 'function') sb.parentModel('minecraft:item/handheld')
+            if (typeof sb.tag === 'function') {
+                sb.tag('minecraft:swords')
+                sb.tag('forge:tools/swords')
+            }
+        }
 
-    // 热重载材质补丁：若当前游戏进程已启动过且 BlockBuilder 已在 RegistryInfo.BLOCK 内存中，
-    // 直接为其补齐 oak_planks 贴图，使 /kubejs reload startup_scripts 后按 F3+T 即可恢复材质而无需重启游戏
+        registerToEpiphyTab(SWORD_ID)
+    })
+
+    registerToEpiphyTab(BLOCK_ID)
+    registerToEpiphyTab(SWORD_ID)
+
+    // 热重载材质补丁：若当前游戏进程已启动过且 Builder 已在 RegistryInfo 内存中，
+    // 直接为其补齐贴图，使 /kubejs reload startup_scripts 后按 F3+T 即可恢复材质而无需重启游戏
     try {
         var RegistryInfo     = Java.loadClass('dev.latvian.mods.kubejs.registry.RegistryInfo')
         var ResourceLocation = Java.loadClass('net.minecraft.resources.ResourceLocation')
@@ -86,6 +121,12 @@
         if (blockBuilder != null) {
             blockBuilder.textureAll('minecraft:block/oak_planks')
             blockBuilder.texture('all', 'minecraft:block/oak_planks')
+        }
+        var swordRl          = new ResourceLocation(SWORD_ID)
+        var swordBuilder     = RegistryInfo.ITEM.objects.get(swordRl)
+        if (swordBuilder != null) {
+            swordBuilder.texture('epiphy:item/imperius_test')
+            swordBuilder.parentModel('minecraft:item/handheld')
         }
     } catch (ePatch) { }
 
@@ -278,11 +319,81 @@
         })
     }
 
-    // 若通用组件已加载，立即调用 bindBlock 生效
+    // ======================================================================== 4. 注册【英佩瑞斯-测试中】局部 3D 星轨环绕与视角视差星窗预设并绑定至 Epiphy3DFX
+    var IMPERIUS_3DFX_PRESET_ID = 'imperius_test_cosmos_vfx'
+
+    SPEC.registerPreset('fx3d', IMPERIUS_3DFX_PRESET_ID, {
+        scheme:         's1',
+        speed:          1.2,
+        slashExpand:    0.45,
+        fov:            520.0,
+        originX:        -9.5,
+        originY:        9.5,
+        ux:             0.698,
+        uy:             -0.716,
+        vx:             0.716,
+        vy:             0.698,
+        ringCenterU:    9.6,
+        renderInHand:   true,
+        renderInHotbar: true,
+        renderInSlots:  true,
+        cosmosWindow: {
+            enabled:  true,
+            parallax: 1.8,
+            speed:    1.2
+        },
+        rings: [
+            {
+                R: 8.8, tiltU: 0.46, tiltV: 0.15, spd: 1.15, segs: 48,
+                cCore: 0xFFF5D2, cGlow: 0xEBAF55, ticks: 24, prisms: 4, wBase: 1.35, uOffset: 0.0
+            },
+            {
+                R: 12.8, tiltU: -0.64, tiltV: -0.22, spd: -0.85, segs: 56,
+                cCore: 0xB9EBFF, cGlow: 0xC36EFF, ticks: 12, prisms: 2, wBase: 1.20, uOffset: 0.0
+            },
+            {
+                R: 6.2, tiltU: 0.18, tiltV: 0.0, spd: 1.75, segs: 36,
+                cCore: 0xFFE6A5, cGlow: 0xDC4678, ticks: 0, prisms: 0, wBase: 0.95, uOffset: -5.2
+            }
+        ],
+        helix: {
+            enabled: true,
+            steps:   56,
+            uStart:  2.0,
+            uSpan:   49.0,
+            radius:  5.4,
+            freq:    0.21,
+            speed:   2.3,
+            cCore0:  0xFFE6C3,
+            cGlow0:  0xF055A5,
+            cCore1:  0xB4F0FF,
+            cGlow1:  0x916EFF
+        },
+        motes: {
+            enabled:    true,
+            count:      14,
+            trailSteps: 5
+        }
+    })
+
+    var imperius3DFXBindingSpec = { preset: IMPERIUS_3DFX_PRESET_ID }
+
+    if (!global.Epiphy3DFXItemBindings || typeof global.Epiphy3DFXItemBindings !== 'object') {
+        global.Epiphy3DFXItemBindings = {}
+    }
+    global.Epiphy3DFXItemBindings[SWORD_ID] = imperius3DFXBindingSpec
+
+    // 若通用组件已加载，立即调用 bindBlock / Epiphy3DFX.bindItem 生效
     if (global.EpiphyAudio && typeof global.EpiphyAudio.bindBlock === 'function') {
         global.EpiphyAudio.bindBlock(BLOCK_ID, audioBindingSpec)
     }
     if (global.ScreenDanmaku && typeof global.ScreenDanmaku.bindBlock === 'function') {
         global.ScreenDanmaku.bindBlock(BLOCK_ID, buildDanmakuSpec, danmakuBindingExtra)
+    }
+    if (global.Epiphy3DFXCore && typeof global.Epiphy3DFXCore.bindItem === 'function') {
+        global.Epiphy3DFXCore.bindItem(SWORD_ID, imperius3DFXBindingSpec)
+    }
+    if (global.Epiphy3DFX && typeof global.Epiphy3DFX.bindItem === 'function') {
+        global.Epiphy3DFX.bindItem(SWORD_ID, imperius3DFXBindingSpec)
     }
 })()

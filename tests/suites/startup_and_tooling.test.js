@@ -554,38 +554,51 @@ module.exports = function registerSuite(test, h) {
                 })
             }
 
+            function assertRejected(res, label, expectedStderrRe) {
+                assert.strictEqual(res.error, undefined, label + ': child process failed to spawn (' + (res.error && res.error.message) + ')')
+                assert.strictEqual(res.signal, null, label + ': child process terminated by signal ' + res.signal)
+                assert.strictEqual(typeof res.status, 'number', label + ': exit status must be numeric, got ' + res.status)
+                assert.ok(res.status > 0, label + ': must exit with positive non-zero code, got ' + res.status)
+                var errText = String(res.stderr || '') + '\n' + String(res.stdout || '')
+                if (expectedStderrRe) {
+                    assert.ok(expectedStderrRe.test(errText), label + ': stderr must match ' + expectedStderrRe + ', got:\n' + errText)
+                }
+            }
+
             // 1. Unicode/Chinese identifier const/let MUST fail
             var rCnConst = runCheckerOnSnippet('cn_const.js', 'const 甲 = 1;\n')
-            assert.notStrictEqual(rCnConst.status, 0, 'const 甲 = 1 must be rejected by AST semantic-drift guard')
+            assertRejected(rCnConst, 'const 甲 = 1', /let\/const|RHINO FAIL|语义漂移/i)
 
             var rCnLet = runCheckerOnSnippet('cn_let.js', 'for (let 索引 = 0; 索引 < 3; 索引++) {}\n')
-            assert.notStrictEqual(rCnLet.status, 0, 'for (let 索引 ...) must be rejected by AST semantic-drift guard')
+            assertRejected(rCnLet, 'for (let 索引 ...)', /let\/const|RHINO FAIL|语义漂移/i)
 
             // 2. Documented kube-mods/rhino SyntaxErrors MUST fail in local AST mode
             var badSnippets = [
-                ['shorthand.js',     'var x = 1; var o = { x };\n'],
-                ['computed.js',      'var k = "a"; var o = { [k]: 1 };\n'],
-                ['default_param.js', 'function f(a = 1) { return a; }\n'],
-                ['destr_def.js',     'var { a = 1 } = {};\n'],
-                ['spread.js',        'var a = [1, 2]; var b = [...a];\n'],
-                ['new_target.js',    'function F() { return new.target; }\n'],
-                ['nullish.js',       'var v = null ?? 9;\n'],
-                ['regex_u.js',       'var r = /abc/u;\n']
+                ['shorthand.js',     'var x = 1; var o = { x };\n',             /RHINO|shorthand|简写/i],
+                ['computed.js',      'var k = "a"; var o = { [k]: 1 };\n',      /RHINO|computed|计算属性/i],
+                ['default_param.js', 'function f(a = 1) { return a; }\n',       /RHINO|默认参数|AssignmentPattern/i],
+                ['destr_def.js',     'var { a = 1 } = {};\n',                   /RHINO|解构默认值|AssignmentPattern/i],
+                ['spread.js',        'var a = [1, 2]; var b = [...a];\n',       /RHINO|展开|Spread/i],
+                ['new_target.js',    'function F() { return new.target; }\n',   /RHINO|new\.target|MetaProperty/i],
+                ['nullish.js',       'var v = null ?? 9;\n',                    /RHINO|\?\?|空值合并/i],
+                ['regex_u.js',       'var r = /abc/u;\n',                       /RHINO|正则|\/u/i]
             ]
             for (var bi = 0; bi < badSnippets.length; bi++) {
                 var rBad = runCheckerOnSnippet(badSnippets[bi][0], badSnippets[bi][1])
-                assert.notStrictEqual(rBad.status, 0, badSnippets[bi][0] + ' must be rejected by local-acorn-ast')
+                assertRejected(rBad, badSnippets[bi][0], badSnippets[bi][2])
             }
 
             // 3. Rhino-supported ES5 + basic destructuring + method shorthand MUST pass
             var rGood = runCheckerOnSnippet('good.js', 'var obj = { a: 1, b: 2, m(x) { return x + 1; } }; var { a, b } = obj; var arrow = (v) => `${v}`;\n')
+            assert.strictEqual(rGood.error, undefined, 'good.js checker process must spawn cleanly')
+            assert.strictEqual(rGood.signal, null, 'good.js checker process must not exit by signal')
             assert.strictEqual(rGood.status, 0, 'Rhino-compatible code must pass local-acorn-ast: ' + (rGood.stderr || rGood.stdout))
 
             // 4. Explicit nonexistent RHINO_JAR MUST fail hard (no silent fallback)
             var rMissingEnv = runCheckerOnSnippet('ok_env.js', 'var ok = 1;\n', [], {
                 RHINO_JAR: path.join(tmpDir, 'does_not_exist_rhino.jar')
             })
-            assert.notStrictEqual(rMissingEnv.status, 0, 'explicit missing RHINO_JAR must fail hard instead of falling back')
+            assertRejected(rMissingEnv, 'explicit missing RHINO_JAR', /RHINO_JAR|不存在|FAIL/i)
 
             // 5. Existing JAR + failing javac MUST fail hard (no silent fallback to green, deterministic even without JDK)
             var fakeJar = path.join(tmpDir, 'rhino-forge-fake.jar')
@@ -595,8 +608,7 @@ module.exports = function registerSuite(test, h) {
                 RHINO_CACHE_DIR: path.join(tmpDir, 'fresh_cache'),
                 RHINO_JAVAC_BIN: process.execPath
             })
-            assert.notStrictEqual(rBrokenJavac.status, 0, 'existing JAR + failing javac must NEVER silently degrade to exit 0')
-            assert.ok((rBrokenJavac.stderr || '').indexOf('禁止静默降级') >= 0, 'stderr must explicitly report fail-hard on toolchain error')
+            assertRejected(rBrokenJavac, 'existing JAR + failing javac', /禁止静默降级/)
         } finally {
             try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch (eRm) { }
         }

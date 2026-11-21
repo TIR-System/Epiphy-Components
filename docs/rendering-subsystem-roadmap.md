@@ -205,7 +205,7 @@
 | **4. 开启 Iris / OptiFine 光影或 Fabulous 画质** | 探测活跃光影管线或渲染阶段异常 | `screen` / `gui` / `slot` 仅使用标准 `GuiGraphics` 调用与 `enableScissor`；`world_plane` 在 KubeJS 阶段走原版 `Display` 实体轨，天然兼容一切光影 | 静默兼容，零报错 |
 | **5. GUI 类名不匹配或 `TextureManager.byPath` 反射失败** | `Screen.getClass().getName()` 未命中，或 `byPath` (`f_118468_`) 无法访问 | 类名不匹配时整个 `gui` 覆盖层休眠不绘制；`byPath` 反射失败时自动放弃 `replaceTextures`，仅执行 100% 安全的 `bgNodes` 背景夹心层覆写 | `byPath` 失败记 1 次 `warnOnce` |
 | **6. 未安装 ModernUI** | 复用现行 `probeModernUiBridge()` 状态机 | `text` 节点自动回退原版 `Font.drawInBatch` + `SHARED_TEXT_SEQ_CACHE` 缓存；`'mui_stroke'` 自动回退 8 向合并 `'stroke'` | 现有机制已完备验证（测试 21/54） |
-| **7. 单帧渲染耗时超限** | 帧耗时监控 `frameElapsedMs` | 单帧排队处理超 `frameBudgetMs (2.5ms)` 留待下帧；单帧总渲染超 `45ms` 触发紧急熔断跳过当帧绘制（10 秒冷却自动恢复） | 复用现行 `v5.7` 防闪烁熔断器 |
+| **7. 单帧渲染耗时超限** | 帧耗时监控 `frameElapsedMs` | 常规高压预算 `highLoadFrameMs (2.5ms)` 作为告警/队列节流参考线；单帧总渲染超硬熔断线 `frameBudgetMs (45ms)` 触发紧急熔断跳过当帧绘制（10 秒冷却自动恢复） | 复用现行 `v5.7` 防闪烁熔断器 |
 
 ---
 
@@ -388,12 +388,12 @@ Phase 4 (Kotlin + Java 原生模组迁移：彻底移除淘汰别名 + 硬件级
 | [x] | **P1-4** | **声明式 2D 图元树与独立层级调度**：实现 6 类图元、`nine_slice.slice` 4 元数组与标量、`5` 向 `anchor`、双模 `clip`、`renderPriority` 独立于 `priority` 的层叠排序（GUI 默认置顶）及 `flushBatchedBeforeImmediate` 双缓冲刷新修复 | `Epiphy的-平面渲染器.js` | 异常注入状态零泄漏 + 层叠排序与遮罩单测 | 已完成 |
 | [x] | **P1-5** | **`rect.fill` 统一填充机制**：完成 `solid` / `outline` / 三色 `gradient` / 外部贴图与程序化几何 `parallax`（`ripples`/`steps`/`particles`/`stripes`）/ `shader`（原版 `end_portal`/`end_gateway`/`glint` + `registerShader` 可扩展机制）与 `TEXTURE_EXIST_CACHE` 防缺贴图 | `Epiphy的-平面渲染器.js` | 视差 UV 计算 + Shader 降级 + 缺贴图单测 | 已完成 |
 | [x] | **P1-6** | **Phase 1 预设封装、向上自定义注册与 `v18` 方案 α 实装**：移除特例 `buildProgressPanel`，归位为内置 `'progress_bar'` 预设 + `progressTracks`；落地分组配置深合并、`channel`/`slot` 句柄、`ui()` `id` 前置 + `.texts()`/`.region()` 与端侧节点预编译；`v18` 三幕遥测全面采用方案 α（`472x16@0.56`、零重叠阶梯切角玻璃底衬、同心旋转方格徽章、4 层立体底流与 `slot.syncNear` 自动全量/增量 `patch`） | `Epiphy的-Spec与通用工具.js`<br>`Epiphy的-平面渲染组件.js`<br>`Epiphy的-平面渲染器.js`<br>`拆解台-混沌殉爆.v18.js` | `v18` NBT 序列化 + 真 `PaintScreenEventJS` + 预设/`channel`/`slot`/预编译/`KNOWN_PACKET_KEYS` 静态一致性/HUD 分层与 Z 隔离断言 (66/66) | 已完成 |
-| [~] | **P2-1** | **承载面 `surface: 'gui'` 夹心层与会话寿命**：已实现 `renderGuiSurfacePass`、`lifeMode: 'screen_session'` 与 `renderPriority: 100` 默认不被弹幕覆盖；注：KubeJS 侧 `ClientEvents.paintScreen` 无容器原生槽位前后阶段，完整 `renderBg/renderSlots` 夹心挂钩需 Phase 2B 事件桥或 Phase 4 Mixin | `Epiphy的-平面渲染组件.js`<br>`Epiphy的-平面渲染器.js` | `screen_session` / `renderGuiSurfacePass` 单测 | 部分完成（PaintScreen 阶段可用，原版 Screen 夹心事件待桥接） |
+| [~] | **P2-1** | **承载面 `surface: 'gui'` 夹心层与会话寿命**：已实现 `renderGuiSurfacePass`、`lifeMode: 'screen_session'` 与 `renderPriority: 100` 默认不被弹幕覆盖；**明确前置边界**：当前仅在 `PaintScreen` 阶段生效，**完整夹心层（含非容器类 `Screen` 的背景/控件夹心与原版任意 GUI 组件精准 Z 夹心）阻塞于 Phase 4 原生模组 Mixin，非 KubeJS 阶段可优雅完成** | `Epiphy的-平面渲染组件.js`<br>`Epiphy的-平面渲染器.js` | `screen_session` / `renderGuiSurfacePass` 单测 | 部分完成（**阻塞于 Phase 4 Mixin，非 KubeJS 可完成**） |
 | [x] | **P2-2** | **会话级纹理重映射与 `fill.mode: 'shader'`**：`applyReplacedTexturesForGui` 接入 `Minecraft.getTextureManager().register` 真替换并在界面关闭/`loggedOut`/`clear` 自动还原；支持原版内置及外部注册自定义 Shader 与降级回退 | `Epiphy的-平面渲染器.js` | 纹理还原防污染单测 + Shader 降级单测 | 已完成 |
-| [~] | **P2-3** | **承载面 `surface: 'slot'` 物品槽位 2D 叠加层**：完成 `slotMatch` 与局部偏移绘制（`renderPriority: 200`）及单测；实机自动跟随每个槽位绘制待容器 `Screen` 绘制钩子接入 | `Epiphy的-平面渲染器.js` | 槽位匹配与局部坐标裁剪单测 | 部分完成（接口就绪，自动槽位事件待桥接） |
+| [~] | **P2-3** | **承载面 `surface: 'slot'` 物品槽位 2D 叠加层**：已完成 `slotMatch` 与局部偏移绘制（`renderPriority: 200`）及单测；**明确前置边界**：**单槽 `renderSlot` 物品底层夹心与高性能多槽批绘制阻塞于 Phase 4 原生模组 Mixin（KubeJS Rhino 逐槽循环存在实测帧率天花板），非 KubeJS 阶段可优雅完成** | `Epiphy的-平面渲染器.js` | 槽位匹配与局部坐标裁剪单测 | 部分完成（**阻塞于 Phase 4 Mixin，非 KubeJS 可完成**） |
 | [x] | **P2-4** | **双端正式更名并挂载 `Epiphy2DSurface` / `Epiphy2DRenderer`**：更名脚本文件并保留 `ScreenDanmaku` / `ScreenDanmakuClient` 兼容别名 | `Epiphy的-平面渲染组件.js`<br>`Epiphy的-平面渲染器.js`<br>`README*.md` | 别名等价性回归单测 | `0b5a013` (2026-11-19) |
 | [ ] | **P3-1** | **承载面 `surface: 'world_plane'`（世界 2D 平面 / 高级告示牌）**：实现 `saves/<world>/kubejs_epiphy_world_planes.json` 持久化、`billboard` 朝向控制、`seeThrough` 穿透开关与 1.20.1 `Display` 实体轨驱动 | 服务端/客户端平面渲染组件 | 跨重启持久化回滚单测 + 视距增量同步单测 | 待开始 |
-| [ ] | **P3-2** | **`Epiphy3DFX` 空间特效子系统协议与桥接层**：建立独立 3D 特效调度包契约与配额隔离，收拢 OBJ/Display 矩阵变换接口 | 新增 `Epiphy的-空间特效*.js` | 协议校验与配额隔离单测 | 待开始 |
+| [~] | **P3-2** | **`Epiphy3DFX` 空间特效子系统协议与桥接层**：已落地独立三维物品渲染底座 `Epiphy的-空间特效核心.js` (`Epiphy3DFXCore v1.0`) 与客户端门面 `Epiphy的-空间特效渲染器.js` (`Epiphy3DFX v2.0`)，与 2D 平面渲染器彻底解耦；支持 100% 自研 GLSL 1.50 核心星空着色器 `epiphy:epiphy_cosmos`（`CCShaderInstance` 单重载加载、360° 无缝相机视差与四芒星芒，零外部模组着色器依赖）及烘焙期预烘焙原生 `CCModel` 3D 环绕特效（真实硬件深度前后遮挡 + GUI 轻量 LOD）；服务端 3D 调度协议与配额隔离待后续补齐 | `Epiphy的-Spec与通用工具.js`<br>`Epiphy的-空间特效核心.js`<br>`Epiphy的-空间特效渲染器.js` | 2D/3D 解耦断言 + GPU 着色器/预烘焙 `CCModel`/`IItemRenderer` 回归单测 (71/71) | 客户端底座已落地 (2026-11-21) |
 | [ ] | **P4-1** | **Kotlin + Java 原生模组迁移**：移除 `DEPRECATED_ALIASES`、接入 `fill.mask` 单 Pass 着色器、`TextureTarget` (FBO) 离屏缓存池（含声明式节点树整树/静态子树离屏缓存，默认关闭按需开启）、`GuiGraphics` Mixin、世界平面射线交互 GUI 与原生 3D VBO/Shader | 独立模组工程 | 原生模组集成测试 | 待开始 |
 
 ### 8.2 变更日志（Changelog）
@@ -442,4 +442,8 @@ Phase 4 (Kotlin + Java 原生模组迁移：彻底移除淘汰别名 + 硬件级
     3. 批处理状态机 `openRectBatch`/`closeRectBatch`/`emitOutlineIntoOpenBatch` 提升至模块顶层（每帧 0 闭包分配），新增帧内 `resolveEventCaps(event)` 消除 5 处 `drawRect*` 重复 `typeof` JNI 探测；
     4. 真正的声明式节点树整树 / 静态子树离屏缓存（`TextureTarget` FBO，默认关闭）正式记入 Phase 4 原生模组路线图。
   - **`EpiphyServerCore v2.6` & 业务收口**：新增状态化 JSON 持久化门面 `openJsonStore(filePath, opts)`（统一 `load`/`save`/`isCorrupt` 与 `lockOnCorrupt` 防损坏覆写，根治底层的读/写参数反序问题），迁移 `方块与区块组件`、`权限阀`、`v18`；`v18` 同步修复 `DANMAKU_NAMESPACE` 声明顺序并全面迁至 `HUD_CH`/`slot`/`id` 前置 `ui()` + `.region()`；单测扩至 `66/66` 且全过真实 Rhino 编译检查。
+- **2026-11-21 (`P3-2` 客户端底座 / `Epiphy3DFXCore v1.0.0` + `Epiphy3DFX v2.0.0` GPU 核心着色器与预烘焙 `CCModel` 架构重构)**：
+  - 彻底淘汰高 CPU 开销的逐顶点 JS 循环（`RenderHandEvent` / `ContainerScreenEvent` / `PaintScreenEventJS` 桥接已全部移除，恢复 `Epiphy的-Spec与通用工具.js` 零额外每帧桥接开销），在 [`kubejs/startup_scripts/通用组件/Epiphy的-空间特效核心.js`](../kubejs/startup_scripts/通用组件/Epiphy的-空间特效核心.js) 建立子系统 B 原生 GPU + 预烘焙 `CCModel` 核心；
+  - 通过 `RegisterShadersEvent` 注册 100% 自研 GLSL 1.50 核心着色器 `epiphy:epiphy_cosmos`（[`epiphy_cosmos.{json,vsh,fsh}`](../kubejs/assets/epiphy/shaders/core/epiphy_cosmos.fsh)），以原生屏幕分辨率逐像素计算 360° 无缝相机视角视差深空星海、三层四芒十字星芒（`+`/`✦`）+ 柔和径向光晕与多倍频翡翠青/星穹紫体积星云，并严格限定在 `imperius_test_cosmos_mask.png` 下段剑身星窗与 1px 裂隙内，绝不调用无尽贪婪等外部渲染器；
+  - 通过 `ModelEvent$ModifyBakingResult` + CodeChickenLib `IItemRenderer` 在模型烘焙期一次性将 2 面星窗面片、3 道带刻度与三维四芒星棱晶的星盘陀螺环、双螺旋缠刃光带及 3 簇 14 枚 3D 拖尾星屑预烘焙为 9 个原生 Java `CCModel` 网格，运行时仅约 9 次原生 `CCModel.render()` + 复用 `Matrix4` 旋转（零 JS 顶点循环、零 GC 分配），依托硬件深度缓冲在第一人称（含 Better First Person）、第三人称、快捷栏与背包槽位实现真实剑身前后遮挡与零卡顿渲染；全量单测 `71/71` 通过 + 22/22 脚本 Rhino 检查通过。
 

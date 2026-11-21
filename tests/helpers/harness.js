@@ -17,6 +17,8 @@ var BUGFIX_PATH       = path.join(ROOT_DIR, 'kubejs', 'server_scripts',  '通用
 var DANMAKU_PATH      = path.join(ROOT_DIR, 'kubejs', 'server_scripts',  '通用组件', 'Epiphy的-平面渲染组件.js')
 var AUDIO_PATH        = path.join(ROOT_DIR, 'kubejs', 'server_scripts',  '通用组件', 'Epiphy的-音频组件.js')
 var RENDERER_PATH     = path.join(ROOT_DIR, 'kubejs', 'client_scripts',  '通用组件', 'Epiphy的-平面渲染器.js')
+var FX3D_CORE_PATH    = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的-空间特效核心.js')
+var FX3D_PATH         = path.join(ROOT_DIR, 'kubejs', 'client_scripts',  '通用组件', 'Epiphy的-空间特效渲染器.js')
 var AUDIO_CLIENT_PATH = path.join(ROOT_DIR, 'kubejs', 'client_scripts',  '通用组件', 'Epiphy的-音频播放器.js')
 
 function createKubeSandbox(loadClassFn) {
@@ -366,6 +368,8 @@ module.exports = {
     DANMAKU_PATH:            DANMAKU_PATH,
     AUDIO_PATH:              AUDIO_PATH,
     RENDERER_PATH:           RENDERER_PATH,
+    FX3D_CORE_PATH:          FX3D_CORE_PATH,
+    FX3D_PATH:               FX3D_PATH,
     AUDIO_CLIENT_PATH:       AUDIO_CLIENT_PATH,
     createKubeSandbox:       createKubeSandbox,
     attachConsoleCapture:    attachConsoleCapture,

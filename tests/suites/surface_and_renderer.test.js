@@ -2232,21 +2232,16 @@ module.exports = function registerSuite(test, h) {
 
         Dm.configure({ warnDeprecatedAliases: true })
         var warnsBeforeDep = svCon.warns.length
+        // Pruned DEPRECATED_DANMAKU_ALIASES retains ONLY 2 most common frozen entries: msg -> title, slot -> slotId
+        assert.deepStrictEqual(Object.keys(Spec.DEPRECATED_DANMAKU_ALIASES).sort(), ['msg', 'slot'])
         var pktDep = Dm.buildPacket({
-            msg: 'DeprecatedMsg',
-            subText: 'DeprecatedSub',
-            slot: 'dep_slot',
-            fontSize: 1.25,
-            rot: -15,
-            spacing: 2.0
+            msg:  'DeprecatedMsg',
+            slot: 'dep_slot'
         })
         assert.strictEqual(pktDep.title, 'DeprecatedMsg')
-        assert.strictEqual(pktDep.sub, 'DeprecatedSub')
         assert.strictEqual(pktDep.slotId, 'dep_slot')
-        assert.strictEqual(pktDep.scale, 1.25)
-        assert.strictEqual(pktDep.angle, -15)
-        assert.strictEqual(pktDep.letterSpacing, 2.0)
         assert.ok(Dm._pure.getDeprecatedAliasHits().msg >= 1, 'deprecated alias msg must be recorded')
+        assert.ok(Dm._pure.getDeprecatedAliasHits().slot >= 1, 'deprecated alias slot must be recorded')
         assert.ok(svCon.warns.length > warnsBeforeDep, 'warnDeprecatedAliases=true must emit one-time warning via LOGGER.once')
         var warnsAfterFirstDep = svCon.warns.length
         Dm.buildPacket({ msg: 'SecondDeprecatedMsg' })
@@ -2796,43 +2791,40 @@ module.exports = function registerSuite(test, h) {
         var Log2  = svSb2.global.EpiphyLog
         var Dm2   = svSb2.global.ScreenDanmaku
 
-        // 1. PRIORITY_MAP must contain only the 5 canonical priority names; deprecated strings move to DEPRECATED_PRIORITY_ALIASES
+        // 1. PRIORITY_MAP must contain only the 5 canonical priority names; pruned DEPRECATED_PRIORITY_ALIASES keeps ONLY 2 frozen entries
         assert.deepStrictEqual(Object.keys(Proto2.PRIORITY_MAP).sort(), ['active', 'critical', 'high', 'low', 'normal'])
-        assert.strictEqual(Proto2.DEPRECATED_PRIORITY_ALIASES.minor, 1)
-        assert.strictEqual(Proto2.DEPRECATED_PRIORITY_ALIASES['致命'], 4)
-        assert.strictEqual(Proto2.DEPRECATED_PRIORITY_ALIASES.sustain, 5)
+        assert.deepStrictEqual(Object.keys(Proto2.DEPRECATED_PRIORITY_ALIASES).sort(), ['medium', 'urgent'])
+        assert.strictEqual(Proto2.DEPRECATED_PRIORITY_ALIASES.medium, 2)
+        assert.strictEqual(Proto2.DEPRECATED_PRIORITY_ALIASES.urgent, 4)
 
         // 2. Deprecation alerts obey EpiphyLog control when CONFIG.warnDeprecatedAliases === 'log'
         assert.strictEqual(Dm2.CONFIG.warnDeprecatedAliases, 'log', 'default warnDeprecatedAliases must delegate to EpiphyLog')
         assert.strictEqual(svCon2.warns.length, 0)
         var pSilent = Dm2.buildPacket({
             title:       'PriTestSilent',
-            priority:    'important',
-            continuous:  true,
+            priority:    'medium',
             shakeMode:   'perchar',
             fadeStyle:   'defocus',
             outlineMode: 'border'
         })
-        assert.strictEqual(pSilent.priority, 3)
-        assert.strictEqual(pSilent.lifeMode, 'active')
+        assert.strictEqual(pSilent.priority, 2)
         assert.strictEqual(pSilent.shakeMode, 'per_char')
         assert.strictEqual(pSilent.fadeStyle, 'blur')
         assert.strictEqual(pSilent.outlineMode, 'stroke')
         assert.strictEqual(svCon2.warns.length, 0, 'with EpiphyLog deprecation control off, deprecated usages emit zero warns')
-        assert.ok(Dm2._pure.getDeprecatedAliasHits()['priority:important'] >= 1, 'deprecated priority must still be counted in hits')
+        assert.ok(Dm2._pure.getDeprecatedAliasHits()['priority:medium'] >= 1, 'deprecated priority must still be counted in hits')
 
         // Enable deprecation warnings via EpiphyLog (e.g. /epiphy debug log deprecations on)
         Log2.setDeprecationWarnings(true)
         var wBeforeLogOn = svCon2.warns.length
         Dm2.buildPacket({
-            title:       'PriTestLogOn',
-            priority:    '致命',
-            fadeMode:    '虚化',
-            sourceConflict: 'union'
+            msg:      'PriTestLogOn',
+            priority: 'urgent',
+            slot:     'legacy_slot_warn'
         })
-        Dm2.buildPacket({ title: 'PriTestLogOn2', priority: '致命' })
+        Dm2.buildPacket({ title: 'PriTestLogOn2', priority: 'urgent' })
         var wAfterLogOn = svCon2.warns.length
-        assert.ok(wAfterLogOn >= wBeforeLogOn + 2, 'enabling EpiphyLog deprecation warnings must emit one-time alerts for priority/enum/field deprecations')
+        assert.ok(wAfterLogOn >= wBeforeLogOn + 2, 'enabling EpiphyLog deprecation warnings must emit one-time alerts for priority/field deprecations')
         Log2.setDeprecationWarnings(false)
 
         // 3. Full §4.1 & §5.2 Official Aliases & Node Schema Normalization
@@ -2976,6 +2968,37 @@ module.exports = function registerSuite(test, h) {
         cliNow2 += 50
         cliPaints2[0](ev2)
         assert.strictEqual(R2.list().some(function (it) { return it.slotId === 'gui_def_pri' }), false, 'screen_session GUI overlay must auto-expire when target GUI closes')
+
+        // ScreenDanmakuClient native v6 push/patch/deactivate/clear
+        var Cli2 = cliSb2.global.ScreenDanmakuClient
+        Cli2.clear('*')
+        cliNow2 += 50
+        cliPaints2[0](ev2)
+        assert.strictEqual(Cli2.count(), 0)
+        Cli2.push({
+            slotId: 'cli_v6_slot',
+            group: 'cli_v6_g',
+            lifeMode: 'active',
+            activeHold: 40,
+            vars: { msg: 'INIT_V6' },
+            nodes: [{ id: 't1', type: 'text', text: '$msg', color: 0xFFFFFFFF }]
+        })
+        cliNow2 += 50
+        cliPaints2[0](ev2)
+        assert.strictEqual(Cli2.list().some(function (it) { return it.slotId === 'cli_v6_slot' }), true, 'ScreenDanmakuClient.push must accept native v6 node payload without manual proto/action')
+        Cli2.patch('cli_v6_slot', { msg: 'PATCHED_V6' }, 40)
+        drawSeq.length = 0
+        cliNow2 += 50
+        cliPaints2[0](ev2)
+        assert.ok(drawSeq.indexOf('text:PATCHED_V6') >= 0, 'ScreenDanmakuClient.patch must emit native v6 patch updating $msg')
+        Cli2.deactivate('cli_v6_slot', 2)
+        cliNow2 += 50
+        cliPaints2[0](ev2)
+        var afterDeactItem = Cli2.list().filter(function (it) { return it.slotId === 'cli_v6_slot' })[0]
+        assert.ok(afterDeactItem != null && afterDeactItem.lifeMode === 'once', 'ScreenDanmakuClient.deactivate must emit native v6 deactivate transitioning active -> once')
+        cliNow2 += 600
+        cliPaints2[0](ev2)
+        assert.strictEqual(Cli2.list().some(function (it) { return it.slotId === 'cli_v6_slot' }), false, 'deactivated v6 overlay must expire after fadeOut')
     })
 
     test('62. 32-bit ARGB alpha preservation, bind.rotSpeed continuous rotation, and smooth diagonal stripes', function () {
@@ -3917,6 +3940,35 @@ module.exports = function registerSuite(test, h) {
         dbgSvSb.global.EpiphyDebug.dispatchRenderPerf({ player: fakePlayer }, 'off')
         assert.strictEqual(R.CONFIG.perfLogEnabled, false)
 
+        // Fail-Narrow safety: console (no player) invoking renderperf on/dump without explicit target MUST be rejected!
+        var pAlice = { username: 'Alice', sendData: function (ch, data) { sentDbgPackets.push({ to: 'Alice', ch: ch, data: data }) } }
+        var pBob   = { username: 'Bob',   sendData: function (ch, data) { sentDbgPackets.push({ to: 'Bob',   ch: ch, data: data }) } }
+        var consoleSrc = { player: null, server: { players: [pAlice, pBob] } }
+        var rejOn   = dbgSvSb.global.EpiphyDebug.dispatchRenderPerf(consoleSrc, 'on')
+        var rejDump = dbgSvSb.global.EpiphyDebug.dispatchRenderPerf(consoleSrc, 'dump')
+        assert.strictEqual(rejOn.ok, false, 'console renderperf on without target must fail-narrow to prevent accidental server-wide disk logging')
+        assert.strictEqual(rejOn.sent, 0)
+        assert.strictEqual(rejDump.ok, false, 'console renderperf dump without target must fail-narrow')
+        // Explicit player target & @all broadcast work cleanly
+        var okAlice = dbgSvSb.global.EpiphyDebug.dispatchRenderPerf(consoleSrc, 'on', 'alice')
+        assert.strictEqual(okAlice.ok, true)
+        assert.strictEqual(okAlice.sent, 1)
+        var okAllOff = dbgSvSb.global.EpiphyDebug.dispatchRenderPerf(consoleSrc, 'off')
+        assert.strictEqual(okAllOff.ok, true, 'console renderperf off without target is safe to broadcast')
+        assert.strictEqual(okAllOff.sent, 2)
+        var okAllOn = dbgSvSb.global.EpiphyDebug.dispatchRenderPerf(consoleSrc, 'on', '@all')
+        assert.strictEqual(okAllOn.ok, true)
+        assert.strictEqual(okAllOn.sent, 2)
+        var missPlayer = dbgSvSb.global.EpiphyDebug.dispatchRenderPerf(consoleSrc, 'on', 'Nobody')
+        assert.strictEqual(missPlayer.ok, false)
+
+        // Client perfLogAutoOffMs auto-stop failsafe (10 minutes default)
+        R.setPerfLog(true)
+        assert.strictEqual(R.CONFIG.perfLogEnabled, true)
+        cNow += R.CONFIG.perfLogAutoOffMs + 100
+        cliTicks[0]()
+        assert.strictEqual(R.CONFIG.perfLogEnabled, false, 'perfLogEnabled must auto-disable once perfLogAutoOffMs elapses')
+
         // --- Part B: Standalone docs/proto_v6_schema.json Conformance Validation ---
         var schemaPath = path.join(ROOT_DIR, 'docs', 'proto_v6_schema.json')
         var schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'))
@@ -3956,7 +4008,21 @@ module.exports = function registerSuite(test, h) {
         }
         assert.ok(sec41Rows >= 25, 'roadmap §4.1 parser must match >= 25 core envelope rows, got ' + sec41Rows)
 
-        // 2b. Roadmap §6.2 frame budget targets must stay in lockstep with Epiphy2DRenderer PERF_BUDGET
+        // 2a. Roadmap §4.1 (C) rect.fill modes must match schema.fill.modes 1:1
+        var sec41CStart = roadmapText.indexOf('#### (C) `rect.fill`')
+        var sec41CEnd   = roadmapText.indexOf('### 4.2')
+        assert.ok(sec41CStart >= 0 && sec41CEnd > sec41CStart, 'roadmap §4.1 (C) rect.fill section must exist')
+        var sec41C = roadmapText.slice(sec41CStart, sec41CEnd)
+        var fillRowRe = /^\|\s*\*\*`'([a-z_]+)'`\*\*/gm
+        var fm
+        var docFillModes = []
+        while ((fm = fillRowRe.exec(sec41C)) !== null) {
+            docFillModes.push(fm[1])
+            assert.ok(schema.fill.modes.indexOf(fm[1]) >= 0, 'roadmap §4.1(C) fill.mode `' + fm[1] + '` must be defined in schema.fill.modes')
+        }
+        assert.ok(docFillModes.length >= 5, 'roadmap §4.1(C) must declare >= 5 rect.fill modes, got ' + docFillModes.length)
+
+        // 2b. Roadmap §6.2 & §3 frame budget targets must stay in lockstep with Epiphy2DRenderer PERF_BUDGET
         var sec62Start = roadmapText.indexOf('### 6.2 客户端帧耗时预算')
         assert.ok(sec62Start >= 0, 'roadmap §6.2 frame budget section must exist')
         var sec62 = roadmapText.slice(sec62Start, sec62Start + 700)
@@ -3967,6 +4033,7 @@ module.exports = function registerSuite(test, h) {
         assert.strictEqual(st.budgetTargetsMs.singlePanel,     Number(mSingle[1]), 'singlePanel budget must match roadmap §6.2')
         assert.strictEqual(st.budgetTargetsMs.highLoadFrame,   Number(mHigh[1]),   'highLoadFrame budget must match roadmap §6.2')
         assert.strictEqual(st.budgetTargetsMs.emergencyCutoff, Number(mCutoff[1]), 'emergencyCutoff budget must match roadmap §6.2')
+        assert.strictEqual(roadmapText.indexOf('frameBudgetMs (2.5ms)'), -1, 'roadmap §3 must NOT conflate highLoadFrameMs (2.5ms) with frameBudgetMs (45ms)')
 
         function validateNodeConformance(node, ctxLabel) {
             assert.ok(node && typeof node === 'object', ctxLabel + ': node must be object')
@@ -4188,5 +4255,449 @@ module.exports = function registerSuite(test, h) {
         cliPaints[0](fbTrace.ev)
         var fbOrder = fbTrace.ops.filter(function (o) { return o.op === 'text' || o.op === 'rect' }).map(function (o) { return o.op === 'rect' ? 'OUR_HUD' : o.text })
         assert.deepStrictEqual(fbOrder, ['DANMAKU_DEFAULT', 'OUR_HUD', 'ABOVE_VANILLA_HUD'], 'fallback single-pass paintScreen must render all layers in ascending renderPriority order')
+    })
+
+    test('71. epiphy:imperius_test (英佩瑞斯-测试中) sword registration & decoupled GPU-Shader + Pre-Baked CCModel Epiphy3DFXCore', function () {
+        var FUNC_TEST_PATH = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的小玩意_功能测试.js')
+        var FX3D_CORE_PATH = h.FX3D_CORE_PATH
+        var FX3D_PATH      = h.FX3D_PATH
+        var modBusHooks    = {}
+        var forgeHooks     = {}
+        var cliPaints      = []
+        var regItems       = {}
+        var regBlocks      = {}
+        var regSounds      = []
+
+        // Mock Forge / MC / CodeChickenLib classes for RegisterShadersEvent + ModelEvent$ModifyBakingResult + IItemRenderer
+        var registeredShaders = []
+        var uniformValues     = { EpiphyTime: null, EpiphyYawPitch: null, EpiphyGuiMode: null }
+        var createdRenderTypes = []
+        var outlinePropsUsed   = []
+        var bakedCCModels      = []
+        var renderDrawCalls    = []
+        var flushedTypes       = []
+        var origModelDraws     = 0
+
+        function MockResourceLocation(a, b) {
+            this.str = b !== undefined ? (a + ':' + b) : String(a)
+        }
+        MockResourceLocation.prototype.toString = function () { return this.str }
+
+        function MockModelResourceLocation(rl, variant) {
+            this.key = String(rl) + '#' + String(variant)
+        }
+        MockModelResourceLocation.prototype.toString = function () { return this.key }
+
+        function MockShaderInstance(provider, rl, fmt) {
+            this.provider = provider
+            this.rl       = rl
+            this.fmt      = fmt
+            this.m_173348_ = function (name) {
+                return {
+                    name: name,
+                    m_5985_: function (v) { uniformValues[name] = v },
+                    m_7971_: function (v0, v1) { uniformValues[name] = [v0, v1] }
+                }
+            }
+        }
+
+        function MockConsumer(obj) { return obj }
+        function MockSupplier(obj) { return obj }
+        function MockVertex5(x, y, z, u, v) { this.x = x; this.y = y; this.z = z; this.u = u; this.v = v }
+
+        function MockCCModel(vCount) {
+            this.verts = new Array(vCount)
+            this.attrs = {}
+            this.normalsComputed = false
+            this.getOrAllocate = function (key) {
+                if (!this.attrs[key]) this.attrs[key] = new Array(vCount)
+                return this.attrs[key]
+            }
+            this.computeNormals = function () { this.normalsComputed = true; return this }
+            this.render = function (ccrs, mat) {
+                renderDrawCalls.push({
+                    rt: ccrs.boundRt,
+                    verts: this.verts.length,
+                    scales: mat.scales.slice(),
+                    rotCount: mat.rots.length
+                })
+            }
+            bakedCCModels.push(this)
+        }
+        var MockCCModelClass = { quadModel: function (n) { return new MockCCModel(n) } }
+
+        function MockMatrix4() {
+            this.scales = []
+            this.rots   = []
+            this.trans  = []
+        }
+        MockMatrix4.prototype.set = function (other) {
+            this.scales = other && other.scales ? other.scales.slice() : []
+            this.rots   = other && other.rots ? other.rots.slice() : []
+            this.trans  = other && other.trans ? other.trans.slice() : []
+            return this
+        }
+        MockMatrix4.prototype.translate = function (x, y, z) { this.trans.push([x, y, z]); return this }
+        MockMatrix4.prototype.rotate    = function (a, ax) { this.rots.push([a, ax]); return this }
+        MockMatrix4.prototype.scale     = function (sx, sy, sz) { this.scales.push([sx, sy !== undefined ? sy : sx, sz !== undefined ? sz : sx]); return this }
+
+        var mockCCRS = {
+            boundRt: null,
+            baseColour: -1,
+            reset: function () { this.boundRt = null; this.baseColour = -1 },
+            bind: function (rt) { this.boundRt = rt }
+        }
+
+        var mockPlayer = {
+            m_5675_: function () { return 42.5 },
+            m_5686_: function () { return -15.0 },
+            m_21324_: function () { return 0.5 }
+        }
+        var mockMcInstance = {
+            f_91074_: mockPlayer,
+            m_91296_: function () { return 0.5 },
+            m_91291_: function () {
+                return {
+                    m_115189_: function () { origModelDraws++ }
+                }
+            }
+        }
+        var GUI_CTX  = { name: 'GUI' }
+        var HAND_CTX = { name: 'FIRST_PERSON_RIGHT_HAND' }
+
+        var sb = {
+            console: { info: function () {}, warn: function () {}, error: function (m) { throw new Error(m) }, debug: function () {}, log: function () {} },
+            Date: { now: function () { return 8000 } },
+            Platform: { isClientEnvironment: function () { return true } },
+            ForgeModEvents: { onEvent: function (cls, fn) { modBusHooks[cls] = fn } },
+            ForgeEvents: { onEvent: function (cls, fn) { forgeHooks[cls] = fn } },
+            StartupEvents: {
+                registry: function (regType, fn) {
+                    if (regType === 'sound_event') {
+                        fn({ create: function (id) { regSounds.push(id); return {} } })
+                    } else if (regType === 'block') {
+                        fn({
+                            create: function (id) {
+                                var b = {
+                                    id: id,
+                                    displayName: function (n) { b.name = n; return b },
+                                    soundType: function () { return b },
+                                    hardness: function () { return b },
+                                    resistance: function () { return b },
+                                    textureAll: function () { return b },
+                                    texture: function () { return b }
+                                }
+                                regBlocks[id] = b
+                                return b
+                            }
+                        })
+                    } else if (regType === 'item') {
+                        fn({
+                            create: function (id, type) {
+                                var it = {
+                                    id: id,
+                                    type: type || 'basic',
+                                    tags: [],
+                                    tierObj: { uses: 2031, attackDamageBonus: 4.0, enchantmentValue: 15 },
+                                    displayName: function (n) { it.name = n; return it },
+                                    tier: function (t) { it.tierName = t; return it },
+                                    attackDamageBaseline: function (v) { it.damageBase = v; return it },
+                                    attackDamageBonus: function (v) { it.damageBonus = v; return it },
+                                    maxDamage: function (v) { it.maxDmg = v; return it },
+                                    unstackable: function () { it.unstack = true; return it },
+                                    modifyTier: function (cb) { cb(it.tierObj); return it },
+                                    texture: function (t) { it.tex = t; return it },
+                                    parentModel: function (m) { it.parentM = m; return it },
+                                    tag: function (tg) { it.tags.push(tg); return it }
+                                }
+                                regItems[id] = it
+                                return it
+                            }
+                        })
+                    }
+                },
+                modifyCreativeTab: function () {}
+            },
+            Client: { getCurrentScreen: function () { return null } },
+            ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, tick: function () {}, paintScreen: function (fn) { cliPaints.push(fn) } },
+            NetworkEvents: { dataReceived: function () {} },
+            Java: {
+                loadClass: function (cls) {
+                    if (cls === 'net.minecraft.client.Minecraft') return { m_91087_: function () { return mockMcInstance } }
+                    if (cls === 'net.minecraft.resources.ResourceLocation') return MockResourceLocation
+                    if (cls === 'net.minecraft.client.resources.model.ModelResourceLocation') return MockModelResourceLocation
+                    if (cls === 'net.minecraft.client.renderer.ShaderInstance') return MockShaderInstance
+                    if (cls === 'codechicken.lib.render.shader.CCShaderInstance') {
+                        return {
+                            create: function (provider, rl, fmt) {
+                                var inst = new MockShaderInstance(provider, rl, fmt)
+                                inst.viaCCShader = true
+                                return inst
+                            }
+                        }
+                    }
+                    if (cls === 'java.util.function.Consumer') return MockConsumer
+                    if (cls === 'java.util.function.Supplier') return MockSupplier
+                    if (cls === 'codechicken.lib.render.CCModel') return MockCCModelClass
+                    if (cls === 'codechicken.lib.render.CCRenderState') return { instance: function () { return mockCCRS } }
+                    if (cls === 'codechicken.lib.render.item.IItemRenderer') return function (impl) { return impl }
+                    if (cls === 'codechicken.lib.util.TransformUtils') return { DEFAULT_TOOL: 'DEFAULT_TOOL' }
+                    if (cls === 'codechicken.lib.vec.Matrix4') return MockMatrix4
+                    if (cls === 'codechicken.lib.vec.Vector3') return { X_POS: 'X', Y_POS: 'Y', Z_POS: 'Z' }
+                    if (cls === 'codechicken.lib.vec.Vertex5') return MockVertex5
+                    if (cls === 'codechicken.lib.render.pipeline.attribute.ColourAttribute') return { attributeKey: 'colour' }
+                    if (cls === 'net.minecraft.client.renderer.GameRenderer') return { m_172811_: function () { return 'posColShader' }, m_172814_: function () { return 'posColTexShader' } }
+                    if (cls === 'net.minecraft.client.renderer.entity.ItemRenderer') return { m_115222_: function () { return 'foilVC' } }
+                    if (cls === 'net.minecraft.client.renderer.ItemBlockRenderTypes') return { m_109279_: function () { return 'origItemRt' } }
+                    if (cls === 'net.minecraft.world.item.ItemDisplayContext') return { GUI: GUI_CTX }
+                    if (cls === 'net.minecraft.client.renderer.RenderStateShard') return { f_110139_: 'TRANS', f_110136_: 'LIGHTNING', f_110110_: 'NO_CULL', f_110114_: 'CD_WRITE', f_110115_: 'C_WRITE' }
+                    if (cls === 'net.minecraft.client.renderer.RenderStateShard$ShaderStateShard') return function (sup) { this.sup = sup }
+                    if (cls === 'net.minecraft.client.renderer.RenderStateShard$TextureStateShard') return function (rl) { this.rl = rl }
+                    if (cls === 'net.minecraft.client.renderer.RenderType$OutlineProperty') return { NONE: 'OUTLINE_NONE' }
+                    if (cls === 'net.minecraft.client.renderer.RenderType$CompositeState') {
+                        return {
+                            m_110628_: function () {
+                                var st = {}
+                                var b = {
+                                    m_173292_: function (s) { st.shader = s; return b },
+                                    m_173290_: function (t) { st.tex = t; return b },
+                                    m_110685_: function (tr) { st.trans = tr; return b },
+                                    m_110661_: function (c) { st.cull = c; return b },
+                                    m_110687_: function (w) { st.write = w; return b },
+                                    m_110689_: function (op) { outlinePropsUsed.push(op); st.outline = op; return st }
+                                }
+                                return b
+                            }
+                        }
+                    }
+                    if (cls === 'net.minecraft.client.renderer.RenderType') {
+                        return {
+                            m_173215_: function (name, fmt, mode, buf, cr, sort, state) {
+                                var rt = { name: name, fmt: fmt, mode: mode, state: state }
+                                createdRenderTypes.push(rt)
+                                return rt
+                            }
+                        }
+                    }
+                    if (cls === 'com.mojang.blaze3d.vertex.DefaultVertexFormat') return { f_85815_: 'POSITION_COLOR', f_85818_: 'POSITION_COLOR_TEX' }
+                    if (cls === 'com.mojang.blaze3d.vertex.VertexFormat$Mode') return { QUADS: 'QUADS' }
+                    return null
+                }
+            },
+            Text: { of: function (s) { return { string: String(s) } } },
+            global: {}
+        }
+        sb.globalThis = sb
+        vm.createContext(sb)
+        loadStartupBase(sb)
+        runScriptIn(sb, FX3D_CORE_PATH)
+        runScriptIn(sb, FUNC_TEST_PATH)
+        runScriptIn(sb, RENDERER_PATH)
+        var forgeHooksBeforeFx3d = Object.keys(forgeHooks).length
+        var cliPaintsBeforeFx3d  = cliPaints.length
+        runScriptIn(sb, FX3D_PATH)
+
+        // 1. Verify sword registration in Epiphy的小玩意_功能测试.js
+        var imp = regItems['epiphy:imperius_test']
+        assert.ok(imp != null, 'epiphy:imperius_test must be registered in StartupEvents.registry("item")')
+        assert.strictEqual(imp.type, 'sword', 'must be registered with "sword" builder for sword enchantments & sweep mechanics')
+        assert.strictEqual(imp.name, '英佩瑞斯-测试中', 'displayName must be 英佩瑞斯-测试中')
+        assert.strictEqual(imp.damageBase, 50.0, 'attackDamageBaseline must be +50.0')
+        assert.strictEqual(imp.damageBonus, 0.0, 'attackDamageBonus must be 0.0')
+        assert.strictEqual(imp.maxDmg, 0, 'maxDamage(0) must be set for infinite durability')
+        assert.strictEqual(imp.tierObj.uses, 0, 'tier.uses must be 0 for infinite durability')
+        assert.strictEqual(imp.tierObj.attackDamageBonus, 0.0, 'tier.attackDamageBonus must be 0.0 so total modifier is exact +50')
+        assert.ok(imp.tags.indexOf('minecraft:swords') >= 0 && imp.tags.indexOf('forge:tools/swords') >= 0, 'must carry minecraft:swords and forge:tools/swords tags')
+        assert.ok(Array.isArray(sb.global.EpiphyCreativeTabQueue) && sb.global.EpiphyCreativeTabQueue.indexOf('epiphy:imperius_test') >= 0, 'must be queued into EpiphyCreativeTab')
+
+        // 2. Verify strict 2D vs 3D subsystem separation AND zero per-frame JS loops in Epiphy3DFX client facade
+        var R2D      = sb.global.Epiphy2DRenderer
+        var FX3DCore = sb.global.Epiphy3DFXCore
+        var FX3D     = sb.global.Epiphy3DFX
+        assert.ok(FX3DCore != null && FX3D != null && sb.global.EpiphySpatialFX === FX3D, 'Epiphy3DFXCore and Epiphy3DFX/EpiphySpatialFX must be exported')
+        assert.strictEqual(typeof R2D.bindItemVfx, 'undefined', '2D planar renderer must NOT contain 3D item VFX binding methods')
+        assert.strictEqual(typeof R2D._pure.buildOrbit3DDrawables, 'undefined', '2D planar renderer must NOT contain 3D orbital mesh generation')
+        assert.strictEqual(cliPaints.length, cliPaintsBeforeFx3d, 'Epiphy3DFX client facade must register ZERO per-frame ClientEvents.paintScreen loops')
+        assert.strictEqual(Object.keys(forgeHooks).length, forgeHooksBeforeFx3d, 'Epiphy3DFX must register ZERO per-frame ForgeEvents (no RenderHandEvent/ContainerScreenEvent)')
+        assert.strictEqual(typeof forgeHooks['net.minecraftforge.client.event.RenderHandEvent'], 'undefined')
+        assert.strictEqual(typeof modBusHooks['net.minecraftforge.client.event.RegisterShadersEvent'], 'function', 'Epiphy3DFXCore must hook RegisterShadersEvent on ForgeModEvents')
+        assert.strictEqual(typeof modBusHooks['net.minecraftforge.client.event.ModelEvent$ModifyBakingResult'], 'function', 'Epiphy3DFXCore must hook ModelEvent$ModifyBakingResult on ForgeModEvents')
+
+        // 3. Verify self-contained GPU shader assets & mask texture exist (and zero Avaritia references)
+        var shaderDir = path.join(ROOT_DIR, 'kubejs', 'assets', 'epiphy', 'shaders', 'core')
+        var texDir    = path.join(ROOT_DIR, 'kubejs', 'assets', 'epiphy', 'textures', 'item')
+        var shaderJson = JSON.parse(fs.readFileSync(path.join(shaderDir, 'epiphy_cosmos.json'), 'utf8'))
+        var shaderVsh  = fs.readFileSync(path.join(shaderDir, 'epiphy_cosmos.vsh'), 'utf8')
+        var shaderFsh  = fs.readFileSync(path.join(shaderDir, 'epiphy_cosmos.fsh'), 'utf8')
+        assert.strictEqual(shaderJson.vertex, 'epiphy:epiphy_cosmos')
+        assert.strictEqual(shaderJson.fragment, 'epiphy:epiphy_cosmos')
+        assert.deepStrictEqual(shaderJson.attributes, ['Position', 'Color', 'UV0'])
+        assert.ok(shaderVsh.indexOf('#version 150') === 0 && shaderFsh.indexOf('#version 150') === 0, 'core shaders must be valid GLSL 150')
+        assert.ok(shaderFsh.indexOf('EpiphyYawPitch') >= 0 && shaderFsh.indexOf('evalCrossStarLayer') >= 0, 'fragment shader must implement camera-reactive cross-star cosmos')
+        assert.ok(fs.existsSync(path.join(texDir, 'imperius_test.png')), 'static base blade texture must exist')
+        assert.ok(fs.existsSync(path.join(texDir, 'imperius_test_cosmos_mask.png')), 'GPU cosmos window mask texture must exist')
+        assert.ok(fs.existsSync(path.join(ROOT_DIR, 'kubejs', 'assets', 'epiphy', 'textures', 'effect', 'white_pixel.png')), 'white_pixel.png must exist for POSITION_COLOR_TEX surround VFX')
+        assert.strictEqual(fs.existsSync(path.join(texDir, 'imperius_test.png.mcmeta')), false, 'obsolete animated mcmeta must be removed')
+        var coreSrc = fs.readFileSync(FX3D_CORE_PATH, 'utf8')
+        assert.strictEqual(coreSrc.indexOf('committee.nova.mods.avaritia'), -1, 'must NEVER call Avaritia renderer/shaders')
+        assert.strictEqual(coreSrc.indexOf("Java.loadClass('java.lang.System')"), -1, 'must NEVER call Java.loadClass(java.lang.System) in hot path')
+
+        // 4. Verify RGBA byte order (0xRRGGBBAA) for CodeChickenLib ColourRGBA & pure pre-baked mesh counts
+        assert.strictEqual(FX3DCore._pure.packRgba(0x112233, 0x80) >>> 0, 0x11223380, 'CCL ColourRGBA must pack R in MSB and A in LSB (0xRRGGBBAA)')
+        var impCfg = FX3D.getBoundItemConfig('epiphy:imperius_test')
+        assert.ok(impCfg != null && impCfg.maskTexture === 'epiphy:textures/item/imperius_test_cosmos_mask.png', 'must auto-derive cosmos mask texture path')
+        assert.strictEqual(FX3DCore._pure.buildCosmosOverlayQuads().length, 2, 'cosmos overlay must be exact 2 quads (front+back)')
+        assert.ok(FX3DCore._pure.buildAstrolabeRingQuads(impCfg.rings[0]).length >= 100 && FX3DCore._pure.buildAstrolabeRingQuads(impCfg.rings[0]).length <= 180, 'Ring 0 must bake lean bold cross-ribbons, ticks, and 4 3D star-prisms')
+        assert.ok(FX3DCore._pure.buildHelixRibbonQuads(impCfg.helix, 0).length >= 60 && FX3DCore._pure.buildHelixRibbonQuads(impCfg.helix, 0).length <= 140, 'Helix strand must bake lean smooth cross-ribbons along blade spine')
+        assert.ok(FX3DCore._pure.buildStarMotesQuads(impCfg.motes, 0, 2).length >= 40, 'Star-mote group must bake 3D star heads + comet trails')
+
+        // 5. Verify RegisterShadersEvent loads epiphy:epiphy_cosmos via CCShaderInstance.create (zero Rhino constructor ambiguity!)
+        modBusHooks['net.minecraftforge.client.event.RegisterShadersEvent']({
+            getResourceProvider: function () { return 'mockResProvider' },
+            registerShader: function (inst, consumer) {
+                registeredShaders.push(inst)
+                consumer.accept(inst)
+            }
+        })
+        assert.strictEqual(registeredShaders.length, 1, 'must register 1 custom core shader')
+        assert.strictEqual(registeredShaders[0].viaCCShader, true, 'must prefer single-overload CCShaderInstance.create to avoid Rhino constructor ambiguity')
+        assert.strictEqual(String(registeredShaders[0].rl), 'epiphy:epiphy_cosmos')
+        var shStat = FX3D.getShaderStatus()
+        assert.strictEqual(shStat.loaded, true)
+        assert.strictEqual(shStat.hasUniforms, true, 'must resolve EpiphyTime, EpiphyYawPitch, EpiphyGuiMode uniforms')
+
+        // 6. Verify ModelEvent$ModifyBakingResult pre-bakes CCModels ONCE, uses OutlineProperty.NONE, and wraps originalModel
+        var modelsStore = {}
+        var origModelStub = { m_6160_: function () { return 'bladeParticleSprite' } }
+        modelsStore['epiphy:imperius_test#inventory'] = origModelStub
+        var mockModelMap = {
+            get: function (mrl) { return modelsStore[String(mrl)] || null },
+            put: function (mrl, val) { modelsStore[String(mrl)] = val }
+        }
+        modBusHooks['net.minecraftforge.client.event.ModelEvent$ModifyBakingResult']({
+            getModels: function () { return mockModelMap }
+        })
+        var wrappedRenderer = modelsStore['epiphy:imperius_test#inventory']
+        assert.ok(wrappedRenderer != null && wrappedRenderer !== origModelStub && typeof wrappedRenderer.renderItem === 'function', 'must wrap original model with IItemRenderer')
+        assert.strictEqual(wrappedRenderer.getModelState(), 'DEFAULT_TOOL', 'sword IItemRenderer must use TransformUtils.DEFAULT_TOOL')
+        assert.strictEqual(wrappedRenderer.isGui3d(), false, 'sword icon must keep crisp flat GUI lighting (isGui3d=false)')
+        assert.strictEqual(wrappedRenderer.m_6160_(), 'bladeParticleSprite', 'getParticleIcon must delegate to originalModel')
+        assert.ok(outlinePropsUsed.length >= 2 && outlinePropsUsed.every(function (p) { return p === 'OUTLINE_NONE' }), 'all RenderTypes must pass OutlineProperty.NONE')
+        // 1 cosmos overlay + 3 rings + 2 helices + 2 mote groups = 8 pre-baked CCModels
+        assert.strictEqual(bakedCCModels.length, 8, 'must pre-bake exact 8 native CCModels (1 cosmos + 3 rings + 2 helices + 2 mote groups)')
+
+        // 7. Verify per-frame renderItem in FIRST_PERSON_RIGHT_HAND & lean GUI LOD (zero JS vertex loop!)
+        var mockBufferSource = {
+            m_109912_: function (rt) { flushedTypes.push(rt) }
+        }
+        var mockStack = { m_41790_: function () { return true } }
+        wrappedRenderer.renderItem(mockStack, HAND_CTX, new MockMatrix4(), mockBufferSource, 0x00F000F0, 0)
+        assert.strictEqual(origModelDraws, 1, 'must draw originalModel once per renderItem')
+        assert.strictEqual(renderDrawCalls.length, 8, 'first-person hand render must emit exact 8 pre-baked CCModel draw calls (zero JS vertex loop)')
+        assert.strictEqual(uniformValues.EpiphyGuiMode, 0.0, 'first-person render must set EpiphyGuiMode = 0.0')
+        assert.ok(Array.isArray(uniformValues.EpiphyYawPitch) && Math.abs(uniformValues.EpiphyYawPitch[0] - 42.5 * Math.PI / 180) < 1e-4, 'must upload camera yaw/pitch radians to GPU shader')
+        assert.strictEqual(flushedTypes.length, 3, 'hand render must flush origRt -> cosmosRt -> vfxSurroundType in exact depth-occlusion order')
+        // Verify slash expansion applied to ring/helix/mote transforms (swing=0.5 -> sin(PI/2)=1.0 -> 1.45x)
+        var hasSlashScale = renderDrawCalls.some(function (dc) {
+            return dc.scales.some(function (sc) { return Math.abs(sc[1] - 1.45) < 1e-4 })
+        })
+        assert.ok(hasSlashScale, 'swingProgress=0.5 must expand 3D surround scale to 1.45x via Matrix4')
+
+        // GUI slot render check: lean LOD (1 cosmos + 2 hero rings = 3 draw calls) and NO mid-GUI origRt flush!
+        renderDrawCalls.length = 0
+        flushedTypes.length = 0
+        wrappedRenderer.renderItem(mockStack, GUI_CTX, new MockMatrix4(), mockBufferSource, 0x00F000F0, 0)
+        assert.strictEqual(uniformValues.EpiphyGuiMode, 1.0, 'GUI slot render must set EpiphyGuiMode = 1.0')
+        assert.strictEqual(renderDrawCalls.length, 3, 'GUI slot render must use lean LOD (1 cosmos + 2 hero rings = 3 draw calls)')
+        assert.strictEqual(flushedTypes.length, 2, 'GUI slot render must NOT flush origRt mid-hotbar batch')
+        assert.strictEqual(FX3D.getStats().bakedCount, 1)
+        assert.strictEqual(FX3D.getStats().coreAvailable, true)
+        assert.strictEqual(FX3D.getStats().envState, 'client')
+
+        // 8. Verify _pure.pushStarPrism3DQuads & pushCrossSegmentQuads geometry helpers
+        var prismList = []
+        FX3DCore._pure.pushStarPrism3DQuads(prismList, 0, 0, 0, [1, 0, 0], [0, 1, 0], [0, 0, 1], 0.05, 0xFFAA00AA, 0xFFFFFFFF)
+        assert.strictEqual(prismList.length, 6, 'pushStarPrism3DQuads must emit 3 orthogonal pairs * (glow + core) = 6 quads')
+        var crossList = []
+        FX3DCore._pure.pushCrossSegmentQuads(crossList, [0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], 0.02, 0xFFFFFFFF)
+        assert.strictEqual(crossList.length, 2, 'pushCrossSegmentQuads must emit 2 orthogonal ribbon quads')
+
+        // 9. Verify BAKED_ITEMS clears cleanly across reloads after unbindItem (no stale entries!)
+        FX3D.unbindItem('epiphy:imperius_test')
+        delete sb.global.Epiphy3DFXItemBindings['epiphy:imperius_test']
+        modBusHooks['net.minecraftforge.client.event.ModelEvent$ModifyBakingResult']({
+            getModels: function () { return mockModelMap }
+        })
+        assert.strictEqual(FX3D.getStats().bakedCount, 0, 'reload after unbindItem must reset bakedCount to 0')
+        assert.deepStrictEqual(plain(FX3D.getStats().bakedItems), {}, 'reload after unbindItem must clear stale BAKED_ITEMS entries')
+
+        // 10. Verify client facade FALLBACK_CONFIG exact parity with Epiphy3DFXCore.CONFIG (no dual-source drift!)
+        var facadeOnlySb = {
+            console: { info: function () {}, warn: function () {}, error: function () {} },
+            global: {}
+        }
+        facadeOnlySb.globalThis = facadeOnlySb
+        vm.createContext(facadeOnlySb)
+        runScriptIn(facadeOnlySb, FX3D_PATH)
+        assert.deepStrictEqual(plain(facadeOnlySb.global.Epiphy3DFX.CONFIG), plain(FX3DCore.CONFIG), 'facade FALLBACK_CONFIG must match Epiphy3DFXCore.CONFIG 1:1')
+        assert.strictEqual(facadeOnlySb.global.Epiphy3DFX.getStats().coreAvailable, false)
+
+        // 11. Verify isClientSide() probe exception emits explicit warning & sets envState='probe_error'
+        var probeWarns = []
+        var errSb = {
+            console: { info: function () {}, warn: function (m) { probeWarns.push(String(m)) }, error: function () {} },
+            Platform: { isClientEnvironment: function () { throw new Error('boom_platform') } },
+            ForgeModEvents: { onEvent: function () { throw new Error('must not hook modbus on probe_error') } },
+            global: {}
+        }
+        errSb.globalThis = errSb
+        vm.createContext(errSb)
+        loadStartupBase(errSb)
+        runScriptIn(errSb, FX3D_CORE_PATH)
+        assert.strictEqual(errSb.global.Epiphy3DFXCore.getStats().envState, 'probe_error')
+        assert.ok(probeWarns.some(function (w) { return w.indexOf('boom_platform') >= 0 }), 'isClientSide probe exception must emit visible console.warn')
+
+        // 12. Verify EpiphySpec.createMonotonicClock (mc_util_nanos primary + NTP-jump-proof clamped Date.now fallback)
+        var fakeNanos = 1000000000
+        var utilClockSb = {
+            console: { info: function () {}, warn: function () {}, error: function () {} },
+            Java: {
+                loadClass: function (cls) {
+                    if (cls === 'net.minecraft.Util') return { m_137569_: function () { return fakeNanos } }
+                    return null
+                }
+            },
+            global: {}
+        }
+        utilClockSb.globalThis = utilClockSb
+        vm.createContext(utilClockSb)
+        loadStartupBase(utilClockSb)
+        var clkUtil = utilClockSb.global.EpiphySpec.createMonotonicClock({ allowSystemProbe: false })
+        assert.strictEqual(clkUtil.getSource(), 'mc_util_nanos', 'must prefer net.minecraft.Util.getNanos() (not blocked by ClassFilter)')
+        fakeNanos += 2500000000
+        assert.ok(Math.abs(clkUtil.elapsedSec() - 2.5) < 1e-4)
+
+        var fakeDate = 10000
+        var dateClockSb = {
+            console: { info: function () {}, warn: function () {}, error: function () {} },
+            Date: { now: function () { return fakeDate } },
+            global: {}
+        }
+        dateClockSb.globalThis = dateClockSb
+        vm.createContext(dateClockSb)
+        loadStartupBase(dateClockSb)
+        var clkDate = dateClockSb.global.EpiphySpec.createMonotonicClock({ allowSystemProbe: false })
+        assert.strictEqual(clkDate.getSource(), 'clamped_date')
+        fakeDate += 50
+        var t1 = clkDate.elapsedSec()
+        assert.ok(Math.abs(t1 - 0.05) < 1e-4)
+        // Simulate NTP backward jump (-5000ms) -> must NOT go backwards!
+        fakeDate -= 5000
+        var t2 = clkDate.elapsedSec()
+        assert.ok(t2 >= t1, 'NTP backward jump must never move monotonic clock backwards')
+        // Simulate NTP forward jump (+60000ms) -> must clamp to clampStepMs (16ms)!
+        fakeDate += 60000
+        var t3 = clkDate.elapsedSec()
+        assert.ok((t3 - t2) <= 0.02, 'NTP forward jump must be clamped cleanly')
     })
 }

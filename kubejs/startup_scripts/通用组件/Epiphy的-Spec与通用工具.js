@@ -33,25 +33,10 @@
         5: 'active'
     });
 
+    // [已淘汰，未来不再做兼容/不再新增映射表——不支持新功能] 仅保留 2 个最常用旧优先级别名
     var DEPRECATED_PRIORITY_ALIASES = Object.freeze({
-        minor:     1,
-        '低':      1,
-        '次要':    1,
-        medium:    2,
-        'default': 2,
-        '中':      2,
-        '普通':    2,
-        major:     3,
-        important: 3,
-        '高':      3,
-        '重要':    3,
-        fatal:     4,
-        urgent:    4,
-        boss:      4,
-        '极高':    4,
-        '致命':    4,
-        sustain:   5,
-        '持续':    5
+        medium: 2,
+        urgent: 4
     });
 
     var HUD_FORBIDDEN_PRESETS = {
@@ -939,48 +924,10 @@
         items: 'children'
     });
 
+    // [已淘汰，未来不再做兼容/不再新增映射表——不支持新功能] 仅保留 2 个最常用旧弹幕字段别名
     var DEPRECATED_DANMAKU_ALIASES = Object.freeze({
-        msg:            'title',
-        message:        'title',
-        main:           'title',
-        subText:        'sub',
-        desc:           'sub',
-        slot:           'slotId',
-        position:       'pos',
-        fontSize:       'scale',
-        rot:            'angle',
-        rotation:       'angle',
-        deg:            'angle',
-        angleDeg:       'angle',
-        existTime:      'stay',
-        existMode:      'lifeMode',
-        life:           'lifeMode',
-        continuous:     'lifeMode',
-        sustained:      'lifeMode',
-        holdTicks:      'activeHold',
-        holdSec:        'activeHold',
-        fadeSec:        'fadeOut',
-        fadeMode:       'fadeStyle',
-        spacing:        'letterSpacing',
-        charSpacing:    'letterSpacing',
-        byChar:         'typewriter',
-        stroke:         'outlineMode',
-        glow:           'outlineMode',
-        glowColor:      'outlineColor',
-        glowWidth:      'outlineWidth',
-        importance:     'priority',
-        move:           'movable',
-        updatePos:      'movable',
-        resetAnimation: 'restart',
-        maxGroupSize:   'maxGroup',
-        groupLimit:     'maxGroup',
-        maxConcurrent:  'maxGroup',
-        charShake:      'perCharShake',
-        randShake:      'randomShake',
-        randColor:      'randomColor',
-        randScale:      'randomScale',
-        sourceConflict: 'conflictMode',
-        overlapMode:    'conflictMode'
+        msg:  'title',
+        slot: 'slotId'
     });
 
     function normalizeDanmakuNode(rawNode, depth) {
@@ -1067,13 +1014,7 @@
             if (hasOwn(DEPRECATED_DANMAKU_ALIASES, k) && out[k] !== undefined) {
                 var canon2 = DEPRECATED_DANMAKU_ALIASES[k];
                 if (out[canon2] === undefined) {
-                    if ((k === 'stroke' || k === 'glow') && typeof out[k] === 'boolean') {
-                        if (out[k]) out[canon2] = k;
-                    } else if (k === 'continuous' || k === 'sustained') {
-                        if (parseBoolStrict(out[k]) === true) out[canon2] = 'active';
-                    } else {
-                        out[canon2] = out[k];
-                    }
+                    out[canon2] = out[k];
                 }
                 if (typeof warnFn === 'function') {
                     warnFn(k, canon2);
@@ -1118,6 +1059,8 @@
                 cost += 4;
             } else if (nType === 'item') {
                 cost += 3;
+            } else if (nType === 'orbit3d' || nType === 'vfx3d' || nType === 'astrolabe3d') {
+                cost += 6;
             } else if (nType === 'text') {
                 var rawText = n.text != null ? String(n.text) : (n.title != null ? String(n.title) : '');
                 var isPerChar = Boolean(n.perCharShake || n.shakeMode === 'per_char');
@@ -1144,6 +1087,8 @@
         return cost;
     }
 
+    // [已淘汰，未来不再做兼容/不再新增映射表——意味着不支持后续新功能]
+    // 仅保留历史扁平 v5 写法的冻结适配层；新业务与客户端调用请一律直接使用原生 v6 结构 (proto: 6 + nodes[])。
     function adaptV5ToV6(rawPkt) {
         if (rawPkt == null || !isObjectLike(rawPkt)) return rawPkt;
         try {
@@ -1590,6 +1535,117 @@
         return createPresetRegistry(domainName).resolve(name, overrides, helpers);
     }
 
+    // ------------------------------------------------------------------------
+    // 跨子系统共享单调时钟工厂（2D / 3D 渲染器统一使用）：
+    //   1. 优先使用 net.minecraft.Util.getNanos() (SRG m_137569_) —— 底层直连 System.nanoTime()
+    //      且不受 KubeJS ClassFilter 对 java.lang.System 的屏蔽限制，热路径零异常；
+    //   2. 次选 java.lang.System.nanoTime()（仅非 MC JVM 环境下单次静默探测）；
+    //   3. 最终降级 Date.now() 时强制套用单调增量钳制（免疫 NTP 校时回拨或跳变）。
+    // ------------------------------------------------------------------------
+    function createMonotonicClock(opts) {
+        var cfg = isObjectLike(opts) ? opts : {};
+        var maxJumpMs = (typeof cfg.maxJumpMs === 'number' && isFinite(cfg.maxJumpMs) && cfg.maxJumpMs > 0)
+            ? cfg.maxJumpMs : 250.0;
+        var clampStepMs = (typeof cfg.clampStepMs === 'number' && isFinite(cfg.clampStepMs) && cfg.clampStepMs >= 0)
+            ? cfg.clampStepMs : 16.0;
+        var allowSystemProbe = (cfg.allowSystemProbe !== false);
+        var onFallbackWarn = (typeof cfg.onWarn === 'function') ? cfg.onWarn : null;
+
+        var utilClass   = null;
+        var utilNanosFn = null;
+        var sysClass    = null;
+        var source      = 'clamped_date';
+
+        if (typeof Java !== 'undefined' && Java != null && typeof Java.loadClass === 'function') {
+            try {
+                utilClass = Java.loadClass('net.minecraft.Util');
+                if (utilClass != null) {
+                    if (typeof utilClass.getNanos === 'function') utilNanosFn = utilClass.getNanos;
+                    else if (typeof utilClass.m_137569_ === 'function') utilNanosFn = utilClass.m_137569_;
+                    if (utilNanosFn != null) {
+                        source = 'mc_util_nanos';
+                    }
+                }
+            } catch (eUtil) { utilClass = null; utilNanosFn = null; }
+
+            if (source === 'clamped_date' && allowSystemProbe) {
+                try {
+                    sysClass = Java.loadClass('java.lang.System');
+                    if (sysClass != null && typeof sysClass.nanoTime === 'function') {
+                        source = 'system_nanos';
+                    }
+                } catch (eSys) { sysClass = null; }
+            }
+        }
+
+        var t0Ns      = null;
+        var lastRawMs = null;
+        var accMs     = 0.0;
+        var warned    = false;
+
+        function readClampedDateMs() {
+            var raw = Date.now();
+            if (lastRawMs === null) {
+                lastRawMs = raw;
+                accMs = raw;
+                return accMs;
+            }
+            var dt = raw - lastRawMs;
+            lastRawMs = raw;
+            if (dt < 0 || dt > maxJumpMs) {
+                dt = clampStepMs;
+            }
+            accMs += dt;
+            return accMs;
+        }
+
+        function nowMs() {
+            if (source === 'mc_util_nanos' && utilNanosFn != null) {
+                try {
+                    var n0 = Number(utilNanosFn.call(utilClass));
+                    if (isFinite(n0)) {
+                        if (t0Ns === null) t0Ns = n0;
+                        return (n0 - t0Ns) / 1000000.0;
+                    }
+                } catch (eU) {
+                    source = 'clamped_date';
+                    if (!warned && onFallbackWarn != null) {
+                        warned = true;
+                        onFallbackWarn('net.minecraft.Util.getNanos 不可用，已降级单调钳制 Date.now(): ' + eU);
+                    }
+                }
+            }
+            if (source === 'system_nanos' && sysClass != null) {
+                try {
+                    var n1 = Number(sysClass.nanoTime());
+                    if (isFinite(n1)) {
+                        if (t0Ns === null) t0Ns = n1;
+                        return (n1 - t0Ns) / 1000000.0;
+                    }
+                } catch (eS) {
+                    source = 'clamped_date';
+                    if (!warned && onFallbackWarn != null) {
+                        warned = true;
+                        onFallbackWarn('System.nanoTime 不可用，已降级单调钳制 Date.now(): ' + eS);
+                    }
+                }
+            }
+            return readClampedDateMs();
+        }
+
+        var epochMs = nowMs();
+
+        return {
+            nowMs: nowMs,
+            elapsedSec: function () {
+                return (nowMs() - epochMs) * 0.001;
+            },
+            getSource: function () {
+                return source;
+            }
+        };
+    }
+
     if (typeof global !== 'undefined') {
         global.EpiphySpec = {
             VERSION:                    SPEC_VERSION,
@@ -1613,6 +1669,7 @@
             computeOverlayCost:         computeOverlayCost,
             adaptV5ToV6:                adaptV5ToV6,
             createBoundedCache:         createBoundedCache,
+            createMonotonicClock:       createMonotonicClock,
             mergeTracksMap:             mergeTracksMap,
             mergeGroupedOptions:        mergeGroupedOptions,
             createPresetRegistry:       createPresetRegistry,
@@ -1650,12 +1707,12 @@
         //   同时保持自绘 HUD 位于弹幕之上；renderPriority >= aboveVanillaHudPriority (100) 时自动进入 Post 层。
         if (global.EpiphyRenderHooks == null || typeof global.EpiphyRenderHooks !== 'object') {
             global.EpiphyRenderHooks = {
-                preHudActive: false,
-                registered:   false
+                preHudActive:     false,
+                preHudRegistered: false,
+                registered:       false
             };
         }
-        if (!global.EpiphyRenderHooks.registered &&
-            typeof ForgeEvents !== 'undefined' && ForgeEvents != null &&
+        if (typeof ForgeEvents !== 'undefined' && ForgeEvents != null &&
             typeof ForgeEvents.onEvent === 'function') {
             var isClientEnv = false;
             try {
@@ -1666,20 +1723,23 @@
                 isClientEnv = false;
             }
             if (isClientEnv) {
-                try {
-                    ForgeEvents.onEvent('net.minecraftforge.client.event.RenderGuiEvent$Pre', function (forgeEvent) {
-                        var r = (typeof global !== 'undefined' && global != null) ? global.Epiphy2DRenderer : null;
-                        if (r != null && typeof r._onRenderGuiPre === 'function') {
-                            r._onRenderGuiPre(forgeEvent);
-                        }
-                    });
-                    global.EpiphyRenderHooks.preHudActive = true;
-                    global.EpiphyRenderHooks.registered   = true;
-                } catch (ePreHook) {
-                    global.EpiphyRenderHooks.preHudActive = false;
+                if (!global.EpiphyRenderHooks.preHudRegistered && !global.EpiphyRenderHooks.registered) {
                     try {
-                        console.warn('[EpiphySpec] RenderGuiEvent$Pre 桥接挂接失败，客户端将自动回退至 ClientEvents.paintScreen: ' + ePreHook);
-                    } catch (eLogHook) { }
+                        ForgeEvents.onEvent('net.minecraftforge.client.event.RenderGuiEvent$Pre', function (forgeEvent) {
+                            var r2d = (typeof global !== 'undefined' && global != null) ? global.Epiphy2DRenderer : null;
+                            if (r2d != null && typeof r2d._onRenderGuiPre === 'function') {
+                                r2d._onRenderGuiPre(forgeEvent);
+                            }
+                        });
+                        global.EpiphyRenderHooks.preHudActive     = true;
+                        global.EpiphyRenderHooks.preHudRegistered = true;
+                        global.EpiphyRenderHooks.registered       = true;
+                    } catch (ePreHook) {
+                        global.EpiphyRenderHooks.preHudActive = false;
+                        try {
+                            console.warn('[EpiphySpec] RenderGuiEvent$Pre 桥接挂接失败，客户端将自动回退至 ClientEvents.paintScreen: ' + ePreHook);
+                        } catch (eLogHook) { }
+                    }
                 }
             }
         }

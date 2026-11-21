@@ -350,6 +350,8 @@ module.exports = function registerSuite(test, h) {
         runScriptIn(sb, AUDIO_CLIENT_PATH)
         runScriptIn(sb, DANMAKU_PATH)
         runScriptIn(sb, RENDERER_PATH)
+        runScriptIn(sb, h.FX3D_CORE_PATH)
+        runScriptIn(sb, h.FX3D_PATH)
 
         var Spec  = sb.global.EpiphySpec
         var Proto = sb.global.EpiphyProtocol
@@ -382,7 +384,9 @@ module.exports = function registerSuite(test, h) {
             { name: 'EpiphyAudio',           obj: sb.global.EpiphyAudio,           file: AUDIO_PATH },
             { name: 'EpiphyAudioClient',     obj: sb.global.EpiphyAudioClient,     file: AUDIO_CLIENT_PATH },
             { name: 'Epiphy2DSurface',       obj: sb.global.Epiphy2DSurface,       file: DANMAKU_PATH },
-            { name: 'Epiphy2DRenderer',      obj: sb.global.Epiphy2DRenderer,      file: RENDERER_PATH }
+            { name: 'Epiphy2DRenderer',      obj: sb.global.Epiphy2DRenderer,      file: RENDERER_PATH },
+            { name: 'Epiphy3DFXCore',        obj: sb.global.Epiphy3DFXCore,        file: h.FX3D_CORE_PATH },
+            { name: 'Epiphy3DFX',            obj: sb.global.Epiphy3DFX,            file: h.FX3D_PATH }
         ]
         // Pure content/item/block-registration scripts with no exported global component API
         var exemptCommonScripts = [
@@ -425,6 +429,14 @@ module.exports = function registerSuite(test, h) {
         assert.strictEqual(sb.global.EpiphyAudioClient.VERSION, '5.6.0', 'EpiphyAudioClient must report its own 5.6.0 version')
         assert.strictEqual(sb.global.EpiphyDebug.VERSION, '1.0.0', 'EpiphyDebug must report its own 1.0.0 version')
         assert.strictEqual(sb.global.EpiphyBugfix.VERSION, '1.0.0', 'EpiphyBugfix must report its own 1.0.0 version')
+
+        // 3b. Cross-document major.minor parity check for roadmap §8.1 P3-2 (prevent doc version drift)
+        var roadmapDoc = fs.readFileSync(path.join(ROOT_DIR, 'docs', 'rendering-subsystem-roadmap.md'), 'utf8')
+        var p32Line = roadmapDoc.split(/\r?\n/).find(function (l) { return l.indexOf('**P3-2**') >= 0 }) || ''
+        var coreVer = Spec.parseSemver(sb.global.Epiphy3DFXCore.VERSION)
+        var fxVer   = Spec.parseSemver(sb.global.Epiphy3DFX.VERSION)
+        assert.ok(p32Line.indexOf('Epiphy3DFXCore v' + coreVer.major + '.' + coreVer.minor) >= 0, 'roadmap §8.1 P3-2 must match Epiphy3DFXCore major.minor')
+        assert.ok(p32Line.indexOf('Epiphy3DFX v' + fxVer.major + '.' + fxVer.minor) >= 0, 'roadmap §8.1 P3-2 must match Epiphy3DFX major.minor')
 
         // 4. Out-of-range dependency version MUST be rejected fail-fast by downstream hard-dependent component
         var badCases = ['2.4.9', '3.0.0']

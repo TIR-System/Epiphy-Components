@@ -52,8 +52,8 @@
 //     - 'shrink'(默认) | 'char_first' | 'char_last' | 'blink' | 'shatter'(逐字碎片化崩解飞散) | 'blur'(柔和失焦虚化淡出) | 'split'(裂解重影淡出) | 'random'
 //
 //  5. 字距、外圈发光与局部富文本样式（全部默认关闭，不影响未开启时的性能）：
-//     - letterSpacing (或 spacing): 额外字间距像素（默认 0 关闭）
-//     - outline (或 glow): 'none'(默认) | 'stroke'(实心描边外圈，如黑底绿字) | 'glow'(柔和发光外圈)
+//     - letterSpacing: 额外字间距像素（默认 0 关闭）
+//     - outline (或 outlineMode): 'none'(默认) | 'stroke'(实心描边外圈，如黑底绿字) | 'glow'(柔和发光外圈)
 //       配套 outlineColor (默认 0x000000) 与 outlineWidth (默认 0.75px)
 //     - 局部加粗/放大/单字震动：支持内联标签 <b>...</b>、<big>...</big>（或 <scale=1.35>...</scale>）、
 //       <shake>...</shake>、<noshake>...</noshake>、<outline=#000000>...</outline>、<glow=#55FFFF>...</glow>，
@@ -117,16 +117,16 @@
     //   charShakeFreq      | shakeFreq                           | [800, 800] ms         | 800       | ✓ (client charShakeDefaultMin/Max=800)
     //   fade               | @deprecated fadeStyle               | string                | 'shrink'  | ✓ fadeStyle
     //   fadeOut            | -                                   | ticks >= 0            | 10        | ✓
-    //   letterSpacing      | @deprecated charSpacing / spacing   | number [-2, 24]       | 0         | ✓
-    //   outline            | @deprecated outlineMode             | 'none'|'stroke'|'glow'|'mui_stroke'| 'none' | ✓
+    //   letterSpacing      | -                                   | number [-2, 24]       | 0         | ✓
+    //   outline            | outlineMode                         | 'none'|'stroke'|'glow'|'mui_stroke'| 'none' | ✓
     //   lifeMode           | -                                   | 'once'|'active'       | 'once'    | ✓
-    //   priority           | @deprecated importance              | 0..10                 | 2 / 5     | ✓ (client fallback 2 / 5)
-    //   group / namespace  | @deprecated ns                      | string                | 'default'/''| ✓
-    //   id                 | @deprecated slot                    | string                | ''        | ✓ slotId
+    //   priority           | -                                   | 0..10                 | 2 / 5     | ✓ (client fallback 2 / 5)
+    //   group / namespace  | ns                                  | string                | 'default'/''| ✓
+    //   id                 | @deprecated slot (冻结兼容)         | string                | ''        | ✓ slotId
     //   key                | -                                   | string                | ''        | ✓
-    //   movable            | @deprecated move / updatePos        | boolean               | false     | ✓
-    //   restart            | @deprecated resetAnimation          | boolean               | false     | ✓
-    //   maxGroup           | @deprecated maxGroupSize/groupLimit/maxConcurrent | int >= 0 | 0     | ✓
+    //   movable            | -                                   | boolean               | false     | ✓
+    //   restart            | -                                   | boolean               | false     | ✓
+    //   maxGroup           | -                                   | int >= 0              | 0         | ✓
     //   maxWidth / wrap / clamp / shadow / showInGui / avoidOverlap / normalizeKey | - | boolean/num | 见下表 | ✓
     //   conflictMode       | @deprecated sourceConflict/overlapMode| 'overlap'|'merge'|'nearest'|'first'|'latest'|'stagger'|'overlap'| 服务端独占
     // ------------------------------------------------------------------------
@@ -801,8 +801,6 @@
     function resolveTypewriterMode(opts) {
         var twParsed = parseBool(opts.typewriter, null)
         if (twParsed !== null) return twParsed
-        var bcParsed = parseBool(opts.byChar, null)
-        if (bcParsed !== null) return bcParsed
         if (opts.mode != null && String(opts.mode).trim() !== '') {
             var m = String(opts.mode).trim().toLowerCase()
             if (m === 'char' || m === 'chars' || m === 'typewriter' || m === '逐字') return true
@@ -881,7 +879,7 @@
     // 震动解析：支持 'none' | 'constant' | 'decay' | 'fade_in' | 'pulse' | 'per_char'(逐字独立震动，默认关闭) | 'random'
     function resolveShake(opts) {
         var rawMode     = opts.shakeMode != null ? opts.shakeMode : (opts.shake != null ? opts.shake : opts.jitter)
-        var perCharFlag = parseBool(opts.perCharShake != null ? opts.perCharShake : opts.charShake, false)
+        var perCharFlag = parseBool(opts.perCharShake, false)
         var freqRange   = resolveShakeFreqRange(opts)
 
         if (perCharFlag) {
@@ -962,7 +960,7 @@
     }
 
     function resolveFadeStyle(opts) {
-        var raw = opts.fadeStyle != null ? opts.fadeStyle : (opts.fade != null ? opts.fade : opts.fadeMode)
+        var raw = opts.fadeStyle != null ? opts.fadeStyle : opts.fade
         if (raw === undefined || raw === null || String(raw).trim() === '') {
             return DEFAULTS.fade
         }
@@ -977,20 +975,9 @@
     // 解析字体外圈与发光配置（默认关闭 'none'）
     function resolveOutline(opts, mainColor) {
         var rawOut  = opts.outlineMode != null ? opts.outlineMode : opts.outline
-        var rawGlow = opts.glow
         var mode    = 'none'
-        var colRaw  = opts.outlineColor != null ? opts.outlineColor : opts.glowColor
-        var wRaw    = opts.outlineWidth != null ? opts.outlineWidth : opts.glowWidth
-
-        if (rawGlow !== undefined && rawGlow !== null && rawGlow !== '' && rawGlow !== false) {
-            var glowBool = parseBool(rawGlow, null)
-            if (glowBool === true) {
-                mode = 'glow'
-            } else if (glowBool !== false) {
-                mode = 'glow'
-                if (colRaw == null) colRaw = rawGlow
-            }
-        }
+        var colRaw  = opts.outlineColor
+        var wRaw    = opts.outlineWidth
 
         if (rawOut !== undefined && rawOut !== null && rawOut !== '' && rawOut !== false) {
             var outStr = String(rawOut).trim().toLowerCase()
@@ -1057,9 +1044,9 @@
     // 服务端仅解析调用方显式请求的 lifeMode 与基础维持 tick（stay / activeHold），
     // 不再预叠加 minTypeTicks + fadeTicks，由客户端 computeOverlaySchedule 单一权威计算。
     function resolveLifetime(opts) {
-        var isContinuous = parseBool(opts.continuous, false) || parseBool(opts.sustained, false)
+        var isContinuous = false
         var isScreenSession = false
-        var lmRaw = opts.lifeMode != null ? opts.lifeMode : opts.existMode
+        var lmRaw = opts.lifeMode
         if (lmRaw != null && String(lmRaw).trim() !== '') {
             var lm = String(lmRaw).trim().toLowerCase()
             if (lm === 'screen_session') {
@@ -1072,7 +1059,7 @@
             }
         }
 
-        var durRaw = opts.duration != null ? opts.duration : (opts.existTime != null ? opts.existTime : opts.stay)
+        var durRaw = opts.duration != null ? opts.duration : opts.stay
         if (durRaw != null && String(durRaw).trim() !== '') {
             var ds = String(durRaw).trim().toLowerCase()
             if (ds === 'active' || ds === 'continuous' || ds === 'sustain' || ds === 'hold' || ds === '持续') {
@@ -1085,7 +1072,7 @@
         var parsedDur     = parseTicksOrSec(durRaw)
         var hasCustomDur  = (parsedDur !== null)
         var ticks         = hasCustomDur ? parsedDur : DEFAULTS.duration
-        var customHoldRaw = opts.activeHold != null ? opts.activeHold : opts.holdTicks
+        var customHoldRaw = opts.activeHold
         var parsedHold    = parseTicksOrSec(customHoldRaw)
 
         if (isScreenSession) {
@@ -2069,7 +2056,7 @@
                 group:     String(pickNonEmpty(opts, ['group'], DEFAULTS.group)),
                 vars:      sanitizeVarsMap(opts.vars)
             }
-            var pHoldRaw = pick(opts, ['activeHold', 'hold', 'holdTicks', 'stay', 'duration'], null)
+            var pHoldRaw = pick(opts, ['activeHold', 'hold', 'stay', 'duration'], null)
             if (pHoldRaw != null) {
                 var pHoldTicks = parseTicksOrSec(pHoldRaw)
                 if (pHoldTicks !== null && pHoldTicks > 0) {
@@ -2113,7 +2100,7 @@
         var colorInfo    = parseColor(opts.color, DEFAULTS.color)
         var subColInfo   = parseColor(opts.subColor, DEFAULTS.subColor)
         var outlineInfo  = resolveOutline(opts, colorInfo.color)
-        var spacingVal   = Math.max(-2.0, Math.min(24.0, parseFiniteNum(pick(opts, ['letterSpacing', 'charSpacing', 'spacing'], null), DEFAULTS.letterSpacing)))
+        var spacingVal   = Math.max(-2.0, Math.min(24.0, parseFiniteNum(opts.letterSpacing, DEFAULTS.letterSpacing)))
         var isChar       = resolveTypewriterMode(opts)
         var charMsVal    = Math.min(SYSTEM_PACKET_LIMITS.maxCharMs, Math.round(parseNonNegNum(opts.charMs, DEFAULTS.charMs, 8)))
         var shakeInfo    = resolveShake(opts)
@@ -2122,20 +2109,20 @@
         lifeInfo.stay       = Math.min(SYSTEM_PACKET_LIMITS.maxStayTicks, lifeInfo.stay)
         lifeInfo.activeHold = Math.min(SYSTEM_PACKET_LIMITS.maxStayTicks, lifeInfo.activeHold)
         var defPri       = (lifeInfo.lifeMode === 'active') ? DEFAULTS.activePriority : DEFAULTS.priority
-        var priority     = parsePriority(pick(opts, ['priority', 'importance'], null), defPri)
+        var priority     = parsePriority(opts.priority, defPri)
         var groupStr     = String(pickNonEmpty(opts, ['group'], DEFAULTS.group))
         var nsStr        = String(pickNonEmpty(opts, ['namespace', 'ns'], ''))
         var slotIdStr    = String(pickNonEmpty(opts, ['slotId', 'id', 'slot'], ''))
         var keyStr       = String(pickNonEmpty(opts, ['key'], ''))
-        var resetAnim    = parseBool(pick(opts, ['restart', 'resetAnimation'], null), false)
-        var allowMove    = parseBool(pick(opts, ['movable', 'move', 'updatePos'], null), DEFAULTS.movable)
+        var resetAnim    = parseBool(opts.restart, false)
+        var allowMove    = parseBool(opts.movable, DEFAULTS.movable)
         var normalizeKey = parseBool(opts.normalizeKey, DEFAULTS.normalizeKey)
         var maxWidth     = sanitizeMaxWidth(pick(opts, ['maxWidth'], DEFAULTS.maxWidth))
         var wrapVal      = parseBool(opts.wrap, DEFAULTS.wrap)
         var clampVal     = parseBool(opts.clamp, DEFAULTS.clamp)
         var shadowVal    = parseBool(opts.shadow, DEFAULTS.shadow)
         var showGuiVal   = parseBool(opts.showInGui, (surfaceStr === 'gui' || surfaceStr === 'slot') ? true : DEFAULTS.showInGui)
-        var maxGroupVal  = Math.round(parseNonNegNum(pick(opts, ['maxGroup', 'maxGroupSize', 'groupLimit', 'maxConcurrent'], null), DEFAULTS.maxGroup, 0))
+        var maxGroupVal  = Math.round(parseNonNegNum(opts.maxGroup, DEFAULTS.maxGroup, 0))
         var fadeOutVal   = parseTicksOrSec(opts.fadeOut)
         if (fadeOutVal === null) fadeOutVal = DEFAULTS.fadeOut
         fadeOutVal       = Math.min(SYSTEM_PACKET_LIMITS.maxFadeOutTicks, fadeOutVal)

@@ -107,7 +107,8 @@
         slotRenderPriority:      200,    // 容器槽位覆盖层默认渲染层级
         perfLogEnabled:        false,  // 默认关闭性能日志写盘（按需通过 /epiphy debug renderperf on 或 setPerfLog(true) 开启，且仅在 ClientEvents.tick 节流落盘，绝不在渲染线程写盘）
         perfLogIntervalMs:     10000,  // 开启性能日志时的常规最小刷盘间隔 (ms)
-        perfLogAlertMs:        PERF_BUDGET.highLoadFrameMs // 超高压帧预算告警线 (ms)，开启性能日志且超限时允许最快每 2s 提前刷新快照
+        perfLogAlertMs:        PERF_BUDGET.highLoadFrameMs, // 超高压帧预算告警线 (ms)，开启性能日志且超限时允许最快每 2s 提前刷新快照
+        perfLogAutoOffMs:      600000  // 性能日志自动超时关闭保护 (ms，默认 10 分钟；设为 0 关闭超时保护)，防止忘关导致长期写盘
     }
 
     var PI         = 3.141592653589793
@@ -273,14 +274,34 @@
     }
 
     GL11           = loadJavaClass('org.lwjgl.opengl.GL11')
-    SystemClass    = loadJavaClass('java.lang.System', true)
+    var McUtilClass = loadJavaClass('net.minecraft.Util', true)
+    var McUtilNanosFn = null
+    if (McUtilClass != null) {
+        try {
+            if (typeof McUtilClass.getNanos === 'function') McUtilNanosFn = McUtilClass.getNanos
+            else if (typeof McUtilClass.m_137569_ === 'function') McUtilNanosFn = McUtilClass.m_137569_
+        } catch (eUtilN) { McUtilNanosFn = null }
+    }
+    var HAS_MC_UTIL_NANOS = (McUtilNanosFn != null)
+    SystemClass    = HAS_MC_UTIL_NANOS ? null : loadJavaClass('java.lang.System', true)
     MinecraftClass = loadJavaClass('net.minecraft.client.Minecraft')
     Matrix4fClass  = loadJavaClass('org.joml.Matrix4f')
 
     var HAS_NANO_TIME = (SystemClass != null && typeof SystemClass.nanoTime === 'function')
+    var LAST_DATE_MS  = null
+    var CLAMP_DATE_MS = 0
 
-    // 单调递增毫秒时钟：避免系统时间被 NTP 同步或手动修改时导致动画 age 跳变或变负
+    // 单调递增毫秒时钟：优先 net.minecraft.Util.getNanos()（不受 ClassFilter 屏蔽），次选 System.nanoTime()，
+    // 兜底 Date.now() 时强制防回拨（免疫 NTP 校时倒退）
     function monotonicNowMs() {
+        if (HAS_MC_UTIL_NANOS) {
+            try {
+                return Number(McUtilNanosFn.call(McUtilClass)) / 1000000.0
+            } catch (eU) {
+                HAS_MC_UTIL_NANOS = false
+                warnOnce('mcUtilNanos', 'net.minecraft.Util.getNanos 不可用，回退单调时钟: ' + eU)
+            }
+        }
         if (HAS_NANO_TIME) {
             try {
                 return Number(SystemClass.nanoTime()) / 1000000.0
@@ -289,7 +310,16 @@
                 warnOnce('nanoTime', 'System.nanoTime 不可用，回退 Date.now(): ' + e)
             }
         }
-        return Date.now()
+        var raw = Date.now()
+        if (LAST_DATE_MS === null) {
+            LAST_DATE_MS  = raw
+            CLAMP_DATE_MS = raw
+            return CLAMP_DATE_MS
+        }
+        var dt = raw - LAST_DATE_MS
+        LAST_DATE_MS = raw
+        if (dt > 0) CLAMP_DATE_MS += dt
+        return CLAMP_DATE_MS
     }
 
     var RENDERER_EPOCH_MS = monotonicNowMs()
@@ -325,6 +355,7 @@
         slot:               makePerfBucket(),
         budgetTrips:        0,
         lastFlushMs:        0,
+        enabledAtMs:        0,
         pendingFlush:       false,
         pendingFlushUrgent: false,
         perfLogPath:        '',
@@ -453,10 +484,22 @@
         }
     }
 
-    // 仅在显式开启 perfLogEnabled 时于 ClientEvents.tick 阶段节流落盘
+    // 仅在显式开启 perfLogEnabled 时于 ClientEvents.tick 阶段节流落盘（含自动超时关闭保护）
     function tickFlushClientPerfLog() {
-        if (!CONFIG.perfLogEnabled || !PERF_STATS.pendingFlush) return
-        var nowMs  = monotonicNowMs()
+        if (!CONFIG.perfLogEnabled) return
+        var nowMs = monotonicNowMs()
+        var autoOffMs = Number(CONFIG.perfLogAutoOffMs) || 0
+        if (autoOffMs > 0 && PERF_STATS.enabledAtMs > 0 && (nowMs - PERF_STATS.enabledAtMs) >= autoOffMs) {
+            if (PERF_STATS.pendingFlush) {
+                flushClientPerfSnapshot(nowMs)
+            }
+            CONFIG.perfLogEnabled         = false
+            PERF_STATS.enabledAtMs        = 0
+            PERF_STATS.pendingFlush       = false
+            PERF_STATS.pendingFlushUrgent = false
+            return
+        }
+        if (!PERF_STATS.pendingFlush) return
         var minGap = PERF_STATS.pendingFlushUrgent ? 2000 : Math.max(1000, Number(CONFIG.perfLogIntervalMs) || 10000)
         if (PERF_STATS.lastFlushMs > 0 && (nowMs - PERF_STATS.lastFlushMs) < minGap) return
         PERF_STATS.pendingFlush       = false
@@ -493,12 +536,10 @@
         critical: 4,
         active:   5
     }
+    // [已淘汰，未来不再做兼容/不再新增映射表——不支持新功能] 仅保留 2 个最常用旧优先级别名
     var LEGACY_PRIORITY_MAP = (PROTO && PROTO.DEPRECATED_PRIORITY_ALIASES) || {
-        minor: 1, '低': 1, '次要': 1,
-        medium: 2, 'default': 2, '中': 2, '普通': 2,
-        major: 3, important: 3, '高': 3, '重要': 3,
-        fatal: 4, urgent: 4, boss: 4, '极高': 4, '致命': 4,
-        sustain: 5, '持续': 5
+        medium: 2,
+        urgent: 4
     }
     var min2     = (SPEC && typeof SPEC.min2 === 'function') ? SPEC.min2 : function (a, b) { return a < b ? a : b }
     var max2     = (SPEC && typeof SPEC.max2 === 'function') ? SPEC.max2 : function (a, b) { return a > b ? a : b }
@@ -3910,6 +3951,8 @@
         return val
     }
 
+    // [已淘汰，未来不再做兼容/不再新增映射表——意味着不支持后续新功能]
+    // 仅保留历史扁平写法的冻结兜底映射；新调用请直接使用原生 v6 报文格式 (proto: 6, surface, nodes[])。
     function adaptV5ToV6Client(rawPkt) {
         if (rawPkt == null) return rawPkt
         var normalized = nbtToPlainJs(rawPkt, 0)
@@ -4987,11 +5030,13 @@
                 if (!cmd) return
                 if (cmd === 'on') {
                     CONFIG.perfLogEnabled = true
+                    PERF_STATS.enabledAtMs = monotonicNowMs()
                     var iv = readNum(raw, 'intervalMs', NaN)
                     if (isFinite(iv) && iv >= 1000) CONFIG.perfLogIntervalMs = Math.round(iv)
                     PERF_STATS.pendingFlush = true
                 } else if (cmd === 'off') {
                     CONFIG.perfLogEnabled         = false
+                    PERF_STATS.enabledAtMs        = 0
                     PERF_STATS.pendingFlush       = false
                     PERF_STATS.pendingFlushUrgent = false
                 } else if (cmd === 'dump') {
@@ -5014,7 +5059,10 @@
         resetStats: resetRendererPerfStats,
         setPerfLog: function (enabled, intervalMs) {
             CONFIG.perfLogEnabled = Boolean(enabled)
-            if (!CONFIG.perfLogEnabled) {
+            if (CONFIG.perfLogEnabled) {
+                PERF_STATS.enabledAtMs = monotonicNowMs()
+            } else {
+                PERF_STATS.enabledAtMs        = 0
                 PERF_STATS.pendingFlush       = false
                 PERF_STATS.pendingFlushUrgent = false
             }
@@ -5024,19 +5072,44 @@
             return { enabled: CONFIG.perfLogEnabled, intervalMs: CONFIG.perfLogIntervalMs, path: resolveClientPerfLogPath() }
         },
         flushPerfLog: function () { return flushClientPerfSnapshot(monotonicNowMs()) },
-        push:       enqueueDanmaku,
+        push:       function (specOrPacket) {
+            if (specOrPacket != null && typeof specOrPacket === 'object' && !Array.isArray(specOrPacket)) {
+                var isCompoundLike = false
+                try {
+                    isCompoundLike = (typeof specOrPacket.contains === 'function' || typeof specOrPacket.getString === 'function')
+                } catch (eTagProbe) {
+                    isCompoundLike = true
+                }
+                if (!isCompoundLike) {
+                    var copy = {}
+                    for (var pk in specOrPacket) {
+                        if (Object.prototype.hasOwnProperty.call(specOrPacket, pk)) copy[pk] = specOrPacket[pk]
+                    }
+                    if (copy.proto == null) copy.proto = PROTO_VERSION
+                    if (!copy.surface) copy.surface = 'screen'
+                    if (!copy.action) copy.action = 'push'
+                    enqueueDanmaku(copy)
+                    return
+                }
+            }
+            enqueueDanmaku(specOrPacket)
+        },
         patch:      function (slotIdOrOpts, maybeVars, maybeHoldTicks) {
             if (slotIdOrOpts != null && typeof slotIdOrOpts === 'object') {
                 var copy = {}
                 for (var k in slotIdOrOpts) copy[k] = slotIdOrOpts[k]
+                copy.proto = PROTO_VERSION
+                if (!copy.surface) copy.surface = 'screen'
                 copy.action = 'patch'
                 enqueueDanmaku(copy)
                 return
             }
             var payload = {
-                action: 'patch',
-                slotId: slotIdOrOpts != null ? String(slotIdOrOpts) : '',
-                vars:   (maybeVars != null && typeof maybeVars === 'object') ? maybeVars : {}
+                proto:   PROTO_VERSION,
+                surface: 'screen',
+                action:  'patch',
+                slotId:  slotIdOrOpts != null ? String(slotIdOrOpts) : '',
+                vars:    (maybeVars != null && typeof maybeVars === 'object') ? maybeVars : {}
             }
             if (maybeHoldTicks != null) payload.activeHold = maybeHoldTicks
             enqueueDanmaku(payload)
@@ -5045,12 +5118,13 @@
             if (keyOrGroup != null && typeof keyOrGroup === 'object') {
                 var copy = {}
                 for (var k in keyOrGroup) copy[k] = keyOrGroup[k]
+                copy.proto = PROTO_VERSION
                 copy.action = 'deactivate'
                 enqueueDanmaku(copy)
                 return
             }
             var target = (keyOrGroup != null && String(keyOrGroup).trim() !== '') ? String(keyOrGroup) : '*'
-            var payload = { action: 'deactivate', key: target, group: target }
+            var payload = { proto: PROTO_VERSION, action: 'deactivate', key: target, group: target }
             if (typeof fadeOutOrOpts === 'number' && !isNaN(fadeOutOrOpts)) {
                 payload.fadeOut = fadeOutOrOpts
             } else if (fadeOutOrOpts != null && typeof fadeOutOrOpts === 'object') {
@@ -5065,13 +5139,14 @@
             if (groupOrOpts != null && typeof groupOrOpts === 'object') {
                 var copy = {}
                 for (var k in groupOrOpts) copy[k] = groupOrOpts[k]
+                copy.proto = PROTO_VERSION
                 copy.action = 'clear'
                 if (copy.group == null || copy.group === '') copy.group = '*'
                 if (maxPriority != null && copy.maxPriority == null) copy.maxPriority = maxPriority
                 enqueueDanmaku(copy)
                 return
             }
-            var payload = { action: 'clear', group: groupOrOpts || '*' }
+            var payload = { proto: PROTO_VERSION, action: 'clear', group: groupOrOpts || '*' }
             if (maxPriority != null) payload.maxPriority = maxPriority
             enqueueDanmaku(payload)
         },
