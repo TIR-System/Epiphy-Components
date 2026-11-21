@@ -4049,4 +4049,144 @@ module.exports = function registerSuite(test, h) {
         validatePacketConformance(Surface.buildPacket({ surface: 'world_plane', worldPos: [1, 64, 2], billboard: 'vertical', seeThrough: true, nodes: [{ type: 'text', x: 0, y: 0, text: 'WP' }] }), 'world_plane')
         validatePacketConformance(Spec.adaptV5ToV6({ proto: 5, title: 'LegacyV5', priority: 3, rx: 0.5, ry: 0.35, stay: 60 }), 'adaptV5ToV6')
     })
+
+    test('70. RenderGuiEvent$Pre bridge: danmaku (0) < our HUD (50) < vanilla HUD (100) < explicit Post overlays, configurable & dedicated-server safe', function () {
+        // 1. Dedicated server startup (Platform.isClientEnvironment() === false) must NEVER register RenderGuiEvent$Pre
+        var srvForgeHooks = []
+        var srvSb = {
+            console: { info: function () {}, warn: function () {}, error: function (m) { throw new Error(m) }, debug: function () {}, log: function () {} },
+            Platform: { isClientEnvironment: function () { return false } },
+            ForgeEvents: { onEvent: function (cls, fn) { srvForgeHooks.push({ cls: cls, fn: fn }) } },
+            global: {}
+        }
+        srvSb.globalThis = srvSb
+        vm.createContext(srvSb)
+        loadStartupBase(srvSb)
+        assert.strictEqual(srvForgeHooks.length, 0, 'dedicated server must NOT register client RenderGuiEvent$Pre hook')
+        assert.strictEqual(srvSb.global.EpiphyRenderHooks.preHudActive, false)
+
+        // 2. Client startup registers RenderGuiEvent$Pre bridge once and delegates dynamically to Epiphy2DRenderer._onRenderGuiPre
+        var forgeHooks = {}
+        var cliPaints  = []
+        var cliNetCb   = null
+        var curScreen  = null
+        var cNow       = 5000
+        var cliSb = {
+            console: { info: function () {}, warn: function () {}, error: function (m) { throw new Error(m) }, debug: function () {}, log: function () {} },
+            Date: { now: function () { return cNow } },
+            Platform: { isClientEnvironment: function () { return true } },
+            ForgeEvents: { onEvent: function (cls, fn) { forgeHooks[cls] = fn } },
+            Client: { getCurrentScreen: function () { return curScreen } },
+            ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, tick: function () {}, paintScreen: function (fn) { cliPaints.push(fn) } },
+            NetworkEvents: { dataReceived: function (chName, fn) { if (chName === 'epiphy:screen_danmaku') cliNetCb = fn } },
+            Java: { loadClass: function () { return null } },
+            Text: { of: function (s) { return { string: String(s) } } },
+            global: {}
+        }
+        cliSb.globalThis = cliSb
+        vm.createContext(cliSb)
+        loadStartupBase(cliSb)
+        assert.strictEqual(typeof forgeHooks['net.minecraftforge.client.event.RenderGuiEvent$Pre'], 'function', 'client startup must register RenderGuiEvent$Pre bridge')
+        assert.strictEqual(cliSb.global.EpiphyRenderHooks.preHudActive, true)
+        runScriptIn(cliSb, RENDERER_PATH)
+        var R = cliSb.global.Epiphy2DRenderer
+        assert.strictEqual(R.isPreHudActive(), true)
+        assert.strictEqual(R.getStats().preHudActive, true)
+        assert.strictEqual(R.CONFIG.screenRenderPriority, 0)
+        assert.strictEqual(R.CONFIG.hudRenderPriority, 50)
+        assert.strictEqual(R.CONFIG.aboveVanillaHudPriority, 100)
+
+        // Push 3 overlays: default danmaku (0), default HUD bar (50), explicit above-vanilla-HUD overlay (120)
+        cliNetCb({ data: { proto: 6, surface: 'screen', title: 'DANMAKU_DEFAULT', stay: 100, rx: 0.4, ry: 0.4 } })
+        cliNetCb({
+            data: {
+                proto: 6, surface: 'screen', id: 'our_hud', lifeMode: 'active', activeHold: 100, rx: 0.3, ry: 0.2,
+                showInGui: true,
+                nodes: [{ id: 'bar', type: 'rect', anchor: 'top_left', x: 0, y: 0, w: 80, h: 8, fill: { mode: 'solid', color: 0xFF00CCFF } }]
+            }
+        })
+        cliNetCb({ data: { proto: 6, surface: 'screen', title: 'ABOVE_VANILLA_HUD', renderPriority: 120, stay: 100, rx: 0.5, ry: 0.5 } })
+
+        function makeTraceEvent() {
+            var ops = []
+            var curZ = 0
+            return {
+                ops: ops,
+                ev: {
+                    width: 854, height: 480, level: 'minecraft:overworld',
+                    font: { width: function (s) { return String(s || '').length * 6 } },
+                    graphics: {
+                        flush: function () { ops.push({ op: 'flush' }) },
+                        pose: function () {
+                            return { translate: function (x, y, z) { curZ = z; ops.push({ op: 'z', z: z }) } }
+                        }
+                    },
+                    push: function () { curZ = 0 },
+                    pop: function () { curZ = 0 },
+                    translate: function () {},
+                    rotateDeg: function () {},
+                    scale: function () {},
+                    setPositionColorShader: function () {},
+                    resetShaderColor: function () { ops.push({ op: 'resetColor' }) },
+                    blend: function () {},
+                    beginQuads: function () {},
+                    end: function () {},
+                    rectangle: function () { ops.push({ op: 'rect', z: curZ }) },
+                    text: function (txt) { ops.push({ op: 'text', text: String(txt && txt.string ? txt.string : txt), z: curZ }) }
+                }
+            }
+        }
+
+        // Fire Pre-HUD pass: ONLY danmaku (0) then our HUD (50), both at negative Z (-100 < -99 < 0)
+        var preTrace = makeTraceEvent()
+        forgeHooks['net.minecraftforge.client.event.RenderGuiEvent$Pre'](preTrace.ev)
+        var preTexts = preTrace.ops.filter(function (o) { return o.op === 'text' })
+        var preRects = preTrace.ops.filter(function (o) { return o.op === 'rect' })
+        assert.strictEqual(preTexts.length, 1, 'Pre-HUD must draw ONLY default danmaku text, not renderPriority=120')
+        assert.strictEqual(preTexts[0].text, 'DANMAKU_DEFAULT')
+        assert.strictEqual(preRects.length, 1, 'Pre-HUD must draw default HUD bar')
+        assert.ok(preTexts[0].z < 0 && preRects[0].z < 0, 'Pre-HUD items must use strictly negative Z (< 0) below vanilla HUD')
+        assert.ok(preRects[0].z > preTexts[0].z, 'Our HUD (50) must sit at higher Z than danmaku (0) inside Pre-HUD')
+        var idxText = preTrace.ops.findIndex(function (o) { return o.op === 'text' && o.text === 'DANMAKU_DEFAULT' })
+        var idxRect = preTrace.ops.findIndex(function (o) { return o.op === 'rect' })
+        assert.ok(idxText >= 0 && idxRect > idxText, 'Danmaku (0) must draw BEFORE our HUD (50)')
+
+        // Fire Post-HUD pass (ClientEvents.paintScreen): ONLY renderPriority >= 100 draws (no double draw!)
+        var postTrace = makeTraceEvent()
+        cliPaints[0](postTrace.ev)
+        var postTexts = postTrace.ops.filter(function (o) { return o.op === 'text' })
+        var postRects = postTrace.ops.filter(function (o) { return o.op === 'rect' })
+        assert.strictEqual(postTexts.length, 1, 'Post-HUD must draw ONLY renderPriority >= 100 overlay')
+        assert.strictEqual(postTexts[0].text, 'ABOVE_VANILLA_HUD')
+        assert.strictEqual(postRects.length, 0, 'Pre-HUD bar must NOT double-render in Post-HUD')
+
+        // 3. Open GUI screen: showInGui=false danmaku hidden; showInGui=true HUD (50) stays in Pre-HUD (behind GUI), NOT Post-HUD
+        curScreen = { getClass: function () { return { getName: function () { return 'net.minecraft.client.gui.screens.inventory.InventoryScreen' } } } }
+        var guiPre = makeTraceEvent()
+        forgeHooks['net.minecraftforge.client.event.RenderGuiEvent$Pre'](guiPre.ev)
+        assert.strictEqual(guiPre.ops.filter(function (o) { return o.op === 'text' }).length, 0, 'showInGui=false danmaku must hide when GUI is open')
+        assert.strictEqual(guiPre.ops.filter(function (o) { return o.op === 'rect' }).length, 1, 'showInGui=true HUD (<100) draws in Pre-HUD behind GUI screen')
+        var guiPost = makeTraceEvent()
+        cliPaints[0](guiPost.ev)
+        assert.strictEqual(guiPost.ops.filter(function (o) { return o.op === 'rect' }).length, 0, 'HUD (<100) must NOT draw in Post-HUD on top of GUI screen')
+        curScreen = null
+
+        // 4. Configurable threshold: lowering aboveVanillaHudPriority to 40 promotes HUD (50) into Post-HUD while keeping danmaku (0) in Pre-HUD
+        R.CONFIG.aboveVanillaHudPriority = 40
+        var cfgPre = makeTraceEvent()
+        forgeHooks['net.minecraftforge.client.event.RenderGuiEvent$Pre'](cfgPre.ev)
+        assert.strictEqual(cfgPre.ops.filter(function (o) { return o.op === 'text' }).length, 1)
+        assert.strictEqual(cfgPre.ops.filter(function (o) { return o.op === 'rect' }).length, 0, 'HUD (50 >= 40) must move out of Pre-HUD when threshold is lowered')
+        var cfgPost = makeTraceEvent()
+        cliPaints[0](cfgPost.ev)
+        assert.strictEqual(cfgPost.ops.filter(function (o) { return o.op === 'rect' }).length, 1, 'HUD (50 >= 40) must now render in Post-HUD')
+        R.CONFIG.aboveVanillaHudPriority = 100
+
+        // 5. Fallback when preHudActive is false (non-Forge/Fabric): paintScreen renders all 3 in order 0 -> 50 -> 120
+        cliSb.global.EpiphyRenderHooks.preHudActive = false
+        var fbTrace = makeTraceEvent()
+        cliPaints[0](fbTrace.ev)
+        var fbOrder = fbTrace.ops.filter(function (o) { return o.op === 'text' || o.op === 'rect' }).map(function (o) { return o.op === 'rect' ? 'OUR_HUD' : o.text })
+        assert.deepStrictEqual(fbOrder, ['DANMAKU_DEFAULT', 'OUR_HUD', 'ABOVE_VANILLA_HUD'], 'fallback single-pass paintScreen must render all layers in ascending renderPriority order')
+    })
 }

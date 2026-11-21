@@ -100,10 +100,11 @@
         errorLogIntervalMs:    5000,   // 渲染/接收异常日志最小打印间隔 (ms)
         maxItemDrawErrors:     2,      // 单条弹幕连续绘制报错达到该次数后立即剔除，防止刷屏
         debug:                 false,  // 是否输出逐字渲染调试日志（也可通过单条 debug: true 或 setDebug(true) 开启）
-        screenRenderPriority:  0,      // 屏幕弹幕默认渲染层级（先画，处于底层）
-        hudRenderPriority:     50,     // 屏幕声明式图形 HUD/进度条默认渲染层级（默认高于弹幕不被覆盖、低于容器 GUI）
-        guiRenderPriority:     100,    // GUI 覆盖层默认渲染层级（默认高于弹幕与 HUD 不被覆盖，可独立调整）
-        slotRenderPriority:    200,    // 容器槽位覆盖层默认渲染层级
+        screenRenderPriority:    0,      // 屏幕弹幕默认渲染层级（< aboveVanillaHudPriority，在 RenderGuiEvent$Pre 绘制，低于原版 HUD 与 GUI，可配置）
+        hudRenderPriority:       50,     // 屏幕声明式图形 HUD/进度条默认渲染层级（< aboveVanillaHudPriority，高于弹幕、低于原版 HUD 与 GUI，可配置）
+        aboveVanillaHudPriority: 100,    // 跨越原版 HUD 分界线：screen 元素 renderPriority >= 该值时进入 ClientEvents.paintScreen (Post 层，高于原版 HUD)
+        guiRenderPriority:       100,    // GUI 覆盖层默认渲染层级（默认高于弹幕与 HUD 不被覆盖，可独立调整）
+        slotRenderPriority:      200,    // 容器槽位覆盖层默认渲染层级
         perfLogEnabled:        false,  // 默认关闭性能日志写盘（按需通过 /epiphy debug renderperf on 或 setPerfLog(true) 开启，且仅在 ClientEvents.tick 节流落盘，绝不在渲染线程写盘）
         perfLogIntervalMs:     10000,  // 开启性能日志时的常规最小刷盘间隔 (ms)
         perfLogAlertMs:        PERF_BUDGET.highLoadFrameMs // 超高压帧预算告警线 (ms)，开启性能日志且超限时允许最快每 2s 提前刷新快照
@@ -381,6 +382,7 @@
             pendingActions: pendingActions.length,
             modernUiActive: Boolean(FRAME_BATCH_CTX != null && FRAME_BATCH_CTX.muiActive),
             batchFailed:    Boolean(BATCH_FAILED),
+            preHudActive:   isPreHudBridgeActive(),
             budgetTargetsMs: {
                 singlePanel:     PERF_BUDGET.singlePanelMs,
                 highLoadFrame:   PERF_BUDGET.highLoadFrameMs,
@@ -2711,6 +2713,10 @@
     function applyPoseZTranslate(event, pz) {
         if (!pz || !isFinite(pz) || event == null) return
         try {
+            if (typeof event['translate(double,double,double)'] === 'function') {
+                event['translate(double,double,double)'](0.0, 0.0, pz)
+                return
+            }
             if (typeof event['translate(float,float,float)'] === 'function') {
                 event['translate(float,float,float)'](0.0, 0.0, pz)
                 return
@@ -5095,6 +5101,10 @@
         renderGuiSurfacePass:    function (screenOrEvent, phase, guiCtx) {
             return renderGuiSurfacePass(screenOrEvent, phase, guiCtx)
         },
+        _onRenderGuiPre:         function (forgeEvent) {
+            return onRenderGuiPre(forgeEvent)
+        },
+        isPreHudActive:          isPreHudBridgeActive,
         restoreReplacedTextures: restoreAllReplacedTextures,
         registerShader:          registerCustomShader,
         _pure: {
@@ -7052,7 +7062,35 @@
         return rendered
     }
 
-    ClientEvents.paintScreen(function (event) {
+    var PRE_HUD_BRIDGE_FAILED    = false
+    var PRE_HUD_CLASSES_PROBED   = false
+    var PaintScreenEventJSClass  = null
+    var PainterClass             = null
+    var RenderSystemClass        = null
+
+    function isPreHudBridgeActive() {
+        return !PRE_HUD_BRIDGE_FAILED &&
+            typeof global !== 'undefined' && global != null &&
+            global.EpiphyRenderHooks != null &&
+            global.EpiphyRenderHooks.preHudActive === true
+    }
+
+    function shouldItemRenderInPass(item, passMode, preBridgeActive) {
+        if (item == null) return false
+        var isGuiOrSlot = (item.surface === 'gui' || item.surface === 'slot')
+        if (passMode === 'pre_hud') {
+            if (isGuiOrSlot) return false
+            var priPre = item.renderPriority != null ? Number(item.renderPriority) : 0
+            return priPre < CONFIG.aboveVanillaHudPriority
+        }
+        // passMode === 'post_hud'
+        if (!preBridgeActive) return true
+        if (isGuiOrSlot) return true
+        var priPost = item.renderPriority != null ? Number(item.renderPriority) : 0
+        return priPost >= CONFIG.aboveVanillaHudPriority
+    }
+
+    function renderScreenPass(event, passMode) {
         var curLevelKey = resolveCurrentLevelKey(event)
         if (curLevelKey === '') {
             if (activeOverlays.length > 0) activeOverlays.length = 0
@@ -7080,7 +7118,23 @@
             }
         }
         if (activeOverlays.length === 0) {
-            if (Object.keys(REPLACED_TEXTURE_REGISTRY).length > 0) {
+            if (passMode !== 'pre_hud' && Object.keys(REPLACED_TEXTURE_REGISTRY).length > 0) {
+                restoreAllReplacedTextures()
+            }
+            return
+        }
+
+        var preBridgeActive = isPreHudBridgeActive()
+        var isPrePass       = (passMode === 'pre_hud')
+        var hasEligibleItem = false
+        for (var elIdx = 0; elIdx < activeOverlays.length; elIdx++) {
+            if (shouldItemRenderInPass(activeOverlays[elIdx], passMode, preBridgeActive)) {
+                hasEligibleItem = true
+                break
+            }
+        }
+        if (!hasEligibleItem) {
+            if (!isPrePass && Object.keys(REPLACED_TEXTURE_REGISTRY).length > 0) {
                 restoreAllReplacedTextures()
             }
             return
@@ -7097,7 +7151,9 @@
         var frameStartMs        = now
         var drawnCount          = 0
         var lastRenderPri       = null
-        var layerZ              = 0.0
+        // Pre-HUD 相位起始 Z 置于 -100（上限 -10 < 0），确保原版 HUD (z=0..150) 与 GUI 界面 (z=0..400) 在深度测试与绘制顺序上均严格居上
+        var layerZ              = isPrePass ? -100.0 : 0.0
+        var layerZMax           = isPrePass ? -10.0 : 200.0
         var anyGuiReplaceMatch  = false
         var curPhase            = null
         var curPhaseStartMs     = frameStartMs
@@ -7123,6 +7179,7 @@
             for (var i = 0; i < drawListLen; i++) {
             var item = drawList[i]
             if (now >= item.expire) continue
+            if (!shouldItemRenderInPass(item, passMode, preBridgeActive)) continue
 
             if (item.surface === 'gui' || item.surface === 'slot') {
                 var guiMatchedNow = (curScreenObj != null) && matchesTargetGui(curScreenObj, item.targetGui)
@@ -7142,7 +7199,7 @@
             if (lastRenderPri !== null && curRenderPri !== lastRenderPri) {
                 flushBatchedBeforeImmediate()
                 // 每跨一个更高 renderPriority 层级推进 +1.0 Z，彻底消除低层文字 +0.03 深度残影反向遮挡高层 HUD 矩形
-                layerZ = min2(200.0, layerZ + 1.0)
+                layerZ = min2(layerZMax, layerZ + 1.0)
             }
             lastRenderPri = curRenderPri
 
@@ -7795,7 +7852,7 @@
                     activeOverlays.splice(postExpIdx, 1)
                 }
             }
-            if (!anyGuiReplaceMatch && Object.keys(REPLACED_TEXTURE_REGISTRY).length > 0) {
+            if (!isPrePass && !anyGuiReplaceMatch && Object.keys(REPLACED_TEXTURE_REGISTRY).length > 0) {
                 restoreAllReplacedTextures()
             }
             flushBatchedBeforeImmediate()
@@ -7811,6 +7868,13 @@
             if (batchCtx != null && batchCtx.needBlendRestore) {
                 if (HAS_EVENT_BLEND) event.blend(false)
                 batchCtx.needBlendRestore = false
+            }
+            if (isPrePass) {
+                if (typeof event.resetShaderColor === 'function') {
+                    try { event.resetShaderColor() } catch (eRsc) { }
+                } else if (RenderSystemClass != null && typeof RenderSystemClass.setShaderColor === 'function') {
+                    try { RenderSystemClass.setShaderColor(1.0, 1.0, 1.0, 1.0) } catch (eRsc2) { }
+                }
             }
             if (drawnCount > 0) {
                 var frameEndMs = monotonicNowMs()
@@ -7830,5 +7894,57 @@
                 markClientPerfDirty(totalFrameMs)
             }
         }
+    }
+
+    function onRenderGuiPre(forgeEvent) {
+        if (PRE_HUD_BRIDGE_FAILED || forgeEvent == null) return
+        // 空闲零分配短路：无待消费动作且无任何属于 pre_hud 层级的活跃项时直接返回，避免每帧构造 PaintScreenEventJS
+        var hasPreWork = pendingActions.length > 0
+        if (!hasPreWork) {
+            for (var pi = 0; pi < activeOverlays.length; pi++) {
+                if (shouldItemRenderInPass(activeOverlays[pi], 'pre_hud', true)) {
+                    hasPreWork = true
+                    break
+                }
+            }
+        }
+        if (!hasPreWork) return
+
+        // 单测或已构造好的 PaintScreenEventJS 兼容对象直接透传
+        if (typeof forgeEvent.push === 'function' && typeof forgeEvent.translate === 'function' && forgeEvent.width != null) {
+            renderScreenPass(forgeEvent, 'pre_hud')
+            return
+        }
+
+        if (!PRE_HUD_CLASSES_PROBED) {
+            PRE_HUD_CLASSES_PROBED  = true
+            PaintScreenEventJSClass = loadJavaClass('dev.latvian.mods.kubejs.client.painter.screen.PaintScreenEventJS', true)
+            PainterClass            = loadJavaClass('dev.latvian.mods.kubejs.client.painter.Painter', true)
+            RenderSystemClass       = loadJavaClass('com.mojang.blaze3d.systems.RenderSystem', true)
+        }
+        if (PaintScreenEventJSClass == null || PainterClass == null || MinecraftClass == null) {
+            PRE_HUD_BRIDGE_FAILED = true
+            warnOnce('preHudClassMissing', '无法加载 PaintScreenEventJS/Painter/Minecraft，RenderGuiEvent$Pre 桥接已平滑回退至 ClientEvents.paintScreen')
+            return
+        }
+        try {
+            var mc = MinecraftClass.getInstance()
+            if (mc == null) return
+            var gg = (typeof forgeEvent.getGuiGraphics === 'function') ? forgeEvent.getGuiGraphics() : forgeEvent.guiGraphics
+            if (gg == null) return
+            var pt = (typeof forgeEvent.getPartialTick === 'function') ? Number(forgeEvent.getPartialTick()) : (Number(forgeEvent.partialTick) || 0.0)
+            if (RenderSystemClass != null && typeof RenderSystemClass.enableDepthTest === 'function') {
+                RenderSystemClass.enableDepthTest()
+            }
+            var paintEv = new PaintScreenEventJSClass(mc, gg, PainterClass.INSTANCE, pt)
+            renderScreenPass(paintEv, 'pre_hud')
+        } catch (ePre) {
+            PRE_HUD_BRIDGE_FAILED = true
+            logErrorThrottled('onRenderGuiPre failed, falling back to paintScreen', ePre)
+        }
+    }
+
+    ClientEvents.paintScreen(function (event) {
+        renderScreenPass(event, 'post_hud')
     })
 })()

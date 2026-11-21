@@ -186,9 +186,12 @@
         // 渲染叠层与重要程度已解耦：
         //   - `priority` (0~10)：控制清除过滤 (maxPriority)、满额淘汰与帧预算免熔断权重（同层平局时高优先居上）
         //   - `renderPriority` / `zIndex` (-10000~10000)：独立控制前后绘制顺序与跨层 Z 隔离
+        //   - 原版 HUD 分界线默认 100（客户端 CONFIG.aboveVanillaHudPriority）：
+        //       * `< 100`：在 Forge RenderGuiEvent$Pre 绘制，严格位于原版物品栏/血条/小地图与 GUI 之下；
+        //       * `>= 100`：在 ClientEvents.paintScreen (Post 层) 绘制，可按需压过原版 HUD；
         //   示例：{ priority: 'critical', zIndex: -10 } -> 不可被普通 clear 清除，但视觉上稳居所有弹幕底层
-        screenRenderPriority: 0,        // 独立屏幕弹幕默认渲染优先级（处于底层）
-        hudRenderPriority:    50,       // 屏幕声明式图形 HUD/进度条默认渲染优先级（默认高于弹幕、低于容器 GUI）
+        screenRenderPriority: 0,        // 独立屏幕弹幕默认渲染层级（< 100，低于原版 HUD，可配置）
+        hudRenderPriority:    50,       // 屏幕声明式图形 HUD/进度条默认渲染层级（< 100，低于原版 HUD、高于弹幕，可配置）
         guiRenderPriority:    100,      // GUI 承载面默认渲染优先级（不被 screen 弹幕覆盖，可独立调整）
         slotRenderPriority:   200       // 槽位承载面默认渲染优先级（位于 GUI 图层上方）
     }

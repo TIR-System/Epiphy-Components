@@ -125,7 +125,7 @@
 4. **长期原生化迁出计划**：
    - 本项目在脚本阶段功能与契约充分稳定后，将整体迁往 **Kotlin + Java** 原生模组，KubeJS 仅作此前过渡依赖。
    - **渲染缓存架构备忘（未来原生模组）**：进入独立 Kotlin + Java 实现阶段时，屏幕弹幕的静态片段与离散/稳态逐字缓冲，以及**声明式 2D 节点树的整树 / 静态子树离屏缓存（默认关闭、面向高复杂度动态面板按需开启）**统一采用独立 **`TextureTarget`** (FBO) 离屏缓存池（自行管理 FBO 生命周期、脏标记失效、离屏渲染与 Quad 贴回），直接绕开 MC 原版高频重复走几何/文字渲染管线的开销。
-   - **平面渲染层叠与重要程度解耦契约**：`priority`（`0~10`）专职管理**清除过滤（`maxPriority`）、满额淘汰保活与帧预算免熔断权重**；`renderPriority`（别名 `zIndex`，`-10000~10000`）专职管理**视觉前后叠层与跨层 Z 隔离**（默认阶梯：`screen` 弹幕 `0` < `screen` 声明式 HUD `50` < `gui` `100` < `slot` `200`；仅同 `renderPriority` 平局时按 `priority` 升序决定先后）。需要反置层级时直接组合两字段即可，例如 `{ priority: 'critical', zIndex: -10 }`（不可被普通 `clear` 误清且免熔断，但视觉上稳居所有弹幕底层）或 `{ priority: 'low', zIndex: 80 }`。
+   - **平面渲染层叠与重要程度解耦契约**：`priority`（`0~10`）专职管理**清除过滤（`maxPriority`）、满额淘汰保活与帧预算免熔断权重**；`renderPriority`（别名 `zIndex`，`-10000~10000`）专职管理**视觉前后叠层与跨层 Z 隔离**（默认阶梯：`screen` 弹幕 `0` < `screen` 自绘声明式 HUD `50` < 原版 HUD 分界线 `aboveVanillaHudPriority: 100` ≤ `gui` `100` < `slot` `200`；同层平局按 `priority` 升序）。在 Forge 客户端，`Epiphy的-Spec与通用工具.js` 启动期挂接 `RenderGuiEvent$Pre` 桥接至 `Epiphy2DRenderer._onRenderGuiPre`，使所有 `renderPriority < 100` 的 `screen` 弹幕与自绘 HUD 均以负 Z（`-100..-10`）绘制在原版物品栏/血条/小地图与游戏 GUI 之下（同时自绘 HUD `50` 仍稳居弹幕 `0` 之上）；需要压过原版 HUD 时可按需配置 `renderPriority >= 100` 或调整 `CONFIG.aboveVanillaHudPriority`。需要反置重要程度与视觉层级时直接组合两字段即可，例如 `{ priority: 'critical', zIndex: -10 }`。
    - **ModernUI 专有快路径与原版回退契约**：ModernUI（LGPL-3.0，兼容 RAL-1.6）专有特性（如 `lookupVanillaLayout(String)`、`'mui_stroke'`/`'sdf_stroke'` `drawTextOutline`、三阶段 `drawUnitsPassGrouped`）允许作为可选快路径调用，但不得改变既有 `'stroke'`/`'glow'`/`'per_char'`/`blur`/`split` 视觉效果，且在缺失 ModernUI、关闭 SDF 着色器或命中 Emoji 位图字体时须无感回退至原版实现并保持 `PROTO_VERSION = 5` 向后兼容。
 
 ---

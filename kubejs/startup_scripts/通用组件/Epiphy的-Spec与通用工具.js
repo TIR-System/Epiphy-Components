@@ -1641,5 +1641,47 @@
             parseCommandSpec:           parseCommandSpec,
             computeSphereMergeClusters: computeSphereMergeClusters
         };
+
+        // 客户端原生 Forge 前置渲染相位桥接（仅在客户端首次启动阶段挂接一次，专用服自动跳过）：
+        //   KubeJS ClientEvents.paintScreen 绑定于 RenderGuiEvent$Post / ScreenEvent$Render$Post，
+        //   绘制时机必然晚于原版物品栏/血条/小地图与 GUI 界面；此处在 startup 阶段通过 ForgeEvents
+        //   挂接 RenderGuiEvent$Pre 并动态转发给 global.Epiphy2DRenderer._onRenderGuiPre(event)，
+        //   使默认弹幕 (renderPriority: 0) 与默认自绘 HUD (renderPriority: 50) 均绘制在原版 HUD 与 GUI 之下，
+        //   同时保持自绘 HUD 位于弹幕之上；renderPriority >= aboveVanillaHudPriority (100) 时自动进入 Post 层。
+        if (global.EpiphyRenderHooks == null || typeof global.EpiphyRenderHooks !== 'object') {
+            global.EpiphyRenderHooks = {
+                preHudActive: false,
+                registered:   false
+            };
+        }
+        if (!global.EpiphyRenderHooks.registered &&
+            typeof ForgeEvents !== 'undefined' && ForgeEvents != null &&
+            typeof ForgeEvents.onEvent === 'function') {
+            var isClientEnv = false;
+            try {
+                if (typeof Platform !== 'undefined' && Platform != null && typeof Platform.isClientEnvironment === 'function') {
+                    isClientEnv = Boolean(Platform.isClientEnvironment());
+                }
+            } catch (eCliCheck) {
+                isClientEnv = false;
+            }
+            if (isClientEnv) {
+                try {
+                    ForgeEvents.onEvent('net.minecraftforge.client.event.RenderGuiEvent$Pre', function (forgeEvent) {
+                        var r = (typeof global !== 'undefined' && global != null) ? global.Epiphy2DRenderer : null;
+                        if (r != null && typeof r._onRenderGuiPre === 'function') {
+                            r._onRenderGuiPre(forgeEvent);
+                        }
+                    });
+                    global.EpiphyRenderHooks.preHudActive = true;
+                    global.EpiphyRenderHooks.registered   = true;
+                } catch (ePreHook) {
+                    global.EpiphyRenderHooks.preHudActive = false;
+                    try {
+                        console.warn('[EpiphySpec] RenderGuiEvent$Pre 桥接挂接失败，客户端将自动回退至 ClientEvents.paintScreen: ' + ePreHook);
+                    } catch (eLogHook) { }
+                }
+            }
+        }
     }
 })();
