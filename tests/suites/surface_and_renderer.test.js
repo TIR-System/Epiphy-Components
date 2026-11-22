@@ -4562,7 +4562,8 @@ module.exports = function registerSuite(test, h) {
         assert.strictEqual(shaderJson.fragment, 'epiphy:epiphy_cosmos')
         assert.deepStrictEqual(shaderJson.attributes, ['Position', 'Color', 'UV0'])
         assert.ok(shaderVsh.indexOf('#version 150') === 0 && shaderFsh.indexOf('#version 150') === 0, 'core shaders must be valid GLSL 150')
-        assert.ok(shaderFsh.indexOf('EpiphyYawPitch') >= 0 && shaderFsh.indexOf('evalHeroCrossStars') >= 0, 'fragment shader must implement camera-reactive cross-star cosmos')
+        assert.ok(shaderFsh.indexOf('EpiphyYawPitch') >= 0 && shaderFsh.indexOf('evalHeroCrossStars') >= 0 && shaderFsh.indexOf('evalStarShell3D') >= 0, 'fragment shader must implement seamless 3D spherical star shells & cross-star cosmos')
+        assert.strictEqual(shaderFsh.indexOf('atan('), -1, 'seamless 3D cosmos shader must NOT use atan() equirectangular mapping that creates meridian seams')
         assert.ok(fs.existsSync(path.join(texDir, 'imperius_test.png')), 'static base item texture must exist')
         assert.ok(fs.existsSync(path.join(texDir, 'imperius_test_cosmos_mask.png')), 'GPU cosmos window mask texture must exist')
         assert.ok(fs.existsSync(path.join(ROOT_DIR, 'kubejs', 'assets', 'epiphy', 'textures', 'effect', 'glow_ribbon.png')), 'glow_ribbon.png soft-glow ribbon texture must exist')
@@ -4621,32 +4622,40 @@ module.exports = function registerSuite(test, h) {
         Item3D.unbindItem('epiphy:generic_orb')
         assert.strictEqual(Item3D.unregisterLayerType('custom_diamond'), true)
 
-        // 5. Verify RGBA byte order (0xRRGGBBAA), v6 declarative compilation, exact seam continuity & 0 NaN vertices on epiphy:imperius_test
+        // 5. Verify RGBA byte order (0xRRGGBBAA), lerpRgb, v6 declarative compilation (arcs/gradients/minRadius/nodes), exact seam continuity & 0 NaN vertices
         assert.strictEqual(Item3D._pure.packRgba(0x112233, 0x80) >>> 0, 0x11223380, 'CCL ColourRGBA must pack R in MSB and A in LSB (0xRRGGBBAA)')
+        assert.strictEqual(Item3D._pure.lerpRgb(0x000000, 0xFF8040, 0.5), 0x804020, 'lerpRgb must smoothly interpolate RGB channels')
         var impCfg = FX3D.getBoundItemConfig('epiphy:imperius_test')
         assert.ok(impCfg != null && impCfg.proto === 6 && impCfg.model.state === 'tool', 'epiphy:imperius_test must resolve as v6 tool spec')
-        assert.strictEqual(impCfg.layers.length, 5, 'epiphy:imperius_test showcase must declare 5 layers (1 overlay + 2 rings + 1 helix + 1 sprite cluster)')
+        assert.strictEqual(impCfg.layers.length, 7, 'epiphy:imperius_test showcase must declare 7 layers (1 overlay + 1 gold ring + 2 inner arcs + 1 outer wave ring + 1 helix + 1 sprite cluster)')
         var uScale         = impCfg.frame.unitScale
         var cosQuads       = Item3D._pure.buildSurfaceOverlayQuads(impCfg.layers[0].geometry)
         var ring0Quads     = Item3D._pure.buildRibbonRingQuads(impCfg.layers[1].geometry, uScale)
         var ring0MarkQuads = Item3D._pure.buildRibbonRingMarkerQuads(impCfg.layers[1].geometry, uScale)
-        var helixQuads     = Item3D._pure.buildRibbonHelixStrandQuads(impCfg.layers[3].geometry, impCfg.layers[3].geometry.strands[0], uScale)
-        var clusterQuads   = Item3D._pure.buildSpriteClusterGroupQuads(impCfg.layers[4].geometry, 0, 2, uScale)
+        var arcAQuads      = Item3D._pure.buildRibbonRingQuads(impCfg.layers[2].geometry, uScale)
+        var helixQuads     = Item3D._pure.buildRibbonHelixStrandQuads(impCfg.layers[5].geometry, impCfg.layers[5].geometry.strands[0], uScale)
+        var helixNodeQuads = Item3D._pure.buildRibbonHelixNodeQuads(impCfg.layers[5].geometry, impCfg.layers[5].geometry.strands[0], uScale)
+        var clusterQuads   = Item3D._pure.buildSpriteClusterGroupQuads(impCfg.layers[6].geometry, 0, 2, uScale)
         assert.strictEqual(cosQuads.length, 2, 'surface_overlay must bake exact 2 quads (front+back)')
-        assert.ok(ring0Quads.length >= 72 && ring0Quads.length <= 140, 'primary ribbon_ring must bake smooth slender connected cross-ribbon + micro ticks')
-        assert.strictEqual(ring0MarkQuads.length, 6, 'primary ribbon_ring must bake 2 soft marker nodes * 3 orthogonal planes = 6 quads')
-        assert.strictEqual(helixQuads.length, 72, 'ribbon_helix strand must bake 36 smooth Frenet connected segments * 2 orthogonal ribbons = 72 quads')
+        assert.ok(ring0Quads.length >= 80 && ring0Quads.length <= 140, 'primary ribbon_ring must bake smooth slender connected cross-ribbon + micro ticks')
+        assert.strictEqual(ring0MarkQuads.length, 9, 'primary ribbon_ring must bake 3 soft marker nodes * 3 orthogonal planes = 9 quads')
+        assert.strictEqual(arcAQuads.length, 48, 'partial arc ribbon_ring (24 segs * 2 planes) must bake 48 tapered quads')
+        assert.strictEqual(helixQuads.length, 80, 'ribbon_helix strand must bake 40 smooth Frenet connected segments * 2 orthogonal ribbons = 80 quads')
+        assert.strictEqual(helixNodeQuads.length, 9, 'ribbon_helix co-orbit nodes (3 nodes * 3 planes) must bake 9 quads')
         assert.strictEqual(clusterQuads.length, 9, 'sprite_cluster group (3 sprites/group * 3 planes) must bake 9 clean quads')
         assert.strictEqual(Item3D._pure.validateQuadsFinite(cosQuads).invalidCount, 0, 'overlay quads must have 0 NaN/Infinity vertices')
         assert.strictEqual(Item3D._pure.validateQuadsFinite(ring0Quads).invalidCount, 0, 'ring0 quads must have 0 NaN/Infinity vertices')
         assert.strictEqual(Item3D._pure.validateQuadsFinite(ring0MarkQuads).invalidCount, 0, 'ring0 marker quads must have 0 NaN/Infinity vertices')
+        assert.strictEqual(Item3D._pure.validateQuadsFinite(arcAQuads).invalidCount, 0, 'partial arc quads must have 0 NaN/Infinity vertices')
         assert.strictEqual(Item3D._pure.validateQuadsFinite(helixQuads).invalidCount, 0, 'helix quads must have 0 NaN/Infinity vertices')
+        assert.strictEqual(Item3D._pure.validateQuadsFinite(helixNodeQuads).invalidCount, 0, 'helix node quads must have 0 NaN/Infinity vertices')
         assert.strictEqual(Item3D._pure.validateQuadsFinite(clusterQuads).invalidCount, 0, 'cluster quads must have 0 NaN/Infinity vertices')
         function dist3(a, b) {
             var dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2]
             return Math.sqrt(dx * dx + dy * dy + dz * dz)
         }
         assert.ok(dist3(ring0Quads[0].p3, ring0Quads[2].p0) < 1e-6 && dist3(ring0Quads[0].p2, ring0Quads[2].p1) < 1e-6, 'adjacent ribbon_ring segments must share exact seam vertices (zero cracks)')
+        assert.ok(dist3(arcAQuads[0].p3, arcAQuads[2].p0) < 1e-6 && dist3(arcAQuads[0].p2, arcAQuads[2].p1) < 1e-6, 'adjacent partial arc segments must share exact seam vertices')
         assert.ok(dist3(helixQuads[0].p3, helixQuads[2].p0) < 1e-6 && dist3(helixQuads[0].p2, helixQuads[2].p1) < 1e-6, 'adjacent Frenet ribbon_helix segments must share exact seam vertices (zero stair-stepping)')
         var badCheck = Item3D._pure.validateQuadsFinite([
             { p0: [0, NaN, 0], p1: [1, 0, 0], p2: [1, 1, 0], p3: [0, 1, 0], u0: 0, v0: 0, u1: 1, v1: 0, u2: 1, v2: 1, u3: 0, v3: 1 },
@@ -4672,7 +4681,7 @@ module.exports = function registerSuite(test, h) {
         assert.strictEqual(shStat.hasUniforms, true, 'must resolve EpiphyTime, EpiphyYawPitch, EpiphyGuiMode uniforms')
         assert.strictEqual(FX3D.getShaderStatus().loaded, true)
 
-        // 7. Verify ModelEvent$ModifyBakingResult pre-bakes material-pooled flicker-free RenderTypes & 8 CCModels
+        // 7. Verify ModelEvent$ModifyBakingResult pre-bakes material-pooled flicker-free RenderTypes & 13 CCModels
         var modelsStore = {}
         var origModelStub = { m_6160_: function () { return 'itemParticleSprite' } }
         modelsStore['epiphy:imperius_test#inventory'] = origModelStub
@@ -4698,8 +4707,8 @@ module.exports = function registerSuite(test, h) {
         assert.ok(ribbonRt.state.trans === 'LIGHTNING' && ribbonRt.state.write === 'C_WRITE' && ribbonRt.state.cull === 'NO_CULL' && ribbonRt.state.tex.blur === true && ribbonRt.state.shader === 'POS_COL_TEX_SHARD', 'ribbon additive RenderType must use LIGHTNING_TRANSPARENCY + COLOR_WRITE + NO_CULL + blur + static POSITION_COLOR_TEX_SHADER shard')
         assert.ok(starRt != null && starRt.fmt === 'POSITION_COLOR_TEX' && starRt.sortOnUpload === false, 'star additive RenderType must use POSITION_COLOR_TEX with sortOnUpload=false')
         assert.ok(starRt.state.trans === 'LIGHTNING' && starRt.state.write === 'C_WRITE' && starRt.state.tex.blur === true && starRt.state.shader === 'POS_COL_TEX_SHARD', 'star additive RenderType must use LIGHTNING_TRANSPARENCY + COLOR_WRITE + blur + static shard')
-        // 1 overlay + 2 ring ribbons + 2 ring markers + 1 merged helix + 2 sprite cluster groups = 8 pre-baked CCModels, ALL finite with normals computed
-        assert.strictEqual(bakedCCModels.length, 8, 'must pre-bake 1 overlay + 2 ring ribbons + 2 ring markers + 1 merged helix + 2 sprite cluster groups = 8 CCModels')
+        // 1 overlay + 4 ring/arc ribbons + 4 ring/arc markers + 1 merged helix + 1 helix co-orbit nodes + 2 sprite clusters = 13 pre-baked CCModels
+        assert.strictEqual(bakedCCModels.length, 13, 'must pre-bake 13 CCModels for layered showcase (1 overlay + 5 ribbon passes + 7 star/node passes)')
         for (var bmIdx = 0; bmIdx < bakedCCModels.length; bmIdx++) {
             assert.strictEqual(bakedCCModels[bmIdx].normalsComputed, true, 'every pre-baked CCModel MUST call computeNormals()')
             for (var bvIdx = 0; bvIdx < bakedCCModels[bmIdx].verts.length; bvIdx++) {
@@ -4721,10 +4730,10 @@ module.exports = function registerSuite(test, h) {
         var starCallsHand    = renderDrawCalls.filter(function (c) { return c.rt === starRt })
         assert.strictEqual(overlayCallsHand.length, 1, 'surface_overlay must issue 1 CCModel draw')
         assert.strictEqual(overlayCallsHand[0].verts, 8, 'surface_overlay must submit exact 8 vertices (2 quads front+back)')
-        assert.strictEqual(ribbonCallsHand.length, 3, 'hand render must submit 2 ring ribbons + 1 merged helix = 3 ribbon CCModel draws')
-        assert.strictEqual(starCallsHand.length, 4, 'hand render must submit 2 ring marker nodes + 2 floating sprite cluster groups = 4 star CCModel draws')
+        assert.strictEqual(ribbonCallsHand.length, 5, 'hand render must submit 4 ring/arc ribbons + 1 merged helix = 5 ribbon CCModel draws')
+        assert.strictEqual(starCallsHand.length, 7, 'hand render must submit 4 ring/arc markers + 1 helix nodes + 2 floating clusters = 7 star CCModel draws')
         var handGeomVertCount = ribbonCallsHand.concat(starCallsHand).reduce(function (acc, c) { return acc + c.verts }, 0)
-        assert.ok(handGeomVertCount >= 1100 && handGeomVertCount <= 1900, 'refined uncluttered hand render must stay lean & crisp, got ' + handGeomVertCount)
+        assert.ok(handGeomVertCount >= 1600 && handGeomVertCount <= 2400, 'layered zero-clipping hand render must stay lean & crisp, got ' + handGeomVertCount)
         assert.ok(ribbonCallsHand.concat(starCallsHand).every(function (c) {
             return c.computeLighting === false && c.baseColour === -1 && c.normalsComputed === true
         }), 'every geometry CCModel draw must disable lighting and keep baseColour=-1')
@@ -4735,7 +4744,7 @@ module.exports = function registerSuite(test, h) {
         assert.strictEqual(flushedTypes[0], 'origItemRt')
         assert.strictEqual(flushedTypes[1], overlayRt)
 
-        // GUI slot render check: lean LOD (overlay 8 verts + 2 rings & their marker nodes only, strictly fewer geometry verts than hand) and exact 2 flushes!
+        // GUI slot render check: lean LOD (overlay 8 verts + primary gold ring & dual inner arcs only, strictly fewer geometry verts than hand) and exact 2 flushes!
         renderDrawCalls.length = 0
         flushedTypes.length = 0
         wrappedRenderer.renderItem(mockStack, GUI_CTX, mockPoseStack, mockBufferSource, 0x00F000F0, 0)
@@ -4746,9 +4755,9 @@ module.exports = function registerSuite(test, h) {
         assert.strictEqual(uniformValues.EpiphyGuiMode, 1.0, 'GUI slot render must set EpiphyGuiMode = 1.0')
         assert.strictEqual(overlayCallsGui.length, 1)
         assert.strictEqual(overlayCallsGui[0].verts, 8, 'GUI slot render must submit exact 8 overlay vertices')
-        assert.strictEqual(ribbonCallsGui.length, 2, 'GUI slot render must obey visibleIn="all" LOD (2 ring ribbons only)')
-        assert.strictEqual(starCallsGui.length, 2, 'GUI slot render must include only 2 ring marker nodes (no hand-only cluster)')
-        assert.ok(guiGeomVertCount > 400 && guiGeomVertCount < handGeomVertCount, 'GUI slot geometry verts must be strictly fewer than hand: ' + guiGeomVertCount + ' vs ' + handGeomVertCount)
+        assert.strictEqual(ribbonCallsGui.length, 3, 'GUI slot render must obey visibleIn="all" LOD (1 gold ring + 2 inner arcs = 3 ribbon draws)')
+        assert.strictEqual(starCallsGui.length, 3, 'GUI slot render must include only 3 GUI-visible marker draws (no hand-only helix/outer ring/cluster)')
+        assert.ok(guiGeomVertCount > 500 && guiGeomVertCount < handGeomVertCount, 'GUI slot geometry verts must be strictly fewer than hand: ' + guiGeomVertCount + ' vs ' + handGeomVertCount)
         assert.strictEqual(flushedTypes.length, 2, 'GUI slot render must flush origRt + shader overlay RenderType')
         var fxStatsAfter = FX3D.getStats()
         assert.strictEqual(fxStatsAfter.bakedCount, 1)
@@ -4756,7 +4765,7 @@ module.exports = function registerSuite(test, h) {
         assert.strictEqual(fxStatsAfter.envState, 'client')
         assert.ok(fxStatsAfter.runtime != null && fxStatsAfter.runtime.renderCalls === 2 && fxStatsAfter.runtime.handCalls === 1 && fxStatsAfter.runtime.guiCalls === 1, 'runtime telemetry must track hand & GUI renderItem calls')
         assert.strictEqual(fxStatsAfter.runtime.overlayDraws, 2)
-        assert.strictEqual(fxStatsAfter.runtime.geometryDraws, 11, 'Hand (3 ribbons + 4 stars = 7) + GUI (2 ribbons + 2 stars = 4) = 11 geometry draws')
+        assert.strictEqual(fxStatsAfter.runtime.geometryDraws, 18, 'Hand (5 ribbons + 7 stars = 12) + GUI (3 ribbons + 3 stars = 6) = 18 geometry draws')
 
         // 9. Verify _pure.pushOrthoSpriteQuads & pushCrossSegmentQuads geometry helpers
         var spriteList = []

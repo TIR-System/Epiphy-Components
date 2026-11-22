@@ -333,11 +333,13 @@
     }
 
     // 4.2 使用 v6 分层声明式格式（model / frame / motion / lod / layers）与 fx() 构造器组合具体视觉效果
+    // 像素级实测包络：校正中轴 pixelOrigin=[23.4, 42.3] 后剑身 u∈[8..56] 严格对称在 v∈[-4.71, +4.62] px、厚度 ±2.0 px；
+    // 以下星盘环、悬浮残弧、双股星链螺旋与外围星芒的最小安全半径与轴向起点均严格处于剑身与护手包络之外（数学零穿模）。
     var imperiusLayers = (ITEM3D && typeof ITEM3D.fx === 'function')
         ? ITEM3D.fx()
             .surfaceOverlay('cosmos_window', IMPERIUS_SHADER_ID, 'epiphy:textures/item/imperius_test_cosmos_mask.png', {
                 visibleIn: 'all',
-                geometry:  { zFront: 0.5330, zBack: 0.4670 },
+                geometry:  { zFront: 0.5318, zBack: 0.4682 },
                 uniforms:  {
                     EpiphyTime:     'time',
                     EpiphyYawPitch: 'viewYawPitch',
@@ -348,37 +350,93 @@
                 visibleIn: 'all',
                 material:       { texture: 'epiphy:textures/effect/glow_ribbon.png', blend: 'additive', blur: true },
                 markerMaterial: { texture: 'epiphy:textures/effect/star_flare.png',  blend: 'additive', blur: true },
-                transform:      { axisOffset: 9.6, tiltU: 0.52, tiltV: 0.16, spinSpeed: 0.65, scaleWithAttack: 'uniform' },
-                geometry:       { radius: 8.4, width: 0.68, segments: 36, color: 0xF2C068, coreColor: 0xFFF4D6, ticks: 16, markers: 2, markerRadius: 2.35 }
+                transform:      { axisOffset: 12.2, tiltU: 0.34, tiltV: 0.14, spinSpeed: 0.58, scaleWithAttack: 'uniform' },
+                geometry: {
+                    radius: 10.6, width: 0.58, segments: 40,
+                    color: 0xE89B24, colorEnd: 0xF5749E,
+                    coreColor: 0xFFCE6A, coreColorEnd: 0xFFA2C4,
+                    alpha: 158, crossAlpha: 88, gradientCycles: 2, pulseAmp: 0.18, pulseFreq: 2,
+                    ticks: 16, markers: 3, markerRadius: 2.10, markerColor: 0xFFE39E
+                }
             })
-            .ribbonRing('secondary_violet_ring', {
+            .ribbonRing('inner_astral_arc_a', {
                 visibleIn: 'all',
                 material:       { texture: 'epiphy:textures/effect/glow_ribbon.png', blend: 'additive', blur: true },
                 markerMaterial: { texture: 'epiphy:textures/effect/star_flare.png',  blend: 'additive', blur: true },
-                transform:      { axisOffset: 11.1, tiltU: -0.78, tiltV: -0.26, spinSpeed: -0.48, scaleWithAttack: 'uniform' },
-                geometry:       { radius: 11.2, width: 0.62, segments: 40, color: 0x9C7EFF, coreColor: 0xD2EAFF, ticks: 0, markers: 2, markerRadius: 2.35 }
+                transform:      { axisOffset: 12.2, tiltU: 0.34, tiltV: 0.14, spinSpeed: -0.95, scaleWithAttack: 'uniform' },
+                geometry: {
+                    radius: 8.1, width: 0.46, segments: 24,
+                    arcStart: 0.0, arcSpan: 2.25,
+                    color: 0x7A3CFF, colorEnd: 0x1CC8FF,
+                    coreColor: 0xA878FF, coreColorEnd: 0x7CE6FF,
+                    alpha: 156, crossAlpha: 84,
+                    ticks: 0, markers: 1, markerRadius: 1.75, markerColor: 0x9EE8FF
+                }
+            })
+            .ribbonRing('inner_astral_arc_b', {
+                visibleIn: 'all',
+                material:       { texture: 'epiphy:textures/effect/glow_ribbon.png', blend: 'additive', blur: true },
+                markerMaterial: { texture: 'epiphy:textures/effect/star_flare.png',  blend: 'additive', blur: true },
+                transform:      { axisOffset: 12.2, tiltU: 0.34, tiltV: 0.14, spinSpeed: -0.95, scaleWithAttack: 'uniform' },
+                geometry: {
+                    radius: 8.1, width: 0.46, segments: 24,
+                    arcStart: 3.141592653589793, arcSpan: 2.25,
+                    color: 0xF24496, colorEnd: 0xFFBC4A,
+                    coreColor: 0xFF8CC4, coreColorEnd: 0xFFE08C,
+                    alpha: 156, crossAlpha: 84,
+                    ticks: 0, markers: 1, markerRadius: 1.75, markerColor: 0xFFD8E8
+                }
+            })
+            .ribbonRing('outer_celestial_ring', {
+                visibleIn: 'hand',
+                material:       { texture: 'epiphy:textures/effect/glow_ribbon.png', blend: 'additive', blur: true },
+                markerMaterial: { texture: 'epiphy:textures/effect/star_flare.png',  blend: 'additive', blur: true },
+                transform:      { axisOffset: 15.2, tiltU: -0.54, tiltV: -0.20, spinSpeed: -0.44, scaleWithAttack: 'uniform' },
+                geometry: {
+                    radius: 13.0, width: 0.52, segments: 44,
+                    waveAmp: 0.55, waveFreq: 3,
+                    color: 0x7B42FF, colorEnd: 0x1FD2FF,
+                    coreColor: 0xB88BFF, coreColorEnd: 0x7CEBFF,
+                    alpha: 152, crossAlpha: 82, gradientCycles: 2, pulseAmp: 0.22, pulseFreq: 3,
+                    ticks: 0, markers: 2, markerRadius: 2.25, markerColor: 0xB8D8FF
+                }
             })
             .ribbonHelix('dual_spiral_threads', {
                 visibleIn: 'hand',
-                material:  { texture: 'epiphy:textures/effect/glow_ribbon.png', blend: 'additive', blur: true },
-                transform: { axisOffset: 0.0, spinSpeed: 1.15, scaleWithAttack: 'radial' },
-                geometry:  {
-                    steps: 36, start: 3.0, span: 48.0, radius: 4.5, freq: 0.17, width: 0.52,
+                material:     { texture: 'epiphy:textures/effect/glow_ribbon.png', blend: 'additive', blur: true },
+                nodeMaterial: { texture: 'epiphy:textures/effect/star_flare.png',  blend: 'additive', blur: true },
+                transform:    { axisOffset: 0.0, spinSpeed: 1.05, scaleWithAttack: 'radial' },
+                geometry: {
+                    steps: 40, start: 8.5, span: 45.5,
+                    minRadius: 6.4, radius: 8.8, ellipticZ: 1.0,
+                    freq: 0.185, width: 0.48, pulseAmp: 0.18, pulseFreq: 2,
+                    nodes: 3, nodeRadius: 1.55, nodeAlpha: 162,
                     strands: [
-                        { phase: 0.0,               color: 0xFFA2CC, coreColor: 0xFFEAF4 },
-                        { phase: 3.141592653589793, color: 0x8CD8FF, coreColor: 0xD8F4FF }
+                        {
+                            phase: 0.0,
+                            color: 0xF24496, colorEnd: 0xF5AD3C,
+                            coreColor: 0xFF8CC4, coreColorEnd: 0xFFD978,
+                            alpha: 154, crossAlpha: 86
+                        },
+                        {
+                            phase: 3.141592653589793,
+                            color: 0x1CC8FF, colorEnd: 0x8A4FFF,
+                            coreColor: 0x7CE6FF, coreColorEnd: 0xC49BFF,
+                            alpha: 154, crossAlpha: 86
+                        }
                     ]
                 }
             })
             .spriteCluster('floating_star_flares', {
                 visibleIn: 'hand',
                 material:  { texture: 'epiphy:textures/effect/star_flare.png', blend: 'additive', blur: true },
-                transform: { orbitSpeeds: [0.42, -0.34], bobAmp: 0.9, bobFreq: 1.1, scaleWithAttack: 'radial' },
-                geometry:  {
-                    count: 6, groups: 2, spanStart: 14.0, spanLength: 34.0,
-                    orbitMin: 5.2, orbitMax: 9.4, spriteMin: 1.85, spriteMax: 2.70,
-                    palette: [0xFFD6EC, 0xB8EAFF, 0xFFF2D0, 0xE2C4FF],
-                    alpha: 158
+                transform: { orbitSpeeds: [0.40, -0.32], bobAmp: 0.85, bobFreq: 1.05, scaleWithAttack: 'radial' },
+                geometry: {
+                    count: 6, groups: 2, spanStart: 12.0, spanLength: 38.0,
+                    orbitMin: 8.0, orbitMax: 12.2, ellipticZ: 1.0,
+                    spriteMin: 1.70, spriteMax: 2.45,
+                    palette: [0xFF72B8, 0x38D4FF, 0xFFCE63, 0xA86EFF],
+                    alpha: 150
                 }
             })
             .build()
@@ -396,7 +454,7 @@
         },
         frame: {
             pixelCanvas: 64,
-            pixelOrigin: [22.5, 41.5, 0.5],
+            pixelOrigin: [23.4, 42.3, 0.5],
             axisDir:     [0.698, 0.716]
         },
         motion: {

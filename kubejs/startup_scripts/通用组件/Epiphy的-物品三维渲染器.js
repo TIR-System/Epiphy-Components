@@ -1,6 +1,6 @@
 // priority: 1050
 // ============================================================================
-//  Epiphy 的通用组件 —— 声明式物品三维渲染器 (EpiphyItem3DRenderer v1.0.0 · Startup/ModBus)
+//  Epiphy 的通用组件 —— 声明式物品三维渲染器 (EpiphyItem3DRenderer v1.1.0 · Startup/ModBus)
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/startup_scripts/通用组件/Epiphy的-物品三维渲染器.js
 //  第三方 Mod 可选特例（原则见 README-LLM.md §3.3）：
@@ -25,7 +25,7 @@
 // ============================================================================
 
 ;(function () {
-    var VERSION    = '1.0.0'
+    var VERSION    = '1.1.0'
     var PROTO_VER  = 6
     var SPEC       = (typeof global !== 'undefined' && global != null && global.EpiphySpec != null) ? global.EpiphySpec : null
     var E_MATH     = (typeof global !== 'undefined' && global != null && global.EpiphyMath != null)
@@ -554,6 +554,16 @@
     }
 
     // ======================================================================== 4. 通用纯几何预烘焙原语（仅烘焙期执行）
+    function lerpRgb(cA, cB, t) {
+        var f = clampNum(Number(t), 0.0, 1.0)
+        var r0 = (cA >>> 16) & 0xFF, g0 = (cA >>> 8) & 0xFF, b0 = cA & 0xFF
+        var r1 = (cB >>> 16) & 0xFF, g1 = (cB >>> 8) & 0xFF, b1 = cB & 0xFF
+        var r = Math.round(r0 + (r1 - r0) * f) & 0xFF
+        var g = Math.round(g0 + (g1 - g0) * f) & 0xFF
+        var b = Math.round(b0 + (b1 - b0) * f) & 0xFF
+        return (r << 16) | (g << 8) | b
+    }
+
     function pushQuad(list, p0, p1, p2, p3, rgba, uvRect, rgbaEnd) {
         var cEnd = (rgbaEnd !== undefined && rgbaEnd !== null) ? rgbaEnd : rgba
         list.push({
@@ -615,15 +625,15 @@
         }
     }
 
-    // 原语 1：通用双面/单面贴合表面覆层面片（默认紧贴 item/generated 前后面外侧，避免深度冲突）
+    // 原语 1：通用双面/单面贴合表面覆层面片（默认紧贴 item/generated 前后面外侧，避免深度冲突与斜视悬浮缝）
     function buildSurfaceOverlayQuads(geo) {
         var g = isPlainObjLike(geo) ? geo : {}
         var quads = []
         var tint  = g.color != null ? Number(g.color) : 0xFFFFFF
         var alpha = g.alpha != null ? Number(g.alpha) : 255
         var rgba  = packRgba(tint, alpha)
-        var zFront = g.zFront != null ? Number(g.zFront) : 0.5330
-        var zBack  = g.zBack != null ? Number(g.zBack) : 0.4670
+        var zFront = g.zFront != null ? Number(g.zFront) : 0.5318
+        var zBack  = g.zBack != null ? Number(g.zBack) : 0.4682
         var x0 = g.x0 != null ? Number(g.x0) : 0.0
         var y0 = g.y0 != null ? Number(g.y0) : 0.0
         var x1 = g.x1 != null ? Number(g.x1) : 1.0
@@ -647,35 +657,67 @@
         return quads
     }
 
-    // 原语 2：通用连续闭合光带环（严格共享端点，可选径向短刻度与方位标记精灵）
+    // 原语 2：通用连续光带环/悬浮弧段（严格共享端点，支持非闭合弧段渐隐、双色渐变、椭圆包络、轴向波浪与径向短刻度）
     function buildRibbonRingQuads(geo, unitScale) {
-        var g     = isPlainObjLike(geo) ? geo : {}
-        var uS    = (unitScale != null && unitScale > 0) ? unitScale : (1.0 / 64.0)
-        var quads = []
-        var R     = Number(g.radius != null ? g.radius : 8.0) * uS
-        var segs  = clampNum(Math.round(Number(g.segments != null ? g.segments : 36)), 12, 64)
-        var halfW = Number(g.width != null ? g.width : 0.65) * uS
-        var cMain = g.color != null ? Number(g.color) : 0xFFFFFF
-        var cCore = g.coreColor != null ? Number(g.coreColor) : cMain
-        var aMain = g.alpha != null ? Number(g.alpha) : 188
-        var aAxis = g.crossAlpha != null ? Number(g.crossAlpha) : 152
+        var g        = isPlainObjLike(geo) ? geo : {}
+        var uS       = (unitScale != null && unitScale > 0) ? unitScale : (1.0 / 64.0)
+        var quads    = []
+        var R        = Number(g.radius != null ? g.radius : 8.0) * uS
+        var ellZ     = Number(g.ellipticZ != null ? g.ellipticZ : 1.0)
+        var segs     = clampNum(Math.round(Number(g.segments != null ? g.segments : 36)), 10, 64)
+        var halfW    = Number(g.width != null ? g.width : 0.60) * uS
+        var arcStart = Number(g.arcStart != null ? g.arcStart : 0.0)
+        var arcSpan  = Number(g.arcSpan != null ? g.arcSpan : TWO_PI)
+        var isFull   = Math.abs(arcSpan) >= (TWO_PI - 1e-4)
+        var waveAmp  = Number(g.waveAmp || 0.0) * uS
+        var waveFreq = Number(g.waveFreq != null ? g.waveFreq : 3.0)
+        var pulseAmp = clampNum(Number(g.pulseAmp || 0.0), 0.0, 0.65)
+        var pulseFrq = Number(g.pulseFreq != null ? g.pulseFreq : 2.0)
+        var gradCyc  = Number(g.gradientCycles != null ? g.gradientCycles : (isFull ? 2.0 : 1.0))
 
-        var rgbaMain = packRgba(cMain, aMain)
-        var rgbaAxis = packRgba(cCore, aAxis)
-        var xAxis    = [1.0, 0.0, 0.0]
+        var cMain    = g.color != null ? Number(g.color) : 0xFFFFFF
+        var cEnd     = g.colorEnd != null ? Number(g.colorEnd) : cMain
+        var cCore    = g.coreColor != null ? Number(g.coreColor) : cMain
+        var cCoreEnd = g.coreColorEnd != null ? Number(g.coreColorEnd) : (g.colorEnd != null ? cEnd : cCore)
+        var aMain    = g.alpha != null ? Number(g.alpha) : 168
+        var aAxis    = g.crossAlpha != null ? Number(g.crossAlpha) : 108
 
-        for (var i = 0; i < segs; i++) {
-            var a0 = (i / segs) * TWO_PI
-            var a1 = ((i + 1) / segs) * TWO_PI
-            var c0 = Math.cos(a0), s0 = Math.sin(a0)
-            var c1 = Math.cos(a1), s1 = Math.sin(a1)
-            var p0 = [0.0, R * c0, R * s0]
-            var p1 = [0.0, R * c1, R * s1]
-            var rad0 = [0.0, c0, s0]
-            var rad1 = [0.0, c1, s1]
-            pushConnectedRibbonQuad(quads, p0, rad0, halfW, p1, rad1, halfW, rgbaMain, rgbaMain)
+        var xAxis = [1.0, 0.0, 0.0]
+        var pts   = new Array(segs + 1)
+        var rads  = new Array(segs + 1)
+        var hws   = new Array(segs + 1)
+        var c1Arr = new Array(segs + 1)
+        var c2Arr = new Array(segs + 1)
+
+        var i
+        for (i = 0; i <= segs; i++) {
+            var frac = i / segs
+            var ang  = arcStart + frac * arcSpan
+            var ca   = Math.cos(ang), sa = Math.sin(ang)
+            var wx   = waveAmp !== 0.0 ? (Math.sin(ang * waveFreq) * waveAmp) : 0.0
+            pts[i]   = [wx, R * ca, R * ellZ * sa]
+            var rx = 0.0, ry = ca, rz = sa * ellZ
+            var rLen = Math.sqrt(ry * ry + rz * rz)
+            if (rLen > 1e-6) { ry /= rLen; rz /= rLen }
+            rads[i] = [rx, ry, rz]
+
+            // 非闭合弧段自动施加首尾收尖与透明渐隐，闭合环保持平滑连通
+            var env = isFull ? 1.0 : Math.pow(Math.max(0.0, Math.sin(frac * PI)), 0.72)
+            var pulse = pulseAmp > 0.0 ? (1.0 - pulseAmp + pulseAmp * (0.5 + 0.5 * Math.cos(frac * TWO_PI * pulseFrq))) : 1.0
+            var gradT = isFull
+                ? (0.5 - 0.5 * Math.cos(frac * TWO_PI * gradCyc))
+                : frac
+            var col1 = (cMain !== cEnd) ? lerpRgb(cMain, cEnd, gradT) : cMain
+            var col2 = (cCore !== cCoreEnd) ? lerpRgb(cCore, cCoreEnd, gradT) : cCore
+            hws[i]   = halfW * (isFull ? 1.0 : (0.36 + 0.64 * env))
+            c1Arr[i] = packRgba(col1, Math.round(aMain * env * pulse))
+            c2Arr[i] = packRgba(col2, Math.round(aAxis * env * pulse))
+        }
+
+        for (i = 0; i < segs; i++) {
+            pushConnectedRibbonQuad(quads, pts[i], rads[i], hws[i], pts[i + 1], rads[i + 1], hws[i + 1], c1Arr[i], c1Arr[i + 1])
             if (g.crossPlane !== false) {
-                pushConnectedRibbonQuad(quads, p0, xAxis, halfW * 0.88, p1, xAxis, halfW * 0.88, rgbaAxis, rgbaAxis)
+                pushConnectedRibbonQuad(quads, pts[i], xAxis, hws[i] * 0.82, pts[i + 1], xAxis, hws[i + 1] * 0.82, c2Arr[i], c2Arr[i + 1])
             }
         }
 
@@ -686,18 +728,20 @@
             var minOut   = Number(g.tickMinorOut != null ? g.tickMinorOut : 0.68) * uS
             var majIn    = Number(g.tickMajorIn != null ? g.tickMajorIn : 0.52) * uS
             var minIn    = Number(g.tickMinorIn != null ? g.tickMinorIn : 0.25) * uS
-            var rgbaTk   = packRgba(cCore, 165)
-            var rgbaTip  = packRgba(cMain, 28)
+            var rgbaTk   = packRgba(cCore, 152)
+            var rgbaTip  = packRgba(cMain, 24)
             for (var tk = 0; tk < ticks; tk++) {
-                var ta = (tk / ticks) * TWO_PI
+                var tFrac = isFull ? (tk / ticks) : ((tk + 0.5) / ticks)
+                var ta    = arcStart + tFrac * arcSpan
                 var tc = Math.cos(ta), ts = Math.sin(ta)
+                var twx = waveAmp !== 0.0 ? (Math.sin(ta * waveFreq) * waveAmp) : 0.0
                 var isMajor = (tk % 4 === 0)
                 var extOut  = isMajor ? majOut : minOut
                 var extIn   = isMajor ? majIn : minIn
                 var tanV    = [0.0, -ts, tc]
-                var midPt   = [0.0, R * tc, R * ts]
-                pushConnectedRibbonQuad(quads, midPt, tanV, tickW, [0.0, (R + extOut) * tc, (R + extOut) * ts], tanV, tickW * 0.55, rgbaTk, rgbaTip)
-                pushConnectedRibbonQuad(quads, midPt, tanV, tickW, [0.0, (R - extIn) * tc, (R - extIn) * ts], tanV, tickW * 0.55, rgbaTk, rgbaTip)
+                var midPt   = [twx, R * tc, R * ellZ * ts]
+                pushConnectedRibbonQuad(quads, midPt, tanV, tickW, [twx, (R + extOut) * tc, (R + extOut) * ellZ * ts], tanV, tickW * 0.55, rgbaTk, rgbaTip)
+                pushConnectedRibbonQuad(quads, midPt, tanV, tickW, [twx, (R - extIn) * tc, (R - extIn) * ellZ * ts], tanV, tickW * 0.55, rgbaTk, rgbaTip)
             }
         }
         return quads
@@ -707,55 +751,83 @@
         var g = isPlainObjLike(geo) ? geo : {}
         var markers = clampNum(Math.round(Number(g.markers || 0)), 0, 8)
         if (markers <= 0) return []
-        var uS     = (unitScale != null && unitScale > 0) ? unitScale : (1.0 / 64.0)
-        var R      = Number(g.radius != null ? g.radius : 8.0) * uS
-        var mR     = Number(g.markerRadius != null ? g.markerRadius : 2.35) * uS
-        var mPhase = Number(g.markerPhase != null ? g.markerPhase : 0.35)
-        var cMark  = g.markerColor != null ? Number(g.markerColor) : (g.coreColor != null ? Number(g.coreColor) : 0xFFFFFF)
-        var aMark  = g.markerAlpha != null ? Number(g.markerAlpha) : 168
-        var rgba   = packRgba(cMark, aMark)
-        var xAxis  = [1.0, 0.0, 0.0]
-        var quads  = []
+        var uS       = (unitScale != null && unitScale > 0) ? unitScale : (1.0 / 64.0)
+        var R        = Number(g.radius != null ? g.radius : 8.0) * uS
+        var ellZ     = Number(g.ellipticZ != null ? g.ellipticZ : 1.0)
+        var mR       = Number(g.markerRadius != null ? g.markerRadius : 2.20) * uS
+        var arcStart = Number(g.arcStart != null ? g.arcStart : 0.0)
+        var arcSpan  = Number(g.arcSpan != null ? g.arcSpan : TWO_PI)
+        var isFull   = Math.abs(arcSpan) >= (TWO_PI - 1e-4)
+        var mPhase   = Number(g.markerPhase != null ? g.markerPhase : 0.35)
+        var waveAmp  = Number(g.waveAmp || 0.0) * uS
+        var waveFreq = Number(g.waveFreq != null ? g.waveFreq : 3.0)
+        var cMark    = g.markerColor != null ? Number(g.markerColor) : (g.coreColor != null ? Number(g.coreColor) : 0xFFFFFF)
+        var aMark    = g.markerAlpha != null ? Number(g.markerAlpha) : 162
+        var rgba     = packRgba(cMark, aMark)
+        var xAxis    = [1.0, 0.0, 0.0]
+        var quads    = []
         for (var pk = 0; pk < markers; pk++) {
-            var pa = (pk / markers) * TWO_PI + mPhase
+            var pa = isFull
+                ? (arcStart + (pk / markers) * TWO_PI + mPhase)
+                : (arcStart + ((pk + 0.5) / markers) * arcSpan)
             var pc = Math.cos(pa), ps = Math.sin(pa)
-            pushOrthoSpriteQuads(quads, 0.0, R * pc, R * ps, [0.0, pc, ps], [0.0, -ps, pc], xAxis, mR, rgba)
+            var wx = waveAmp !== 0.0 ? (Math.sin(pa * waveFreq) * waveAmp) : 0.0
+            pushOrthoSpriteQuads(quads, wx, R * pc, R * ellZ * ps, [0.0, pc, ps], [0.0, -ps, pc], xAxis, mR, rgba)
         }
         return quads
     }
 
-    // 原语 3：通用 Frenet 连续螺旋流光带（单股/多股均可配置，相邻段严丝合缝且首尾平滑渐隐）
+    // 原语 3：通用 Frenet 连续螺旋流光带（支持安全最小半径 minRadius 防穿模、椭圆截面 ellipticZ、轴向双色渐变与共轨星珠节点）
+    function evalHelixSample(g, st, frac, uS) {
+        var startU  = Number(g.start != null ? g.start : 0.0)
+        var spanU   = Number(g.span != null ? g.span : 40.0)
+        var radMax  = Number(g.radius != null ? g.radius : 4.5) * uS
+        var minRad  = g.minRadius != null ? (Number(g.minRadius) * uS) : (radMax * 0.28)
+        var ellZ    = Number(g.ellipticZ != null ? g.ellipticZ : 1.0)
+        var freq    = Number(g.freq != null ? g.freq : 0.17)
+        var taper   = Number(g.taperPower != null ? g.taperPower : 0.78)
+        var phase   = Number(st.phase != null ? st.phase : 0.0)
+
+        var uRaw = startU + frac * spanU
+        var env  = Math.pow(Math.max(0.0, Math.sin(frac * PI)), taper)
+        var r    = minRad + (radMax - minRad) * env
+        var ang  = uRaw * freq + phase
+        var ca   = Math.cos(ang), sa = Math.sin(ang)
+        return {
+            pt:   [uRaw * uS, r * ca, r * ellZ * sa],
+            rad:  [0.0, ca, sa * ellZ],
+            env:  env,
+            ca:   ca,
+            sa:   sa
+        }
+    }
+
     function buildRibbonHelixStrandQuads(geo, strandCfg, unitScale) {
         var g     = isPlainObjLike(geo) ? geo : {}
         var st    = isPlainObjLike(strandCfg) ? strandCfg : {}
         var uS    = (unitScale != null && unitScale > 0) ? unitScale : (1.0 / 64.0)
         var quads = []
         var steps   = clampNum(Math.round(Number(g.steps != null ? g.steps : 36)), 12, 64)
-        var startU  = Number(g.start != null ? g.start : 0.0)
-        var spanU   = Number(g.span != null ? g.span : 40.0)
-        var radMax  = Number(g.radius != null ? g.radius : 4.5) * uS
-        var freq    = Number(g.freq != null ? g.freq : 0.17)
-        var halfWPx = Number(g.width != null ? g.width : 0.52)
-        var phase   = Number(st.phase != null ? st.phase : 0.0)
-        var cMain   = st.color != null ? Number(st.color) : (g.color != null ? Number(g.color) : 0xFFFFFF)
-        var cCore   = st.coreColor != null ? Number(st.coreColor) : cMain
-        var aMain   = st.alpha != null ? Number(st.alpha) : 182
-        var aCore   = st.crossAlpha != null ? Number(st.crossAlpha) : 138
+        var halfWPx = Number(g.width != null ? g.width : 0.50)
+        var pulseAmp = clampNum(Number(g.pulseAmp || 0.0), 0.0, 0.60)
+        var pulseFrq = Number(g.pulseFreq != null ? g.pulseFreq : 2.0)
+
+        var cMain    = st.color != null ? Number(st.color) : (g.color != null ? Number(g.color) : 0xFFFFFF)
+        var cEnd     = st.colorEnd != null ? Number(st.colorEnd) : (g.colorEnd != null ? Number(g.colorEnd) : cMain)
+        var cCore    = st.coreColor != null ? Number(st.coreColor) : cMain
+        var cCoreEnd = st.coreColorEnd != null ? Number(st.coreColorEnd) : (cEnd !== cMain ? cEnd : cCore)
+        var aMain    = st.alpha != null ? Number(st.alpha) : 162
+        var aCore    = st.crossAlpha != null ? Number(st.crossAlpha) : 102
 
         var pts  = new Array(steps + 1)
         var rads = new Array(steps + 1)
         var envs = new Array(steps + 1)
         var i
         for (i = 0; i <= steps; i++) {
-            var frac = i / steps
-            var uRaw = startU + frac * spanU
-            var env  = Math.pow(Math.max(0.0, Math.sin(frac * PI)), 0.78)
-            var r    = radMax * (0.28 + 0.72 * env)
-            var ang  = uRaw * freq + phase
-            var ca   = Math.cos(ang), sa = Math.sin(ang)
-            pts[i]  = [uRaw * uS, r * ca, r * sa]
-            rads[i] = [0.0, ca, sa]
-            envs[i] = env
+            var smp = evalHelixSample(g, st, i / steps, uS)
+            pts[i]  = smp.pt
+            rads[i] = smp.rad
+            envs[i] = smp.env
         }
 
         var n1Arr = new Array(steps + 1)
@@ -764,6 +836,7 @@
         var c1Arr = new Array(steps + 1)
         var c2Arr = new Array(steps + 1)
         for (i = 0; i <= steps; i++) {
+            var frac  = i / steps
             var pPrev = pts[i > 0 ? (i - 1) : 0]
             var pNext = pts[i < steps ? (i + 1) : steps]
             var tx = pNext[0] - pPrev[0], ty = pNext[1] - pPrev[1], tz = pNext[2] - pPrev[2]
@@ -784,23 +857,50 @@
             var n2Len = Math.sqrt(n2x * n2x + n2y * n2y + n2z * n2z)
             if (n2Len > 1e-5) { n2x /= n2Len; n2y /= n2Len; n2z /= n2Len }
 
+            var pulse = pulseAmp > 0.0 ? (1.0 - pulseAmp + pulseAmp * (0.5 + 0.5 * Math.sin(frac * TWO_PI * pulseFrq))) : 1.0
+            var col1 = (cMain !== cEnd) ? lerpRgb(cMain, cEnd, frac) : cMain
+            var col2 = (cCore !== cCoreEnd) ? lerpRgb(cCore, cCoreEnd, frac) : cCore
+
             n1Arr[i] = [n1x, n1y, n1z]
             n2Arr[i] = [n2x, n2y, n2z]
-            hwArr[i] = (halfWPx * (0.45 + 0.55 * envs[i])) * uS
-            c1Arr[i] = packRgba(cMain, Math.round(aMain * envs[i]))
-            c2Arr[i] = packRgba(cCore, Math.round(aCore * envs[i]))
+            hwArr[i] = (halfWPx * (0.42 + 0.58 * envs[i])) * uS
+            c1Arr[i] = packRgba(col1, Math.round(aMain * envs[i] * pulse))
+            c2Arr[i] = packRgba(col2, Math.round(aCore * envs[i] * pulse))
         }
 
         for (i = 0; i < steps; i++) {
             pushConnectedRibbonQuad(quads, pts[i], n1Arr[i], hwArr[i], pts[i + 1], n1Arr[i + 1], hwArr[i + 1], c1Arr[i], c1Arr[i + 1])
             if (g.crossPlane !== false) {
-                pushConnectedRibbonQuad(quads, pts[i], n2Arr[i], hwArr[i] * 0.88, pts[i + 1], n2Arr[i + 1], hwArr[i + 1] * 0.88, c2Arr[i], c2Arr[i + 1])
+                pushConnectedRibbonQuad(quads, pts[i], n2Arr[i], hwArr[i] * 0.82, pts[i + 1], n2Arr[i + 1], hwArr[i + 1] * 0.82, c2Arr[i], c2Arr[i + 1])
             }
         }
         return quads
     }
 
-    // 原语 4：通用 3D 正交柔光精灵轨道簇（按确定性分布分组，支持轨道半径、区间与调色板）
+    // 原语 3 辅件：沿螺旋流光带共轨镶嵌柔光精灵节点（随螺旋同步盘旋）
+    function buildRibbonHelixNodeQuads(geo, strandCfg, unitScale) {
+        var g = isPlainObjLike(geo) ? geo : {}
+        var st = isPlainObjLike(strandCfg) ? strandCfg : {}
+        var nCount = clampNum(Math.round(Number(st.nodes != null ? st.nodes : (g.nodes || 0))), 0, 8)
+        if (nCount <= 0) return []
+        var uS    = (unitScale != null && unitScale > 0) ? unitScale : (1.0 / 64.0)
+        var nRad  = Number(st.nodeRadius != null ? st.nodeRadius : (g.nodeRadius != null ? g.nodeRadius : 1.65)) * uS
+        var cMain = st.color != null ? Number(st.color) : (g.color != null ? Number(g.color) : 0xFFFFFF)
+        var cEnd  = st.colorEnd != null ? Number(st.colorEnd) : (g.colorEnd != null ? Number(g.colorEnd) : cMain)
+        var aNode = st.nodeAlpha != null ? Number(st.nodeAlpha) : (g.nodeAlpha != null ? Number(g.nodeAlpha) : 168)
+        var xAxis = [1.0, 0.0, 0.0]
+        var quads = []
+        for (var ni = 0; ni < nCount; ni++) {
+            var frac = (ni + 1) / (nCount + 1)
+            var smp  = evalHelixSample(g, st, frac, uS)
+            var col  = (cMain !== cEnd) ? lerpRgb(cMain, cEnd, frac) : cMain
+            var rgba = packRgba(col, Math.round(aNode * (0.65 + 0.35 * smp.env)))
+            pushOrthoSpriteQuads(quads, smp.pt[0], smp.pt[1], smp.pt[2], [0.0, smp.ca, smp.sa], [0.0, -smp.sa, smp.ca], xAxis, nRad, rgba)
+        }
+        return quads
+    }
+
+    // 原语 4：通用 3D 正交柔光精灵轨道簇（按确定性分布分组，支持椭圆轨道包络、区间与调色板）
     function buildSpriteClusterGroupQuads(geo, groupIndex, groupCount, unitScale) {
         var g = isPlainObjLike(geo) ? geo : {}
         var uS = (unitScale != null && unitScale > 0) ? unitScale : (1.0 / 64.0)
@@ -810,9 +910,10 @@
         var spanLen = Number(g.spanLength != null ? g.spanLength : 32.0)
         var orbMin  = Number(g.orbitMin != null ? g.orbitMin : 4.0)
         var orbMax  = Number(g.orbitMax != null ? g.orbitMax : 9.0)
+        var ellZ    = Number(g.ellipticZ != null ? g.ellipticZ : 1.0)
         var spMin   = Number(g.spriteMin != null ? g.spriteMin : 1.6)
         var spMax   = Number(g.spriteMax != null ? g.spriteMax : 2.5)
-        var alpha   = g.alpha != null ? Number(g.alpha) : 160
+        var alpha   = g.alpha != null ? Number(g.alpha) : 155
         var palette = Array.isArray(g.palette) && g.palette.length > 0 ? g.palette : [0xFFFFFF]
         var xAxis   = [1.0, 0.0, 0.0]
         var quads   = []
@@ -829,7 +930,7 @@
             var tint  = Number(palette[i % palette.length])
             var c0    = Math.cos(ang0), s0 = Math.sin(ang0)
             var rSpr  = (spMin + h2 * (spMax - spMin)) * uS
-            pushOrthoSpriteQuads(quads, uBase, orbR * c0, orbR * s0, [0.0, c0, s0], [0.0, -s0, c0], xAxis, rSpr, packRgba(tint, alpha))
+            pushOrthoSpriteQuads(quads, uBase, orbR * c0, orbR * ellZ * s0, [0.0, c0, s0], [0.0, -s0, c0], xAxis, rSpr, packRgba(tint, alpha))
         }
         return quads
     }
@@ -1002,30 +1103,52 @@
                 ? hGeo.strands
                 : [{ phase: 0.0 }, { phase: PI }]
             var combined = []
+            var nodeQuads = []
             for (var si = 0; si < strands.length; si++) {
                 var sq = buildRibbonHelixStrandQuads(hGeo, strands[si], uS)
                 for (var sqi = 0; sqi < sq.length; sqi++) combined.push(sq[sqi])
+                var nq = buildRibbonHelixNodeQuads(hGeo, strands[si], uS)
+                for (var nqi = 0; nqi < nq.length; nqi++) nodeQuads.push(nq[nqi])
             }
             var hOff = Number(hTr.axisOffset != null ? hTr.axisOffset : 0.0) * uS
-            return [{
+            var hTrSpec = {
+                mode:            'local_axis',
+                cx:              frame.origin[0] + frame.axisDir[0] * hOff,
+                cy:              frame.origin[1] + frame.axisDir[1] * hOff,
+                cz:              frame.origin[2] + Number(hTr.zOffset || 0.0) * uS,
+                axisAngleRad:    frame.axisAngleRad,
+                tiltU:           Number(hTr.tiltU || 0.0),
+                tiltV:           Number(hTr.tiltV || 0.0),
+                spinSpeed:       Number(hTr.spinSpeed != null ? hTr.spinSpeed : 1.15),
+                scaleWithAttack: String(hTr.scaleWithAttack || 'radial')
+            }
+            var hOut = [{
                 id:        layerSpec.id,
                 category:  'geometry',
                 visibleIn: layerSpec.visibleIn,
                 material:  hMat,
                 uniforms:  null,
                 quads:     combined,
-                transform: {
-                    mode:            'local_axis',
-                    cx:              frame.origin[0] + frame.axisDir[0] * hOff,
-                    cy:              frame.origin[1] + frame.axisDir[1] * hOff,
-                    cz:              frame.origin[2] + Number(hTr.zOffset || 0.0) * uS,
-                    axisAngleRad:    frame.axisAngleRad,
-                    tiltU:           Number(hTr.tiltU || 0.0),
-                    tiltV:           Number(hTr.tiltV || 0.0),
-                    spinSpeed:       Number(hTr.spinSpeed != null ? hTr.spinSpeed : 1.15),
-                    scaleWithAttack: String(hTr.scaleWithAttack || 'radial')
-                }
+                transform: hTrSpec
             }]
+            if (nodeQuads.length > 0) {
+                var hnMat = normalizeMaterial(layerSpec.nodeMaterial || layerSpec.markerMaterial, {
+                    texture:    'epiphy:textures/effect/star_flare.png',
+                    blend:      'additive',
+                    blur:       true,
+                    depthWrite: false
+                })
+                hOut.push({
+                    id:        layerSpec.id + ':nodes',
+                    category:  'geometry',
+                    visibleIn: layerSpec.visibleIn,
+                    material:  hnMat,
+                    uniforms:  null,
+                    quads:     nodeQuads,
+                    transform: hTrSpec
+                })
+            }
+            return hOut
         }
 
         if (lType === 'sprite_cluster') {
@@ -1870,6 +1993,7 @@
         },
         _pure: {
             packRgba:                  packRgba,
+            lerpRgb:                   lerpRgb,
             getNeutralItemSpec:        getNeutralItemSpec,
             normalizeItemSpec:         normalizeItemSpec,
             normalizeFrame:            normalizeFrame,
@@ -1880,6 +2004,7 @@
             buildRibbonRingQuads:      buildRibbonRingQuads,
             buildRibbonRingMarkerQuads: buildRibbonRingMarkerQuads,
             buildRibbonHelixStrandQuads: buildRibbonHelixStrandQuads,
+            buildRibbonHelixNodeQuads: buildRibbonHelixNodeQuads,
             buildSpriteClusterGroupQuads: buildSpriteClusterGroupQuads,
             validateQuadsFinite:       validateQuadsFinite
         }
