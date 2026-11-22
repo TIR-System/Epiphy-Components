@@ -1,6 +1,6 @@
 // priority: 950
 // ============================================================================
-//  通用调试与性能诊断组件 (EpiphyDebug v1.0.0)
+//  通用调试与性能诊断组件 (EpiphyDebug v1.1.0)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/server_scripts/通用组件/Epiphy的-调试组件.js
@@ -14,7 +14,7 @@
 //         - `/epiphy debug checks`                       : 执行全部已注册模块的健康检查
 //         - `/epiphy debug log <模块|*> <on|off>`        : 统一切换 EpiphyLog 模块级调试日志开关
 //         - `/epiphy debug action <模块> <动作>`          : 触发模块注册的维护动作（如 rescan / clearcache 等）
-//         - `/epiphy debug renderperf <on|off|dump|reset>`: 按需控制客户端 2D 渲染性能打点落盘开关与快照导出
+//         - `/epiphy debug renderperf <on|off|dump|reset>`: 按需控制客户端 2D/3D 渲染性能打点落盘开关与快照导出
 //    3. 同时导出 JS API `global.EpiphyDebug`，供脚本诊断或节点单元测试调用。
 //
 //  依赖与缺失影响：
@@ -34,7 +34,7 @@
         throw new Error('[EpiphyDebug] 缺少硬依赖 global.EpiphyServerBase，请确认 server_scripts/通用组件/Epiphy的-服务端核心.js 已加载')
     }
 
-    var VERSION              = '1.0.0'
+    var VERSION              = '1.1.0'
     var RENDER_DEBUG_CHANNEL = 'epiphy:render_debug'
     var LOGGER               = BASE.createLogger('EpiphyDebug', 5000)
     var providers     = new Map() // key -> providerRecord
@@ -357,7 +357,8 @@
             if (mod === 'tracker' || mod === 'blocktracker') targetLogName = 'EpiphyBlockTracker'
             else if (mod === 'valve' || mod === 'auth') targetLogName = 'EpiphyPermissionValve'
             else if (mod === 'audio') targetLogName = 'EpiphyAudio'
-            else if (mod === 'danmaku') targetLogName = 'ScreenDanmaku'
+            else if (mod === 'danmaku' || mod === 'surface2d') targetLogName = 'ScreenDanmaku'
+            else if (mod === 'fx3d' || mod === 'spatial' || mod === 'spatialfx') targetLogName = 'Epiphy3DFX'
             else if (mod === 'debug') targetLogName = 'EpiphyDebug'
             if (mod === '*') {
                 global.EpiphyLog.setDebug(on)
@@ -369,13 +370,17 @@
             }
         }
 
-        if ((mod === '*' || mod === 'danmaku') && typeof global !== 'undefined' && global.ScreenDanmaku != null && typeof global.ScreenDanmaku.configure === 'function') {
+        if ((mod === '*' || mod === 'danmaku' || mod === 'surface2d') && typeof global !== 'undefined' && global.ScreenDanmaku != null && typeof global.ScreenDanmaku.configure === 'function') {
             global.ScreenDanmaku.configure({ debug: on })
             applied.push('ScreenDanmaku.CONFIG.debug')
         }
         if ((mod === '*' || mod === 'audio') && typeof global !== 'undefined' && global.EpiphyAudio != null && global.EpiphyAudio.CONFIG != null) {
             global.EpiphyAudio.CONFIG.debug = on
             applied.push('EpiphyAudio.CONFIG.debug')
+        }
+        if ((mod === '*' || mod === 'fx3d' || mod === 'spatial' || mod === 'spatialfx') && typeof global !== 'undefined' && global.Epiphy3DFXServer != null && global.Epiphy3DFXServer.CONFIG != null) {
+            global.Epiphy3DFXServer.CONFIG.debug = on
+            applied.push('Epiphy3DFXServer.CONFIG.debug')
         }
 
         return { ok: applied.length > 0, target: mod, enabled: on, applied: applied }
@@ -647,7 +652,7 @@
         '§b§l  [ Epiphy 统一调试组件 // /epiphy debug 帮助手册 ]',
         '§3§l----------------------------------------------------',
         '§e1. 运行时总览面板：   §f/epiphy debug §7或 §f/epiphy debug status',
-        '§e2. 单模块详情与动作： §f/epiphy debug module <tracker|audio|danmaku|valve|log>',
+        '§e2. 单模块详情与动作： §f/epiphy debug module <tracker|audio|danmaku|fx3d|valve|log>',
         '§e3. 全模块健康自检：   §f/epiphy debug checks',
         '§e4. 统一切换日志开关： §f/epiphy debug log <模块|*> <on|off>',
         '§e5. 执行维护诊断动作： §f/epiphy debug action <模块> <动作名>',

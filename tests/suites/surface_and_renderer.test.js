@@ -3891,7 +3891,7 @@ module.exports = function registerSuite(test, h) {
         assert.strictEqual(writeCount, 0, 'when perfLogEnabled is false, neither paintScreen nor tick may write disk')
 
         var st = R.getStats()
-        assert.strictEqual(st.version, '6.2.0')
+        assert.strictEqual(st.version, '6.2.1')
         assert.strictEqual(st.perfLogEnabled, false)
         assert.strictEqual(st.phases.paint_total.frames, 1)
         assert.strictEqual(st.phases.screen_text.frames, 1)
@@ -4258,7 +4258,7 @@ module.exports = function registerSuite(test, h) {
     })
 
     test('71. Generic v6 declarative EpiphyItem3DRenderer (extensible shaders/layers/parts/presets) & epiphy:imperius_test downstream showcase', function () {
-        var FUNC_TEST_PATH       = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的小玩意_功能测试.js')
+        var FUNC_TEST_PATH       = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '小玩意与案例', 'Epiphy的小玩意_功能测试.js')
         var ITEM3D_RENDERER_PATH = h.ITEM3D_RENDERER_PATH
         var FX3D_PATH            = h.FX3D_PATH
         var modBusHooks          = {}
@@ -5403,5 +5403,214 @@ module.exports = function registerSuite(test, h) {
         noSpecNet['epiphy:spatial_fx']({ data: { proto: 1, surface: 'world', action: 'push', worldPos: [0, 64, 0], shapes: [{ kind: 'ring' }] } })
         noSpecSb.global.Epiphy3DFX._stepWorldNow(5050)
         assert.strictEqual(noSpecSb.global.Epiphy3DFX.listWorld().length, 1, 'Spec-absent client must still consume valid v1 world FX')
+    })
+
+    test('73. Epiphy3DFXServer debug provider, /epiphy fx3d player/broadcast isolation & client renderperf 3D snapshot', function () {
+        var FX3D_SERVER_PATH = h.FX3D_SERVER_PATH
+        var FX3D_PATH        = h.FX3D_PATH
+        var DEBUG_PATH       = h.DEBUG_PATH
+        var VALVE_PATH       = h.VALVE_PATH
+
+        function MockServerPlayer(name, uuid, isOp) {
+            this.username = name
+            this.uuid     = uuid
+            this._isOp    = Boolean(isOp)
+            this.x = 10; this.y = 64; this.z = 20
+            this.sent = []
+        }
+        MockServerPlayer.prototype.isOp = function () { return this._isOp }
+        MockServerPlayer.prototype.getStringUUID = function () { return this.uuid }
+        MockServerPlayer.prototype.sendData = function (ch, pkt) {
+            this.sent.push({ ch: ch, pkt: JSON.parse(JSON.stringify(pkt)) })
+        }
+
+        function MockMinecraftServer() {}
+
+        var authPl = new MockServerPlayer('Alice', 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', false)
+        var bobPl  = new MockServerPlayer('Bob',   '11111111-2222-3333-4444-555555555555', false)
+        var overworldLvl = {
+            dimension: 'minecraft:overworld',
+            players: [authPl, bobPl]
+        }
+        var netherLvl = {
+            dimension: 'minecraft:the_nether',
+            players: [bobPl]
+        }
+        authPl.level = overworldLvl
+        bobPl.level  = overworldLvl
+
+        var srv = new MockMinecraftServer()
+        srv.getWorldData = function () { return { getLevelName: function () { return 'Fx3dIso' }, getAllowCommands: function () { return true } } }
+        srv.getLevel = function (d) {
+            return String(d).indexOf('nether') >= 0 ? netherLvl : overworldLvl
+        }
+        srv.getAllLevels = function () { return [overworldLvl, netherLvl] }
+        srv.levels = [overworldLvl, netherLvl]
+        srv.players = [authPl, bobPl]
+        srv.getPlayer = function (n) { return n === 'Alice' ? authPl : (n === 'Bob' ? bobPl : null) }
+        srv.getPlayerList = function () {
+            return {
+                getPlayers: function () { return [authPl, bobPl] },
+                getPlayerByName: function (n) { return srv.getPlayer(n) },
+                isOp: function () { return false }
+            }
+        }
+        authPl.server = srv
+        bobPl.server  = srv
+
+        var cmdRegCbs = []
+        var sb = h.createKubeSandbox(function (cls) {
+            if (cls === 'net.minecraft.server.level.ServerPlayer') return MockServerPlayer
+            if (cls === 'net.minecraft.server.MinecraftServer') return MockMinecraftServer
+            return null
+        })
+        sb.Utils = { server: srv }
+        sb.ServerEvents.commandRegistry = function (fn) { cmdRegCbs.push(fn) }
+        var nowFake = 20000
+        function MockDate() { return new Date(nowFake) }
+        MockDate.now = function () { return nowFake }
+        sb.Date = MockDate
+
+        loadServerBase(sb)
+        runScriptIn(sb, VALVE_PATH)
+        runScriptIn(sb, DEBUG_PATH)
+        runScriptIn(sb, FX3D_SERVER_PATH)
+
+        var Debug = sb.global.EpiphyDebug
+        var Valve = sb.global.EpiphyPermissionValve
+        var FxSrv = sb.global.Epiphy3DFXServer
+
+        // 1. Verify EpiphyDebug provider registration, checks, log toggle & resetstats action
+        assert.strictEqual(Debug.hasProvider('fx3d'), true, 'Epiphy3DFXServer must auto-register "fx3d" provider with EpiphyDebug')
+        FxSrv.toPlayer(authPl, { key: 'dbg_ring', worldPos: [10, 64, 20], kind: 'ring' })
+        assert.strictEqual(FxSrv.getStats().packetsBuilt, 1)
+        assert.strictEqual(FxSrv.getStats().packetsSent, 1)
+        var snap = Debug.collectSnapshot('fx3d')
+        assert.strictEqual(snap.modules.length, 1)
+        assert.ok(snap.modules[0].summaryText.indexOf('built=1') >= 0 && snap.modules[0].summaryText.indexOf('sent=1') >= 0)
+        var chk = Debug.runChecks('fx3d')
+        assert.strictEqual(chk.warnCount, 0)
+        assert.ok(chk.passCount >= 2)
+        var tog = Debug.toggleLogDebug('fx3d', true)
+        assert.strictEqual(tog.ok, true)
+        assert.strictEqual(FxSrv.CONFIG.debug, true, '/epiphy debug log fx3d on must enable Epiphy3DFXServer.CONFIG.debug')
+        Debug.toggleLogDebug('fx3d', false)
+        assert.strictEqual(FxSrv.CONFIG.debug, false)
+        var actRes = Debug.runAction('fx3d', 'resetstats')
+        assert.strictEqual(actRes.ok, true)
+        assert.strictEqual(FxSrv.getStats().packetsBuilt, 0, 'resetstats action must reset Epiphy3DFXServer stats')
+
+        // 2. Verify /epiphy fx3d Brigadier command tree & non-OP player/broadcast isolation
+        function FakeNode(kind, name) {
+            this._kind = kind; this._name = name; this._children = {}; this._exec = null; this._req = null
+        }
+        FakeNode.prototype.then = function (c) { if (c) this._children[c._name] = c; return this }
+        FakeNode.prototype.executes = function (fn) { this._exec = fn; return this }
+        FakeNode.prototype.requires = function (fn) { this._req = fn; return this }
+        FakeNode.prototype.suggests = function () { return this }
+
+        var regRoot = null
+        var argValues = {}
+        function makeArg(fn) {
+            return { create: function () { return {} }, getResult: fn || function (_c, k) { return argValues[k] } }
+        }
+        var regEv = {
+            commands: {
+                literal:  function (n) { return new FakeNode('lit', n) },
+                argument: function (n) { return new FakeNode('arg', n) }
+            },
+            arguments: {
+                WORD:              makeArg(),
+                STRING:            makeArg(),
+                GREEDY_STRING:     makeArg(),
+                DOUBLE:            makeArg(),
+                FLOAT:             makeArg(),
+                INTEGER:           makeArg(),
+                BOOLEAN:           makeArg(),
+                PLAYERS:           makeArg(),
+                PLAYER:            makeArg(),
+                ENTITIES:          makeArg(),
+                ENTITY:            makeArg(),
+                RESOURCE_LOCATION: makeArg(),
+                DIMENSION:         makeArg(function (_c, k) { return argValues[k] ? { dimension: argValues[k] } : null }),
+                VEC3:              makeArg()
+            },
+            register: function (r) { regRoot = r }
+        }
+        for (var ci = 0; ci < cmdRegCbs.length; ci++) cmdRegCbs[ci](regEv)
+        assert.ok(regRoot != null && regRoot._children.fx3d != null, '/epiphy fx3d must mount under /epiphy root command')
+
+        // Grant non-OP Alice module scope 'fx3d' (WITHOUT 'fx3d.broadcast' exactScopeOnly!)
+        Valve.grantPlayer(srv, authPl, 'fx3d', 'TestAdmin')
+        var aliceMsgs = []
+        var aliceSource = {
+            source: authPl,
+            player: authPl,
+            server: srv,
+            level:  overworldLvl,
+            position: { x: 10, y: 64, z: 20 },
+            hasPermission: function () { return true }, // simulate withPermission(2) - must still treat non-OP Alice as 'player' tier!
+            sendSuccess: function (m) { aliceMsgs.push(String(m)) }
+        }
+
+        // Execute `/epiphy fx3d here ring 15 9999` -> clamped to player tier (radius<=8, stay<=400, u:<uuid> namespace)
+        authPl.sent.length = 0
+        bobPl.sent.length = 0
+        argValues = { kind: 'ring', shapeRadius: 15.0, stay: 9999 }
+        var hereExec = regRoot._children.fx3d._children.here._children.kind._children.shapeRadius._children.stay._exec
+        nowFake += 1000
+        assert.strictEqual(hereExec({ source: aliceSource }), 1)
+        assert.strictEqual(authPl.sent.length, 1)
+        var pSent = authPl.sent[0].pkt
+        assert.strictEqual(pSent.tier, 'player', 'non-OP authorized player must be clamped to player tier')
+        assert.strictEqual(pSent.namespace, 'u:' + authPl.uuid, 'non-OP player packet must enforce u:<uuid> namespace')
+        assert.strictEqual(pSent.shapes[0].radius, 8.0, 'non-OP player shape radius must clamp to <= 8.0')
+        assert.strictEqual(pSent.stay, 400, 'non-OP player stay must clamp to <= 400 ticks')
+
+        // Execute `/epiphy fx3d pos the_nether [0,64,0] 16 ring` WITHOUT fx3d.broadcast -> MUST reject cross-dimension!
+        nowFake += 1000
+        argValues = { dim: 'minecraft:the_nether', center: [0, 64, 0], range: 16, kind: 'ring' }
+        var posExec = regRoot._children.fx3d._children.pos._children.dim._children.center._children.range._children.kind._exec
+        assert.strictEqual(posExec({ source: aliceSource }), 0, 'cross-dimension /epiphy fx3d pos must fail without fx3d.broadcast')
+
+        // Execute `/epiphy fx3d pos overworld [10,64,20] 64 ring` WITHOUT fx3d.broadcast -> MUST reject range > 32m!
+        nowFake += 1000
+        argValues = { dim: 'minecraft:overworld', center: [10, 64, 20], range: 64, kind: 'ring' }
+        assert.strictEqual(posExec({ source: aliceSource }), 0, 'range > 32m must fail without fx3d.broadcast')
+
+        // Explicitly grant `fx3d.broadcast` -> cross-dimension and 64m range now succeed!
+        Valve.grantPlayer(srv, authPl, 'fx3d.broadcast', 'TestAdmin')
+        nowFake += 1000
+        bobPl.sent.length = 0
+        argValues = { dim: 'minecraft:the_nether', center: [10, 64, 20], range: 64, kind: 'beam' }
+        assert.strictEqual(posExec({ source: aliceSource }), 1, 'explicit fx3d.broadcast grant must allow cross-dim & 64m broadcast')
+        assert.strictEqual(bobPl.sent.length, 1)
+        assert.strictEqual(bobPl.sent[0].pkt.tier, 'player')
+
+        // 3. Verify client renderperf snapshot embeds `fx3d` telemetry from Epiphy3DFX & EpiphyItem3DRenderer
+        var cliSb = {
+            console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+            Date: { now: function () { return 30000 } },
+            Platform: { isClientEnvironment: function () { return true } },
+            Client: { getCurrentScreen: function () { return null } },
+            ForgeEvents: { onEvent: function () {} },
+            ForgeModEvents: { onEvent: function () {} },
+            NetworkEvents: { dataReceived: function () {} },
+            ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, tick: function () {}, paintScreen: function () {} },
+            Java: { loadClass: function () { return null } },
+            Text: { of: function (s) { return String(s) } },
+            global: {}
+        }
+        cliSb.globalThis = cliSb
+        vm.createContext(cliSb)
+        loadStartupBase(cliSb)
+        runScriptIn(cliSb, h.ITEM3D_RENDERER_PATH)
+        runScriptIn(cliSb, RENDERER_PATH)
+        runScriptIn(cliSb, FX3D_PATH)
+
+        var perfSnap = cliSb.global.Epiphy2DRenderer.getStats()
+        assert.ok(perfSnap.fx3d != null, 'Epiphy2DRenderer.getStats() must attach fx3d telemetry snapshot')
+        assert.strictEqual(perfSnap.fx3d.itemRendererAvailable, true)
+        assert.ok(perfSnap.fx3d.world != null && Array.isArray(perfSnap.fx3d.world.builtinShapes), 'fx3d telemetry must include world 3D renderer stats')
     })
 }

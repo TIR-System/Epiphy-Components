@@ -209,7 +209,7 @@ module.exports = function registerSuite(test, h) {
     })
 
     test('hidden items: epiphy:chaos_crystal avoids createCompositeState(boolean) EnumTypeWrapper trap across Mojmap, no-AT, and SRG modes', function () {
-        var HIDDEN_PATH = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的小玩意-原版_其他Mod的隐藏物品.js')
+        var HIDDEN_PATH = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '小玩意与案例', 'Epiphy的小玩意-原版_其他Mod的隐藏物品.js')
 
         function runHiddenItemsCase(useRemappedMojmap, exposeOutlineEnum) {
             var modBusListeners = {}
@@ -287,8 +287,11 @@ module.exports = function registerSuite(test, h) {
             }
 
             var fakeMatOps = []
+            var matConstructorCalls = 0
             function FakeMatrix4(src) {
+                matConstructorCalls++
                 this.src = src || null
+                this.set = function (s) { this.src = s || null; return this }
                 this.translate = function () { return this }
                 this.rotate = function () { return this }
                 this.scale = function (s) { scaleArgs.push(s); return this }
@@ -477,6 +480,11 @@ module.exports = function registerSuite(test, h) {
                 assert.deepStrictEqual(compositeOutlineArgs, ['none', 'none'])
             }
             assert.strictEqual(scaleArgs[0], 0.22)
+            var allocAfterFirst = matConstructorCalls
+            assert.strictEqual(allocAfterFirst, 2, 'must preallocate exact 2 reusable Matrix4 instances at bake time (workMat + identityMat)')
+            rendererProxy.impl.renderItem({}, 'GUI', 'POSE_STACK_2', 'FAKE_GETTER', 15728880, 655360)
+            rendererProxy.impl.renderItem({}, 'GUI', 'POSE_STACK_3', 'FAKE_GETTER', 15728880, 655360)
+            assert.strictEqual(matConstructorCalls, allocAfterFirst, 'subsequent renderItem frames must reuse preallocated Matrix4 instances (zero per-frame Matrix4 allocation)')
         }
 
         runHiddenItemsCase(true, false)
@@ -485,7 +493,7 @@ module.exports = function registerSuite(test, h) {
     })
 
     test('hidden items helpers: callMcMember supports arbitrary argc and readMcMember falls back cleanly without swallowing errors or returning silent undefined', function () {
-        var HIDDEN_PATH = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的小玩意-原版_其他Mod的隐藏物品.js')
+        var HIDDEN_PATH = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '小玩意与案例', 'Epiphy的小玩意-原版_其他Mod的隐藏物品.js')
         var src = fs.readFileSync(HIDDEN_PATH, 'utf8')
         var startIdx = src.indexOf('var probeMcMember = function')
         var endIdx = src.indexOf('var buildCompositeStateNone = function')

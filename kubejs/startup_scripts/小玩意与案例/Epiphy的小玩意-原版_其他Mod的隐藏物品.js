@@ -1,7 +1,7 @@
 // ============================================================================
 //  Epiphy的小玩意 —— 原版与其他 Mod 的隐藏物品收录模块
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
-//  放置位置：kubejs/startup_scripts/通用组件/Epiphy的小玩意-原版_其他Mod的隐藏物品.js
+//  放置位置：kubejs/startup_scripts/小玩意与案例/Epiphy的小玩意-原版_其他Mod的隐藏物品.js
 //  依赖模块：kubejs/startup_scripts/通用组件/创造模式栏-epiphy.js (epiphy:stuff)
 //  第三方 Mod 联动与可选特例（原则见 README-LLM.md §3.3）：
 //    - Draconic Evolution / BrandonsCore / CodeChickenLib（可选）：仅用于 `epiphy:chaos_crystal` 的混沌晶体放置、伤害源及 3D OBJ + Chaos Shader 物品渲染；缺失对应 Mod 时跳过相关类/模型绑定，不影响其余原版隐藏物品。
@@ -273,25 +273,41 @@
 
                     var fnFalse = function () { return false }
                     var fnTrue = function () { return true }
+                    // 烘焙期一次性预分配复用矩阵并缓存方法引用，消除每帧 renderItem 热路径对象分配与反射重查
+                    var workMat = new $Matrix4()
+                    var identityMat = new $Matrix4()
+                    var hasMatSet = (typeof workMat.set === 'function')
+                    var fnGetMc = probeMcMember($Minecraft, 'getInstance', 'm_91087_').value
+                    var cachedMc = null
+                    var fnGetFrameTime = null
+                    var vecY = $Vector3.Y_POS
+
                     var renderer = new $IItemRenderer({
                         renderItem: function (stack, displayContext, mStack, getter, packedLight, packedOverlay) {
-                            var mat = new $Matrix4(mStack)
+                            var mat = hasMatSet ? workMat.set(mStack) : new $Matrix4(mStack)
                             var ccrs = $CCRenderState.instance()
                             ccrs.reset()
                             ccrs.brightness = packedLight
                             ccrs.overlay = packedOverlay
 
-                            var mc = callMcMember($Minecraft, 'getInstance', 'm_91087_')
-                            var frameTime = (mc != null) ? callMcMember(mc, 'getFrameTime', 'm_91296_') : 0.0
+                            if (cachedMc == null && typeof fnGetMc === 'function') {
+                                cachedMc = fnGetMc.call($Minecraft)
+                                if (cachedMc != null) {
+                                    fnGetFrameTime = probeMcMember(cachedMc, 'getFrameTime', 'm_91296_').value
+                                }
+                            }
+                            var frameTime = (cachedMc != null && typeof fnGetFrameTime === 'function')
+                                ? fnGetFrameTime.call(cachedMc)
+                                : 0.0
                             var rot = ($TimeKeeper.getClientTick() + frameTime) / 40.0
                             mat.translate(0.5, 0.5, 0.5)
-                            mat.rotate(rot, $Vector3.Y_POS)
+                            mat.rotate(rot, vecY)
                             // chaos_crystal.obj 高度跨度为 [-3.55, 3.29]（约 6.84 格），缩放到 0.22 使其刚好饱满呈现在物品栏与手持方块视角中
                             mat.scale(0.22)
 
                             var chaosShader = $BCShaders.CHAOS_ENTITY_SHADER
                             if (chaosShader != null) {
-                                if (chaosShader.hasModelMatUniform()) chaosShader.getModelMatUniform().glUniformMatrix4f(new $Matrix4())
+                                if (chaosShader.hasModelMatUniform()) chaosShader.getModelMatUniform().glUniformMatrix4f(identityMat)
                                 if (chaosShader.hasSimpleLightUniform()) chaosShader.getSimpleLightUniform().glUniform1b(true)
                                 if (chaosShader.hasDisableLightUniform()) chaosShader.getDisableLightUniform().glUniform1b(false)
                                 if (chaosShader.hasDisableOverlayUniform()) chaosShader.getDisableOverlayUniform().glUniform1b(false)

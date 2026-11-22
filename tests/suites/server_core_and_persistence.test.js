@@ -999,7 +999,7 @@ module.exports = function registerSuite(test, h) {
     // 37. World Exit/Rejoin Regression: JsonIO LinkedTreeMap + persisted test block danmaku/audio
     // ----------------------------------------------------------------------------
     test('World rejoin regression: JsonIO LinkedTreeMap load & PlayerEvents.loggedIn delayed danmaku + audio trigger', function () {
-        var TEST_BLOCK_PATH = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的小玩意_功能测试.js')
+        var TEST_BLOCK_PATH = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '小玩意与案例', 'Epiphy的小玩意_功能测试.js')
 
         function makeMockJavaMap(plainObj) {
             var backing = new Map()

@@ -1,6 +1,6 @@
 // priority: 500
 // ============================================================================
-//  通用空间特效组件 —— 服务端调度器 (Epiphy3DFXServer v1.1.0)
+//  通用空间特效组件 —— 服务端调度器 (Epiphy3DFXServer v1.2.0)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/server_scripts/通用组件/Epiphy的-空间特效组件.js
@@ -11,8 +11,10 @@
 //    - 必需前置：kubejs/startup_scripts/通用组件/Epiphy的-Spec与通用工具.js (EpiphySpec / EpiphyProtocol, priority: 1200)
 //               与 kubejs/server_scripts/通用组件/Epiphy的-服务端核心.js (EpiphyServerCore / EpiphyServerBase, priority: 1080)
 //    - 必需配套：kubejs/client_scripts/通用组件/Epiphy的-空间特效渲染器.js（缺失时服务端 API 正常调度，客户端无世界 3D 渲染）
-//    - 可选依赖：kubejs/server_scripts/通用组件/Epiphy的-日志.js (EpiphyLog, priority: 1100)
-//      缺失时由 EpiphyServerBase 自动回退至 console 限频降级输出
+//    - 可选依赖：
+//      * kubejs/server_scripts/通用组件/Epiphy的-日志.js (EpiphyLog, priority: 1100，缺失时自动回退至 console 限频降级输出)
+//      * kubejs/server_scripts/通用组件/Epiphy的-权限阀.js (EpiphyPermissionValve, priority: 1000，缺失时 JS API 正常，`/epiphy fx3d` 不挂载)
+//      * kubejs/server_scripts/通用组件/Epiphy的-调试组件.js (EpiphyDebug, priority: 950，存在时自动上报 `fx3d` 运行时指标与自检)
 //
 //  [组件边界 / 禁止直接复用] 本组件属于 L3 业务调度层（视觉表现层【子系统 B】服务端），内部逻辑不得被其他模块
 //    或兄弟 L3 组件直接复制或跨模块复用；外部玩法脚本仅应通过 global.Epiphy3DFXServer 公开 API 调用。
@@ -37,7 +39,7 @@
         SPEC.checkDependencyVersion('EpiphyServerCore', BASE, '2.5.0', '2.99.99', { caller: 'Epiphy3DFXServer', required: true })
     }
 
-    var VERSION       = '1.1.0'
+    var VERSION       = '1.2.0'
     var LOGGER        = BASE.createLogger('Epiphy3DFX', 5000)
     var CHANNEL       = PROTO.FX3D_CHANNEL || 'epiphy:spatial_fx'
     var PROTO_VERSION = PROTO.FX3D_PROTO_VERSION || 1
@@ -51,6 +53,26 @@
 
     var SERVER_REF  = null
     var tickCounter = 0
+
+    var STATS = {
+        packetsBuilt:       0,
+        packetsSent:        0,
+        sendErrors:         0,
+        rejectedInvalid:    0,
+        rejectedQuota:      0,
+        rejectedConstraint: 0,
+        cmdCalls:           0
+    }
+
+    var PLAYER_FX3D_LIMITS = {
+        commandCooldownMs:   250,
+        maxRadius:           32,
+        broadcastMaxRadius:  96,
+        maxShapeRadius:      8.0,
+        maxStayTicks:        400,
+        maxPriority:         3
+    }
+    var playerCmdCooldownMap = new Map()
 
     var CONFIG = {
         debug:              false,
@@ -260,12 +282,15 @@
             try {
                 res = rule.fn(packet, ctx)
             } catch (eRule) {
+                STATS.rejectedConstraint++
                 return reportWarn('3D 空间特效约束 `' + rule.name + '` 执行异常（已 Fail-Closed 拦截）：' + eRule, notifyPlayer)
             }
             if (res === false) {
+                STATS.rejectedConstraint++
                 return reportWarn('3D 空间特效被约束 `' + rule.name + '` 拦截！', notifyPlayer)
             }
             if (BASE.isObjectLike(res) && res.ok === false) {
+                STATS.rejectedConstraint++
                 return reportWarn('3D 空间特效被约束 `' + rule.name + '` 拦截：' + String(res.reason || '未满足准入条件'), notifyPlayer)
             }
         }
@@ -300,6 +325,7 @@
 
     function buildValidatedPacket(rawOpts, notifyPlayer) {
         if (!BASE.isObjectLike(rawOpts)) {
+            STATS.rejectedInvalid++
             return reportWarn('调用 Epiphy3DFXServer 必须传入配置对象！', notifyPlayer)
         }
         var opts = rawOpts
@@ -309,6 +335,7 @@
             if (!isControl) {
                 var resolved = resolvePreset(opts.preset, opts)
                 if (resolved == null) {
+                    STATS.rejectedInvalid++
                     return reportWarn('未找到已注册的 3D 空间特效预设: ' + opts.preset, notifyPlayer)
                 }
                 opts = resolved
@@ -318,6 +345,7 @@
 
         var surfaceStr = String(opts.surface || 'world').trim().toLowerCase()
         if (!VALID_SURFACES[surfaceStr]) {
+            STATS.rejectedInvalid++
             return reportWarn('不支持的 3D 承载面 surface="' + surfaceStr + '"（当前支持: ' + Object.keys(VALID_SURFACES).join(', ') + '）！', notifyPlayer)
         }
         var action = String(opts.action || 'push').trim().toLowerCase()
@@ -343,6 +371,7 @@
             var cPri = opts.maxPriority != null ? opts.maxPriority : opts.priority
             if (cPri != null) cPkt.maxPriority = parsePriority(cPri, 10)
             if (!runConstraints(cPkt, { action: 'clear', rawOpts: opts }, notifyPlayer)) return null
+            STATS.packetsBuilt++
             return cPkt
         }
 
@@ -362,11 +391,13 @@
             if (dPri != null) dPkt.maxPriority = parsePriority(dPri, 10)
             if (parseBool(opts.includeOnce, false)) dPkt.includeOnce = true
             if (!runConstraints(dPkt, { action: 'deactivate', rawOpts: opts }, notifyPlayer)) return null
+            STATS.packetsBuilt++
             return dPkt
         }
 
         if (action === 'patch') {
             if (!slotStr && !keyStr) {
+                STATS.rejectedInvalid++
                 return reportWarn('3D 特效 patch 增量报文缺少必填参数 `slotId` / `id` / `key`！', notifyPlayer)
             }
             var pPkt = {
@@ -390,12 +421,14 @@
                 }
             }
             if (!runConstraints(pPkt, { action: 'patch', rawOpts: opts }, notifyPlayer)) return null
+            STATS.packetsBuilt++
             return pPkt
         }
 
         // action === 'push'
         var worldPos = sanitizeWorldPos(opts)
         if (worldPos == null && !opts.followEntityUuid) {
+            STATS.rejectedInvalid++
             return reportWarn('3D 空间特效 push 报文缺少必填坐标 `worldPos: [x, y, z]`（或 `x/y/z` / `followEntityUuid`）！', notifyPlayer)
         }
 
@@ -414,6 +447,7 @@
             if (inlineClean != null) shapes.push(inlineClean)
         }
         if (shapes.length === 0) {
+            STATS.rejectedInvalid++
             return reportWarn('3D 空间特效 push 报文缺少有效图元 `shapes[]`（或 `kind`）！', notifyPlayer)
         }
 
@@ -472,11 +506,13 @@
             : shapes.length * 3
         var maxCost = (tierStr === 'player') ? CONFIG.maxPlayerCost : CONFIG.maxSystemCost
         if (cost > maxCost) {
+            STATS.rejectedQuota++
             return reportWarn('3D 空间特效渲染开销超出配额上限（cost=' + cost + ' > max=' + maxCost + '，tier=' + tierStr + '），已拒绝构建报文！', notifyPlayer)
         }
         built.cost = cost
 
         if (!runConstraints(built, { action: 'push', rawOpts: opts }, notifyPlayer)) return null
+        STATS.packetsBuilt++
         return built
     }
 
@@ -495,8 +531,13 @@
         if (player == null || typeof player.sendData !== 'function') return 0
         try {
             player.sendData(CHANNEL, pkt)
+            STATS.packetsSent++
+            if (CONFIG.debug) {
+                LOGGER.debug('sendData', 'action=' + pkt.action + ' tier=' + pkt.tier + ' key=' + (pkt.key || '-') + ' cost=' + (pkt.cost || 0))
+            }
             return 1
         } catch (eSend) {
+            STATS.sendErrors++
             LOGGER.catchWarn('sendData', eSend, null, CONFIG.errorLogIntervalMs)
             return 0
         }
@@ -810,6 +851,508 @@
         return true
     }
 
+    function getStats() {
+        return {
+            version:            VERSION,
+            protoVersion:       PROTO_VERSION,
+            channel:            CHANNEL,
+            debug:              Boolean(CONFIG.debug),
+            presetsCount:       FX3D_PRESETS.list().length,
+            constraintsCount:   CONSTRAINTS.length,
+            validKinds:         Object.keys(VALID_KINDS),
+            validSurfaces:      Object.keys(VALID_SURFACES),
+            packetsBuilt:       STATS.packetsBuilt,
+            packetsSent:        STATS.packetsSent,
+            sendErrors:         STATS.sendErrors,
+            rejectedInvalid:    STATS.rejectedInvalid,
+            rejectedQuota:      STATS.rejectedQuota,
+            rejectedConstraint: STATS.rejectedConstraint,
+            cmdCalls:           STATS.cmdCalls
+        }
+    }
+
+    function resetStats() {
+        STATS.packetsBuilt       = 0
+        STATS.packetsSent        = 0
+        STATS.sendErrors         = 0
+        STATS.rejectedInvalid    = 0
+        STATS.rejectedQuota      = 0
+        STATS.rejectedConstraint = 0
+        STATS.cmdCalls           = 0
+        return getStats()
+    }
+
+    // ------------------------------------------------------------------------
+    // 指令权限分层辅助与 /epiphy fx3d 子命令注册
+    // ------------------------------------------------------------------------
+    function extractPlayerUuidSafe(pl) {
+        if (pl == null) return ''
+        try {
+            if (typeof BASE.uuidOf === 'function') {
+                var bu = BASE.uuidOf(pl)
+                if (bu) return String(bu).trim().toLowerCase()
+            }
+        } catch (e0) { }
+        try {
+            if (pl.uuid != null) return String(pl.uuid).trim().toLowerCase()
+            if (typeof pl.getStringUUID === 'function') return String(pl.getStringUUID()).trim().toLowerCase()
+        } catch (e1) { }
+        return ''
+    }
+
+    function resolveFx3dCommandActor(source) {
+        var valve = (typeof global !== 'undefined' && global != null) ? global.EpiphyPermissionValve : null
+        if (valve != null && typeof valve.getCommandActorTier === 'function') {
+            var info = valve.getCommandActorTier(source)
+            if (info != null) {
+                var u = info.uuid || extractPlayerUuidSafe(info.player)
+                return {
+                    tier:     info.tier === 'player' ? 'player' : 'system',
+                    isPlayer: Boolean(info.isPlayer),
+                    isOp:     Boolean(info.isOp),
+                    uuid:     u ? String(u).trim().toLowerCase() : 'anon',
+                    player:   info.player || null
+                }
+            }
+        }
+        // 无权限阀降级：仅信任真实 ServerPlayer.isOp()，严禁使用 source.hasPermission(2)
+        var pl = null
+        try {
+            if (source != null) {
+                if (source.player != null) pl = source.player
+                else if (typeof source.getPlayer === 'function') pl = source.getPlayer()
+            }
+        } catch (ePl) { }
+        if (pl != null) {
+            var isOp = Boolean(typeof pl.isOp === 'function' && pl.isOp())
+            var pu   = extractPlayerUuidSafe(pl)
+            return {
+                tier:     isOp ? 'system' : 'player',
+                isPlayer: true,
+                isOp:     isOp,
+                uuid:     pu || 'anon',
+                player:   pl
+            }
+        }
+        return { tier: 'system', isPlayer: false, isOp: true, uuid: '', player: null }
+    }
+
+    function hasFx3dBroadcastGrant(actor) {
+        if (actor == null || actor.tier !== 'player') return true
+        var valve = (typeof global !== 'undefined' && global != null) ? global.EpiphyPermissionValve : null
+        var srv = resolveActiveServer(actor.player != null ? actor.player.server : null)
+        if (valve != null && typeof valve.hasPlayerScope === 'function' && actor.player != null) {
+            return Boolean(valve.hasPlayerScope(srv, actor.player, 'fx3d.broadcast', { exactScopeOnly: true }))
+        }
+        return false
+    }
+
+    function checkPlayerFx3dCmdRate(actor, bucket) {
+        if (actor == null || actor.tier !== 'player' || !actor.uuid) return true
+        var key   = (bucket ? String(bucket) : 'send') + ':' + String(actor.uuid).trim().toLowerCase()
+        var nowMs = Date.now()
+        var last  = playerCmdCooldownMap.get(key) || 0
+        if ((nowMs - last) < PLAYER_FX3D_LIMITS.commandCooldownMs) {
+            return false
+        }
+        if (playerCmdCooldownMap.size >= 1024) {
+            playerCmdCooldownMap.forEach(function (v, k) {
+                if ((nowMs - v) >= PLAYER_FX3D_LIMITS.commandCooldownMs) {
+                    playerCmdCooldownMap.delete(k)
+                }
+            })
+            if (playerCmdCooldownMap.size >= 1024) playerCmdCooldownMap.clear()
+        }
+        playerCmdCooldownMap.set(key, nowMs)
+        return true
+    }
+
+    function applyPlayerFx3dLimits(opts, actor) {
+        if (!BASE.isObjectLike(opts) || actor == null || actor.tier !== 'player') return opts
+        var ownerNs = 'u:' + (actor.uuid || 'anon')
+        opts._sourceTier = 'player'
+        opts.tier        = 'player'
+        opts.namespace   = ownerNs
+        var rawGrp = (opts.group != null && String(opts.group).trim() !== '' && opts.group !== '*')
+            ? String(opts.group).trim()
+            : 'default'
+        if (opts.action === 'clear' && (opts.group === '*' || opts.group === 'all')) {
+            opts.group = '*'
+        } else {
+            opts.group = (rawGrp.indexOf(ownerNs + ':') === 0) ? rawGrp : (ownerNs + ':' + rawGrp)
+        }
+        opts.priority = Math.min(parsePriority(opts.priority, 2), PLAYER_FX3D_LIMITS.maxPriority)
+        if (opts.stay != null) opts.stay = Math.min(PLAYER_FX3D_LIMITS.maxStayTicks, Math.max(4, Number(opts.stay) || CONFIG.defaultStayTicks))
+        if (opts.duration != null) {
+            var dt = SPEC.parseTicksOrSec(opts.duration)
+            opts.duration = Math.min(PLAYER_FX3D_LIMITS.maxStayTicks, Math.max(4, dt != null ? dt : CONFIG.defaultStayTicks))
+        }
+        if (opts.radius != null && opts.kind != null) {
+            opts.radius = Math.min(PLAYER_FX3D_LIMITS.maxShapeRadius, Math.max(0.2, Number(opts.radius) || 2.0))
+        }
+        return opts
+    }
+
+    var FX3D_HELP_LINES = [
+        '§3§l----------------------------------------------------',
+        '§b§l  [ Epiphy 空间特效组件 // /epiphy fx3d 帮助手册 ]',
+        '§3§l----------------------------------------------------',
+        '§e1. 当前位置生成： §f/epiphy fx3d here <ring|beam|helix|sphere> [形状半径] [持续ticks]',
+        '§e2. 指定坐标广播： §f/epiphy fx3d pos <维度> <x y z> <广播范围> <kind> [形状半径] [持续ticks]',
+        '§e3. 触发已注册预设：§f/epiphy fx3d preset <预设名> [广播范围]',
+        '§e4. 渐隐停止特效： §f/epiphy fx3d stop [key|*]',
+        '§e5. 清空空间特效： §f/epiphy fx3d clear [group|*]',
+        '§e6. 查看预设与图元：§f/epiphy fx3d presets',
+        '§3§l----------------------------------------------------'
+    ]
+
+    function buildFx3dCommandNode(regCtx) {
+        var cb = BASE.createCommandBuilder(regCtx, { tag: 'Epiphy 3DFX' })
+
+        function cmdErr(ctx, msg) {
+            return cb.replyErr(ctx, msg + ' §7(输入 §f/epiphy fx3d help §7查看语法)')
+        }
+
+        function resolveSourcePosAndLevel(src) {
+            var lvl = null
+            var pos = null
+            try {
+                if (src != null) {
+                    if (src.level != null) lvl = src.level
+                    else if (typeof src.getLevel === 'function') lvl = src.getLevel()
+                    else if (src.player != null && src.player.level != null) lvl = src.player.level
+                }
+            } catch (eL) { }
+            try {
+                if (src != null) {
+                    var pObj = src.position != null ? src.position : (typeof src.getPosition === 'function' ? src.getPosition() : null)
+                    if (pObj != null && pObj.x != null) {
+                        pos = [Number(pObj.x), Number(pObj.y), Number(pObj.z)]
+                    } else if (src.player != null && src.player.x != null) {
+                        pos = [Number(src.player.x), Number(src.player.y), Number(src.player.z)]
+                    }
+                }
+            } catch (eP) { }
+            return { level: lvl, pos: pos }
+        }
+
+        function execHere(ctx, kindName, shapeRadiusOpt, stayOpt) {
+            STATS.cmdCalls++
+            var actor = resolveFx3dCommandActor(ctx.source)
+            if (!checkPlayerFx3dCmdRate(actor, 'send')) {
+                return cmdErr(ctx, '操作过快，请稍候再试！')
+            }
+            var loc = resolveSourcePosAndLevel(ctx.source)
+            if (loc.level == null || loc.pos == null) {
+                return cmdErr(ctx, '当前指令源无有效世界坐标，请改用 /epiphy fx3d pos <维度> <x y z> ...')
+            }
+            var kLower = String(kindName || '').trim().toLowerCase()
+            if (!VALID_KINDS[kLower]) {
+                return cmdErr(ctx, '未知 3D 图元类型 `' + kLower + '`（可用: ' + Object.keys(VALID_KINDS).join(', ') + '）')
+            }
+            var broadcastRange = actor.tier === 'player'
+                ? (hasFx3dBroadcastGrant(actor) ? PLAYER_FX3D_LIMITS.broadcastMaxRadius : PLAYER_FX3D_LIMITS.maxRadius)
+                : CONFIG.defaultRadius
+            var pktOpts = {
+                kind:     kLower,
+                radius:   shapeRadiusOpt != null ? Number(shapeRadiusOpt) : 2.5,
+                stay:     stayOpt != null ? Number(stayOpt) : CONFIG.defaultStayTicks,
+                worldPos: loc.pos
+            }
+            applyPlayerFx3dLimits(pktOpts, actor)
+            var sent = inDimension(loc.level, loc.pos[0], loc.pos[1], loc.pos[2], broadcastRange, pktOpts)
+            return cb.replyOk(ctx, '已在当前坐标派发 3D 空间特效 [' + kLower + ']（送达 ' + sent + ' 名玩家）')
+        }
+
+        function execPos(ctx, dimStr, posArr, rangeVal, kindName, shapeRadiusOpt, stayOpt) {
+            STATS.cmdCalls++
+            var actor = resolveFx3dCommandActor(ctx.source)
+            if (!checkPlayerFx3dCmdRate(actor, 'send')) {
+                return cmdErr(ctx, '操作过快，请稍候再试！')
+            }
+            if (!dimStr || String(dimStr).trim() === '') {
+                return cmdErr(ctx, '无法解析目标维度！')
+            }
+            var reqDim = SPEC.normalizeDim(dimStr)
+            var hasBroad = hasFx3dBroadcastGrant(actor)
+            if (actor.tier === 'player' && !hasBroad) {
+                var srcLoc = resolveSourcePosAndLevel(ctx.source)
+                var srcDim = srcLoc.level != null ? BASE.dimOfLevel(srcLoc.level) : ''
+                if (!srcDim || srcDim !== reqDim) {
+                    return cmdErr(ctx, '你未被授予 fx3d.broadcast 权限，禁止跨维度触发 3D 空间特效！')
+                }
+                if (Number(rangeVal) > PLAYER_FX3D_LIMITS.maxRadius) {
+                    return cmdErr(ctx, '你未被授予 fx3d.broadcast 权限，广播半径上限为 ' + PLAYER_FX3D_LIMITS.maxRadius + ' 格！')
+                }
+            }
+            var kLower = String(kindName || '').trim().toLowerCase()
+            if (!VALID_KINDS[kLower]) {
+                return cmdErr(ctx, '未知 3D 图元类型 `' + kLower + '`（可用: ' + Object.keys(VALID_KINDS).join(', ') + '）')
+            }
+            var maxRange = actor.tier === 'player' ? PLAYER_FX3D_LIMITS.broadcastMaxRadius : 256
+            var rClean = Math.max(1, Math.min(maxRange, Number(rangeVal) || CONFIG.defaultRadius))
+            var x = Array.isArray(posArr) ? Number(posArr[0]) : 0
+            var y = Array.isArray(posArr) ? Number(posArr[1]) : 64
+            var z = Array.isArray(posArr) ? Number(posArr[2]) : 0
+            var pktOpts = {
+                kind:      kLower,
+                dimension: dimStr,
+                worldPos:  [x, y, z],
+                radius:    shapeRadiusOpt != null ? Number(shapeRadiusOpt) : 2.5,
+                stay:      stayOpt != null ? Number(stayOpt) : CONFIG.defaultStayTicks
+            }
+            applyPlayerFx3dLimits(pktOpts, actor)
+            var sent = inDimension(dimStr, x, y, z, rClean, pktOpts)
+            return cb.replyOk(ctx, '已在 ' + SPEC.normalizeDim(dimStr) + ' [' + x.toFixed(1) + ', ' + y.toFixed(1) + ', ' + z.toFixed(1) + '] 派发 3D 空间特效 [' + kLower + ']（送达 ' + sent + ' 名玩家）')
+        }
+
+        function execPreset(ctx, presetName, rangeOpt) {
+            STATS.cmdCalls++
+            var actor = resolveFx3dCommandActor(ctx.source)
+            if (!checkPlayerFx3dCmdRate(actor, 'send')) {
+                return cmdErr(ctx, '操作过快，请稍候再试！')
+            }
+            var pName = String(presetName || '').trim()
+            if (!FX3D_PRESETS.has(pName)) {
+                return cmdErr(ctx, '未找到已注册的 3D 预设 `' + pName + '`')
+            }
+            var loc = resolveSourcePosAndLevel(ctx.source)
+            if (loc.level == null || loc.pos == null) {
+                return cmdErr(ctx, '当前指令源无有效世界坐标！')
+            }
+            var maxR = actor.tier === 'player'
+                ? (hasFx3dBroadcastGrant(actor) ? PLAYER_FX3D_LIMITS.broadcastMaxRadius : PLAYER_FX3D_LIMITS.maxRadius)
+                : 256
+            var reqR = rangeOpt != null ? Number(rangeOpt) : CONFIG.defaultRadius
+            if (actor.tier === 'player' && !hasFx3dBroadcastGrant(actor) && reqR > PLAYER_FX3D_LIMITS.maxRadius) {
+                return cmdErr(ctx, '你未被授予 fx3d.broadcast 权限，广播半径上限为 ' + PLAYER_FX3D_LIMITS.maxRadius + ' 格！')
+            }
+            var rUse = Math.max(1, Math.min(maxR, reqR))
+            var pktOpts = { preset: pName, worldPos: loc.pos }
+            applyPlayerFx3dLimits(pktOpts, actor)
+            var sent = inDimension(loc.level, loc.pos[0], loc.pos[1], loc.pos[2], rUse, pktOpts)
+            return cb.replyOk(ctx, '已触发 3D 预设 [' + pName + ']（送达 ' + sent + ' 名玩家）')
+        }
+
+        function execStopOrClear(ctx, mode, targetArg) {
+            STATS.cmdCalls++
+            var actor = resolveFx3dCommandActor(ctx.source)
+            if (!checkPlayerFx3dCmdRate(actor, 'control')) {
+                return cmdErr(ctx, '操作过快，请稍候再试！')
+            }
+            var loc = resolveSourcePosAndLevel(ctx.source)
+            if (loc.level == null || loc.pos == null) {
+                return cmdErr(ctx, '当前指令源无有效世界坐标！')
+            }
+            var range = actor.tier === 'player'
+                ? (hasFx3dBroadcastGrant(actor) ? PLAYER_FX3D_LIMITS.broadcastMaxRadius : PLAYER_FX3D_LIMITS.maxRadius)
+                : 128
+            var tgt = (targetArg != null && String(targetArg).trim() !== '') ? String(targetArg).trim() : '*'
+            var pktOpts = (mode === 'clear')
+                ? { action: 'clear', group: tgt }
+                : { action: 'deactivate', key: tgt, group: (tgt === '*' || tgt === 'all') ? '*' : '' }
+            applyPlayerFx3dLimits(pktOpts, actor)
+            var sent = inDimension(loc.level, loc.pos[0], loc.pos[1], loc.pos[2], range, pktOpts)
+            return cb.replyOk(ctx, '已向周围下发 3D 空间特效 ' + (mode === 'clear' ? '清空' : '渐隐停止') + ' 指令 [' + tgt + ']（送达 ' + sent + ' 名玩家）')
+        }
+
+        function execListPresets(ctx) {
+            var pList = FX3D_PRESETS.list()
+            var kList = Object.keys(VALID_KINDS)
+            return cb.sendLines(ctx, [
+                '§b[Epiphy 3DFX] §7支持图元 (' + kList.length + '): §f' + kList.join(', '),
+                '§b[Epiphy 3DFX] §7已注册预设 (' + pList.length + '): §f' + (pList.length > 0 ? pList.join(', ') : '（暂无）')
+            ])
+        }
+
+        return cb.literal('fx3d', {
+            exec: function (ctx) { return cb.sendLines(ctx, FX3D_HELP_LINES) },
+            children: [
+                cb.literal('help', {
+                    scope: 'fx3d.help',
+                    exec:  function (ctx) { return cb.sendLines(ctx, FX3D_HELP_LINES) }
+                }),
+                cb.literal('presets', {
+                    scope: 'fx3d.presets',
+                    exec:  execListPresets
+                }),
+                cb.literal('here', {
+                    scope: 'fx3d.here',
+                    children: [
+                        cb.arg({ name: 'kind', type: 'word' }, {
+                            exec: function (ctx) {
+                                return execHere(ctx, cb.readArg(ctx, 'kind', 'word'), null, null)
+                            },
+                            children: [
+                                cb.arg({ name: 'shapeRadius', type: 'double' }, {
+                                    exec: function (ctx) {
+                                        return execHere(ctx, cb.readArg(ctx, 'kind', 'word'), cb.readArg(ctx, 'shapeRadius', 'double'), null)
+                                    },
+                                    children: [
+                                        cb.arg({ name: 'stay', type: 'double' }, function (ctx) {
+                                            return execHere(ctx, cb.readArg(ctx, 'kind', 'word'), cb.readArg(ctx, 'shapeRadius', 'double'), cb.readArg(ctx, 'stay', 'double'))
+                                        })
+                                    ]
+                                })
+                            ]
+                        })
+                    ]
+                }),
+                cb.literal('pos', {
+                    scope: 'fx3d.pos',
+                    children: [
+                        cb.arg({ name: 'dim', type: 'dim' }, {
+                            children: [
+                                cb.arg({ name: 'center', type: 'vec3' }, {
+                                    children: [
+                                        cb.arg({ name: 'range', type: 'double' }, {
+                                            children: [
+                                                cb.arg({ name: 'kind', type: 'word' }, {
+                                                    exec: function (ctx) {
+                                                        return execPos(ctx, cb.readArg(ctx, 'dim', 'dim'), cb.readArg(ctx, 'center', 'vec3'), cb.readArg(ctx, 'range', 'double'), cb.readArg(ctx, 'kind', 'word'), null, null)
+                                                    },
+                                                    children: [
+                                                        cb.arg({ name: 'shapeRadius', type: 'double' }, {
+                                                            exec: function (ctx) {
+                                                                return execPos(ctx, cb.readArg(ctx, 'dim', 'dim'), cb.readArg(ctx, 'center', 'vec3'), cb.readArg(ctx, 'range', 'double'), cb.readArg(ctx, 'kind', 'word'), cb.readArg(ctx, 'shapeRadius', 'double'), null)
+                                                            },
+                                                            children: [
+                                                                cb.arg({ name: 'stay', type: 'double' }, function (ctx) {
+                                                                    return execPos(ctx, cb.readArg(ctx, 'dim', 'dim'), cb.readArg(ctx, 'center', 'vec3'), cb.readArg(ctx, 'range', 'double'), cb.readArg(ctx, 'kind', 'word'), cb.readArg(ctx, 'shapeRadius', 'double'), cb.readArg(ctx, 'stay', 'double'))
+                                                                })
+                                                            ]
+                                                        })
+                                                    ]
+                                                })
+                                            ]
+                                        })
+                                    ]
+                                })
+                            ]
+                        })
+                    ]
+                }),
+                cb.literal('preset', {
+                    scope: 'fx3d.here',
+                    children: [
+                        cb.arg({ name: 'presetName', type: 'word' }, {
+                            exec: function (ctx) {
+                                return execPreset(ctx, cb.readArg(ctx, 'presetName', 'word'), null)
+                            },
+                            children: [
+                                cb.arg({ name: 'range', type: 'double' }, function (ctx) {
+                                    return execPreset(ctx, cb.readArg(ctx, 'presetName', 'word'), cb.readArg(ctx, 'range', 'double'))
+                                })
+                            ]
+                        })
+                    ]
+                }),
+                cb.literal('stop', {
+                    scope: 'fx3d.stop',
+                    exec: function (ctx) { return execStopOrClear(ctx, 'stop', '*') },
+                    children: [
+                        cb.arg({ name: 'target', type: 'word' }, function (ctx) {
+                            return execStopOrClear(ctx, 'stop', cb.readArg(ctx, 'target', 'word'))
+                        })
+                    ]
+                }),
+                cb.literal('clear', {
+                    scope: 'fx3d.clear',
+                    exec: function (ctx) { return execStopOrClear(ctx, 'clear', '*') },
+                    children: [
+                        cb.arg({ name: 'target', type: 'word' }, function (ctx) {
+                            return execStopOrClear(ctx, 'clear', cb.readArg(ctx, 'target', 'word'))
+                        })
+                    ]
+                })
+            ]
+        })
+    }
+
+    var fx3dSubcommandSpec = {
+        name: 'fx3d',
+        permission: {
+            mode:                 'authorized',
+            label:                '可作弊 + 管理员/已授权对象',
+            requireCheats:        true,
+            requireOp:            true,
+            allowAuthorized:      true,
+            opLevel:              2,
+            allowCommandBlock:    true,
+            allowConsole:         true,
+            allowDeclaredCallers: true,
+            allowedCallers:       null
+        },
+        scopes: [
+            { scope: 'fx3d.here',      desc: '在当前维度位置周围派发 3D 空间特效（无 broadcast 上限 32m）' },
+            { scope: 'fx3d.pos',       desc: '向指定维度坐标派发 3D 空间特效（跨维度或 >32m 需 fx3d.broadcast）' },
+            { scope: 'fx3d.stop',      desc: '渐隐停止自己命名空间下的 3D 空间特效' },
+            { scope: 'fx3d.clear',     desc: '清空自己命名空间下的 3D 空间特效' },
+            { scope: 'fx3d.presets',   desc: '查看已注册的 3D 空间特效预设与支持图元' },
+            { scope: 'fx3d.broadcast', desc: '允许非 OP 跨维度或超 32m(最高96m) 的广域 3D 特效调度（需单独授予）' },
+            { scope: 'fx3d.help',      desc: '查看 /epiphy fx3d 帮助' }
+        ],
+        summary:   '世界 3D 空间特效调度指令 (/epiphy fx3d ...)',
+        helpLines: FX3D_HELP_LINES,
+        buildNode: buildFx3dCommandNode
+    }
+
+    // 动态上报自身统计与健康自检到统一调试组件 (EpiphyDebug)
+    var fx3dDebugProvider = {
+        name:  'fx3d',
+        label: '3D 空间特效调度',
+        order: 35,
+        summary: function () {
+            return 'built=' + STATS.packetsBuilt +
+                ' | sent=' + STATS.packetsSent +
+                ' | presets=' + FX3D_PRESETS.list().length +
+                ' | rej(q/c/i)=' + STATS.rejectedQuota + '/' + STATS.rejectedConstraint + '/' + STATS.rejectedInvalid
+        },
+        detail: function () {
+            var st = getStats()
+            return [
+                'version: ' + st.version + ' (proto=v' + st.protoVersion + ', channel=' + st.channel + ')',
+                'debug: ' + st.debug + ' | cmdCalls: ' + st.cmdCalls,
+                'packetsBuilt: ' + st.packetsBuilt + ' | packetsSent: ' + st.packetsSent + ' | sendErrors: ' + st.sendErrors,
+                'rejected: quota=' + st.rejectedQuota + ', constraint=' + st.rejectedConstraint + ', invalid=' + st.rejectedInvalid,
+                'validKinds: ' + st.validKinds.join(', '),
+                'presets (' + st.presetsCount + '): ' + (FX3D_PRESETS.list().join(', ') || '（无）'),
+                'constraints (' + st.constraintsCount + '): ' + (listConstraints().join(', ') || '（无）')
+            ]
+        },
+        metrics: getStats,
+        check: function () {
+            return [
+                {
+                    name:   'fx3d_send_errors',
+                    ok:     STATS.sendErrors === 0,
+                    detail: 'sendErrors=' + STATS.sendErrors
+                },
+                {
+                    name:   'fx3d_proto_ready',
+                    ok:     Boolean(CHANNEL && PROTO_VERSION >= 1),
+                    detail: 'channel=' + CHANNEL + ', proto=v' + PROTO_VERSION
+                }
+            ]
+        },
+        actions: {
+            resetstats: {
+                desc: '重置 3D 空间特效服务端收发与拒绝计数',
+                fn: function () {
+                    resetStats()
+                    return '已重置 Epiphy3DFXServer 运行时统计计数'
+                }
+            }
+        }
+    }
+
+    if (typeof BASE.registerDebugProvider === 'function') {
+        BASE.registerDebugProvider(fx3dDebugProvider)
+    }
+    if (typeof BASE.registerSubcommandSafe === 'function') {
+        BASE.registerSubcommandSafe(fx3dSubcommandSpec, { requirePermissionValve: false })
+    }
+
     var API = {
         VERSION:             VERSION,
         CHANNEL:             CHANNEL,
@@ -837,6 +1380,8 @@
         listConstraints:     listConstraints,
         registerShapeSchema: registerShapeSchema,
         registerSurface:     registerSurface,
+        getStats:            getStats,
+        resetStats:          resetStats,
         _pure: {
             KNOWN_PACKET_KEYS: KNOWN_PACKET_KEYS,
             sanitizeShape:     sanitizeShape,

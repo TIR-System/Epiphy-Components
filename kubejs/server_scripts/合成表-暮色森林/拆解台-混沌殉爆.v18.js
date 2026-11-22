@@ -12,9 +12,8 @@
 //  第三方 Mod 联动依赖（玩法专属，不影响通用组件独立运行）：
 //    - Twilight Forest（终极拆解台本体）、Draconic Evolution / BrandonsCore（混沌湮灭波前与伤害）、Enigmatic Legacy（遗物豁免，缺失时安全回退）
 //  [语法规范] 遵循 README-LLM.md §1 强制语法基准（与 docs/kube-mods-rhino-es5-es6-compatibility.md）
-//  资源位置：kubejs/assets/epiphy/（models / textures / blockstates / lang）—— 加载根，普通文件；
-//            另有纯备份副本位于 kubejs/startup_scripts/拆解台-混沌殉爆/models/，不参与加载。
-//            全部为普通文件，无符号链接/硬链接/联接点，打包换机后行为一致。
+//  资源位置：kubejs/assets/epiphy/（models / textures / blockstates / lang）—— 唯一静态资源事实源，普通文件；
+//            全部为普通文件，无符号链接/硬链接/联接点，打包换机或迁入原生 Mod 后行为一致。
 //
 //  核心机制总览：
 //    0. 5 个失稳阶段方块（无合成方式，仅在破坏终极拆解台时出现；创造模式放置直接进入失稳爆炸流程）：

@@ -2,16 +2,15 @@
 //  拆解台 · 混沌殉爆 —— 失稳阶段方块注册 & 硬度修改 (KubeJS 1.20.1 / 2001.6.5)
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/startup_scripts/拆解台-混沌殉爆/Epiphy的小玩意-终极拆解台_不稳定.js
-//  资源加载位置（命名空间 epiphy；KubeJS 的加载根为 kubejs/assets/，无法用脚本改写）：
-//    kubejs/assets/epiphy/textures/block/ultra_uncrafting_instability_1~5_*.png   ← 唯一必须的实体资源
-//    kubejs/assets/epiphy/lang/zh_cn.json                                          ← 可选，显示名同脚本内 displayName
-//  模型与方块状态：**不放磁盘文件**，由本脚本的 .texture() 与 builder.modelJson 在运行时动态生成
-//    （KubeJS 1.20.1 支持仅保留 assets/<ns>/textures/，无需手写静态 models/ 或 blockstates/ JSON）。
-//    若在 assets 下另放 models/ blockstates/，会以同名 key 覆盖运行时生成的内容，反而引发资源异常。
-//  归档副本（普通文件，纯备份，不参与加载）：
-//    kubejs/startup_scripts/拆解台-混沌殉爆/models/
-//  注意：不使用符号链接 / 硬链接 / 联接点等任何操作系统级技巧，全部为普通文件，
-//        打包成整合包换机器后行为完全一致。
+//  第三方 Mod 联动声明（玩法专属，原则见 README-LLM.md §3.3）：
+//    - Twilight Forest（可选联动）：存在时将 `twilightforest:uncrafting_table` 挖掘硬度调整为 50.0；缺失时跳过修改，5 个失稳阶段方块与音效仍正常注册。
+//  资源单一事实源（命名空间 epiphy，位于 kubejs/assets/epiphy/，后续可零改动迁入原生 Mod assets/）：
+//    - kubejs/assets/epiphy/blockstates/ultra_uncrafting_instability_1~5.json
+//    - kubejs/assets/epiphy/models/block/ultra_uncrafting_instability_1~5.json  (双层自发光 forge_data block_light=15)
+//    - kubejs/assets/epiphy/models/item/ultra_uncrafting_instability_1~5.json
+//    - kubejs/assets/epiphy/textures/block/ultra_uncrafting_instability_1~5_*.png
+//    - kubejs/assets/epiphy/lang/zh_cn.json
+//  注意：全部为普通静态资源文件，无运行时重复拼接 modelJson，无符号链接 / 硬链接 / 联接点。
 //
 //  5 个失稳阶段方块设计（从【外壳破损】一路到【堆芯熔毁】）：
 //    - epiphy:ultra_uncrafting_instability_1 —— 终极拆解台 [外壳破损]（0s ~ 36s，浅粉红染色 #FFCCCC，光照 6）
@@ -64,7 +63,8 @@
         for (var i = 0; i < STAGES.length; i++) {
             ;(function (stage) {
                 var s = stage.shortId
-                var builder = event.create(stage.id)
+                // 方块状态与双层自发光模型由 kubejs/assets/epiphy/{blockstates,models}/ 静态 JSON 单一事实源提供
+                event.create(stage.id)
                     .displayName(stage.name)
                     .soundType('NETHERITE_BLOCK')
                     .hardness(50.0)
@@ -79,61 +79,20 @@
                     .texture('east', 'epiphy:block/' + s + '_uncrafting_side')
                     .texture('west', 'epiphy:block/' + s + '_uncrafting_side')
                     .texture('particle', 'epiphy:block/' + s + '_uncrafting_particle')
-
-                // 与 kubejs/assets/epiphy/models/block/ultra_uncrafting_instability_1~5.json 同构（双层自发光）
-                builder.modelJson = {
-                    parent: 'minecraft:block/block',
-                    render_type: 'minecraft:translucent',
-                    textures: {
-                        bottom: 'epiphy:block/' + s + '_uncrafting_particle',
-                        particle: 'epiphy:block/' + s + '_uncrafting_particle',
-                        top: 'epiphy:block/' + s + '_uncrafting_top',
-                        top2: 'epiphy:block/' + s + '_uncrafting_glow',
-                        north: 'epiphy:block/' + s + '_uncrafting_side',
-                        south: 'epiphy:block/' + s + '_uncrafting_side',
-                        east: 'epiphy:block/' + s + '_uncrafting_side',
-                        west: 'epiphy:block/' + s + '_uncrafting_side',
-                        north2: 'epiphy:block/' + s + '_uncrafting_glow_side',
-                        south2: 'epiphy:block/' + s + '_uncrafting_glow_side',
-                        east2: 'epiphy:block/' + s + '_uncrafting_glow_side',
-                        west2: 'epiphy:block/' + s + '_uncrafting_glow_side'
-                    },
-                    elements: [
-                        {
-                            from: [-0.05, -0.05, -0.05],
-                            to: [16.05, 16.05, 16.05],
-                            faces: {
-                                down: { cullface: 'down', texture: '#bottom' },
-                                up: { cullface: 'up', texture: '#top' },
-                                north: { cullface: 'north', texture: '#north' },
-                                south: { cullface: 'south', texture: '#south' },
-                                east: { cullface: 'east', texture: '#east' },
-                                west: { cullface: 'west', texture: '#west' }
-                            }
-                        },
-                        {
-                            from: [-0.05, -0.05, -0.05],
-                            to: [16.05, 16.05, 16.05],
-                            faces: {
-                                up: { cullface: 'up', forge_data: { block_light: 15, sky_light: 15 }, texture: '#top2' },
-                                north: { cullface: 'north', forge_data: { block_light: 15, sky_light: 15 }, texture: '#north2' },
-                                south: { cullface: 'south', forge_data: { block_light: 15, sky_light: 15 }, texture: '#south2' },
-                                east: { cullface: 'east', forge_data: { block_light: 15, sky_light: 15 }, texture: '#east2' },
-                                west: { cullface: 'west', forge_data: { block_light: 15, sky_light: 15 }, texture: '#west2' }
-                            }
-                        }
-                    ]
-                }
             })(STAGES[i])
         }
     })
 
     // 将原版终极拆解台挖掘硬度调为 50.0（黑曜石同款），不调高防爆抗性，不改变活塞推动属性
-    BlockEvents.modification(function (event) {
-        event.modify('twilightforest:uncrafting_table', function (block) {
-            block.destroySpeed = 50.0
-        })
-    })
+    if (typeof BlockEvents !== 'undefined' && BlockEvents != null && typeof BlockEvents.modification === 'function') {
+        if (typeof Platform === 'undefined' || Platform == null || typeof Platform.isLoaded !== 'function' || Platform.isLoaded('twilightforest')) {
+            BlockEvents.modification(function (event) {
+                event.modify('twilightforest:uncrafting_table', function (block) {
+                    block.destroySpeed = 50.0
+                })
+            })
+        }
+    }
 
     // ------------------------------------------------------------------------
     // 将 5 个失稳阶段方块声明加入独立创造模式物品栏模块 [kubejs/startup_scripts/通用组件/创造模式栏-epiphy.js]

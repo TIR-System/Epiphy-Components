@@ -1,7 +1,7 @@
 // ============================================================================
 //  Epiphy 的小玩意 —— 功能测试组件 ([rnfmabj-测试] 指令广播方块 & [英佩瑞斯-测试中] 局部 3D 星轨长剑)
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
-//  放置位置：kubejs/startup_scripts/通用组件/Epiphy的小玩意_功能测试.js
+//  放置位置：kubejs/startup_scripts/小玩意与案例/Epiphy的小玩意_功能测试.js
 //  依赖组件：
 //    - kubejs/startup_scripts/通用组件/Epiphy的-物品三维渲染器.js (global.EpiphyItem3DRenderer · v6 声明式物品 3D 渲染管线)
 //    - kubejs/client_scripts/通用组件/Epiphy的-空间特效渲染器.js  (global.Epiphy3DFX / global.EpiphySpatialFX)

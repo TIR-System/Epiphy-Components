@@ -390,11 +390,6 @@ module.exports = function registerSuite(test, h) {
             { name: 'Epiphy3DFXServer',      docTag: 'Epiphy3DFXServer',                          obj: sb.global.Epiphy3DFXServer,      file: h.FX3D_SERVER_PATH },
             { name: 'Epiphy3DFX',            docTag: 'Epiphy3DFX',                                obj: sb.global.Epiphy3DFX,            file: h.FX3D_PATH }
         ]
-        // Pure content/item/block-registration scripts with no exported global component API
-        var exemptCommonScripts = [
-            path.normalize(path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的小玩意-原版_其他Mod的隐藏物品.js')),
-            path.normalize(path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的小玩意_功能测试.js'))
-        ]
         var managedSet = {}
         for (var mi = 0; mi < componentMatrix.length; mi++) {
             managedSet[path.normalize(componentMatrix[mi].file)] = true
@@ -412,11 +407,10 @@ module.exports = function registerSuite(test, h) {
                 if (ents[ce].slice(-3) !== '.js') continue
                 var fullFp = path.normalize(path.join(commonDirs[cd], ents[ce]))
                 discoveredCommonFiles.push(fullFp)
-                if (exemptCommonScripts.indexOf(fullFp) >= 0) continue
-                assert.ok(managedSet[fullFp], 'Unmanaged common component detected (must register VERSION & header check in Test 67): ' + path.relative(ROOT_DIR, fullFp))
+                assert.ok(managedSet[fullFp], 'Unmanaged script detected inside 通用组件/ (downstream scripts belong in dedicated folders; generic components must register VERSION & header check in Test 67): ' + path.relative(ROOT_DIR, fullFp))
             }
         }
-        assert.ok(discoveredCommonFiles.length >= componentMatrix.length, 'common component directory scan must discover all scripts')
+        assert.strictEqual(discoveredCommonFiles.length, componentMatrix.length, '通用组件/ across startup/server/client must strictly match the 15 managed generic components 1:1 (zero exemptions)')
 
         for (var i = 0; i < componentMatrix.length; i++) {
             var row = componentMatrix[i]
@@ -429,7 +423,7 @@ module.exports = function registerSuite(test, h) {
         }
         assert.strictEqual(sb.global.EpiphyAudio.VERSION, '5.8.0', 'EpiphyAudio must report its own 5.8.0 version')
         assert.strictEqual(sb.global.EpiphyAudioClient.VERSION, '5.6.0', 'EpiphyAudioClient must report its own 5.6.0 version')
-        assert.strictEqual(sb.global.EpiphyDebug.VERSION, '1.0.0', 'EpiphyDebug must report its own 1.0.0 version')
+        assert.strictEqual(sb.global.EpiphyDebug.VERSION, '1.1.0', 'EpiphyDebug must report its own 1.1.0 version')
         assert.strictEqual(sb.global.EpiphyBugfix.VERSION, '1.0.0', 'EpiphyBugfix must report its own 1.0.0 version')
 
         // 3b. Cross-document exact 3-segment semver parity & anti-drift guard (README.md, README_EN.md, README-LLM.md, roadmap)

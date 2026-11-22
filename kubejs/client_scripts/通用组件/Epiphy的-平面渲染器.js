@@ -1,5 +1,5 @@
 // ============================================================================
-//  通用平面渲染与屏幕弹幕组件 —— 客户端渲染引擎 (Epiphy2DRenderer / ScreenDanmakuClient v6.2.0)
+//  通用平面渲染与屏幕弹幕组件 —— 客户端渲染引擎 (Epiphy2DRenderer / ScreenDanmakuClient v6.2.1)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-平面渲染器.js
@@ -50,7 +50,7 @@
     var CHANNEL       = (PROTO && PROTO.DANMAKU_CHANNEL) || 'epiphy:screen_danmaku'
     var DEBUG_CHANNEL = 'epiphy:render_debug'
     var PROTO_VERSION = (PROTO && PROTO.DANMAKU_PROTO_VERSION) || 6
-    var VERSION       = '6.2.0'
+    var VERSION       = '6.2.1'
     if (SPEC && typeof SPEC.checkDependencyVersion === 'function') {
         SPEC.checkDependencyVersion('EpiphySpec', SPEC, '2.5.0', '2.99.99', {
             caller: 'Epiphy2DRenderer',
@@ -411,6 +411,10 @@
     }
 
     function getRendererPerfStats() {
+        var fx3dStats = null
+        if (typeof global !== 'undefined' && global != null && global.Epiphy3DFX != null && typeof global.Epiphy3DFX.getStats === 'function') {
+            try { fx3dStats = global.Epiphy3DFX.getStats() } catch (eFx3dStat) { fx3dStats = null }
+        }
         return {
             version:        VERSION,
             protoVersion:   PROTO_VERSION,
@@ -438,6 +442,7 @@
                 glyphWidth:   GLYPH_WIDTH_CACHE.size(),
                 textureExist: TEXTURE_EXIST_CACHE.size()
             },
+            fx3d:           fx3dStats,
             perfLogEnabled: Boolean(CONFIG.perfLogEnabled),
             perfLogPath:    PERF_STATS.perfLogPath || resolveClientPerfLogPath(),
             lastWriteErr:   PERF_STATS.lastWriteErr

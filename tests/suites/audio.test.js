@@ -853,7 +853,7 @@ module.exports = function registerSuite(test, h) {
     // 35. Audio Forge 1.20.1 SRG-only production runtime + Epiphy的小玩意_功能测试 e2e
     // ----------------------------------------------------------------------------
     test('Epiphy的小玩意_功能测试 & EpiphyAudioClient: SRG-only Forge runtime, subtitle m_7761_ & attCache recovery', function () {
-        var TEST_BLOCK_PATH = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '通用组件', 'Epiphy的小玩意_功能测试.js')
+        var TEST_BLOCK_PATH = path.join(ROOT_DIR, 'kubejs', 'startup_scripts', '小玩意与案例', 'Epiphy的小玩意_功能测试.js')
 
         // 1. Load startup (Spec + Epiphy的小玩意_功能测试.js) + server (Base + BlockTracker + Audio)
         var registeredSounds = []
