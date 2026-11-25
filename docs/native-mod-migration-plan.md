@@ -1,6 +1,6 @@
 # Epiphy 独立原生模组（Kotlin + Java · Phase 4）迁移工程计划书
 
-> **文档状态**：Phase 4 原生化工程蓝图与架构实施计划（v1.3）  
+> **文档状态**：Phase 4 原生化工程蓝图与架构实施计划（v1.4）  
 > **许可证声明 (License)**：本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)  
 > **前置基线**：KubeJS 过渡期 `P0 ~ P3` 全量里程碑已封版（15 个通用组件、74/74 回归单测、[`docs/proto_v6_schema.json`](proto_v6_schema.json) `v6.3.0`）  
 > **关联文档**：[`README-LLM.md`](../README-LLM.md) · [`docs/rendering-subsystem-roadmap.md`](rendering-subsystem-roadmap.md)
@@ -250,17 +250,22 @@ kubejs/ (整合包数据魔改层 —— 永久保留在 KubeJS，无需移植�
    - 新增原生核心着色器 `epiphy:ui_masked_fill`，同时采样 `Sampler0`（基底纯色/渐变/视差图层）与 `Sampler1`（任意异形 PNG 灰度/Alpha 遮罩），单 Pass 实现斜切装甲槽、圆环进度扇区与异形裂隙窗。
 4. **`world_plane` 三维射线平面求交与轻交互**：
    - 对开启 `interactive = true` 的 `world_plane`，在客户端准星射线（`Player.pick` 视线向量）与平面方程 $(P - P_0) \cdot \vec{n} = 0$ 求交，反解局部像素坐标 $(u, v)$，支持节点悬停高亮（`$hover` 内置变量）与右键点击事件回传服务端（附带服务端距离 `<= maxDistance` 与视线防穿墙二次校验）。
+5. **原版与第三方 Mod HUD / Boss 血条 / GUI 的动态挟持与替换（Conditional UI Hijack）**：
+   - 面向“拦截原版或其他 Mod 的血条/界面并完全替换为 Epiphy 自绘高定面板”的核心渲染器诉求，提供由轻到重的三级接管管线：
+     - **L1 事件级标准接管**：通过 Forge `RenderGuiOverlayEvent.Pre`（按 `NamedGuiOverlay` ID 精准 `setCanceled(true)` 吞掉原版或第三方 HUD 层）与 `ScreenEvent.Opening`（通过 `setNewScreen` 包装或替换为自绘 `Screen`）；
+     - **L2 细粒度绘制流条件接管（`@WrapOperation` / `@WrapWithCondition`）**：例如在 `BossHealthOverlay` 单条 `LerpingBossEvent` 绘制处用 `@WrapOperation` 拦截——命中已注册 Epiphy 血条规则的 Boss 时**不调用 `original.call(...)`**（直接吞掉原血条并原地驱动 `PROTO v6` + Shader/FBO 面板），未命中的普通 Boss 原样放行给原版或其他美化 Mod；
+     - **L3 第三方 Mod 专属界面按需挟持（`IMixinConfigPlugin.shouldApplyMixin`）**：针对不走标准事件直接硬写渲染的第三方 Mod GUI/血条，在 `epiphy-compat` 中通过 `LoadingModList.get().getModFileById(...) != null` 动态挂载专属拦截 Mixin，装了目标 Mod 才精准接管替换，未安装时静默跳过零报错。
 
-### 5.3 非渲染领域的非破坏性 Mixin 活用与克制准入纪律
-借助 `MixinBooster` (`Fabric Mixin`) + `MixinExtras`，服务端与底层机制同样能以极小代码量取代脚本时代笨重的事后轮询与外置补丁，但必须严守**「底层咽喉精准下刀，上层业务克制禁用」**的工程边界：
+### 5.3 非渲染领域的 Mixin 活用与「可接管但忌写死」工程准则
+借助 `MixinBooster` (`Fabric Mixin`) + `MixinExtras`，服务端与底层机制同样能以极小代码量取代脚本时代笨重的事后轮询与外置补丁，同时把**「运行期功能侵入/接管（允许且鼓励按需使用）」**与**「编译期死板字节码覆盖（禁止）」**严格区分开：
 
-1. **推荐活用 Mixin 的三类高收益底层场景**：
+1. **推荐活用 Mixin 的三类高收益非渲染底层场景**：
    - **原版时序 / 逻辑 Bug 源头无损修复（如 `EpiphyBugfix`）**：原版 `LivingEntity.readAdditionalSaveData` 因先调 `setHealth`（按默认 `20.0f` 截断）后读 `Attributes` 导致高生命上限重进丢失。用 `@Share` 暂存 NBT 原始 `Health` 并在 `Attributes` 读取后一行恢复，即可零文件 I/O、零延迟闪烁地对所有实体与属性 Mod 源头根治；
    - **补齐原版缺失的唯一底层咽喉钩子（如 `EpiphyBlockTracker`）**：在 `LevelChunk.setBlockState` 尾部挂载无副作用观察钩子（前置 `O(1)` 集合判空，未命中 1ns 返回），即可一次性覆盖玩家、活塞、流体、爆炸与第三方模组机器的一切方块变更，彻底废除后台定时抽检轮询；
    - **接口注入（Duck Interface）内联状态挂载**：通过 `MixinBooster` 支持的接口注入在 `ServerPlayer` / `LevelChunk` 上直接挂载私有瞬态引用，免去高频热路径上的 `Map<UUID, ...>` 哈希查找。
-2. **明确禁用 Mixin 的克制红线（保障可读性、可维护性与跨 Mod 兼容）**：
-   - **非底层常规业务一律走标准事件总线与显式 API**：凡是 Forge / KFF 已有现成事件或正常调用链能清晰表达的逻辑，严禁为了炫技写成隐式 Mixin（避免控制流暗跳导致日后排查困难）；
-   - **严禁破坏性注解**：全面禁用 `@Overwrite` 与排他性 `@Redirect`，只允许使用可多模组链式叠加的 `@WrapOperation`、`@ModifyExpressionValue`、`@ModifyReturnValue` 与不随意 `cancel` 的观察型 `@Inject`；每个 Mixin 类职责单一，体内仅做 1~3 行参数提取并立即转发至 Kotlin 具名服务方法。
+2. **「允许动态挟持行为，禁止静态写死字节码」边界**：
+   - **非底层常规业务优先走标准事件与显式 API**：普通上层逻辑不滥用隐式 Mixin，保持调用链直观可维护；
+   - **用动态让权原语实现强力侵入效果**：当渲染器或底层机制确需**挟持、吞掉或替换**原版/他模组行为时，使用 `@WrapMethod` / `@WrapOperation` / `@WrapWithCondition` 或带规则开关的 `cancellable = true` `@Inject`（命中规则时接管替换，未命中或配置关闭时调用 `original.call` 无缝回退），取代一刀切写死且启动即与其他模组撞车的 `@Overwrite` / 硬 `@Redirect`。
 
 ---
 
