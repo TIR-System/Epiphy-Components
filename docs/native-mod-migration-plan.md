@@ -1,6 +1,6 @@
 # Epiphy 独立原生模组（Kotlin + Java · Phase 4）迁移工程计划书
 
-> **文档状态**：Phase 4 原生化工程蓝图与架构实施计划（v1.4）  
+> **文档状态**：Phase 4 原生化工程蓝图与架构实施计划（v1.5）  
 > **许可证声明 (License)**：本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)  
 > **前置基线**：KubeJS 过渡期 `P0 ~ P3` 全量里程碑已封版（15 个通用组件、74/74 回归单测、[`docs/proto_v6_schema.json`](proto_v6_schema.json) `v6.3.0`）  
 > **关联文档**：[`README-LLM.md`](../README-LLM.md) · [`docs/rendering-subsystem-roadmap.md`](rendering-subsystem-roadmap.md)
@@ -22,29 +22,36 @@
 ### 1.2 构建与语言分工选型
 | 维度 | 选型方案 | 选型依据 |
 | :--- | :--- | :--- |
-| **目标平台与语言加载器** | `Minecraft 1.20.1` · `Forge 47.2.x` · **`Kotlin for Forge 4.12.0+`**（内置 `neoforge` 过渡包，预留 1.21 演进边界） | 与本地实机测试端（已装 `kotlinforforge-4.12.0-all.jar`）100% 对齐；直接复用 KFF 语言提供器内建的 `kotlin-stdlib`、`kotlin-reflect`、`kotlinx-coroutines-core` 与 `kotlinx-serialization-json` |
-| **JDK 与映射** | `Java 17` + `ParchmentMC 1.20.1` + `ForgeGradle [6.0,6.2)` | 编译期 Mojmap + 参数名可读，发布构建自动重映射 SRG，彻底告别 KubeJS 阶段手动双探 `m_xxxx_` / `f_xxxx_` 的反射脆弱性 |
-| **Kotlin + Java 混编分工** | **Kotlin (`1.9.22+`，与 KFF `4.12.0` 元数据对齐)**：`@Mod object` 单例入口、`@Serializable` 数据模型、`ui {}`/`fx {}` 类型安全 DSL、服务端调度状态机、权限域树与 KubeJS 插件桥接<br>**Java 17**：全部 Mixin 类、OpenGL / `BufferBuilder` / VBO 紧凑字节流写入、每帧零装箱热路径矩阵运算 | 兼顾 Kotlin 属性委托/协程/DSL 的高表达力与 Java 在底层渲染热路径、Mixin 字节码织入上的绝对确定性（零隐式装箱、零合成桥接签名冲突） |
+| **目标平台与语言加载器** | `Minecraft 1.20.1` · `Forge 47.2.x` · **`Kotlin for Forge 4.12.0+`**（内置 `neoforge` 过渡包，预留 1.21 演进边界） | 与本地实机测试端（已装 `kotlinforforge-4.12.0-all.jar`）100% 对齐；直接复用 KFF `4.12.0` 语言提供器内建的 **`Kotlin 2.2.21`**（`@Metadata(mv = [2, 2, 0])`）、**`kotlinx-coroutines-core 1.10.2`** 与 **`kotlinx-serialization-json 1.9.0`** |
+| **JDK、Gradle 与映射** | `Java 17` + `Gradle 8.8+` + `ParchmentMC 1.20.1` + `ForgeGradle [6.0,6.2)` | 编译期 Mojmap + 参数名可读，发布构建自动重映射 SRG，彻底告别 KubeJS 阶段手动双探 `m_xxxx_` / `f_xxxx_` 的反射脆弱性 |
+| **Kotlin + Java 混编分工** | **Kotlin (`2.2.21`，严格对齐 KFF `4.12.0` 运行时 ABI)**：`@Mod object` 单例入口、`@Serializable` 数据模型、`ui {}`/`fx {}` 类型安全 DSL、服务端调度状态机、权限域树与 KubeJS 插件桥接<br>**Java 17**：全部 Mixin 类、OpenGL / `BufferBuilder` / VBO 紧凑字节流写入、每帧零装箱热路径矩阵运算 | `kotlin("plugin.serialization")` 编译器插件版本必须与 KFF `4.12.0` 内置的 `kotlinx-serialization 1.9.0`（Kotlin `2.2.21` 代际）严格一致，防止 `@Serializable` 合成体在运行期发生 `IncompatibleClassChangeError` / `NoSuchMethodError`；同时兼顾 Java 在底层渲染热路径与 Mixin 织入上的绝对确定性 |
 | **字节码注入** | **`Sinytra MixinBooster` (`Fabric Mixin 0.15+`)** + **`MixinExtras` (`jarJar`)** | 彻底替换 LexForge 自带的残缺 `Sponge Mixin 0.8.5`，完整解锁接口注入、构造器 `super()` 前注入、匿名内部类修复及 `@WrapOperation` / `@Local` / `@Share`，且代码与未来 1.21+ NeoForge 100% 零修改对齐 |
 
 ---
 
 ## 2. 基于 `Kotlin for Forge` (`4.12.0`) 的开发模板与实现规范
 
-经对实机环境 `kotlinforforge-4.12.0-all.jar` 的包结构核验，KFF `4.12.0` 外层为 `FMLModType: LIBRARY` 语言库，内嵌 **`kfflang-4.12.0`**（`IModLanguageProvider` 语言加载器）、**`kfflib-4.12.0`**（Forge Kotlin 工具库）与 **`kffmod-4.12.0`**（容器生命周期绑定），并已随包提供 **`kotlinx-coroutines-core`** 与 **`kotlinx-serialization-json`**。工程搭建必须严格遵循以下 KFF 4.x 官方规范：
+经对实机环境 `kotlinforforge-4.12.0-all.jar` 的字节码与元数据逐项拆包取证：
+- KFF `4.12.0` 外层为 `FMLModType: LIBRARY` 语言库，内嵌 **`kfflang-4.12.0.jar`**（`IModLanguageProvider` 语言加载器）、**`kfflib-4.12.0.jar`**（Forge Kotlin 扩展库）与 **`kffmod-4.12.0.jar`**（容器生命周期绑定）；
+- 其内置运行时精确版本为：**`kotlin-stdlib 2.2.21`**（`kotlin/KotlinVersionCurrentValue.class` 的 `get()` 字节码硬编码 `new KotlinVersion(2, 2, 21)`，`META-INF/kotlin-stdlib.kotlin_module` 版本头为 `[2, 2, 0]`）、**`kotlinx-coroutines-core 1.10.2`**（`META-INF/kotlinx_coroutines_core.version`）与 **`kotlinx-serialization-json 1.9.0`**。
+
+工程搭建必须严格遵循以下经字节码核验的 KFF `4.12.0` +纯正 Kotlin DSL 规范：
 
 ### 2.1 Gradle 构建配置模板 (`build.gradle.kts`)
-- **严禁将 Kotlin 标准库或 `kotlinx-*` 打入自身模组 Jar**（否则与 KFF `MODULE_LAYER` 产生 `LinkageError`）；统一通过 KFF 官方 Maven 坐标引入：
+- **严禁将 Kotlin 标准库或 `kotlinx-*` 打入自身模组 Jar**（否则与 KFF `MODULE_LAYER` 产生 `LinkageError`），且 **`kotlin("jvm")` 与 `kotlin("plugin.serialization")` 必须锁定为 `"2.2.21"`**：
 
 ```kotlin
 plugins {
     java
-    kotlin("jvm") version "1.9.22"
-    kotlin("plugin.serialization") version "1.9.22"
+    kotlin("jvm") version "2.2.21"
+    kotlin("plugin.serialization") version "2.2.21"
     id("net.minecraftforge.gradle") version "[6.0,6.2)"
     id("org.parchmentmc.librarian.forgegradle") version "1.+"
     id("org.spongepowered.mixin") version "0.7.+"
 }
+
+// 显式激活 ForgeGradle Jar-in-Jar 打包任务（用于内嵌 mixinextras-forge）
+jarJar.enable()
 
 repositories {
     maven("https://thedarkcolour.github.io/KotlinForForge/") {
@@ -59,25 +66,49 @@ repositories {
         name = "FabricMC (Fabric Mixin AP)"
         content { includeGroup("net.fabricmc") }
     }
+    // 可选软兼容依赖仓库（KubeJS / Architectury / ModernUI / Curios）
+    maven("https://maven.architectury.dev/") {
+        content { includeGroup("dev.architectury") }
+    }
+    maven("https://maven.saps.dev/releases/") {
+        content { includeGroup("dev.latvian.mods") }
+    }
+    maven("https://maven.izzel.io/releases/") {
+        content { includeGroup("icyllis.modernui") }
+    }
+    maven("https://maven.theillusivec4.top/") {
+        content { includeGroup("top.theillusivec4.curios") }
+    }
 }
 
 dependencies {
     minecraft("net.minecraftforge:forge:1.20.1-47.2.20")
-    // 1. 引入 KFF 4.12.0（自动传递编译期 kotlin-stdlib / coroutines / serialization 与 kfflib API）
+
+    // 1. 引入 KFF 4.12.0（自动传递编译期 Kotlin 2.2.21 stdlib / coroutines 1.10.2 / serialization 1.9.0 与 kfflib API）
     implementation("thedarkcolour:kotlinforforge:4.12.0")
 
-    // 2. 现代 Mixin 管线：MixinBooster 替换 LexForge 残缺 0.8.5 为 Fabric Mixin + MixinExtras jarJar 内嵌
+    // 2. 现代 Mixin 管线（纯正 Kotlin DSL 写法）：MixinBooster + Fabric Mixin AP + MixinExtras Jar-in-Jar
     implementation("org.sinytra.mixinbooster:mixin-booster:0.1.3+1.20.1")
     annotationProcessor("net.fabricmc:sponge-mixin:0.15.3+mixin.0.8.7")
-    compileOnly(annotationProcessor("io.github.llamalad7:mixinextras-common:0.4.1")!!)
-    implementation(jarJar("io.github.llamalad7:mixinextras-forge:0.4.1")) {
-        jarJar.ranged(this, "[0.4.1,)")
+
+    compileOnly("io.github.llamalad7:mixinextras-common:0.4.1")
+    annotationProcessor("io.github.llamalad7:mixinextras-common:0.4.1")
+
+    implementation(fg.deobf("io.github.llamalad7:mixinextras-forge:0.4.1"))
+    jarJar(group = "io.github.llamalad7", name = "mixinextras-forge", version = "[0.4.1,)") {
+        jarJar.pin(this, "0.4.1")
+        isTransitive = false
     }
 
     // 3. 可选软兼容桥接依赖（仅在 epiphy-compat 编译期可见，绝不作为强制运行前置）
-    compileOnly(fg.deobf("dev.latvian.mods:kubejs-forge:2001.6.5-build.16"))
+    compileOnly(fg.deobf("dev.latvian.mods:kubejs-forge:2001.6.5-build.26"))
     compileOnly(fg.deobf("icyllis.modernui:ModernUI-Forge:1.20.1-3.10.1.4"))
     compileOnly(fg.deobf("top.theillusivec4.curios:curios-forge:5.9.1+1.20.1:api"))
+}
+
+mixin {
+    add(sourceSets.main.get(), "epiphy.refmap.json")
+    config("epiphy.mixins.json")
 }
 
 kotlin {
@@ -126,7 +157,7 @@ side = "BOTH"
 ### 2.3 KFF 核心惯用法与内置工具库复用规范 (`kfflang` + `kfflib`)
 1. **`@Mod object` 单例主类与安全双端分流 (`MOD_BUS` / `FORGE_BUS` / `runForDist`)**：
    - 使用 `thedarkcolour.kotlinforforge.forge.MOD_BUS`（替代 `FMLJavaModLoadingContext.get().modEventBus`）与 `FORGE_BUS`（替代 `MinecraftForge.EVENT_BUS`）；
-   - 双端物理隔离统一使用 `thedarkcolour.kotlinforforge.forge.runForDist`（或 `runWhenOn(Dist.CLIENT)` / `lazySidedDelegate`），确保 Dedicated Server 绝不触发 `dev.epiphy.client.*` 类加载：
+   - **重要字节码边界**：`thedarkcolour.kotlinforforge.forge.runForDist` 是一个 **`inline` 函数**，`clientTarget` 的字节码会被直接内联进 `EpiphyMod.<init>` 方法体中。若在 `clientTarget` 内直接书写带 `@OnlyIn(Dist.CLIENT)` 参数类型的方法引用（如 `RenderLevelStageEvent` 或 `RegisterGuiOverlaysEvent` 监听器），JVM 类验证器在 Dedicated Server 上加载 `EpiphyMod` 时就会触发 `NoClassDefFoundError`！因此，`clientTarget` 内**只允许调用签名不含任何客户端专属类的静态跳板方法**（`EpiphyClientBootstrap.init(MOD_BUS, FORGE_BUS)`）：
    ```kotlin
    package dev.epiphy
 
@@ -146,8 +177,8 @@ side = "BOTH"
 
            runForDist(
                clientTarget = {
-                   MOD_BUS.addListener(dev.epiphy.client.EpiphyClientBootstrap::onClientSetup)
-                   MOD_BUS.addListener(dev.epiphy.client.fx3d.EpiphyShaders::onRegisterShaders)
+                   // 仅通过无客户端参数类型的跳板入口转发，严禁在此内联块中直接引用 @OnlyIn(Dist.CLIENT) 事件类型
+                   dev.epiphy.client.EpiphyClientBootstrap.init(MOD_BUS, FORGE_BUS)
                },
                serverTarget = {
                    EpiphyDedicatedServerBootstrap.init()
@@ -157,13 +188,23 @@ side = "BOTH"
    }
    ```
 2. **`AutoKotlinEventBusSubscriber` 自动 `object` 事件订阅**：
-   - KFF 的 `kfflang` 会自动扫描标注了 `@Mod.EventBusSubscriber(modid = EpiphyMod.ID, bus = ...)` 的 Kotlin `object` 单例，直接将其作为实例注册至对应事件总线——监听器函数**无需添加 `@JvmStatic`** 即可干净工作。
-3. **`ObjectHolderDelegate` 属性委托注册 (`by REGISTRY.registerObject`)**：
-   - 借助 `thedarkcolour.kotlinforforge.forge.registerObject`，注册表条目可直接通过 Kotlin `by` 委托声明为强类型只读属性（如 `val STUFF_TAB by CREATIVE_TABS.registerObject("stuff") { ... }`），消除 `.get()` 样板调用。
-4. **直接复用 `kfflib` 内置图形与向量扩展 + `kotlinx.serialization`**：
-   - **渲染栈零泄漏语法糖**：在 Kotlin 侧渲染逻辑中直接使用 `thedarkcolour.kotlinforforge.forge.PoseStackUtilKt` 提供的 `poseStack.use { ... }` 内联扩展（编译期展开为 `pushPose()` + `try / finally { popPose() }`，天然契合渲染安全红线）；
+   - KFF 的 `kfflang` 会自动扫描标注了 `@Mod.EventBusSubscriber(modid = EpiphyMod.ID, bus = ...)` 的 Kotlin `object` 单例，直接将其 `INSTANCE` 作为实例注册至对应事件总线——监听器函数**无需添加 `@JvmStatic`** 即可工作（注：未显式指定 `bus` 时默认注册到 `Bus.FORGE`；订阅 `RegisterShadersEvent` 等 Mod 生命周期事件时必须显式声明 `bus = Mod.EventBusSubscriber.Bus.MOD`）。
+3. **`ObjectHolderDelegate` 属性委托注册 (`by DeferredRegister.registerObject`)**：
+   - KFF 4.x 已移除早期 `KDeferredRegister` 包装类，改为在 `KDeferredRegisterKt` 中直接对原版 Forge `DeferredRegister<B>` 提供扩展函数 `thedarkcolour.kotlinforforge.forge.registerObject`：注册表条目可直接通过 Kotlin `by` 委托声明为强类型只读属性（如 `val STUFF_TAB by CREATIVE_TABS.registerObject("stuff") { ... }`），消除 `.get()` 样板调用。
+4. **`kfflib` 向量扩展复用、自建 `inline fun PoseStack.withPose` 与 `kotlinx.serialization`**：
+   - **渲染栈零泄漏内联原语（禁用 `kfflib` 自带的 `PoseStackUtilKt.use`）**：经对 `kfflib-4.12.0.jar` 内 `PoseStackUtilKt.class` 字节码反汇编核实，KFF 自带的 `PoseStack.use(Function0)` **既没有 `inline` 修饰（热路径捕获变量会分配 `Function0` 闭包），字节码 `exception_table_length` 也是 `0`（完全没有 `try / finally`，一旦内部抛异常会跳过 `popPose()` 直接导致 OpenGL 矩阵栈炸栈）**！因此在 `dev.epiphy.client.util` 中必须自建真正带 `inline` + `try / finally` 的扩展并禁用 `kfflib` 的 `PoseStack.use`：
+     ```kotlin
+     inline fun com.mojang.blaze3d.vertex.PoseStack.withPose(block: com.mojang.blaze3d.vertex.PoseStack.() -> Unit) {
+         this.pushPose()
+         try {
+             this.block()
+         } finally {
+             this.popPose()
+         }
+     }
+     ```
    - **向量运算扩展**：复用 `kfflib` `vectorutil`（`Vec2UtilKt` / `Vec3UtilKt` / `Vec3iUtilKt` / `Vector3fcUtilKt` / `Vector4fcUtilKt`）提供的原版 `Vec3` 与 JOML 向量加减乘除及解构扩展；
-   - **零额外依赖 JSON 序列化**：直接使用 KFF 已打包的 `kotlinx.serialization.json.Json` 驱动 `JsonStore<T>`（`epiphy-data/` 持久化与 `proto_v6_schema.json` 校验），零反射开销且无需引入额外 JSON 库。
+   - **零额外依赖 JSON 序列化**：直接使用 KFF `4.12.0` 已打包的 `kotlinx.serialization.json.Json`（`1.9.0`）驱动 `JsonStore<T>`（`epiphy-data/` 持久化与 `proto_v6_schema.json` 校验），零反射开销且无需引入额外 JSON 库。
 5. **`EpiphyMixinPlugin` 启动期 `MixinBooster` 环境自检守卫**：
    - 由于 `MixinBooster` 属于 `ModLauncher` 早期 `ITransformationService`，在 `EpiphyMixinPlugin.onLoad` 中前置探测 `org.spongepowered.asm.mixin.FabricUtil` 类是否存在；若用户漏装 `MixinBooster.jar` 仍停留在 LexForge 残缺 `0.8.5` 环境，立即输出清晰可读的中文/英文缺失前置提示并安全中断，杜绝晦涩的字节码解析堆栈。
 
@@ -202,7 +243,7 @@ kubejs/ (整合包数据魔改层 —— 永久保留在 KubeJS，无需移植�
 | :--- | :--- | :--- | :--- |
 | `EpiphySpec` (`v2.8.1`) | `dev.epiphy.api.spec`<br>`dev.epiphy.core.protocol` | 转为 `@Serializable` 密封接口/数据类、网络 `FriendlyByteBuf` 编解码器、`BoundedCache<K,V>` 与全局 `PresetRegistry`（保留主名 + 至多 2 个官方别名） | 裁撤 `NativeMath` 8 常量补丁、`safeTypeOf`、`nbtToPlainJs`、`DEPRECATED_*_ALIASES` |
 | `EpiphyItem3DRenderer` (`v1.1.0`) | `dev.epiphy.client.fx3d.item` | **彻底去 CCL 原生重写**（见 §5.1）：`IClientItemExtensions` + `BEWLR` + `ItemRenderer` Mixin + 原生 GPU `VertexBuffer` (VBO) + 原版 `ShaderInstance` | 裁撤全部 `codechicken.lib.*` 反射绑定与 `CCModel`/`CCRenderState` 包装 |
-| `EpiphyCreativeTab` (`v1.0.0`) | `dev.epiphy.core.registry` | KFF `KDeferredRegister` + `by CREATIVE_TABS.registerObject("stuff")` 委托与事件动态追加接口 | 裁撤 KubeJS `StartupEvents.modifyCreativeTab` 字符串桥接 |
+| `EpiphyCreativeTab` (`v1.0.0`) | `dev.epiphy.core.registry` | Forge `DeferredRegister.create(...)` + KFF `by CREATIVE_TABS.registerObject("stuff")` 扩展委托与事件动态追加接口 | 裁撤 KubeJS `StartupEvents.modifyCreativeTab` 字符串桥接 |
 | `EpiphyLog` (`v1.3.0`) | `dev.epiphy.server.log` | 基于 SLF4J + KFF 协程/`Channel` 异步写盘，维护按世界路由的 `epiphy-data/worlds/<id>/logs/*.log` 与限频折叠 | 裁撤 `ClassFilter` `JsonIO`/`FilesIO` 写盘降级分支，直接使用 Java NIO `FileChannel` |
 | `EpiphyServerCore` (`v2.6.0`) | `dev.epiphy.server.core`<br>`dev.epiphy.server.storage` | 基于 `kotlinx.serialization` 实现 `JsonStore<T>`（`ATOMIC_MOVE` + `.bak` 自愈 + `corruptLocked` 隔离备份锁）与 `epiphy-data/` 世界防串档自动分叉 | 裁撤 `LinkedTreeMap` 手工递归转换、Mojmap/SRG 双路方法探测、手写 Brigadier 反射构建器（改用原生泛型 Brigadier DSL） |
 | `EpiphyBlockTracker` (`v2.5.1`) | `dev.epiphy.server.world` | `LevelChunk.setBlockState` 唯一咽喉非破坏性 `@Inject`（`O(1)` 块集合命中直通火烧/活塞/机器等一切变更）+ `LevelChunkSection` Palette 直读 + 三级门控 `WorldOps` | 裁撤 KubeJS 兜底慢速逐点 `getBlock` 与后台 `verifyWindowTicks` 周期轮询抽检 |
@@ -319,8 +360,8 @@ flowchart TD
 | 潜在风险点 | 风险等级 | 前置工程防控措施 |
 | :--- | :---: | :--- |
 | **1. 误将 `kotlin-stdlib` / `kotlinx-*` 打入模组 Jar 引发 KFF `LinkageError`** | 高 | 严格依赖 `thedarkcolour:kotlinforforge:4.12.0` 模块层提供 Kotlin 运行时，构建脚本增加 Jar 产物检查任务，一旦发现产物 Jar 内含 `kotlin/` 或 `kotlinx/` 字节码立即构建失败。 |
-| **2. 专用服务端（Dedicated Server）误加载客户端类 (`ClassNotFoundException`)** | 高 | 严禁在双端共享数据类或包内直接引用 `Minecraft`、`PoseStack`、`ShaderInstance`、`VertexBuffer`；入口统一使用 KFF `runForDist` / `runWhenOn(Dist.CLIENT)` 分流；M0 即配置 Gradle `runServer` 自动化冒烟门禁。 |
+| **2. 专用服务端（Dedicated Server）误加载客户端类 (`ClassNotFoundException` / `NoClassDefFoundError`)** | 高 | 严禁在双端共享数据类或 `runForDist` 内联块的方法引用签名中直接出现 `Minecraft`、`PoseStack`、`ShaderInstance`、`VertexBuffer` 或 `@OnlyIn(Dist.CLIENT)` 事件类；`runForDist` 统一通过无客户端类型参数的 `EpiphyClientBootstrap.init(MOD_BUS, FORGE_BUS)` 跳板分流；M0 即配置 Gradle `runServer` 自动化冒烟门禁。 |
 | **3. FBO 离屏缓存半透明文本/图元二次混合发黑（Alpha 衰减失真）** | 中高 | 向 `TextureTarget` 离屏绘制时写入预乘 Alpha（Premultiplied Alpha），将 FBO 贴回主屏幕或 3D 世界平面时固定使用 `RenderSystem.blendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)`，绘制完毕在 `finally` 中恢复标准混合方程。 |
 | **4. Iris / OptiFine 光影管线与自定义 Core Shader / Mixin 冲突** | 中高 | 物品与世界 3D 优先通过标准 `MultiBufferSource` 管线与 `RenderLevelStageEvent.Stage.AFTER_TRANSLUCENT_BLOCKS` 提交；当探测到活跃光影接管且自定义 Core Shader 被拦截时，复用已验证的 Fail-Soft 降级矩阵平滑退回标准发光贴图通道。 |
 | **5. 可选联动 Mod（KubeJS / ModernUI / Curios）未安装时引发类验证错误** | 中 | 所有可选联动代码物理隔离在独立包 `dev.epiphy.compat.<modid>.*`，主模块仅在确认 `ModList.get().isLoaded("<modid>")` 为 `true` 后通过独立桥接入口触发类加载，并在 CI 分别运行“全装联动”与“仅 Forge + KFF 纯净”两套启动测试。 |
-| **6. Kotlin 隐式装箱或 Lambda 分配污染每帧渲染热路径** | 低中 | 底层顶点发射、矩阵栈变换、字素查表与 Mixin 类强制使用纯 Java 17 或 Kotlin 基本类型数组（`FloatArray` / `IntArray`）+ `inline` 函数（如 KFF `PoseStack.use`），通过 JFR 监控确保稳定态渲染热路径每帧堆分配趋近于 `0 Bytes`。 |
+| **6. Kotlin 隐式装箱或非 `inline` 扩展污染每帧渲染热路径与 `PoseStack` 安全性** | 低中 | 底层顶点发射、矩阵栈变换、字素查表与 Mixin 类强制使用纯 Java 17 或 Kotlin 基本类型数组（`FloatArray` / `IntArray`）+ 自建带 `try / finally` 的 `inline fun PoseStack.withPose`（禁用 `kfflib` 非内联且无 `finally` 的 `PoseStack.use`），通过 JFR 监控确保稳定态渲染热路径每帧堆分配趋近于 `0 Bytes`。 |
