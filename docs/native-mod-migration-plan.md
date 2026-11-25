@@ -1,6 +1,6 @@
 # Epiphy 独立原生模组（Kotlin + Java · Phase 4）迁移工程计划书
 
-> **文档状态**：Phase 4 原生化工程蓝图与架构实施计划（v1.2）  
+> **文档状态**：Phase 4 原生化工程蓝图与架构实施计划（v1.3）  
 > **许可证声明 (License)**：本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)  
 > **前置基线**：KubeJS 过渡期 `P0 ~ P3` 全量里程碑已封版（15 个通用组件、74/74 回归单测、[`docs/proto_v6_schema.json`](proto_v6_schema.json) `v6.3.0`）  
 > **关联文档**：[`README-LLM.md`](../README-LLM.md) · [`docs/rendering-subsystem-roadmap.md`](rendering-subsystem-roadmap.md)
@@ -205,10 +205,10 @@ kubejs/ (整合包数据魔改层 —— 永久保留在 KubeJS，无需移植�
 | `EpiphyCreativeTab` (`v1.0.0`) | `dev.epiphy.core.registry` | KFF `KDeferredRegister` + `by CREATIVE_TABS.registerObject("stuff")` 委托与事件动态追加接口 | 裁撤 KubeJS `StartupEvents.modifyCreativeTab` 字符串桥接 |
 | `EpiphyLog` (`v1.3.0`) | `dev.epiphy.server.log` | 基于 SLF4J + KFF 协程/`Channel` 异步写盘，维护按世界路由的 `epiphy-data/worlds/<id>/logs/*.log` 与限频折叠 | 裁撤 `ClassFilter` `JsonIO`/`FilesIO` 写盘降级分支，直接使用 Java NIO `FileChannel` |
 | `EpiphyServerCore` (`v2.6.0`) | `dev.epiphy.server.core`<br>`dev.epiphy.server.storage` | 基于 `kotlinx.serialization` 实现 `JsonStore<T>`（`ATOMIC_MOVE` + `.bak` 自愈 + `corruptLocked` 隔离备份锁）与 `epiphy-data/` 世界防串档自动分叉 | 裁撤 `LinkedTreeMap` 手工递归转换、Mojmap/SRG 双路方法探测、手写 Brigadier 反射构建器（改用原生泛型 Brigadier DSL） |
-| `EpiphyBlockTracker` (`v2.5.1`) | `dev.epiphy.server.world` | 升级为 `LevelChunk` Capability / `SavedData` + 区块加载/卸载事件直连（零反射读取 `LevelChunkSection.getStates()` Palette 快速剪枝）+ 三级门控 `WorldOps` 批处理队列 | 裁撤 KubeJS 兜底慢速逐点 `getBlock` 轮询 |
+| `EpiphyBlockTracker` (`v2.5.1`) | `dev.epiphy.server.world` | `LevelChunk.setBlockState` 唯一咽喉非破坏性 `@Inject`（`O(1)` 块集合命中直通火烧/活塞/机器等一切变更）+ `LevelChunkSection` Palette 直读 + 三级门控 `WorldOps` | 裁撤 KubeJS 兜底慢速逐点 `getBlock` 与后台 `verifyWindowTicks` 周期轮询抽检 |
 | `EpiphyPermissionValve` (`v5.4.0`) | `dev.epiphy.server.security` | 完整保留三态权限树（`grant`/`revoke`/`inherit`）、`exactScopeOnly` 广播门、命令方块防篡改锁、外置 `revocations.json` 防回滚墓碑与 8 位口令 2 分钟二次确认 `namegrant` | 裁撤 Rhino 调用栈字符串令牌伪造防御（改用 Java/Kotlin 模块级 `internal` 句柄与强类型 `CommandSourceStack` 鉴权） |
 | `EpiphyDebug` (`v1.1.0`) | `dev.epiphy.server.debug` | 原生 `DebugProvider` SPI 接口、JVM GC/堆内存与帧耗时遥测聚合、`/epiphy debug renderperf` S2C 采样控制 | 零裁剪平滑演进 |
-| `EpiphyBugfix` (`v1.0.0`) | `dev.epiphy.server.bugfix` | 原生 `PlayerEvent.PlayerLoggedOutEvent` / `PlayerLoggedInEvent` + 玩家 Capability / `SavedData` 权威生命值上限保持与恢复 | 裁撤 NBT 文本手工读写 |
+| `EpiphyBugfix` (`v1.0.0`) | `dev.epiphy.server.bugfix` | `LivingEntityMixin.readAdditionalSaveData` 非破坏性 `@Share` + `@Inject`：在原版 `Attributes` 加载完毕后无损还原真实 `Health`，从源头根治原版高血量上限重进截断 Bug | 裁撤退出外置 `kubejs_epiphy_bugfix_hp.json` 文件 I/O 与进服延迟 tick 补血状态机 |
 | `Epiphy2DSurface` (`v6.3.0`) | `dev.epiphy.server.surface2d` | 强类型 `SurfaceChannel` / `SurfaceSlot`、`ui {}` Kotlin DSL、`world_plane` `SavedData` 视距追踪器（基于服务端 ChunkMap 追踪集合替代全服玩家扫描） | 裁撤分组展平运行期拼写扫描（Kotlin 编译期类型检查直接根治拼写错误；仅在 JSON/KubeJS 入口保留 Schema 校验） |
 | `Epiphy2DRenderer` (`v6.3.0`) | `dev.epiphy.client.surface2d` | 原生 `GuiGraphics` + GPU VBO/批处理合成器、**`TextureTarget` (FBO) 离屏缓存池**、Mixin 驱动 `gui`/`slot` 夹心、`fill.mask` 着色器、`world_plane` 3D 射线交互 | 裁撤 `PaintScreenEventJS` / `Painter` 桥接包装与 Rhino 数值拆装箱开销 |
 | `Epiphy3DFXServer` (`v1.2.0`) | `dev.epiphy.server.fx3d` | 强类型空间特效调度器、`ConstraintPipeline`、`Channel`/`Slot` 增量 `patch` 与玩家层配额隔离 | 零裁剪平滑演进 |
@@ -250,6 +250,17 @@ kubejs/ (整合包数据魔改层 —— 永久保留在 KubeJS，无需移植�
    - 新增原生核心着色器 `epiphy:ui_masked_fill`，同时采样 `Sampler0`（基底纯色/渐变/视差图层）与 `Sampler1`（任意异形 PNG 灰度/Alpha 遮罩），单 Pass 实现斜切装甲槽、圆环进度扇区与异形裂隙窗。
 4. **`world_plane` 三维射线平面求交与轻交互**：
    - 对开启 `interactive = true` 的 `world_plane`，在客户端准星射线（`Player.pick` 视线向量）与平面方程 $(P - P_0) \cdot \vec{n} = 0$ 求交，反解局部像素坐标 $(u, v)$，支持节点悬停高亮（`$hover` 内置变量）与右键点击事件回传服务端（附带服务端距离 `<= maxDistance` 与视线防穿墙二次校验）。
+
+### 5.3 非渲染领域的非破坏性 Mixin 活用与克制准入纪律
+借助 `MixinBooster` (`Fabric Mixin`) + `MixinExtras`，服务端与底层机制同样能以极小代码量取代脚本时代笨重的事后轮询与外置补丁，但必须严守**「底层咽喉精准下刀，上层业务克制禁用」**的工程边界：
+
+1. **推荐活用 Mixin 的三类高收益底层场景**：
+   - **原版时序 / 逻辑 Bug 源头无损修复（如 `EpiphyBugfix`）**：原版 `LivingEntity.readAdditionalSaveData` 因先调 `setHealth`（按默认 `20.0f` 截断）后读 `Attributes` 导致高生命上限重进丢失。用 `@Share` 暂存 NBT 原始 `Health` 并在 `Attributes` 读取后一行恢复，即可零文件 I/O、零延迟闪烁地对所有实体与属性 Mod 源头根治；
+   - **补齐原版缺失的唯一底层咽喉钩子（如 `EpiphyBlockTracker`）**：在 `LevelChunk.setBlockState` 尾部挂载无副作用观察钩子（前置 `O(1)` 集合判空，未命中 1ns 返回），即可一次性覆盖玩家、活塞、流体、爆炸与第三方模组机器的一切方块变更，彻底废除后台定时抽检轮询；
+   - **接口注入（Duck Interface）内联状态挂载**：通过 `MixinBooster` 支持的接口注入在 `ServerPlayer` / `LevelChunk` 上直接挂载私有瞬态引用，免去高频热路径上的 `Map<UUID, ...>` 哈希查找。
+2. **明确禁用 Mixin 的克制红线（保障可读性、可维护性与跨 Mod 兼容）**：
+   - **非底层常规业务一律走标准事件总线与显式 API**：凡是 Forge / KFF 已有现成事件或正常调用链能清晰表达的逻辑，严禁为了炫技写成隐式 Mixin（避免控制流暗跳导致日后排查困难）；
+   - **严禁破坏性注解**：全面禁用 `@Overwrite` 与排他性 `@Redirect`，只允许使用可多模组链式叠加的 `@WrapOperation`、`@ModifyExpressionValue`、`@ModifyReturnValue` 与不随意 `cancel` 的观察型 `@Inject`；每个 Mixin 类职责单一，体内仅做 1~3 行参数提取并立即转发至 Kotlin 具名服务方法。
 
 ---
 
