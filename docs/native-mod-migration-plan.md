@@ -1,6 +1,6 @@
 # Epiphy 独立原生模组（Kotlin + Java · Phase 4）迁移工程计划书
 
-> **文档状态**：Phase 4 原生化工程蓝图与架构实施计划（v1.1）  
+> **文档状态**：Phase 4 原生化工程蓝图与架构实施计划（v1.2）  
 > **许可证声明 (License)**：本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)  
 > **前置基线**：KubeJS 过渡期 `P0 ~ P3` 全量里程碑已封版（15 个通用组件、74/74 回归单测、[`docs/proto_v6_schema.json`](proto_v6_schema.json) `v6.3.0`）  
 > **关联文档**：[`README-LLM.md`](../README-LLM.md) · [`docs/rendering-subsystem-roadmap.md`](rendering-subsystem-roadmap.md)
@@ -16,7 +16,7 @@
 2. **职责得当边界（单纯合成表等数据魔改留存 KubeJS，无需移植）**：
    - **迁入原生 Mod 的范畴**：15 个通用基础底座与双端视听引擎（日志、核心存储、权限阀、调试、Bugfix、区块追踪与地形批处理、2D 平面合成、世界/物品 3D 渲染、3D 空间音频）以及依赖高频 tick 状态机或底层渲染钩子的核心机制；
    - **明确不移植、继续留在 KubeJS 的范畴**：**单纯的【合成表增删改】**（如现行 `kubejs/server_scripts/合成表-*/` 下的原版、植物魔法、神秘遗物配方脚本 `ServerEvents.recipes`）、整合包级物品/方块 Tag 微调、战利品表调整、简单静态 Tooltip 文案补充等纯数据层胶水。此类功能天然契合 KubeJS 的声明式脚本与 `/reload` 热重载工作流，硬编码进编译态 Mod 只会丧失调参灵活性并无谓引入具体内容 Mod 依赖。
-3. **核心零业务第三方前置铁律（仅依赖 Forge + `Kotlin for Forge` 语言加载器）**：原生 Mod 本体仅以 `Minecraft 1.20.1`、`Forge 47.2+` 与官方语言加载器 **`Kotlin for Forge` (`kotlinforforge 4.12.0+`)** 为运行前置（**严禁自行 Jar-in-Jar 重复打包 `kotlin-stdlib` 以免破坏 KFF 模块层类加载器**）。KubeJS 阶段在物品 3D 渲染中临时借用的 `CodeChickenLib` 特例将在原生 Mod 中 **100% 移除并自主实现**；`ModernUI`、`Curios API`、`KubeJS` 全部作为编译期 `compileOnly` + 运行期 `ModList.get().isLoaded(...)` 物理隔离的可选软兼容桥接。
+3. **核心零业务第三方前置铁律（仅依赖 Forge + `Kotlin for Forge` + `MixinBooster` 现代字节码底座）**：原生 Mod 本体仅以 `Minecraft 1.20.1`、`Forge 47.2+`、官方语言加载器 **`Kotlin for Forge` (`kotlinforforge 4.12.0+`)** 与现代字节码换芯底座 **`Sinytra MixinBooster` (`org.sinytra.mixinbooster:mixin-booster`)** 为运行前置（**彻底告别 LexForge 残缺的 `Sponge Mixin 0.8.5`**，直接对齐 1.21+ NeoForge 原生内置的 `Fabric Mixin` + `MixinExtras` 标准；严禁自行 Jar-in-Jar 重复打包 `kotlin-stdlib`）。KubeJS 阶段在物品 3D 渲染中临时借用的 `CodeChickenLib` 特例将在原生 Mod 中 **100% 移除并自主实现**；`ModernUI`、`Curios API`、`KubeJS` 全部作为编译期 `compileOnly` + 运行期 `ModList.get().isLoaded(...)` 物理隔离的可选软兼容桥接。
 4. **语义收敛与官方别名上限规范（保留至多 `2` 个官方别名）**：正式移除过渡期冻结的历史无序淘汰表（`DEPRECATED_DANMAKU_ALIASES`、`DEPRECATED_PRIORITY_ALIASES` 及早期十余种混杂枚举），全模块统一执行 **「1 个主标准名 + 至多 2 个显式官方别名（合计至多 3 个高频名称）」** 规范——所有官方别名均在 API/DSL/JSON 入口单点归一化为主标准名，内部管线与网络二进制帧零别名。
 
 ### 1.2 构建与语言分工选型
@@ -25,7 +25,7 @@
 | **目标平台与语言加载器** | `Minecraft 1.20.1` · `Forge 47.2.x` · **`Kotlin for Forge 4.12.0+`**（内置 `neoforge` 过渡包，预留 1.21 演进边界） | 与本地实机测试端（已装 `kotlinforforge-4.12.0-all.jar`）100% 对齐；直接复用 KFF 语言提供器内建的 `kotlin-stdlib`、`kotlin-reflect`、`kotlinx-coroutines-core` 与 `kotlinx-serialization-json` |
 | **JDK 与映射** | `Java 17` + `ParchmentMC 1.20.1` + `ForgeGradle [6.0,6.2)` | 编译期 Mojmap + 参数名可读，发布构建自动重映射 SRG，彻底告别 KubeJS 阶段手动双探 `m_xxxx_` / `f_xxxx_` 的反射脆弱性 |
 | **Kotlin + Java 混编分工** | **Kotlin (`1.9.22+`，与 KFF `4.12.0` 元数据对齐)**：`@Mod object` 单例入口、`@Serializable` 数据模型、`ui {}`/`fx {}` 类型安全 DSL、服务端调度状态机、权限域树与 KubeJS 插件桥接<br>**Java 17**：全部 Mixin 类、OpenGL / `BufferBuilder` / VBO 紧凑字节流写入、每帧零装箱热路径矩阵运算 | 兼顾 Kotlin 属性委托/协程/DSL 的高表达力与 Java 在底层渲染热路径、Mixin 字节码织入上的绝对确定性（零隐式装箱、零合成桥接签名冲突） |
-| **字节码注入** | `SpongePowered Mixin 0.8.5` + `MixinExtras` | 以最小侵入度的 `@Inject` / `@WrapOperation` 解锁 KubeJS 阶段被阻塞的 `gui` 全屏夹心、`renderSlot` 槽位底层夹心、`GuiGraphics.blit` 贴图拦截与第三方物品 3D 挂载 |
+| **字节码注入** | **`Sinytra MixinBooster` (`Fabric Mixin 0.15+`)** + **`MixinExtras` (`jarJar`)** | 彻底替换 LexForge 自带的残缺 `Sponge Mixin 0.8.5`，完整解锁接口注入、构造器 `super()` 前注入、匿名内部类修复及 `@WrapOperation` / `@Local` / `@Share`，且代码与未来 1.21+ NeoForge 100% 零修改对齐 |
 
 ---
 
@@ -51,15 +51,30 @@ repositories {
         name = "Kotlin for Forge"
         content { includeGroup("thedarkcolour") }
     }
+    maven("https://maven.su5ed.dev/releases") {
+        name = "Su5eD (Sinytra MixinBooster)"
+        content { includeGroup("org.sinytra.mixinbooster") }
+    }
+    maven("https://maven.fabricmc.net/") {
+        name = "FabricMC (Fabric Mixin AP)"
+        content { includeGroup("net.fabricmc") }
+    }
 }
 
 dependencies {
     minecraft("net.minecraftforge:forge:1.20.1-47.2.20")
-    // 引入 KFF 4.12.0（自动传递编译期 kotlin-stdlib / coroutines / serialization 与 kfflib API）
+    // 1. 引入 KFF 4.12.0（自动传递编译期 kotlin-stdlib / coroutines / serialization 与 kfflib API）
     implementation("thedarkcolour:kotlinforforge:4.12.0")
-    annotationProcessor("org.spongepowered.mixin:mixin:0.8.5:processor")
 
-    // 可选软兼容桥接依赖（仅在 epiphy-compat 编译期可见，绝不作为强制运行前置）
+    // 2. 现代 Mixin 管线：MixinBooster 替换 LexForge 残缺 0.8.5 为 Fabric Mixin + MixinExtras jarJar 内嵌
+    implementation("org.sinytra.mixinbooster:mixin-booster:0.1.3+1.20.1")
+    annotationProcessor("net.fabricmc:sponge-mixin:0.15.3+mixin.0.8.7")
+    compileOnly(annotationProcessor("io.github.llamalad7:mixinextras-common:0.4.1")!!)
+    implementation(jarJar("io.github.llamalad7:mixinextras-forge:0.4.1")) {
+        jarJar.ranged(this, "[0.4.1,)")
+    }
+
+    // 3. 可选软兼容桥接依赖（仅在 epiphy-compat 编译期可见，绝不作为强制运行前置）
     compileOnly(fg.deobf("dev.latvian.mods:kubejs-forge:2001.6.5-build.16"))
     compileOnly(fg.deobf("icyllis.modernui:ModernUI-Forge:1.20.1-3.10.1.4"))
     compileOnly(fg.deobf("top.theillusivec4.curios:curios-forge:5.9.1+1.20.1:api"))
@@ -149,6 +164,8 @@ side = "BOTH"
    - **渲染栈零泄漏语法糖**：在 Kotlin 侧渲染逻辑中直接使用 `thedarkcolour.kotlinforforge.forge.PoseStackUtilKt` 提供的 `poseStack.use { ... }` 内联扩展（编译期展开为 `pushPose()` + `try / finally { popPose() }`，天然契合渲染安全红线）；
    - **向量运算扩展**：复用 `kfflib` `vectorutil`（`Vec2UtilKt` / `Vec3UtilKt` / `Vec3iUtilKt` / `Vector3fcUtilKt` / `Vector4fcUtilKt`）提供的原版 `Vec3` 与 JOML 向量加减乘除及解构扩展；
    - **零额外依赖 JSON 序列化**：直接使用 KFF 已打包的 `kotlinx.serialization.json.Json` 驱动 `JsonStore<T>`（`epiphy-data/` 持久化与 `proto_v6_schema.json` 校验），零反射开销且无需引入额外 JSON 库。
+5. **`EpiphyMixinPlugin` 启动期 `MixinBooster` 环境自检守卫**：
+   - 由于 `MixinBooster` 属于 `ModLauncher` 早期 `ITransformationService`，在 `EpiphyMixinPlugin.onLoad` 中前置探测 `org.spongepowered.asm.mixin.FabricUtil` 类是否存在；若用户漏装 `MixinBooster.jar` 仍停留在 LexForge 残缺 `0.8.5` 环境，立即输出清晰可读的中文/英文缺失前置提示并安全中断，杜绝晦涩的字节码解析堆栈。
 
 ---
 
@@ -272,7 +289,7 @@ flowchart TD
 
 | 里程碑 | 核心交付物 | 关键验收门禁（Definition of Done） |
 | :--- | :--- | :--- |
-| **M0：KFF 工程脚手架与契约基座** | 建立基于 `kotlinforforge 4.12.0` (`modLoader="kotlinforforge"`) 的四模块 Gradle 工程（`api`/`core`/`compat`/`showcase`）；接入 Parchment 与 Mixin；在 `epiphy-api` 落地 `proto_v6_schema.json` 与「1 主名 + 至多 2 官方别名」JUnit 门禁 | `./gradlew check` 全绿；仅安装 `Forge + Kotlin for Forge 4.12.0` 启动客户端与专用服务端（Dedicated Server）零崩溃、零客户端类泄漏、零重复 Kotlin stdlib 打包 |
+| **M0：KFF + MixinBooster 工程脚手架** | 建立基于 `kotlinforforge 4.12.0` + `MixinBooster` (`Fabric Mixin`) + `mixinextras-forge` (`jarJar`) 的四模块 Gradle 工程（`api`/`core`/`compat`/`showcase`）；接入 Parchment 与 `EpiphyMixinPlugin` 自检；在 `epiphy-api` 落地 `proto_v6_schema.json` 与「1 主名 + 至多 2 官方别名」JUnit 门禁 | `./gradlew check` 全绿；安装 `Forge + Kotlin for Forge 4.12.0 + MixinBooster` 启动客户端与专用服务端（Dedicated Server）零崩溃、零客户端类泄漏、零重复 Kotlin stdlib 打包 |
 | **M1：核心存储与权限安全底座** | 基于 KFF 内置 `kotlinx.serialization` 完成 `JsonStore`、`epiphy-data/` 世界自动分叉、`EpiphyLog` 协程异步写盘、`EpiphyPermissionValve`（三态域 + 墓碑 + 二次口令确认）、`EpiphyDebug` 与 `EpiphyBugfix` | 100% 复现并通过现行权限阀防提权、防回滚墓碑、损坏文件 `.corrupt.bak` 隔离锁 JUnit 测试；直接读取现有测试端 `epiphy-data/` 零报错兼容 |
 | **M2：方块/区块引擎与空间音频** | 完成基于 `LevelChunkSection` Palette 直读的 `BlockTracker`、三级门控 `WorldOps` 地形/流体批处理，以及基于 Mixin `@Accessor` 的双端 `EpiphyAudio` 3D 声场与温和 BGM 避让 | 1000+ 绑定方块区块扫描耗时 `< 0.5ms/tick`；ESC 暂停/失焦恢复、球簇合并与非 `minecraft:` 模组音乐零误停测试通过 |
 | **M3：2D 平面合成器完全体** | 完成 `PROTO v6` 全部 6 类图元、混合图文全富文本 Pass-Grouped 合批（完结 `P1-2`）、`TextureTarget` FBO 池、`AbstractContainerScreen` & `GuiGraphics` 夹心 Mixin（完结 `P2-1`/`P2-3`）、`fill.mask` 着色器与 `world_plane` 射线交互 | 20 条并发弹幕 + 2 个复杂遥测面板 + 54 槽位动态覆盖层同屏总 CPU/GPU 提交耗时 **`<= 0.4 ms`**；开闭任意 GUI 贴图与 OpenGL 状态 100% 零泄漏 |
