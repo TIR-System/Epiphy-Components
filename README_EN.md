@@ -232,6 +232,7 @@ Epiphy的-音频播放器.js:
 ├── docs/
 │   ├── audio-assets.md                           # Audio asset exclusion & BYO placement notes
 │   ├── kube-mods-rhino-es5-es6-compatibility.md  # Bytecode & runtime audit of kube-mods/rhino
+│   ├── native-mod-migration-plan.md              # Phase 4 standalone native mod (Kotlin + Java) migration plan
 │   ├── proto_v6_schema.json                      # Authoritative PROTO v6 JSON Schema contract
 │   └── rendering-subsystem-roadmap.md            # 2D Planar Compositor & 3D Spatial FX roadmap & v6 protocol specification
 ├── scripts/
