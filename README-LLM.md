@@ -132,8 +132,10 @@
    - 必须通过 `EpiphyPermissionValve.getCommandActorTier(source)` 区分 `'system'`（JS API / 真 OP / 控制台 / 命令方块 / Declared Callers）与 `'player'`（非 OP `authorized` 玩家）；当权限阀未加载时仅认 `pl.isOp()`（严禁退化信任 `hasPermissions(2)`）。
    - 支持细粒度分层 `scope`（如 `danmaku.self`、`audio.play`）独立授予非 OP；明确撤销子 `scope` 须覆盖父模块授权；标记 `exactScopeOnly` 的高危能力（如 `danmaku.broadcast` / `audio.broadcast`）不得从模块级授权继承。
    - 任何新增音频/弹幕能力不得允许 `'player'` 源绕过命名空间隔离、越权停止 `'system'` 或他人对象，也不得挤压系统演出配额/槽位；同时不得反向给脚本 API、OP、控制台或命令方块施压额外玩家限流。
-4. **长期原生化迁出计划**：
-   - 本项目在脚本阶段功能与契约充分稳定后，将整体迁往 **Kotlin + Java** 原生模组，KubeJS 仅作此前过渡依赖。
+4. **长期原生化迁出计划（见 [`docs/native-mod-migration-plan.md`](docs/native-mod-migration-plan.md)）**：
+   - **基于 `Kotlin for Forge` (`thedarkcolour:kotlinforforge:4.12.0+`) 混编架构**：原生模组采用 `modLoader = "kotlinforforge"`（`loaderVersion = "[4,5)"`），直接依托 KFF 语言加载器提供的 `@Mod object` 单例、`MOD_BUS` / `FORGE_BUS`、`runForDist`、`AutoKotlinEventBusSubscriber`、`ObjectHolderDelegate`、`PoseStack.use` 以及随包内置的 `kotlinx-coroutines-core` 与 `kotlinx-serialization-json`（严禁自行重复打包 `kotlin-stdlib`）；底层 Mixin 与紧凑 VBO 字节写入使用 Java 17。
+   - **原生化 vs 留存 KubeJS 的职责边界**：15 个通用基础底座与视听引擎迁入原生 Mod；**单纯的【合成表修改】（如 `kubejs/server_scripts/合成表-*/`）、Tag 微调等整合包数据胶水继续保留在 KubeJS 层，无需移植**。
+   - **官方别名保留上限**：全模块统一保留 **「1 个主标准名 + 至多 2 个显式官方别名」**（入口单点归一化为主标准名，仅裁撤超出该上限的历史无序 `DEPRECATED_*_ALIASES`）。
    - **第三方 Mod 钩子去依赖清单（写成独立原生 Mod 后必须全部自主实现）**：
      - **`CodeChickenLib` 临时特例移除**：`Epiphy的-物品三维渲染器.js` (`EpiphyItem3DRenderer`) 当前为绕过 KubeJS 1.20.1 `StartupEvents.registry('item')` 不暴露 `initializeClient` 的脚本层限制，以及 Rhino 纯解释器逐顶点写 `VertexConsumer` 的性能瓶颈（8~25ms vs Java 侧 ~0.54ms），临时借用了 `IItemRenderer` / `TransformUtils` / `CCShaderInstance` / `CCModel` / `CCRenderState` / `ColourAttribute` / `Matrix4` / `Vector3` / `Vertex5` 作为可选物品 3D 渲染与网格提交加速特例（无 CCL 时单告警 Fail-Soft 退回原版静态模型；世界 3D 相位桥接已迁入 `Epiphy的-Spec与通用工具.js`，与 CCL 物理隔离）。在写成独立原生 Mod（Phase 4）时，**必须彻底移除对 `CodeChickenLib` 的全部引用，改由本项目自主实现**：使用 Forge 原生 `IClientItemExtensions` + `BlockEntityWithoutLevelRenderer`（或自有 `ItemRenderer` Mixin）接管自定义物品渲染，直接使用原版 `ShaderInstance` 注册核心着色器，并以原生 Java VBO/网格提交替代 `CCModel`。
    - **渲染缓存架构备忘（未来原生模组）**：进入独立 Kotlin + Java 实现阶段时，屏幕弹幕的静态片段与离散/稳态逐字缓冲，以及**声明式 2D 节点树的整树 / 静态子树离屏缓存（默认关闭、面向高复杂度动态面板按需开启）**统一采用独立 **`TextureTarget`** (FBO) 离屏缓存池（自行管理 FBO 生命周期、脏标记失效、离屏渲染与 Quad 贴回），直接绕开 MC 原版高频重复走几何/文字渲染管线的开销。
