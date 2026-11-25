@@ -1,5 +1,5 @@
 // ============================================================================
-//  通用平面渲染与屏幕弹幕组件 —— 客户端渲染引擎 (Epiphy2DRenderer / ScreenDanmakuClient v6.2.1)
+//  通用平面渲染与屏幕弹幕组件 —— 客户端渲染引擎 (Epiphy2DRenderer / ScreenDanmakuClient v6.3.0)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/client_scripts/通用组件/Epiphy的-平面渲染器.js
@@ -50,7 +50,7 @@
     var CHANNEL       = (PROTO && PROTO.DANMAKU_CHANNEL) || 'epiphy:screen_danmaku'
     var DEBUG_CHANNEL = 'epiphy:render_debug'
     var PROTO_VERSION = (PROTO && PROTO.DANMAKU_PROTO_VERSION) || 6
-    var VERSION       = '6.2.1'
+    var VERSION       = '6.3.0'
     if (SPEC && typeof SPEC.checkDependencyVersion === 'function') {
         SPEC.checkDependencyVersion('EpiphySpec', SPEC, '2.5.0', '2.99.99', {
             caller: 'Epiphy2DRenderer',
@@ -225,8 +225,9 @@
     var BATCH_RETRY_AT_MS       = 0
     var BATCH_RETRY_COOLDOWN_MS = 10000
     var MUI_RETRY_COOLDOWN_MS   = 10000
-    var BATCH_MODE_PROBED       = false
-    var FONT_DISPLAY_NORMAL     = null
+    var BATCH_MODE_PROBED        = false
+    var FONT_DISPLAY_NORMAL      = null
+    var FONT_DISPLAY_SEE_THROUGH = null
     var MUI_PROBED              = false
     var MUI_ENGINE              = null
     var MUI_RENDERER            = null
@@ -358,6 +359,7 @@
         screen_hud:         makePerfBucket(),
         gui:                makePerfBucket(),
         slot:               makePerfBucket(),
+        world_plane:        makePerfBucket(),
         budgetTrips:        0,
         lastFlushMs:        0,
         enabledAtMs:        0,
@@ -434,7 +436,8 @@
                 screen_text: clonePerfBucket(PERF_STATS.screen_text),
                 screen_hud:  clonePerfBucket(PERF_STATS.screen_hud),
                 gui:         clonePerfBucket(PERF_STATS.gui),
-                slot:        clonePerfBucket(PERF_STATS.slot)
+                slot:        clonePerfBucket(PERF_STATS.slot),
+                world_plane: clonePerfBucket(PERF_STATS.world_plane)
             },
             caches: {
                 sharedSeq:    SHARED_TEXT_SEQ_CACHE.size(),
@@ -455,6 +458,7 @@
         resetPerfBucket(PERF_STATS.screen_hud)
         resetPerfBucket(PERF_STATS.gui)
         resetPerfBucket(PERF_STATS.slot)
+        resetPerfBucket(PERF_STATS.world_plane)
         PERF_STATS.budgetTrips        = 0
         PERF_STATS.lastFlushMs        = 0
         PERF_STATS.pendingFlush       = false
@@ -1657,7 +1661,10 @@
         if (BATCH_MODE_PROBED) return FONT_DISPLAY_NORMAL
         BATCH_MODE_PROBED = true
         var cls = loadJavaClass('net.minecraft.client.gui.Font$DisplayMode')
-        if (cls != null && cls.NORMAL != null) FONT_DISPLAY_NORMAL = cls.NORMAL
+        if (cls != null) {
+            if (cls.NORMAL != null) FONT_DISPLAY_NORMAL = cls.NORMAL
+            if (cls.SEE_THROUGH != null) FONT_DISPLAY_SEE_THROUGH = cls.SEE_THROUGH
+        }
         return FONT_DISPLAY_NORMAL
     }
 
@@ -4477,6 +4484,25 @@
                     if (isPlainObjLike(raw.vars)) {
                         applyVarsPatchToOverlay(pOv, raw.vars, now)
                     }
+                    if (pOv.surface === 'world_plane') {
+                        var pWp = raw.worldPos !== undefined ? raw.worldPos : raw.at
+                        if (Array.isArray(pWp) && pWp.length >= 3 &&
+                            isFinite(Number(pWp[0])) && isFinite(Number(pWp[1])) && isFinite(Number(pWp[2]))) {
+                            pOv.worldPos = [Number(pWp[0]), Number(pWp[1]), Number(pWp[2])]
+                        }
+                        if (raw.billboard !== undefined || raw.facing !== undefined) {
+                            var pBb = String(raw.billboard !== undefined ? raw.billboard : raw.facing).toLowerCase()
+                            if (pBb === 'center' || pBb === 'vertical' || pBb === 'fixed') pOv.billboard = pBb
+                        }
+                        if (raw.seeThrough !== undefined || raw.xray !== undefined) {
+                            pOv.seeThrough = readBool(raw, 'seeThrough', readBool(raw, 'xray', pOv.seeThrough))
+                        }
+                        if (raw.yaw !== undefined) pOv.yaw = readNum(raw, 'yaw', pOv.yaw || 0)
+                        if (raw.pitch !== undefined) pOv.pitch = readNum(raw, 'pitch', pOv.pitch || 0)
+                        if (raw.roll !== undefined) pOv.roll = readNum(raw, 'roll', pOv.roll || 0)
+                        if (raw.maxDistance !== undefined) pOv.maxDistance = clampNum(readNonNegNum(raw, 'maxDistance', pOv.maxDistance || 64, 2), 2, 512)
+                        if (raw.dimension !== undefined) pOv.dimension = readStr(raw, 'dimension', pOv.dimension || '')
+                    }
                     if (pOv.lifeMode === 'active') {
                         var patchHoldTicks = readNonNegNum(raw, 'activeHold', pOv.holdTicks || 28, 4)
                         pOv.holdTicks      = patchHoldTicks
@@ -4622,9 +4648,42 @@
         var maxGroupSize = Math.round(readNonNegNum(raw, 'maxGroup', readNonNegNum(raw, 'maxGroupSize', 0, 0), 0))
         var debugEnabled = readBool(raw, 'debug', false)
 
+        var wpCoord = null
+        var wpBillboard = 'vertical'
+        var wpSeeThrough = false
+        var wpYaw = 0.0, wpPitch = 0.0, wpRoll = 0.0
+        var wpMaxDist = 64.0
+        var wpDimension = ''
+        if (surface === 'world_plane') {
+            var rawWp = raw.worldPos !== undefined ? raw.worldPos : raw.at
+            if (!Array.isArray(rawWp) || rawWp.length < 3 ||
+                !isFinite(Number(rawWp[0])) || !isFinite(Number(rawWp[1])) || !isFinite(Number(rawWp[2]))) {
+                return
+            }
+            wpCoord = [Number(rawWp[0]), Number(rawWp[1]), Number(rawWp[2])]
+            var bbIn = readStr(raw, 'billboard', readStr(raw, 'facing', 'vertical')).toLowerCase()
+            wpBillboard  = (bbIn === 'center' || bbIn === 'vertical' || bbIn === 'fixed') ? bbIn : 'vertical'
+            wpSeeThrough = readBool(raw, 'seeThrough', readBool(raw, 'xray', false))
+            wpYaw        = clampNum(readNum(raw, 'yaw', 0.0), -360.0, 360.0)
+            wpPitch      = clampNum(readNum(raw, 'pitch', 0.0), -180.0, 180.0)
+            wpRoll       = clampNum(readNum(raw, 'roll', 0.0), -360.0, 360.0)
+            wpMaxDist    = clampNum(readNonNegNum(raw, 'maxDistance', 64.0, 2.0), 2.0, 512.0)
+            wpDimension  = readStr(raw, 'dimension', '')
+        }
+
         if (exist != null) {
                     exist.proto           = 6
                     exist.surface         = surface
+                    if (surface === 'world_plane') {
+                        exist.worldPos    = wpCoord
+                        exist.billboard   = wpBillboard
+                        exist.seeThrough  = wpSeeThrough
+                        exist.yaw         = wpYaw
+                        exist.pitch       = wpPitch
+                        exist.roll        = wpRoll
+                        exist.maxDistance = wpMaxDist
+                        exist.dimension   = wpDimension
+                    }
                     exist.hasGraphicNodes = hasCustomNodes
                     exist.nodes           = Array.isArray(raw.nodes) ? compileDeclarativeNodes(raw.nodes, 0) : exist.nodes
                     exist.clip            = raw.clip !== undefined ? raw.clip : exist.clip
@@ -4781,6 +4840,14 @@
             bgNodes:            Array.isArray(raw.bgNodes) ? compileDeclarativeNodes(raw.bgNodes, 0) : null,
             fgNodes:            Array.isArray(raw.fgNodes) ? compileDeclarativeNodes(raw.fgNodes, 0) : null,
             slotMatch:          raw.slotMatch || null,
+            worldPos:           wpCoord,
+            billboard:          wpBillboard,
+            seeThrough:         wpSeeThrough,
+            yaw:                wpYaw,
+            pitch:              wpPitch,
+            roll:               wpRoll,
+            maxDistance:        wpMaxDist,
+            dimension:          wpDimension,
             key:                key,
             slotId:             slotId,
             tier:               tier,
@@ -4977,6 +5044,12 @@
                             }
                         }
                         if (raw.activeHold != null) qPkt.activeHold = raw.activeHold
+                        if (raw.worldPos !== undefined) qPkt.worldPos = raw.worldPos
+                        if (raw.billboard !== undefined) qPkt.billboard = raw.billboard
+                        if (raw.seeThrough !== undefined) qPkt.seeThrough = raw.seeThrough
+                        if (raw.yaw !== undefined) qPkt.yaw = raw.yaw
+                        if (raw.pitch !== undefined) qPkt.pitch = raw.pitch
+                        if (raw.roll !== undefined) qPkt.roll = raw.roll
                         return
                     }
                 }
@@ -5166,20 +5239,31 @@
             for (var i = 0; i < activeOverlays.length; i++) {
                 var ov = activeOverlays[i]
                 if (ov == null) continue
-                out.push({
-                    proto:        ov.proto || 6,
-                    surface:      ov.surface || 'screen',
-                    key:          ov.key,
-                    slotId:       ov.slotId,
-                    tier:         ov.tier,
-                    namespace:    ov.namespace,
-                    group:        ov.group,
-                    lifeMode:     ov.lifeMode,
+                var row = {
+                    proto:          ov.proto || 6,
+                    surface:        ov.surface || 'screen',
+                    key:            ov.key,
+                    slotId:         ov.slotId,
+                    tier:           ov.tier,
+                    namespace:      ov.namespace,
+                    group:          ov.group,
+                    lifeMode:       ov.lifeMode,
                     priority:       ov.priority,
                     renderPriority: ov.renderPriority != null ? ov.renderPriority : 0,
                     maxGroupSize:   ov.maxGroupSize,
-                    lineCacheKey: ov._lineRenderCache != null ? ov._lineRenderCache.key : null
-                })
+                    lineCacheKey:   ov._lineRenderCache != null ? ov._lineRenderCache.key : null
+                }
+                if (ov.surface === 'world_plane') {
+                    row.worldPos    = ov.worldPos ? ov.worldPos.slice() : null
+                    row.billboard   = ov.billboard || 'vertical'
+                    row.seeThrough  = Boolean(ov.seeThrough)
+                    row.yaw         = ov.yaw || 0
+                    row.pitch       = ov.pitch || 0
+                    row.roll        = ov.roll || 0
+                    row.maxDistance = ov.maxDistance || 64
+                    row.dimension   = ov.dimension || ''
+                }
+                out.push(row)
             }
             return out
         },
@@ -5188,6 +5272,15 @@
         },
         _onRenderGuiPre:         function (forgeEvent) {
             return onRenderGuiPre(forgeEvent)
+        },
+        _hasActiveWorldPlanes:   function () {
+            return hasActiveWorldPlanes()
+        },
+        _onRenderLevelStage:     function (forgeEvent) {
+            return onRenderLevelStageWorldPlanes(forgeEvent)
+        },
+        listWorldPlanes:         function () {
+            return listActiveWorldPlanes()
         },
         isPreHudActive:          isPreHudBridgeActive,
         restoreReplacedTextures: restoreAllReplacedTextures,
@@ -7161,7 +7254,7 @@
     }
 
     function shouldItemRenderInPass(item, passMode, preBridgeActive) {
-        if (item == null) return false
+        if (item == null || item.surface === 'world_plane') return false
         var isGuiOrSlot = (item.surface === 'gui' || item.surface === 'slot')
         if (passMode === 'pre_hud') {
             if (isGuiOrSlot) return false
@@ -8027,6 +8120,712 @@
             PRE_HUD_BRIDGE_FAILED = true
             logErrorThrottled('onRenderGuiPre failed, falling back to paintScreen', ePre)
         }
+    }
+
+    // ========================================================================
+    // 三维空间中的 2D 画布投影渲染引擎 (`surface: 'world_plane'`)
+    //   - 统一挂载在 EpiphySpec `RenderLevelStageEvent` (`AFTER_TRANSLUCENT_BLOCKS`) 相位
+    //   - 零活跃 `world_plane` 实例时 `_hasActiveWorldPlanes()` O(1) 短路零开销
+    //   - 100% 复用 `renderDeclarativeNodes` 图元树编译器（支持 rect/sprite/nine_slice/group/text + tracks/bind/clip）
+    //   - 支持 `billboard: 'center' | 'vertical' | 'fixed'`（配 `yaw`/`pitch`/`roll`）与 `seeThrough` (`Font$DisplayMode.SEE_THROUGH` / 深度控制)
+    // ========================================================================
+    var WP_DEG_TO_RAD      = (SPEC && SPEC.MATH && SPEC.MATH.DEG_TO_RAD) ? SPEC.MATH.DEG_TO_RAD : 0.017453292519943295
+    var WP_RAD_TO_DEG      = (SPEC && SPEC.MATH && SPEC.MATH.RAD_TO_DEG) ? SPEC.MATH.RAD_TO_DEG : 57.29577951308232
+    var WP_PX_TO_METER     = 1.0 / 64.0
+    var WP_FULL_BRIGHT     = 0x00F000F0
+    var WP_NO_OVERLAY      = 655360 // OverlayTexture.NO_OVERLAY (0 | (10 << 16))
+    var WP_STAGE_CACHE     = undefined
+    var WP_WHITE_RT_NORMAL = undefined
+    var WP_WHITE_RT_XRAY   = undefined
+    var WP_TEX_RT_CACHE    = createLocalBoundedCache(64)
+    var WP_POSE_MAT4       = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+    var WP_ROT_BASIS       = [1, 0, 0, 0, 1, 0, 0, 0, 1] // Right(0..2), Down(3..5), Normal(6..8)
+    var WP_2D_STACK        = []
+    var WP_TEXT_JOML_MAT   = null
+
+    function hasActiveWorldPlanes() {
+        for (var i = 0; i < activeOverlays.length; i++) {
+            var ov = activeOverlays[i]
+            if (ov != null && ov.surface === 'world_plane') return true
+        }
+        for (var pi = 0; pi < pendingActions.length; pi++) {
+            var q = pendingActions[pi]
+            if (q == null) continue
+            var s = readStr(q, 'surface', readStr(q, 'carrier', ''))
+            var a = readStr(q, 'action', readStr(q, 'act', ''))
+            if (s === 'world_plane' || a === 'clear' || a === 'deactivate' || a === 'stop' || a === 'patch' || q.items != null) {
+                return true
+            }
+        }
+        return false
+    }
+
+    function listActiveWorldPlanes() {
+        var out = []
+        for (var i = 0; i < activeOverlays.length; i++) {
+            var ov = activeOverlays[i]
+            if (ov == null || ov.surface !== 'world_plane') continue
+            out.push({
+                key:         ov.key,
+                slotId:      ov.slotId,
+                namespace:   ov.namespace,
+                group:       ov.group,
+                worldPos:    ov.worldPos ? ov.worldPos.slice() : null,
+                billboard:   ov.billboard || 'vertical',
+                seeThrough:  Boolean(ov.seeThrough),
+                yaw:         ov.yaw || 0,
+                pitch:       ov.pitch || 0,
+                roll:        ov.roll || 0,
+                maxDistance: ov.maxDistance || 64,
+                dimension:   ov.dimension || ''
+            })
+        }
+        return out
+    }
+
+    function isWorldPlaneTranslucentStage(forgeEvent) {
+        if (forgeEvent == null) return false
+        var st = null
+        try {
+            st = (typeof forgeEvent.getStage === 'function') ? forgeEvent.getStage() : forgeEvent.stage
+        } catch (eSt) { st = null }
+        if (st == null) return true
+        if (WP_STAGE_CACHE === undefined) {
+            WP_STAGE_CACHE = null
+            var StageCls = loadJavaClass('net.minecraftforge.client.event.RenderLevelStageEvent$Stage', true)
+            if (StageCls != null && StageCls.AFTER_TRANSLUCENT_BLOCKS != null) {
+                WP_STAGE_CACHE = StageCls.AFTER_TRANSLUCENT_BLOCKS
+            }
+        }
+        if (WP_STAGE_CACHE != null) {
+            if (st === WP_STAGE_CACHE) return true
+            try {
+                if (typeof st.equals === 'function' && st.equals(WP_STAGE_CACHE)) return true
+            } catch (eEqSt) { }
+        }
+        var stStr = String(st)
+        return stStr === 'AFTER_TRANSLUCENT_BLOCKS' || stStr === 'after_translucent_blocks'
+    }
+
+    function readWorldPlaneCameraInfo(forgeEvent) {
+        var cx = 0, cy = 0, cz = 0, yawDeg = 0, pitchDeg = 0, hasRot = false
+        try {
+            var cam = (typeof forgeEvent.getCamera === 'function') ? forgeEvent.getCamera() : forgeEvent.camera
+            if (cam != null) {
+                var pos = (typeof cam.getPosition === 'function') ? cam.getPosition() : ((typeof cam.m_90583_ === 'function') ? cam.m_90583_() : cam.position)
+                if (pos != null) {
+                    cx = Number(pos.x !== undefined ? pos.x : pos.f_82479_) || 0
+                    cy = Number(pos.y !== undefined ? pos.y : pos.f_82480_) || 0
+                    cz = Number(pos.z !== undefined ? pos.z : pos.f_82481_) || 0
+                }
+                if (typeof cam.getYRot === 'function') { yawDeg = Number(cam.getYRot()) || 0; hasRot = true }
+                else if (typeof cam.m_90590_ === 'function') { yawDeg = Number(cam.m_90590_()) || 0; hasRot = true }
+                else if (cam.yRot !== undefined) { yawDeg = Number(cam.yRot) || 0; hasRot = true }
+
+                if (typeof cam.getXRot === 'function') { pitchDeg = Number(cam.getXRot()) || 0; hasRot = true }
+                else if (typeof cam.m_90589_ === 'function') { pitchDeg = Number(cam.m_90589_()) || 0; hasRot = true }
+                else if (cam.xRot !== undefined) { pitchDeg = Number(cam.xRot) || 0; hasRot = true }
+            }
+        } catch (eCam) { }
+        return { x: cx, y: cy, z: cz, yawDeg: yawDeg, pitchDeg: pitchDeg, hasRot: hasRot }
+    }
+
+    function readClientDimensionForWorldPlane(forgeEvent) {
+        if (forgeEvent != null && typeof forgeEvent.dimension === 'string' && forgeEvent.dimension) {
+            return SPEC ? (SPEC.normalizeDim(forgeEvent.dimension) || forgeEvent.dimension) : forgeEvent.dimension
+        }
+        var lk = resolveCurrentLevelKey(null)
+        if (lk) return SPEC ? (SPEC.normalizeDim(lk) || lk) : lk
+        return ''
+    }
+
+    function resolveWpBufferSource(forgeEvent) {
+        if (forgeEvent != null) {
+            try {
+                if (typeof forgeEvent.getBufferSource === 'function') {
+                    var bsEv = forgeEvent.getBufferSource()
+                    if (bsEv != null) return bsEv
+                }
+                if (forgeEvent.bufferSource != null) return forgeEvent.bufferSource
+            } catch (eBs1) { }
+        }
+        if (MinecraftClass != null && !MC_INSTANCE_FAILED) {
+            try {
+                var mc = MinecraftClass.getInstance()
+                if (mc != null) {
+                    var rb = (typeof mc.renderBuffers === 'function') ? mc.renderBuffers() : ((typeof mc.m_91269_ === 'function') ? mc.m_91269_() : null)
+                    if (rb != null) {
+                        if (typeof rb.bufferSource === 'function') return rb.bufferSource()
+                        if (typeof rb.m_110104_ === 'function') return rb.m_110104_()
+                    }
+                }
+            } catch (eBs2) { }
+        }
+        return null
+    }
+
+    function resolveWpWhiteRenderType(seeThrough, forgeEvent) {
+        if (forgeEvent != null && forgeEvent.worldPlaneRenderType != null) {
+            return typeof forgeEvent.worldPlaneRenderType === 'function'
+                ? forgeEvent.worldPlaneRenderType(seeThrough, null)
+                : forgeEvent.worldPlaneRenderType
+        }
+        if (RenderTypeClass === null) {
+            RenderTypeClass = loadJavaClass('net.minecraft.client.renderer.RenderType', true) || false
+        }
+        if (RenderTypeClass) {
+            var whiteRl = getResourceLocation('epiphy:textures/effect/white_pixel.png')
+            if (seeThrough) {
+                if (WP_WHITE_RT_XRAY === undefined) {
+                    WP_WHITE_RT_XRAY = null
+                    try {
+                        if (whiteRl != null && typeof RenderTypeClass.textSeeThrough === 'function') {
+                            WP_WHITE_RT_XRAY = RenderTypeClass.textSeeThrough(whiteRl)
+                        } else if (whiteRl != null && typeof RenderTypeClass.m_110497_ === 'function') {
+                            WP_WHITE_RT_XRAY = RenderTypeClass.m_110497_(whiteRl)
+                        } else if (typeof RenderTypeClass.gui === 'function') {
+                            WP_WHITE_RT_XRAY = RenderTypeClass.gui()
+                        }
+                    } catch (eRtX) { WP_WHITE_RT_XRAY = null }
+                }
+                if (WP_WHITE_RT_XRAY != null) return WP_WHITE_RT_XRAY
+            }
+            if (WP_WHITE_RT_NORMAL === undefined) {
+                WP_WHITE_RT_NORMAL = null
+                try {
+                    if (whiteRl != null && typeof RenderTypeClass.text === 'function') {
+                        WP_WHITE_RT_NORMAL = RenderTypeClass.text(whiteRl)
+                    } else if (whiteRl != null && typeof RenderTypeClass.m_110494_ === 'function') {
+                        WP_WHITE_RT_NORMAL = RenderTypeClass.m_110494_(whiteRl)
+                    } else if (whiteRl != null && typeof RenderTypeClass.entityTranslucentEmissive === 'function') {
+                        WP_WHITE_RT_NORMAL = RenderTypeClass.entityTranslucentEmissive(whiteRl, false)
+                    } else if (whiteRl != null && typeof RenderTypeClass.m_234335_ === 'function') {
+                        WP_WHITE_RT_NORMAL = RenderTypeClass.m_234335_(whiteRl, false)
+                    }
+                } catch (eRtN) { WP_WHITE_RT_NORMAL = null }
+            }
+            if (WP_WHITE_RT_NORMAL != null) return WP_WHITE_RT_NORMAL
+        }
+        return seeThrough ? 'epiphy:world_plane_xray' : 'epiphy:world_plane_normal'
+    }
+
+    function resolveWpTextureRenderType(rl, seeThrough, forgeEvent) {
+        if (rl == null) return resolveWpWhiteRenderType(seeThrough, forgeEvent)
+        if (forgeEvent != null && typeof forgeEvent.worldPlaneRenderType === 'function') {
+            return forgeEvent.worldPlaneRenderType(seeThrough, rl)
+        }
+        var cacheKey = (seeThrough ? 'X|' : 'N|') + String(rl)
+        var cached = WP_TEX_RT_CACHE.get(cacheKey)
+        if (cached != null) return cached
+        if (RenderTypeClass === null) {
+            RenderTypeClass = loadJavaClass('net.minecraft.client.renderer.RenderType', true) || false
+        }
+        var rt = null
+        if (RenderTypeClass) {
+            try {
+                if (seeThrough) {
+                    if (typeof RenderTypeClass.textSeeThrough === 'function') rt = RenderTypeClass.textSeeThrough(rl)
+                    else if (typeof RenderTypeClass.m_110497_ === 'function') rt = RenderTypeClass.m_110497_(rl)
+                } else {
+                    if (typeof RenderTypeClass.text === 'function') rt = RenderTypeClass.text(rl)
+                    else if (typeof RenderTypeClass.m_110494_ === 'function') rt = RenderTypeClass.m_110494_(rl)
+                    else if (typeof RenderTypeClass.entityTranslucent === 'function') rt = RenderTypeClass.entityTranslucent(rl)
+                    else if (typeof RenderTypeClass.m_110473_ === 'function') rt = RenderTypeClass.m_110473_(rl)
+                }
+            } catch (eTexRt) { rt = null }
+        }
+        if (rt == null) rt = (seeThrough ? 'epiphy:tex_xray:' : 'epiphy:tex_normal:') + String(rl)
+        WP_TEX_RT_CACHE.set(cacheKey, rt)
+        return rt
+    }
+
+    function readWpPoseMat4(poseStack, out) {
+        out[0] = 1; out[1] = 0; out[2] = 0; out[3] = 0
+        out[4] = 0; out[5] = 1; out[6] = 0; out[7] = 0
+        out[8] = 0; out[9] = 0; out[10] = 1; out[11] = 0
+        out[12] = 0; out[13] = 0; out[14] = 0; out[15] = 1
+        if (poseStack == null) return false
+        try {
+            var last = (typeof poseStack.last === 'function') ? poseStack.last() : ((typeof poseStack.m_85850_ === 'function') ? poseStack.m_85850_() : null)
+            if (last == null) return false
+            var p = (typeof last.pose === 'function') ? last.pose() : ((typeof last.m_252922_ === 'function') ? last.m_252922_() : null)
+            if (p == null || typeof p.m00 !== 'function') return false
+            out[0] = Number(p.m00()); out[1] = Number(p.m10()); out[2] = Number(p.m20()); out[3] = Number(p.m30())
+            out[4] = Number(p.m01()); out[5] = Number(p.m11()); out[6] = Number(p.m21()); out[7] = Number(p.m31())
+            out[8] = Number(p.m02()); out[9] = Number(p.m12()); out[10] = Number(p.m22()); out[11] = Number(p.m32())
+            out[12] = Number(p.m03()); out[13] = Number(p.m13()); out[14] = Number(p.m23()); out[15] = Number(p.m33())
+            return true
+        } catch (ePm) {
+            return false
+        }
+    }
+
+    // 计算世界平面正交三基向量：Right (+u 屏幕向右), Down (+v 屏幕向下), Normal (朝向观察者正面的法向量)
+    function computeWorldPlaneBasis(ov, camInfo, relX, relY, relZ, outBasis) {
+        var bb = ov.billboard || 'vertical'
+        var yawRad = 0.0
+        var pitchRad = 0.0
+        var rollRad = ((ov.roll || 0.0) + (ov.angle || 0.0)) * WP_DEG_TO_RAD
+
+        if (bb === 'fixed') {
+            yawRad   = -(ov.yaw || 0.0) * WP_DEG_TO_RAD
+            pitchRad = (ov.pitch || 0.0) * WP_DEG_TO_RAD
+        } else if (bb === 'center') {
+            if (camInfo.hasRot) {
+                yawRad   = -camInfo.yawDeg * WP_DEG_TO_RAD
+                pitchRad = camInfo.pitchDeg * WP_DEG_TO_RAD
+            } else {
+                var toCamX = -relX, toCamY = -relY, toCamZ = -relZ
+                var horiz = Math.sqrt(toCamX * toCamX + toCamZ * toCamZ)
+                yawRad   = Math.atan2(toCamX, toCamZ)
+                pitchRad = -Math.atan2(toCamY, max2(1e-5, horiz))
+            }
+        } else {
+            // 'vertical'（默认）：仅绕世界 Y 轴水平朝向相机，Y 轴保持竖直不随俯仰倾斜
+            if (camInfo.hasRot) {
+                yawRad = -camInfo.yawDeg * WP_DEG_TO_RAD
+            } else {
+                yawRad = Math.atan2(-relX, -relZ)
+            }
+            pitchRad = 0.0
+        }
+
+        // R = Ry(yawRad) * Rx(pitchRad) * Rz(rollRad)
+        // 在 MC 观察者面向平面正面时：局部 +u 对应 (-localX)，局部 +v 对应 (-localY)，正面法线对应 (+localZ)（或与原版 renderNameTag scale(-s,-s,s) 等价）
+        var cy = Math.cos(yawRad), sy = Math.sin(yawRad)
+        var cx = Math.cos(pitchRad), sx = Math.sin(pitchRad)
+        var cz = Math.cos(rollRad), sz = Math.sin(rollRad)
+
+        var r00 = cy * cz + sy * sx * sz
+        var r10 = cx * sz
+        var r20 = -sy * cz + cy * sx * sz
+
+        var r01 = -cy * sz + sy * sx * cz
+        var r11 = cx * cz
+        var r21 = sy * sz + cy * sx * cz
+
+        var r02 = sy * cx
+        var r12 = -sx
+        var r22 = cy * cx
+
+        // Right 向量 (+u 轴，对应 -Col0)
+        outBasis[0] = -r00; outBasis[1] = -r10; outBasis[2] = -r20
+        // Down 向量 (+v 轴，对应 -Col1)
+        outBasis[3] = -r01; outBasis[4] = -r11; outBasis[5] = -r21
+        // Normal 向量 (朝向正面，对应 +Col2)
+        outBasis[6] = r02;  outBasis[7] = r12;  outBasis[8] = r22
+    }
+
+    function emitWpQuadVertex(vc, poseMat, lx, ly, lz, u, v, argb) {
+        var wx = poseMat[0] * lx + poseMat[1] * ly + poseMat[2] * lz + poseMat[3]
+        var wy = poseMat[4] * lx + poseMat[5] * ly + poseMat[6] * lz + poseMat[7]
+        var wz = poseMat[8] * lx + poseMat[9] * ly + poseMat[10] * lz + poseMat[11]
+        var a = ((argb >>> 24) & 0xFF)
+        var r = ((argb >>> 16) & 0xFF)
+        var g = ((argb >>> 8) & 0xFF)
+        var b = (argb & 0xFF)
+
+        if (typeof vc.vertex === 'function') {
+            var step = vc.vertex(wx, wy, wz)
+            if (step != null && typeof step.color === 'function') {
+                step = step.color(r, g, b, a)
+                if (typeof step.uv === 'function') step = step.uv(u, v)
+                if (typeof step.overlayCoords === 'function') step = step.overlayCoords(WP_NO_OVERLAY)
+                if (typeof step.uv2 === 'function') step = step.uv2(WP_FULL_BRIGHT)
+                if (typeof step.normal === 'function') step = step.normal(0.0, 1.0, 0.0)
+                if (typeof step.endVertex === 'function') step.endVertex()
+                return
+            }
+        }
+        if (typeof vc.m_5954_ === 'function') {
+            // text / entity vertex consumer fast SRG
+            vc.m_5954_(wx, wy, wz, r / 255.0, g / 255.0, b / 255.0, a / 255.0, u, v, WP_NO_OVERLAY, WP_FULL_BRIGHT, 0.0, 1.0, 0.0)
+            return
+        }
+        if (typeof vc.m_5483_ === 'function') {
+            var s = vc.m_5483_(wx, wy, wz).m_6122_(r, g, b, a).m_7421_(u, v)
+            if (typeof s.m_86008_ === 'function') s = s.m_86008_(WP_NO_OVERLAY)
+            if (typeof s.m_85969_ === 'function') s = s.m_85969_(WP_FULL_BRIGHT)
+            if (typeof s.m_5601_ === 'function') s = s.m_5601_(0.0, 1.0, 0.0)
+            if (typeof s.m_5752_ === 'function') s.m_5752_()
+        }
+    }
+
+    function getWp2DSlot(depthIdx) {
+        while (WP_2D_STACK.length <= depthIdx) {
+            WP_2D_STACK.push({ m00: 1, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0 })
+        }
+        return WP_2D_STACK[depthIdx]
+    }
+
+    function pushPoseStackSafe(ps) {
+        if (ps == null) return false
+        if (typeof ps.pushPose === 'function') { ps.pushPose(); return true }
+        if (typeof ps.m_85836_ === 'function') { ps.m_85836_(); return true }
+        return false
+    }
+
+    function translatePoseStackSafe(ps, dx, dy, dz) {
+        if (ps == null) return
+        if (typeof ps.translate === 'function') ps.translate(dx, dy, dz)
+        else if (typeof ps.m_85837_ === 'function') ps.m_85837_(dx, dy, dz)
+    }
+
+    function popPoseStackSafe(ps) {
+        if (ps == null) return
+        if (typeof ps.popPose === 'function') ps.popPose()
+        else if (typeof ps.m_85849_ === 'function') ps.m_85849_()
+    }
+
+    function flushWpRenderType(bs, rt) {
+        if (bs == null || rt == null) return
+        try {
+            if (typeof bs.endBatch === 'function') bs.endBatch(rt)
+            else if (typeof bs.m_109912_ === 'function') bs.m_109912_(rt)
+        } catch (eFlWp) { }
+    }
+
+    function onRenderLevelStageWorldPlanes(forgeEvent) {
+        if (!isWorldPlaneTranslucentStage(forgeEvent)) return
+        var now = monotonicNowMs()
+        flushPendingActions(now)
+
+        for (var expIdx = activeOverlays.length - 1; expIdx >= 0; expIdx--) {
+            if (now >= activeOverlays[expIdx].expire) {
+                activeOverlays.splice(expIdx, 1)
+            }
+        }
+
+        var wpList = []
+        for (var oi = 0; oi < activeOverlays.length; oi++) {
+            var cand = activeOverlays[oi]
+            if (cand != null && cand.surface === 'world_plane' && cand.worldPos != null && now < cand.expire) {
+                wpList.push(cand)
+            }
+        }
+        if (wpList.length === 0) return
+
+        var startMs   = now
+        var camInfo   = readWorldPlaneCameraInfo(forgeEvent)
+        var curDim    = readClientDimensionForWorldPlane(forgeEvent)
+        var poseStack = null
+        try {
+            poseStack = (typeof forgeEvent.getPoseStack === 'function') ? forgeEvent.getPoseStack() : forgeEvent.poseStack
+        } catch (ePs) { poseStack = null }
+
+        var bufSrc = resolveWpBufferSource(forgeEvent)
+        var fontObj = (forgeEvent != null && forgeEvent.font != null) ? forgeEvent.font : getClientFont(null, now)
+        probeDisplayModeNormal()
+
+        if (wpList.length > 1) {
+            // 远到近排序保证半透明叠层自然融合；同距离按 renderPriority 排序
+            wpList.sort(function (a, b) {
+                var dax = a.worldPos[0] - camInfo.x, day = a.worldPos[1] - camInfo.y, daz = a.worldPos[2] - camInfo.z
+                var dbx = b.worldPos[0] - camInfo.x, dby = b.worldPos[1] - camInfo.y, dbz = b.worldPos[2] - camInfo.z
+                var da2 = dax * dax + day * day + daz * daz
+                var db2 = dbx * dbx + dby * dby + dbz * dbz
+                if (Math.abs(db2 - da2) > 0.01) return db2 - da2
+                return compareOverlayDrawPriority(a, b)
+            })
+        }
+
+        var prevActiveEv = ACTIVE_FRAME_EVENT
+        var prevBatchCtx = ACTIVE_FRAME_BATCH_CTX
+        ACTIVE_FRAME_BATCH_CTX = null
+        var renderedPlanes = 0
+        var usedRenderTypes = []
+        var trackUsedRt = function (rt) {
+            if (rt == null) return
+            for (var rti = 0; rti < usedRenderTypes.length; rti++) {
+                if (usedRenderTypes[rti] === rt) return
+            }
+            usedRenderTypes.push(rt)
+        }
+
+        try {
+            for (var i = 0; i < wpList.length; i++) {
+                var ov = wpList[i]
+                if (curDim && ov.dimension && ov.dimension !== curDim) continue
+                var relX = ov.worldPos[0] - camInfo.x
+                var relY = ov.worldPos[1] - camInfo.y
+                var relZ = ov.worldPos[2] - camInfo.z
+                var maxD = ov.maxDistance != null ? ov.maxDistance : 64.0
+                if ((relX * relX + relY * relY + relZ * relZ) > (maxD * maxD)) continue
+
+                stepOverlayTracks(ov, now)
+                var fadeStartAt  = ov.fadeStartAt != null ? ov.fadeStartAt : (ov.expire - (ov.fadeMs || 350))
+                var fadeWin      = max2(1, ov.expire - fadeStartAt)
+                var inFade       = (now >= fadeStartAt)
+                var fadeProgress = inFade ? clampNum((now - fadeStartAt) / fadeWin, 0.0, 1.0) : 0.0
+                var fadeAlpha    = inFade ? clampNum(1.0 - fadeProgress, 0.04, 1.0) : 1.0
+                if (fadeAlpha <= 0.005) continue
+
+                var planeScale = ((ov.scale != null && ov.scale > 0.1) ? Number(ov.scale) : 1.0) * WP_PX_TO_METER
+                if (inFade && ov.fadeStyle === 'shrink') {
+                    planeScale *= max2(0.05, 1.0 - fadeProgress * 0.92)
+                }
+
+                computeWorldPlaneBasis(ov, camInfo, relX, relY, relZ, WP_ROT_BASIS)
+                var bRx = WP_ROT_BASIS[0] * planeScale, bRy = WP_ROT_BASIS[1] * planeScale, bRz = WP_ROT_BASIS[2] * planeScale
+                var bDx = WP_ROT_BASIS[3] * planeScale, bDy = WP_ROT_BASIS[4] * planeScale, bDz = WP_ROT_BASIS[5] * planeScale
+                var nX  = WP_ROT_BASIS[6],             nY  = WP_ROT_BASIS[7],             nZ  = WP_ROT_BASIS[8]
+
+                var pushedRoot = false
+                try {
+                    if (pushPoseStackSafe(poseStack)) {
+                        pushedRoot = true
+                        translatePoseStackSafe(poseStack, relX, relY, relZ)
+                    }
+                    readWpPoseMat4(poseStack, WP_POSE_MAT4)
+                    if (!pushedRoot) {
+                        // 无真实 PoseStack（如轻量单测环境）时直接写入世界相机相对位移
+                        WP_POSE_MAT4[3]  += relX
+                        WP_POSE_MAT4[7]  += relY
+                        WP_POSE_MAT4[11] += relZ
+                    }
+
+                    var topIdx = 0
+                    var s0 = getWp2DSlot(0)
+                    var rootOx = Number(ov.ox || 0)
+                    var rootOy = Number(ov.oy || 0)
+                    s0.m00 = 1; s0.m01 = 0; s0.m02 = rootOx
+                    s0.m10 = 0; s0.m11 = 1; s0.m12 = rootOy
+
+                    var layerBias = 0.0
+                    var curTexRl  = null
+                    var curQuadVc = null
+                    var useTexMode = false
+                    var isXray = Boolean(ov.seeThrough)
+
+                    var mapLocalPointToPlane3D = function (px, py, zBias, outPt) {
+                        var st2d = WP_2D_STACK[topIdx]
+                        var u = st2d.m00 * px + st2d.m01 * py + st2d.m02
+                        var v = st2d.m10 * px + st2d.m11 * py + st2d.m12
+                        outPt[0] = bRx * u + bDx * v + nX * zBias
+                        outPt[1] = bRy * u + bDy * v + nY * zBias
+                        outPt[2] = bRz * u + bDz * v + nZ * zBias
+                    }
+
+                    var pt0 = [0, 0, 0], pt1 = [0, 0, 0], pt2 = [0, 0, 0], pt3 = [0, 0, 0]
+
+                    var wpAdapter = {
+                        push: function () {
+                            var cur = WP_2D_STACK[topIdx]
+                            topIdx++
+                            var nxt = getWp2DSlot(topIdx)
+                            nxt.m00 = cur.m00; nxt.m01 = cur.m01; nxt.m02 = cur.m02
+                            nxt.m10 = cur.m10; nxt.m11 = cur.m11; nxt.m12 = cur.m12
+                        },
+                        pop: function () {
+                            if (topIdx > 0) topIdx--
+                        },
+                        translate: function (tx, ty) {
+                            var cur = WP_2D_STACK[topIdx]
+                            var dx = Number(tx) || 0, dy = Number(ty) || 0
+                            cur.m02 += cur.m00 * dx + cur.m01 * dy
+                            cur.m12 += cur.m10 * dx + cur.m11 * dy
+                        },
+                        rotateDeg: function (deg) {
+                            var rad = (Number(deg) || 0) * WP_DEG_TO_RAD
+                            var c = Math.cos(rad), s = Math.sin(rad)
+                            var cur = WP_2D_STACK[topIdx]
+                            var a00 = cur.m00 * c + cur.m01 * s
+                            var a01 = -cur.m00 * s + cur.m01 * c
+                            var a10 = cur.m10 * c + cur.m11 * s
+                            var a11 = -cur.m10 * s + cur.m11 * c
+                            cur.m00 = a00; cur.m01 = a01
+                            cur.m10 = a10; cur.m11 = a11
+                        },
+                        scale: function (sx, sy) {
+                            var cur = WP_2D_STACK[topIdx]
+                            var kx = Number(sx) || 1, ky = (sy !== undefined) ? (Number(sy) || 1) : kx
+                            cur.m00 *= kx; cur.m01 *= ky
+                            cur.m10 *= kx; cur.m11 *= ky
+                        },
+                        getMatrix: function () {
+                            return WP_2D_STACK[topIdx]
+                        },
+                        setPositionColorShader: function () {
+                            useTexMode = false
+                        },
+                        setPositionColorTextureShader: function () {
+                            useTexMode = true
+                        },
+                        setShaderTexture: function (rl) {
+                            curTexRl = rl
+                        },
+                        blend: function () {},
+                        beginQuads: function (textured) {
+                            useTexMode = Boolean(textured)
+                            if (bufSrc == null) {
+                                curQuadVc = null
+                                return
+                            }
+                            var rt = useTexMode
+                                ? resolveWpTextureRenderType(curTexRl, isXray, forgeEvent)
+                                : resolveWpWhiteRenderType(isXray, forgeEvent)
+                            trackUsedRt(rt)
+                            curQuadVc = (typeof bufSrc.getBuffer === 'function')
+                                ? bufSrc.getBuffer(rt)
+                                : (typeof bufSrc.m_6299_ === 'function' ? bufSrc.m_6299_(rt) : null)
+                        },
+                        rectangle: function (x, y, _z, w, h, argb, u0, v0, u1, v1) {
+                            if (curQuadVc == null) return
+                            var zB = layerBias
+                            layerBias += 0.0006
+                            var tu0 = (u0 !== undefined) ? Number(u0) : 0.0
+                            var tv0 = (v0 !== undefined) ? Number(v0) : 0.0
+                            var tu1 = (u1 !== undefined) ? Number(u1) : 1.0
+                            var tv1 = (v1 !== undefined) ? Number(v1) : 1.0
+                            mapLocalPointToPlane3D(x,     y,     zB, pt0)
+                            mapLocalPointToPlane3D(x,     y + h, zB, pt1)
+                            mapLocalPointToPlane3D(x + w, y + h, zB, pt2)
+                            mapLocalPointToPlane3D(x + w, y,     zB, pt3)
+                            // 双面可见或标准逆时针正面顶点序列
+                            emitWpQuadVertex(curQuadVc, WP_POSE_MAT4, pt0[0], pt0[1], pt0[2], tu0, tv0, argb)
+                            emitWpQuadVertex(curQuadVc, WP_POSE_MAT4, pt1[0], pt1[1], pt1[2], tu0, tv1, argb)
+                            emitWpQuadVertex(curQuadVc, WP_POSE_MAT4, pt2[0], pt2[1], pt2[2], tu1, tv1, argb)
+                            emitWpQuadVertex(curQuadVc, WP_POSE_MAT4, pt3[0], pt3[1], pt3[2], tu1, tv0, argb)
+                        },
+                        vertex: function (_mat, x, y, _z, argb) {
+                            if (curQuadVc == null) return
+                            mapLocalPointToPlane3D(x, y, layerBias, pt0)
+                            emitWpQuadVertex(curQuadVc, WP_POSE_MAT4, pt0[0], pt0[1], pt0[2], 0.5, 0.5, argb)
+                        },
+                        end: function () {
+                            layerBias += 0.0004
+                            curQuadVc = null
+                        },
+                        text: function (compOrStr, lx, ly, argb, shadow) {
+                            var zB = layerBias + 0.0008
+                            layerBias += 0.0012
+                            var dispMode = isXray
+                                ? (FONT_DISPLAY_SEE_THROUGH != null ? FONT_DISPLAY_SEE_THROUGH : 'SEE_THROUGH')
+                                : (FONT_DISPLAY_NORMAL != null ? FONT_DISPLAY_NORMAL : 'NORMAL')
+
+                            if (forgeEvent != null && typeof forgeEvent.onWorldPlaneText === 'function') {
+                                mapLocalPointToPlane3D(lx, ly, zB, pt0)
+                                forgeEvent.onWorldPlaneText({
+                                    text:        (compOrStr != null && compOrStr.string !== undefined) ? String(compOrStr.string) : String(compOrStr),
+                                    localPos:    [lx, ly],
+                                    planeOffset: [pt0[0], pt0[1], pt0[2]],
+                                    worldRelPos: [
+                                        WP_POSE_MAT4[0] * pt0[0] + WP_POSE_MAT4[1] * pt0[1] + WP_POSE_MAT4[2] * pt0[2] + WP_POSE_MAT4[3],
+                                        WP_POSE_MAT4[4] * pt0[0] + WP_POSE_MAT4[5] * pt0[1] + WP_POSE_MAT4[6] * pt0[2] + WP_POSE_MAT4[7],
+                                        WP_POSE_MAT4[8] * pt0[0] + WP_POSE_MAT4[9] * pt0[1] + WP_POSE_MAT4[10] * pt0[2] + WP_POSE_MAT4[11]
+                                    ],
+                                    argb:        argb,
+                                    shadow:      Boolean(shadow),
+                                    displayMode: dispMode,
+                                    seeThrough:  isXray
+                                })
+                            }
+
+                            if (fontObj == null || bufSrc == null) return
+                            var st2d = WP_2D_STACK[topIdx]
+                            // 列向量：Col0 = dP/dx, Col1 = dP/dy, Col2 = Normal, Col3 = P(0,0,zB)
+                            var ux = bRx * st2d.m00 + bDx * st2d.m10
+                            var uy = bRy * st2d.m00 + bDy * st2d.m10
+                            var uz = bRz * st2d.m00 + bDz * st2d.m10
+
+                            var vx = bRx * st2d.m01 + bDx * st2d.m11
+                            var vy = bRy * st2d.m01 + bDy * st2d.m11
+                            var vz = bRz * st2d.m01 + bDz * st2d.m11
+
+                            var ox3 = bRx * st2d.m02 + bDx * st2d.m12 + nX * zB
+                            var oy3 = bRy * st2d.m02 + bDy * st2d.m12 + nY * zB
+                            var oz3 = bRz * st2d.m02 + bDz * st2d.m12 + nZ * zB
+
+                            // 组合 PoseStack 4x4 矩阵 M = WP_POSE_MAT4 * LocalPlaneMat
+                            var m00 = WP_POSE_MAT4[0] * ux + WP_POSE_MAT4[1] * uy + WP_POSE_MAT4[2] * uz
+                            var m10 = WP_POSE_MAT4[4] * ux + WP_POSE_MAT4[5] * uy + WP_POSE_MAT4[6] * uz
+                            var m20 = WP_POSE_MAT4[8] * ux + WP_POSE_MAT4[9] * uy + WP_POSE_MAT4[10] * uz
+
+                            var m01 = WP_POSE_MAT4[0] * vx + WP_POSE_MAT4[1] * vy + WP_POSE_MAT4[2] * vz
+                            var m11 = WP_POSE_MAT4[4] * vx + WP_POSE_MAT4[5] * vy + WP_POSE_MAT4[6] * vz
+                            var m21 = WP_POSE_MAT4[8] * vx + WP_POSE_MAT4[9] * vy + WP_POSE_MAT4[10] * vz
+
+                            var m02 = WP_POSE_MAT4[0] * nX + WP_POSE_MAT4[1] * nY + WP_POSE_MAT4[2] * nZ
+                            var m12 = WP_POSE_MAT4[4] * nX + WP_POSE_MAT4[5] * nY + WP_POSE_MAT4[6] * nZ
+                            var m22 = WP_POSE_MAT4[8] * nX + WP_POSE_MAT4[9] * nY + WP_POSE_MAT4[10] * nZ
+
+                            var m03 = WP_POSE_MAT4[0] * ox3 + WP_POSE_MAT4[1] * oy3 + WP_POSE_MAT4[2] * oz3 + WP_POSE_MAT4[3]
+                            var m13 = WP_POSE_MAT4[4] * ox3 + WP_POSE_MAT4[5] * oy3 + WP_POSE_MAT4[6] * oz3 + WP_POSE_MAT4[7]
+                            var m23 = WP_POSE_MAT4[8] * ox3 + WP_POSE_MAT4[9] * oy3 + WP_POSE_MAT4[10] * oz3 + WP_POSE_MAT4[11]
+
+                            var jMat = null
+                            if (Matrix4fClass != null) {
+                                try {
+                                    if (WP_TEXT_JOML_MAT == null) WP_TEXT_JOML_MAT = new Matrix4fClass()
+                                    if (typeof WP_TEXT_JOML_MAT.set === 'function') {
+                                        // JOML Matrix4f.set(m00, m01, m02, m03, m10, ... ) column-major
+                                        WP_TEXT_JOML_MAT.set(
+                                            m00, m10, m20, 0.0,
+                                            m01, m11, m21, 0.0,
+                                            m02, m12, m22, 0.0,
+                                            m03, m13, m23, 1.0
+                                        )
+                                        jMat = WP_TEXT_JOML_MAT
+                                    }
+                                } catch (eJMat) { jMat = null }
+                            }
+
+                            var seqObj = resolveVisualSeq(compOrStr) || compOrStr
+                            try {
+                                if (typeof fontObj.m_272191_ === 'function' && jMat != null && FONT_DISPLAY_NORMAL != null) {
+                                    fontObj.m_272191_(seqObj, lx, ly, argb, Boolean(shadow), jMat, bufSrc, dispMode, 0, WP_FULL_BRIGHT)
+                                } else if (typeof fontObj.drawInBatch === 'function') {
+                                    fontObj.drawInBatch(seqObj, lx, ly, argb, Boolean(shadow), jMat || [m00, m01, m02, m03, m10, m11, m12, m13, m20, m21, m22, m23, 0, 0, 0, 1], bufSrc, dispMode, 0, WP_FULL_BRIGHT)
+                                }
+                            } catch (eWpTxt) {
+                                logErrorThrottled('worldPlane text drawInBatch', eWpTxt)
+                            }
+                        }
+                    }
+
+                    ACTIVE_FRAME_EVENT = wpAdapter
+                    LAST_CAPS_EVENT    = null
+                    var vMap = ov.displayVars || ov.vars || {}
+                    var nodesToDraw = Array.isArray(ov.nodes) ? ov.nodes : []
+                    if (nodesToDraw.length > 0) {
+                        renderDeclarativeNodes(wpAdapter, ov, nodesToDraw, vMap, fadeAlpha, fontObj, null, now, 0.0, 0)
+                    } else if (ov.title || ov.sub) {
+                        var fallbackNodes = []
+                        if (ov.title) fallbackNodes.push({ id: '_wp_t', type: 'text', anchor: 'center', x: 0, y: 0, text: ov.title, color: ov.color, shadow: ov.shadow })
+                        if (ov.sub) fallbackNodes.push({ id: '_wp_s', type: 'text', anchor: 'center', x: 0, y: 12, text: ov.sub, color: ov.subColor, shadow: ov.shadow })
+                        compileDeclarativeNodes(fallbackNodes, 0)
+                        renderDeclarativeNodes(wpAdapter, ov, fallbackNodes, vMap, fadeAlpha, fontObj, null, now, 0.0, 0)
+                    }
+                    renderedPlanes++
+                } catch (eWpPlane) {
+                    logErrorThrottled('renderWorldPlane:' + ov.key, eWpPlane)
+                } finally {
+                    closeRectBatch(ACTIVE_FRAME_EVENT || {}, { hasBlend: false })
+                    if (pushedRoot) {
+                        try { popPoseStackSafe(poseStack) } catch (ePopWp) { }
+                    }
+                }
+            }
+        } finally {
+            ACTIVE_FRAME_EVENT     = prevActiveEv
+            ACTIVE_FRAME_BATCH_CTX = prevBatchCtx
+            LAST_CAPS_EVENT        = null
+            if (bufSrc != null) {
+                for (var fli = 0; fli < usedRenderTypes.length; fli++) {
+                    flushWpRenderType(bufSrc, usedRenderTypes[fli])
+                }
+                try {
+                    if (typeof bufSrc.endBatch === 'function' && usedRenderTypes.length > 0) bufSrc.endBatch()
+                    else if (typeof bufSrc.m_109911_ === 'function' && usedRenderTypes.length > 0) bufSrc.m_109911_()
+                } catch (eEndAll) { }
+            }
+            if (renderedPlanes > 0) {
+                var dtWp = max2(0, monotonicNowMs() - startMs)
+                recordPerfSample(PERF_STATS.world_plane, dtWp, renderedPlanes)
+                markClientPerfDirty(dtWp)
+            }
+        }
+        return renderedPlanes
     }
 
     ClientEvents.paintScreen(function (event) {

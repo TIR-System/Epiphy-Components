@@ -1,6 +1,6 @@
 // priority: 500
 // ============================================================================
-//  通用平面渲染与屏幕弹幕组件 —— 服务端调度器 (Epiphy2DSurface / ScreenDanmaku v6.2.0)
+//  通用平面渲染与屏幕弹幕组件 —— 服务端调度器 (Epiphy2DSurface / ScreenDanmaku v6.3.0)
 //  所属系列：Epiphy的-通用组件系列（本系列包含 startup / server / client 配套脚本）
 //  许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //  放置位置：kubejs/server_scripts/通用组件/Epiphy的-平面渲染组件.js
@@ -80,7 +80,7 @@
         SPEC.checkDependencyVersion('EpiphySpec', SPEC, '2.5.0', '2.99.99', { caller: 'Epiphy2DSurface', required: true })
         SPEC.checkDependencyVersion('EpiphyServerCore', BASE, '2.5.0', '2.99.99', { caller: 'Epiphy2DSurface', required: true })
     }
-    var VERSION       = '6.2.0'
+    var VERSION       = '6.3.0'
     var LOGGER        = BASE.createLogger('ScreenDanmaku', 5000)
     var CHANNEL       = PROTO.DANMAKU_CHANNEL
     var PROTO_VERSION = PROTO.DANMAKU_PROTO_VERSION
@@ -325,7 +325,14 @@
                 var dp = duePlayers[fi]
                 pendingLoginFlushes.delete(dp.uuid)
                 flushTrackedBlocksForJoinedPlayer(dp.player)
+                syncPersistedWorldPlanesTick(dp.player)
             }
+        }
+        if ((danmakuTickCounter % WORLD_PLANE_SYNC_INTERVAL_TICKS) === 0) {
+            syncPersistedWorldPlanesTick(null)
+        }
+        if (worldPlanesDirty && (danmakuTickCounter - lastWorldPlaneSaveTick) >= 20) {
+            flushWorldPlanes(false)
         }
         if ((danmakuTickCounter % 600) === 0 && playerSourceCooldown.size > 0) {
             playerSourceCooldown.forEach(function (exp, k) {
@@ -1832,7 +1839,11 @@
             movable: 'movable', maxWidth: 'maxWidth', wrap: 'wrap', clamp: 'clamp',
             avoidHud: 'avoidHud', avoid: 'avoid', avoidOverlap: 'avoidOverlap',
             minSepX: 'minSepX', minSepY: 'minSepY',
-            renderPriority: 'renderPriority', zIndex: 'zIndex'
+            renderPriority: 'renderPriority', zIndex: 'zIndex',
+            worldPos: 'worldPos', at: 'worldPos',
+            billboard: 'billboard', facing: 'billboard',
+            seeThrough: 'seeThrough', xray: 'seeThrough',
+            yaw: 'yaw', pitch: 'pitch', roll: 'roll', maxDistance: 'maxDistance'
         },
         life: {
             mode: 'lifeMode', lifeMode: 'lifeMode',
@@ -1867,7 +1878,7 @@
         'posTag', 'normalizeKey', 'preset', 'server', 'radius', 'maxPriority', 'includeOnce',
         'title', 'sub', 'debug',
         'vars', 'tracks', 'clip', 'nodes', 'bgNodes', 'fgNodes', 'targetGui', 'replaceTextures', 'slotMatch',
-        'worldPos', 'billboard', 'seeThrough',
+        'worldPos', 'billboard', 'seeThrough', 'yaw', 'pitch', 'roll', 'maxDistance', 'dimension', 'dim', 'persist',
         'boldTarget', 'scaleTarget', 'shakeTarget', 'targetScale', 'bold', 'italic', 'colorMode', 'style',
         'jitter', 'perCharShake', 'randomShake', 'randomColor', 'randomScale',
         'shakeStyle', 'charShakeFreq', 'shakeInterval',
@@ -2063,6 +2074,32 @@
                     pPacket.activeHold = Math.min(SYSTEM_PACKET_LIMITS.maxStayTicks, Math.max(4, pHoldTicks))
                 }
             }
+            if (surfaceStr === 'world_plane') {
+                var wpPatch = opts.worldPos !== undefined ? opts.worldPos : opts.at
+                if (Array.isArray(wpPatch) && wpPatch.length >= 3 &&
+                    isFinite(Number(wpPatch[0])) && isFinite(Number(wpPatch[1])) && isFinite(Number(wpPatch[2]))) {
+                    pPacket.worldPos = [Number(wpPatch[0]), Number(wpPatch[1]), Number(wpPatch[2])]
+                }
+                if (opts.billboard !== undefined || opts.facing !== undefined) {
+                    var bbP = String(opts.billboard !== undefined ? opts.billboard : opts.facing).trim().toLowerCase()
+                    if (bbP === 'center' || bbP === 'vertical' || bbP === 'fixed') pPacket.billboard = bbP
+                }
+                if (opts.seeThrough !== undefined || opts.xray !== undefined) {
+                    pPacket.seeThrough = parseBool(opts.seeThrough !== undefined ? opts.seeThrough : opts.xray, false)
+                }
+                if (opts.yaw !== undefined) pPacket.yaw = Math.max(-360, Math.min(360, parseFiniteNum(opts.yaw, 0)))
+                if (opts.pitch !== undefined) pPacket.pitch = Math.max(-180, Math.min(180, parseFiniteNum(opts.pitch, 0)))
+                if (opts.roll !== undefined) pPacket.roll = Math.max(-360, Math.min(360, parseFiniteNum(opts.roll, 0)))
+                if (opts.maxDistance !== undefined) {
+                    var mdP = Math.max(2, Math.min(512, parseFiniteNum(opts.maxDistance, 64)))
+                    if (pTierPatch === 'player' && mdP > 48) mdP = 48
+                    pPacket.maxDistance = mdP
+                }
+                var dimPatchRaw = pickNonEmpty(opts, ['dimension', 'dim'], '')
+                if (dimPatchRaw) {
+                    pPacket.dimension = String(SPEC.normalizeDim(String(dimPatchRaw)) || String(dimPatchRaw)).slice(0, 128)
+                }
+            }
             return pPacket
         }
 
@@ -2250,11 +2287,24 @@
             }
         } else if (surfaceStr === 'world_plane') {
             var wp = opts.worldPos !== undefined ? opts.worldPos : opts.at
-            if (Array.isArray(wp) && wp.length >= 3) {
-                built.worldPos = [parseFiniteNum(wp[0], 0), parseFiniteNum(wp[1], 64), parseFiniteNum(wp[2], 0)]
+            if (!Array.isArray(wp) || wp.length < 3 ||
+                !isFinite(Number(wp[0])) || !isFinite(Number(wp[1])) || !isFinite(Number(wp[2]))) {
+                return reportConfigWarning('surface="world_plane" 缺少有效的三维坐标 `worldPos: [x, y, z]`（或别名 `at`）！', notifyPlayer)
             }
-            built.billboard = String(opts.billboard !== undefined ? opts.billboard : (opts.facing || 'vertical')).toLowerCase()
+            built.worldPos = [Number(wp[0]), Number(wp[1]), Number(wp[2])]
+            var rawBb = String(opts.billboard !== undefined ? opts.billboard : (opts.facing || 'vertical')).trim().toLowerCase()
+            built.billboard = (rawBb === 'center' || rawBb === 'vertical' || rawBb === 'fixed') ? rawBb : 'vertical'
             built.seeThrough = parseBool(opts.seeThrough !== undefined ? opts.seeThrough : opts.xray, false)
+            if (opts.yaw !== undefined) built.yaw = Math.max(-360, Math.min(360, parseFiniteNum(opts.yaw, 0)))
+            if (opts.pitch !== undefined) built.pitch = Math.max(-180, Math.min(180, parseFiniteNum(opts.pitch, 0)))
+            if (opts.roll !== undefined) built.roll = Math.max(-360, Math.min(360, parseFiniteNum(opts.roll, 0)))
+            var maxDistVal = Math.max(2, Math.min(512, parseFiniteNum(opts.maxDistance, 64)))
+            if (pTier === 'player' && maxDistVal > 48) maxDistVal = 48
+            built.maxDistance = maxDistVal
+            var rawWpDim = pickNonEmpty(opts, ['dimension', 'dim'], '')
+            if (rawWpDim) {
+                built.dimension = String(SPEC.normalizeDim(String(rawWpDim)) || String(rawWpDim)).slice(0, 128)
+            }
         }
 
         if (hasDeclarativeV6 && SPEC && typeof SPEC.computeOverlayCost === 'function') {
@@ -2376,8 +2426,32 @@
             return 0
         }
         var normProbe = normalizeOptionsObject(opts)
+        if (BASE.isObjectLike(normProbe)) {
+            var probeSurf = String(normProbe.surface || normProbe.carrier || 'screen').trim().toLowerCase()
+            if (probeSurf === 'world_plane' && parseBool(normProbe.persist, false)) {
+                var wpCopy = {}
+                for (var wpk in normProbe) {
+                    if (Object.prototype.hasOwnProperty.call(normProbe, wpk)) wpCopy[wpk] = normProbe[wpk]
+                }
+                if (wpCopy.worldPos === undefined && wpCopy.at === undefined) {
+                    wpCopy.worldPos = [cx, cy, cz]
+                }
+                if (wpCopy.maxDistance === undefined && r > 0) {
+                    wpCopy.maxDistance = r
+                }
+                if (wpCopy.dimension === undefined && wpCopy.dim === undefined) {
+                    wpCopy.dimension = extractLevelDimensionName(lv, levelOrDim)
+                }
+                return spawnWorldPlane(wpCopy) ? 1 : 0
+            }
+        }
+        var probeHasNodes = BASE.isObjectLike(normProbe) && (
+            Array.isArray(normProbe.nodes) || Array.isArray(normProbe.layers) ||
+            Array.isArray(normProbe.bgNodes) || Array.isArray(normProbe.fgNodes) ||
+            (typeof normProbe.preset === 'string' && normProbe.preset.trim() !== '')
+        )
         if (!BASE.isObjectLike(normProbe) ||
-            (normProbe.action !== 'clear' && normProbe.action !== 'deactivate' && normProbe.action !== 'stop' && pickNonEmpty(normProbe, ['text', 'title'], null) == null)) {
+            (normProbe.action !== 'clear' && normProbe.action !== 'deactivate' && normProbe.action !== 'stop' && normProbe.action !== 'patch' && !probeHasNodes && pickNonEmpty(normProbe, ['text', 'title'], null) == null)) {
             return buildValidatedPacket(prepareSourceConflictOpts(opts), null) ? 0 : 0
         }
 
@@ -3532,6 +3606,653 @@
         }
     }
 
+    // ------------------------------------------------------------------------
+    // 世界悬浮 2D 平面 (`surface: 'world_plane'`) 存档级持久化与视距增量同步引擎
+    //   - 存储路径：saves/<world>/kubejs_epiphy_world_planes.json（随存档复制/备份/回滚 1:1 同步回滚）
+    //   - 兜底镜像：SERVER_REF.persistentData.epiphy_world_planes_v1
+    //   - 权限红线：持久化世界平面仅限 `'system'` 层创建，拒绝非 OP `'player'` 层 `persist: true`
+    // ------------------------------------------------------------------------
+    var WORLD_PLANE_FILE_NAME           = 'kubejs_epiphy_world_planes.json'
+    var WORLD_PLANE_FALLBACK_DIR        = 'epiphy-data/fallback_world_planes'
+    var WORLD_PLANE_PERSIST_KEY         = 'epiphy_world_planes_v1'
+    var WORLD_PLANE_SYNC_INTERVAL_TICKS = 10
+    var WORLD_PLANE_HEARTBEAT_TICKS     = 30
+    var WORLD_PLANE_HOLD_TICKS          = 80
+    var WORLD_PLANE_HYSTERESIS_M        = 4.0
+
+    var persistedWorldPlanes     = new Map() // planeKey -> record
+    var playerVisibleWorldPlanes = new Map() // playerUuid -> Map<planeKey, { lastSyncTick, rev }>
+    var worldPlanesLoadedForPath = ''
+    var worldPlaneStore          = null
+    var worldPlanesDirty         = false
+    var lastWorldPlaneSaveTick   = -9999
+    var worldPlaneRevSeq         = 1
+
+    function extractLevelDimensionName(lvObj, rawFallback) {
+        if (lvObj != null) {
+            try {
+                if (typeof lvObj.dimension === 'string' && lvObj.dimension) {
+                    return SPEC.normalizeDim(lvObj.dimension) || lvObj.dimension
+                }
+                if (lvObj.dimension != null && typeof lvObj.dimension.location === 'function') {
+                    var loc = lvObj.dimension.location()
+                    if (loc != null) return SPEC.normalizeDim(String(loc)) || String(loc)
+                }
+                if (typeof lvObj.getDimension === 'function') {
+                    var gd = lvObj.getDimension()
+                    if (gd != null) return SPEC.normalizeDim(String(gd)) || String(gd)
+                }
+            } catch (eDimLv) { }
+        }
+        if (typeof rawFallback === 'string' && rawFallback.trim() !== '') {
+            return SPEC.normalizeDim(rawFallback.trim()) || rawFallback.trim()
+        }
+        return 'minecraft:overworld'
+    }
+
+    function readPlayerDimensionSafe(player) {
+        if (player == null) return ''
+        try {
+            var lv = player.level || (typeof player.getLevel === 'function' ? player.getLevel() : null)
+            if (lv != null) return extractLevelDimensionName(lv, '')
+            if (typeof player.dimension === 'string' && player.dimension) {
+                return SPEC.normalizeDim(player.dimension) || player.dimension
+            }
+        } catch (ePDim) { }
+        return 'minecraft:overworld'
+    }
+
+    function collectOnlineServerPlayers(srv) {
+        var out = []
+        if (srv == null) return out
+        try {
+            if (typeof srv.getPlayerList === 'function') {
+                var plObj = srv.getPlayerList()
+                if (plObj != null && typeof plObj.getPlayers === 'function') {
+                    var arr1 = BASE.toSeqArray(plObj.getPlayers())
+                    if (arr1 != null) return arr1
+                }
+            }
+            if (srv.players != null) {
+                var arr2 = BASE.toSeqArray(srv.players)
+                if (arr2 != null) return arr2
+            }
+        } catch (ePList) { }
+        return out
+    }
+
+    function makeWorldPlaneKey(namespaceStr, slotIdStr) {
+        var ns = String(namespaceStr || '').trim()
+        var id = String(slotIdStr || '').trim()
+        if (!id) return ''
+        if (ns && id.indexOf(ns + ':') !== 0) return ns + ':' + id
+        return id
+    }
+
+    function ensureWorldPlaneStore(filePath) {
+        var normTarget = filePath ? String(filePath).replace(/\\/g, '/') : ''
+        if (worldPlaneStore != null && worldPlaneStore.path === normTarget) {
+            return worldPlaneStore
+        }
+        worldPlaneStore = BASE.openJsonStore(normTarget, { logger: LOGGER, backup: true, lockOnCorrupt: true })
+        return worldPlaneStore
+    }
+
+    function resolveCurrentWorldPlanesPath(srvOpt) {
+        var srv = srvOpt || SERVER_REF || (typeof Utils !== 'undefined' && Utils != null ? Utils.server : null)
+        if (srv != null && SERVER_REF == null) SERVER_REF = srv
+        var info = BASE.resolveWorldStorageInfo(srv, WORLD_PLANE_FILE_NAME, WORLD_PLANE_FALLBACK_DIR)
+        return (info != null && info.filePath) ? String(info.filePath).replace(/\\/g, '/') : ''
+    }
+
+    function buildPersistedWorldPlaneRecord(rawSpec, existingRev) {
+        if (!BASE.isObjectLike(rawSpec)) return null
+        var copy = {}
+        for (var k in rawSpec) {
+            if (Object.prototype.hasOwnProperty.call(rawSpec, k) && k !== 'persist') {
+                copy[k] = rawSpec[k]
+            }
+        }
+        copy.surface    = 'world_plane'
+        copy.action     = 'push'
+        copy.tier       = 'system'
+        copy.lifeMode   = 'active'
+        copy.activeHold = WORLD_PLANE_HOLD_TICKS
+
+        var dim = extractLevelDimensionName(copy.level, copy.dimension || copy.dim || 'minecraft:overworld')
+        delete copy.level
+        delete copy.dim
+        copy.dimension = dim
+
+        var wpArr = copy.worldPos !== undefined ? copy.worldPos : copy.at
+        if (!Array.isArray(wpArr) || wpArr.length < 3) return null
+        var wx = Number(wpArr[0]), wy = Number(wpArr[1]), wz = Number(wpArr[2])
+        if (!isFinite(wx) || !isFinite(wy) || !isFinite(wz)) return null
+
+        var ns = String(pickNonEmpty(copy, ['namespace', 'ns'], 'world_plane')).trim()
+        var slotId = String(pickNonEmpty(copy, ['slotId', 'id', 'key', 'slot'], '')).trim()
+        if (!slotId) {
+            var dimSlug = dim.replace(/[^a-zA-Z0-9_]/g, '_')
+            slotId = 'wp_' + dimSlug + '_' + Math.round(wx * 10) + '_' + Math.round(wy * 10) + '_' + Math.round(wz * 10)
+        }
+        var planeKey = makeWorldPlaneKey(ns, slotId)
+        copy.namespace = ns
+        copy.slotId    = slotId
+        copy.key       = planeKey
+
+        var fullPkt = buildValidatedPacket(copy, null)
+        if (fullPkt == null) return null
+        fullPkt.key        = planeKey
+        fullPkt.slotId     = slotId
+        fullPkt.namespace  = ns
+        fullPkt.lifeMode   = 'active'
+        fullPkt.activeHold = WORLD_PLANE_HOLD_TICKS
+        fullPkt.dimension  = dim
+
+        var storedSpec = {}
+        for (var pk in fullPkt) {
+            if (Object.prototype.hasOwnProperty.call(fullPkt, pk)) {
+                storedSpec[pk] = fullPkt[pk]
+            }
+        }
+
+        return {
+            planeKey:    planeKey,
+            slotId:      slotId,
+            namespace:   ns,
+            group:       fullPkt.group || 'default',
+            dimension:   dim,
+            worldPos:    [fullPkt.worldPos[0], fullPkt.worldPos[1], fullPkt.worldPos[2]],
+            maxDistance: fullPkt.maxDistance || 64,
+            fadeOut:     fullPkt.fadeOut != null ? fullPkt.fadeOut : 10,
+            vars:        fullPkt.vars ? sanitizeVarsMap(fullPkt.vars) : {},
+            spec:        storedSpec,
+            fullPacket:  fullPkt,
+            rev:         existingRev != null ? existingRev : (worldPlaneRevSeq++)
+        }
+    }
+
+    function flushWorldPlanes(immediate) {
+        var targetPath = worldPlanesLoadedForPath || resolveCurrentWorldPlanesPath(SERVER_REF)
+        if (!targetPath || !worldPlanesDirty) return false
+        if (!immediate && (danmakuTickCounter - lastWorldPlaneSaveTick) < 20) return false
+        try {
+            worldPlanesLoadedForPath = targetPath
+            var store = ensureWorldPlaneStore(targetPath)
+            var planesArr = []
+            persistedWorldPlanes.forEach(function (rec) {
+                if (rec != null && rec.spec != null) {
+                    planesArr.push(rec.spec)
+                }
+            })
+            var tsStr = ''
+            try { tsStr = new Date().toISOString() } catch (eTs) { tsStr = String(Date.now()) }
+            var doc = {
+                version:   1,
+                updatedAt: tsStr,
+                planes:    planesArr
+            }
+            var wroteDisk = Boolean(store.save(doc))
+            try {
+                if (SERVER_REF != null && SERVER_REF.persistentData != null && typeof SERVER_REF.persistentData.putString === 'function') {
+                    SERVER_REF.persistentData.putString(WORLD_PLANE_PERSIST_KEY, JSON.stringify(planesArr))
+                }
+            } catch (eWpPData) { }
+            if (wroteDisk || store.isCorrupt()) {
+                worldPlanesDirty       = false
+                lastWorldPlaneSaveTick = danmakuTickCounter
+                return wroteDisk
+            }
+        } catch (eWpSave) {
+            reportCatch('flushWorldPlanes', eWpSave)
+        }
+        return false
+    }
+
+    function ensureWorldPlanesLoaded(forceReload) {
+        var targetPath = resolveCurrentWorldPlanesPath(SERVER_REF)
+        if (!targetPath) return false
+        if (!forceReload && worldPlanesLoadedForPath === targetPath) return true
+
+        var prevKeys = new Map()
+        persistedWorldPlanes.forEach(function (oldRec, oldKey) {
+            prevKeys.set(oldKey, oldRec)
+        })
+
+        persistedWorldPlanes.clear()
+        worldPlanesLoadedForPath = targetPath
+        worldPlanesDirty         = false
+
+        var store   = ensureWorldPlaneStore(targetPath)
+        var loadRes = store.load()
+        var rawDoc  = (loadRes != null && loadRes.ok) ? loadRes.data : null
+        var rawList = null
+        if (rawDoc != null && typeof rawDoc === 'object') {
+            rawList = BASE.toSeqArray(BASE.readMapField(rawDoc, 'planes'))
+        }
+        if (rawList == null && !store.isCorrupt() && SERVER_REF != null && SERVER_REF.persistentData != null) {
+            try {
+                if (typeof SERVER_REF.persistentData.contains === 'function' && SERVER_REF.persistentData.contains(WORLD_PLANE_PERSIST_KEY)) {
+                    var pStr = String(SERVER_REF.persistentData.getString(WORLD_PLANE_PERSIST_KEY) || '')
+                    if (pStr) rawList = BASE.toSeqArray(JSON.parse(pStr))
+                }
+            } catch (eReadPData) { }
+        }
+        if (Array.isArray(rawList)) {
+            for (var i = 0; i < rawList.length; i++) {
+                var itemObj = nbtOrMapToPlainSpec(rawList[i])
+                var builtRec = buildPersistedWorldPlaneRecord(itemObj, worldPlaneRevSeq++)
+                if (builtRec != null) {
+                    persistedWorldPlanes.set(builtRec.planeKey, builtRec)
+                }
+            }
+        }
+
+        // 若为热重载/回滚恢复：对之前已推送给在线玩家但现已不存在的世界平面立即单发 deactivate 对账回收
+        if (forceReload && playerVisibleWorldPlanes.size > 0) {
+            var onlinePlayers = collectOnlineServerPlayers(SERVER_REF)
+            var playerByUuid = new Map()
+            for (var pi = 0; pi < onlinePlayers.length; pi++) {
+                var op = onlinePlayers[pi]
+                var u = getPlayerUuidSafe(op)
+                if (u && u !== 'unknown') playerByUuid.set(u, op)
+            }
+            playerVisibleWorldPlanes.forEach(function (visMap, uuid) {
+                var pObj = playerByUuid.get(uuid)
+                visMap.forEach(function (_vMeta, oldPlaneKey) {
+                    if (!persistedWorldPlanes.has(oldPlaneKey)) {
+                        var oldRec = prevKeys.get(oldPlaneKey)
+                        if (pObj != null && oldRec != null) {
+                            sendSinglePlayerPacket(pObj, {
+                                proto:     PROTO_VERSION,
+                                surface:   'world_plane',
+                                action:    'deactivate',
+                                tier:      'system',
+                                key:       oldPlaneKey,
+                                group:     oldRec.group || 'default',
+                                namespace: oldRec.namespace || '',
+                                fadeOut:   oldRec.fadeOut || 8
+                            })
+                        }
+                        visMap.delete(oldPlaneKey)
+                    }
+                })
+            })
+        }
+        return true
+    }
+
+    function nbtOrMapToPlainSpec(rawVal) {
+        if (rawVal == null) return null
+        if (Array.isArray(rawVal)) {
+            var aOut = []
+            for (var ai = 0; ai < rawVal.length; ai++) aOut.push(nbtOrMapToPlainSpec(rawVal[ai]))
+            return aOut
+        }
+        var seq = BASE.toSeqArray(rawVal)
+        if (seq != null && typeof rawVal !== 'string' && !BASE.isJavaMapLike(rawVal) && rawVal.constructor !== Object) {
+            var sOut = []
+            for (var si = 0; si < seq.length; si++) sOut.push(nbtOrMapToPlainSpec(seq[si]))
+            return sOut
+        }
+        if (typeof rawVal === 'object') {
+            if (BASE.isJavaMapLike(rawVal) && typeof rawVal.keySet === 'function') {
+                var mOut = {}
+                var ks = BASE.toSeqArray(rawVal.keySet()) || []
+                for (var ki = 0; ki < ks.length; ki++) {
+                    var mk = String(ks[ki])
+                    mOut[mk] = nbtOrMapToPlainSpec(BASE.readMapField(rawVal, mk))
+                }
+                return mOut
+            }
+            var oOut = {}
+            for (var ok in rawVal) {
+                if (Object.prototype.hasOwnProperty.call(rawVal, ok)) {
+                    oOut[ok] = nbtOrMapToPlainSpec(rawVal[ok])
+                }
+            }
+            return oOut
+        }
+        return rawVal
+    }
+
+    function syncPersistedWorldPlanesTick(forceTargetPlayer) {
+        if (SERVER_REF == null && forceTargetPlayer != null && forceTargetPlayer.server != null) {
+            SERVER_REF = forceTargetPlayer.server
+        }
+        if (SERVER_REF != null) {
+            ensureWorldPlanesLoaded(false)
+        }
+        if (persistedWorldPlanes.size === 0) return 0
+
+        var targets = forceTargetPlayer != null ? [forceTargetPlayer] : collectOnlineServerPlayers(SERVER_REF)
+        if (!targets || targets.length === 0) return 0
+
+        var sentTotal = 0
+        for (var pi = 0; pi < targets.length; pi++) {
+            var player = targets[pi]
+            if (player == null) continue
+            try {
+                if (typeof player.isRemoved === 'function' && player.isRemoved()) continue
+            } catch (ePRem) { }
+            var uuid = getPlayerUuidSafe(player)
+            if (!uuid || uuid === 'unknown') continue
+            var pPos = readPlayerPos(player)
+            if (pPos == null) continue
+            var pDim = readPlayerDimensionSafe(player)
+
+            var visMap = playerVisibleWorldPlanes.get(uuid)
+            if (visMap == null) {
+                visMap = new Map()
+                playerVisibleWorldPlanes.set(uuid, visMap)
+            }
+
+            persistedWorldPlanes.forEach(function (rec, planeKey) {
+                var visEntry = visMap.get(planeKey)
+                var sameDim  = (!rec.dimension || !pDim || rec.dimension === pDim)
+                var inRange  = false
+                if (sameDim) {
+                    var dx = pPos.x - rec.worldPos[0]
+                    var dy = pPos.y - rec.worldPos[1]
+                    var dz = pPos.z - rec.worldPos[2]
+                    var distSq = dx * dx + dy * dy + dz * dz
+                    var rLim = (visEntry != null) ? (rec.maxDistance + WORLD_PLANE_HYSTERESIS_M) : rec.maxDistance
+                    inRange = (distSq <= (rLim * rLim))
+                }
+                if (inRange) {
+                    if (visEntry == null || visEntry.rev !== rec.rev) {
+                        sentTotal += sendSinglePlayerPacket(player, rec.fullPacket)
+                        visMap.set(planeKey, { lastSyncTick: danmakuTickCounter, rev: rec.rev })
+                    } else if ((danmakuTickCounter - visEntry.lastSyncTick) >= WORLD_PLANE_HEARTBEAT_TICKS) {
+                        var hbPkt = {
+                            proto:      PROTO_VERSION,
+                            surface:    'world_plane',
+                            action:     'patch',
+                            tier:       'system',
+                            key:        rec.planeKey,
+                            slotId:     rec.slotId,
+                            namespace:  rec.namespace,
+                            group:      rec.group,
+                            vars:       rec.vars || {},
+                            activeHold: WORLD_PLANE_HOLD_TICKS
+                        }
+                        sentTotal += sendSinglePlayerPacket(player, hbPkt)
+                        visEntry.lastSyncTick = danmakuTickCounter
+                    }
+                } else if (visEntry != null) {
+                    sentTotal += sendSinglePlayerPacket(player, {
+                        proto:     PROTO_VERSION,
+                        surface:   'world_plane',
+                        action:    'deactivate',
+                        tier:      'system',
+                        key:       rec.planeKey,
+                        group:     rec.group,
+                        namespace: rec.namespace,
+                        fadeOut:   rec.fadeOut || 10
+                    })
+                    visMap.delete(planeKey)
+                }
+            })
+        }
+        return sentTotal
+    }
+
+    function spawnWorldPlane(rawOpts) {
+        if (!BASE.isObjectLike(rawOpts)) {
+            reportConfigWarning('调用 spawnWorldPlane(opts) 时必须传入配置对象！')
+            return null
+        }
+        if (rawOpts.server != null && SERVER_REF == null) SERVER_REF = rawOpts.server
+        var nsProbe = String(pick(rawOpts, ['namespace', 'ns'], ''))
+        var isPlayerTier = (rawOpts._sourceTier === 'player' || rawOpts.tier === 'player' || nsProbe.indexOf('u:') === 0)
+        var wantPersist = parseBool(rawOpts.persist, true)
+        if (isPlayerTier && wantPersist) {
+            reportConfigWarning('安全拦截：非 OP 玩家层 (`tier="player"`) 禁止创建跨重启持久化的世界平面 (`persist: true`)！')
+            return null
+        }
+        if (!wantPersist) {
+            var tempCopy = {}
+            for (var tk in rawOpts) {
+                if (Object.prototype.hasOwnProperty.call(rawOpts, tk) && tk !== 'persist') tempCopy[tk] = rawOpts[tk]
+            }
+            tempCopy.surface = 'world_plane'
+            var wpT = tempCopy.worldPos !== undefined ? tempCopy.worldPos : tempCopy.at
+            if (!Array.isArray(wpT) || wpT.length < 3) {
+                reportConfigWarning('spawnWorldPlane 缺少有效 worldPos: [x, y, z]！')
+                return null
+            }
+            var dimT = tempCopy.level || tempCopy.dimension || tempCopy.dim || 'minecraft:overworld'
+            var radT = parseFiniteNum(tempCopy.maxDistance !== undefined ? tempCopy.maxDistance : tempCopy.radius, 64)
+            inDimension(dimT, wpT[0], wpT[1], wpT[2], radT, tempCopy)
+            return String(pickNonEmpty(tempCopy, ['slotId', 'id', 'key'], 'transient_world_plane'))
+        }
+
+        ensureWorldPlanesLoaded(false)
+        var rec = buildPersistedWorldPlaneRecord(rawOpts, worldPlaneRevSeq++)
+        if (rec == null) return null
+        persistedWorldPlanes.set(rec.planeKey, rec)
+        worldPlanesDirty = true
+        flushWorldPlanes(true)
+        syncPersistedWorldPlanesTick(null)
+        return rec.planeKey
+    }
+
+    function patchWorldPlane(idOrOpts, maybeVars) {
+        ensureWorldPlanesLoaded(false)
+        var patchObj = BASE.isObjectLike(idOrOpts) ? idOrOpts : { id: String(idOrOpts || ''), vars: maybeVars }
+        var ns = String(pick(patchObj, ['namespace', 'ns'], ''))
+        var rawId = String(pickNonEmpty(patchObj, ['key', 'slotId', 'id', 'slot'], '')).trim()
+        if (!rawId) return 0
+
+        var hitRec = persistedWorldPlanes.get(rawId)
+        if (hitRec == null && ns) {
+            hitRec = persistedWorldPlanes.get(makeWorldPlaneKey(ns, rawId))
+        }
+        if (hitRec == null) {
+            var defKey = makeWorldPlaneKey('world_plane', rawId)
+            hitRec = persistedWorldPlanes.get(defKey)
+        }
+        if (hitRec == null) {
+            persistedWorldPlanes.forEach(function (cand) {
+                if (hitRec == null && (cand.slotId === rawId || cand.planeKey === rawId)) hitRec = cand
+            })
+        }
+        if (hitRec == null) return 0
+
+        var vPatch = patchObj.vars !== undefined ? patchObj.vars : (patchObj.data !== undefined ? patchObj.data : maybeVars)
+        if (BASE.isObjectLike(vPatch)) {
+            var cleanVars = sanitizeVarsMap(vPatch)
+            if (hitRec.vars == null) hitRec.vars = {}
+            if (hitRec.spec.vars == null) hitRec.spec.vars = {}
+            if (hitRec.fullPacket.vars == null) hitRec.fullPacket.vars = {}
+            for (var vk in cleanVars) {
+                if (Object.prototype.hasOwnProperty.call(cleanVars, vk)) {
+                    hitRec.vars[vk]            = cleanVars[vk]
+                    hitRec.spec.vars[vk]       = cleanVars[vk]
+                    hitRec.fullPacket.vars[vk] = cleanVars[vk]
+                }
+            }
+        }
+        var geometryChanged = false
+        var wpNew = patchObj.worldPos !== undefined ? patchObj.worldPos : patchObj.at
+        if (Array.isArray(wpNew) && wpNew.length >= 3 &&
+            isFinite(Number(wpNew[0])) && isFinite(Number(wpNew[1])) && isFinite(Number(wpNew[2]))) {
+            hitRec.worldPos            = [Number(wpNew[0]), Number(wpNew[1]), Number(wpNew[2])]
+            hitRec.spec.worldPos       = hitRec.worldPos.slice()
+            hitRec.fullPacket.worldPos = hitRec.worldPos.slice()
+            geometryChanged = true
+        }
+        var optFields = ['yaw', 'pitch', 'roll', 'billboard', 'seeThrough', 'maxDistance']
+        for (var ofi = 0; ofi < optFields.length; ofi++) {
+            var fName = optFields[ofi]
+            if (patchObj[fName] !== undefined) {
+                hitRec.spec[fName] = patchObj[fName]
+                geometryChanged = true
+            }
+        }
+        if (geometryChanged) {
+            var rebuilt = buildPersistedWorldPlaneRecord(hitRec.spec, worldPlaneRevSeq++)
+            if (rebuilt != null) {
+                hitRec = rebuilt
+                persistedWorldPlanes.set(hitRec.planeKey, hitRec)
+            }
+        }
+
+        worldPlanesDirty = true
+        flushWorldPlanes(false)
+
+        if (geometryChanged) {
+            return syncPersistedWorldPlanesTick(null)
+        }
+        var pPkt = {
+            proto:      PROTO_VERSION,
+            surface:    'world_plane',
+            action:     'patch',
+            tier:       'system',
+            key:        hitRec.planeKey,
+            slotId:     hitRec.slotId,
+            namespace:  hitRec.namespace,
+            group:      hitRec.group,
+            vars:       hitRec.vars || {},
+            activeHold: WORLD_PLANE_HOLD_TICKS
+        }
+        var onlineList = collectOnlineServerPlayers(SERVER_REF)
+        var sentN = 0
+        for (var pi = 0; pi < onlineList.length; pi++) {
+            var pl = onlineList[pi]
+            var u  = getPlayerUuidSafe(pl)
+            var vm = playerVisibleWorldPlanes.get(u)
+            if (vm != null && vm.has(hitRec.planeKey)) {
+                sentN += sendSinglePlayerPacket(pl, pPkt)
+                vm.get(hitRec.planeKey).lastSyncTick = danmakuTickCounter
+            }
+        }
+        return sentN
+    }
+
+    function removeWorldPlane(idOrOpts, fadeOutOpt) {
+        ensureWorldPlanesLoaded(false)
+        var targetId = BASE.isObjectLike(idOrOpts)
+            ? String(pickNonEmpty(idOrOpts, ['key', 'slotId', 'id', 'slot'], '')).trim()
+            : String(idOrOpts || '').trim()
+        var ns = BASE.isObjectLike(idOrOpts) ? String(pick(idOrOpts, ['namespace', 'ns'], '')).trim() : ''
+        if (!targetId) return 0
+
+        var targetRec = persistedWorldPlanes.get(targetId)
+        if (targetRec == null && ns) targetRec = persistedWorldPlanes.get(makeWorldPlaneKey(ns, targetId))
+        if (targetRec == null) targetRec = persistedWorldPlanes.get(makeWorldPlaneKey('world_plane', targetId))
+        if (targetRec == null) {
+            persistedWorldPlanes.forEach(function (cand) {
+                if (targetRec == null && (cand.slotId === targetId || cand.planeKey === targetId)) targetRec = cand
+            })
+        }
+        if (targetRec == null) return 0
+
+        persistedWorldPlanes.delete(targetRec.planeKey)
+        worldPlanesDirty = true
+        flushWorldPlanes(true)
+
+        var fadeTicks = parseTicksOrSec(fadeOutOpt !== undefined ? fadeOutOpt : (BASE.isObjectLike(idOrOpts) ? idOrOpts.fadeOut : null))
+        var deactPkt = {
+            proto:     PROTO_VERSION,
+            surface:   'world_plane',
+            action:    'deactivate',
+            tier:      'system',
+            key:       targetRec.planeKey,
+            group:     targetRec.group,
+            namespace: targetRec.namespace,
+            fadeOut:   fadeTicks != null ? fadeTicks : (targetRec.fadeOut || 10)
+        }
+        var onlineList = collectOnlineServerPlayers(SERVER_REF)
+        for (var pi = 0; pi < onlineList.length; pi++) {
+            var pl = onlineList[pi]
+            var u  = getPlayerUuidSafe(pl)
+            var vm = playerVisibleWorldPlanes.get(u)
+            if (vm != null && vm.has(targetRec.planeKey)) {
+                sendSinglePlayerPacket(pl, deactPkt)
+                vm.delete(targetRec.planeKey)
+            }
+        }
+        return 1
+    }
+
+    function clearWorldPlanes(groupOrOpts) {
+        ensureWorldPlanesLoaded(false)
+        var grp = '*'
+        var ns  = ''
+        if (BASE.isObjectLike(groupOrOpts)) {
+            grp = String(pickNonEmpty(groupOrOpts, ['group'], '*'))
+            ns  = String(pick(groupOrOpts, ['namespace', 'ns'], ''))
+        } else if (groupOrOpts != null && String(groupOrOpts).trim() !== '') {
+            grp = String(groupOrOpts).trim()
+        }
+        var removed = []
+        persistedWorldPlanes.forEach(function (rec, pKey) {
+            var grpOk = (grp === '*' || grp === 'all' || rec.group === grp)
+            var nsOk  = (!ns || rec.namespace === ns)
+            if (grpOk && nsOk) {
+                removed.push(rec)
+                persistedWorldPlanes.delete(pKey)
+            }
+        })
+        if (removed.length === 0) return 0
+        worldPlanesDirty = true
+        flushWorldPlanes(true)
+
+        var onlineList = collectOnlineServerPlayers(SERVER_REF)
+        for (var ri = 0; ri < removed.length; ri++) {
+            var rRec = removed[ri]
+            var dPkt = {
+                proto:     PROTO_VERSION,
+                surface:   'world_plane',
+                action:    'deactivate',
+                tier:      'system',
+                key:       rRec.planeKey,
+                group:     rRec.group,
+                namespace: rRec.namespace,
+                fadeOut:   rRec.fadeOut || 8
+            }
+            for (var pi = 0; pi < onlineList.length; pi++) {
+                var pl = onlineList[pi]
+                var u  = getPlayerUuidSafe(pl)
+                var vm = playerVisibleWorldPlanes.get(u)
+                if (vm != null && vm.has(rRec.planeKey)) {
+                    sendSinglePlayerPacket(pl, dPkt)
+                    vm.delete(rRec.planeKey)
+                }
+            }
+        }
+        return removed.length
+    }
+
+    function listWorldPlanes() {
+        ensureWorldPlanesLoaded(false)
+        var out = []
+        persistedWorldPlanes.forEach(function (rec) {
+            out.push({
+                key:         rec.planeKey,
+                slotId:      rec.slotId,
+                namespace:   rec.namespace,
+                group:       rec.group,
+                dimension:   rec.dimension,
+                worldPos:    rec.worldPos.slice(),
+                billboard:   rec.fullPacket.billboard,
+                seeThrough:  Boolean(rec.fullPacket.seeThrough),
+                yaw:         rec.fullPacket.yaw || 0,
+                pitch:       rec.fullPacket.pitch || 0,
+                roll:        rec.fullPacket.roll || 0,
+                maxDistance: rec.maxDistance
+            })
+        })
+        return out
+    }
+
+    function reloadWorldPlanes() {
+        ensureWorldPlanesLoaded(true)
+        syncPersistedWorldPlanesTick(null)
+        return persistedWorldPlanes.size
+    }
+
     absorbGlobalDanmakuBlockBindings()
 
     ServerEvents.tick(function (event) {
@@ -3601,6 +4322,12 @@
         sendMinorEdgeNear:  sendMinorEdgeNear,
         clearPlayer:        clearPlayer,
         clearNear:          clearNear,
+        spawnWorldPlane:    spawnWorldPlane,
+        patchWorldPlane:    patchWorldPlane,
+        removeWorldPlane:   removeWorldPlane,
+        clearWorldPlanes:   clearWorldPlanes,
+        listWorldPlanes:    listWorldPlanes,
+        reloadWorldPlanes:  reloadWorldPlanes,
         getStats:           getStats,
         _pure: Object.freeze({
             parseSize:              parseSize,
@@ -4284,6 +5011,7 @@
                 var uuid = getPlayerUuidSafe(p)
                 if (uuid && uuid !== 'unknown') {
                     pendingLoginFlushes.delete(uuid)
+                    playerVisibleWorldPlanes.delete(uuid)
                     var normUuid = String(uuid).trim().toLowerCase()
                     playerCmdCooldownMap.delete(normUuid)
                     var cmdSuffix = ':' + normUuid
@@ -4308,10 +5036,18 @@
 
     if (typeof ServerEvents !== 'undefined' && ServerEvents != null && typeof ServerEvents.unloaded === 'function') {
         ServerEvents.unloaded(function () {
+            if (worldPlanesDirty) {
+                flushWorldPlanes(true)
+            }
             SERVER_REF = null
             pendingLoginFlushes.clear()
             playerSourceCooldown.clear()
             playerCmdCooldownMap.clear()
+            persistedWorldPlanes.clear()
+            playerVisibleWorldPlanes.clear()
+            worldPlanesLoadedForPath = ''
+            worldPlaneStore          = null
+            worldPlanesDirty         = false
             invalidateScopeCache(null)
         })
     }
@@ -4359,6 +5095,8 @@
             boundScopeRevision:    boundScopeRevision,
             blockSeqByKeySize:     blockSeqByKey.size,
             cooldownSize:          playerSourceCooldown.size,
+            persistedWorldPlanes:  persistedWorldPlanes.size,
+            worldPlanesPath:       worldPlanesLoadedForPath,
             trackedRecordsCalls:   getDanmakuTrackerCalls(),
             valveMissing:          vMissing,
             valveRegError:         valveRegError,

@@ -634,7 +634,7 @@ module.exports = function registerSuite(test, h) {
             loadStartupBase(cliSb)
             runScriptIn(cliSb, RENDERER_PATH)
             var CliV57 = cliSb.global.ScreenDanmakuClient
-            assert.strictEqual(CliV57.VERSION, '6.2.1', 'ScreenDanmakuClient must expose VERSION 6.2.1')
+            assert.strictEqual(CliV57.VERSION, '6.3.0', 'ScreenDanmakuClient must expose VERSION 6.3.0')
             assert.strictEqual(cliSb.global.Epiphy2DRenderer, CliV57, 'Epiphy2DRenderer must alias ScreenDanmakuClient')
             assert.strictEqual(CliV57._pure.isPotentialSpanTagHead('<AVARITIA_BIOS>', 0), false, '<AVARITIA_BIOS> must be fast-rejected in O(1)')
             assert.strictEqual(CliV57._pure.hasRichSpanTags('<AVARITIA_BIOS> :: [0x00F8_DEADC0DE] >>'), false, 'non-tag brackets must not trigger regex or span tag mode')

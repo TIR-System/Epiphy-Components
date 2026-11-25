@@ -2196,7 +2196,7 @@ module.exports = function registerSuite(test, h) {
 
         // 1. P2-4 & P1-2: Dual export and protocol compatibility (v6 accepts 5 and 6, rejects 4)
         assert.strictEqual(Surface, Dm, 'Epiphy2DSurface must alias ScreenDanmaku')
-        assert.strictEqual(Dm.VERSION, '6.2.0', 'ScreenDanmaku VERSION must be 6.2.0')
+        assert.strictEqual(Dm.VERSION, '6.3.0', 'ScreenDanmaku VERSION must be 6.3.0')
         assert.strictEqual(Proto.DANMAKU_PROTO_VERSION, 6, 'DANMAKU_PROTO_VERSION must be 6')
         assert.strictEqual(Spec.isProtoCompatible(6, 6), true)
         assert.strictEqual(Spec.isProtoCompatible(6, 5), true)
@@ -3891,7 +3891,7 @@ module.exports = function registerSuite(test, h) {
         assert.strictEqual(writeCount, 0, 'when perfLogEnabled is false, neither paintScreen nor tick may write disk')
 
         var st = R.getStats()
-        assert.strictEqual(st.version, '6.2.1')
+        assert.strictEqual(st.version, '6.3.0')
         assert.strictEqual(st.perfLogEnabled, false)
         assert.strictEqual(st.phases.paint_total.frames, 1)
         assert.strictEqual(st.phases.screen_text.frames, 1)
@@ -4113,7 +4113,7 @@ module.exports = function registerSuite(test, h) {
         validatePacketConformance(Surface.buildPacket({ action: 'clear', group: '*', maxPriority: 5 }), 'clear')
         validatePacketConformance(Surface.buildPacket({ surface: 'gui', lifeMode: 'screen_session', targetGui: { titleMatch: 'Chest' }, bgNodes: [{ type: 'rect', x: 0, y: 0, w: 40, h: 20, fill: { mode: 'gradient', from: 0x112233, to: 0x445566 } }] }), 'gui')
         validatePacketConformance(Surface.buildPacket({ surface: 'slot', slotMatch: { slotIndex: 0 }, nodes: [{ type: 'rect', x: 0, y: 0, w: 16, h: 16, fill: { mode: 'outline', color: 0xFFFF0000 } }] }), 'slot')
-        validatePacketConformance(Surface.buildPacket({ surface: 'world_plane', worldPos: [1, 64, 2], billboard: 'vertical', seeThrough: true, nodes: [{ type: 'text', x: 0, y: 0, text: 'WP' }] }), 'world_plane')
+        validatePacketConformance(Surface.buildPacket({ surface: 'world_plane', worldPos: [1, 64, 2], billboard: 'fixed', yaw: 45, pitch: -90, roll: 15, maxDistance: 80, dimension: 'minecraft:overworld', seeThrough: true, nodes: [{ type: 'text', x: 0, y: 0, text: 'WP' }] }), 'world_plane')
         validatePacketConformance(Spec.adaptV5ToV6({ proto: 5, title: 'LegacyV5', priority: 3, rx: 0.5, ry: 0.35, stay: 60 }), 'adaptV5ToV6')
     })
 
@@ -5612,5 +5612,421 @@ module.exports = function registerSuite(test, h) {
         assert.ok(perfSnap.fx3d != null, 'Epiphy2DRenderer.getStats() must attach fx3d telemetry snapshot')
         assert.strictEqual(perfSnap.fx3d.itemRendererAvailable, true)
         assert.ok(perfSnap.fx3d.world != null && Array.isArray(perfSnap.fx3d.world.builtinShapes), 'fx3d telemetry must include world 3D renderer stats')
+    })
+
+    test('74. P3-1 surface="world_plane": save-scoped persistence & rollback reconciliation, view-distance sync, player-tier guard & 3D canvas projection', function () {
+        var fsDisk = {}
+        var worldSaveDir = 'D:/FakeMc/saves/TestWorld'
+        var expectedJsonPath = worldSaveDir + '/kubejs_epiphy_world_planes.json'
+
+        var overworldLvl = { dimension: 'minecraft:overworld', players: [] }
+        var netherLvl    = { dimension: 'minecraft:the_nether', players: [] }
+
+        var aliceSent = []
+        var alice = {
+            username: 'Alice',
+            stringUuid: '00000000-0000-0000-0000-000000000a01',
+            x: 100, y: 65, z: 200,
+            level: overworldLvl,
+            getUuid: function () { return this.stringUuid },
+            sendData: function (ch, pkt) { aliceSent.push({ ch: ch, pkt: JSON.parse(JSON.stringify(pkt)) }) }
+        }
+        overworldLvl.players = [alice]
+
+        var pDataMap = {}
+        var mockSrv = {
+            persistentData: {
+                contains:  function (k) { return Object.prototype.hasOwnProperty.call(pDataMap, k) },
+                getString: function (k) { return pDataMap[k] || '' },
+                putString: function (k, v) { pDataMap[k] = String(v) }
+            },
+            getWorldPath: function () { return { toAbsolutePath: function () { return { normalize: function () { return worldSaveDir } } } } },
+            getLevel: function (d) {
+                var s = String(d)
+                if (s.indexOf('the_nether') >= 0) return netherLvl
+                return overworldLvl
+            },
+            getPlayerList: function () {
+                return { getPlayers: function () { return [alice] } }
+            }
+        }
+        alice.server = mockSrv
+
+        function createWorldPlaneServerSandbox() {
+            var tickCbs   = []
+            var unloadCbs = []
+            var sb = {
+                console: { info: function () {}, warn: function () {}, error: function () {}, debug: function () {}, log: function () {} },
+                Date: Date,
+                Utils: { server: mockSrv },
+                JsonIO: {
+                    read: function (p) {
+                        var norm = String(p).replace(/\\/g, '/')
+                        return Object.prototype.hasOwnProperty.call(fsDisk, norm) ? JSON.parse(fsDisk[norm]) : null
+                    },
+                    write: function (p, obj) {
+                        var norm = String(p).replace(/\\/g, '/')
+                        fsDisk[norm] = JSON.stringify(obj)
+                    }
+                },
+                ServerEvents: {
+                    loaded: function () {},
+                    unloaded: function (fn) { unloadCbs.push(fn) },
+                    tick: function (fn) { tickCbs.push(fn) },
+                    commandRegistry: function () {}
+                },
+                BlockEvents: { placed: function () {}, broken: function () {} },
+                PlayerEvents: { loggedIn: function () {}, loggedOut: function () {} },
+                Java: {
+                    loadClass: function (cls) {
+                        if (cls === 'net.minecraft.world.level.storage.LevelResource') {
+                            return { ROOT: 'ROOT' }
+                        }
+                        return null
+                    }
+                },
+                global: {}
+            }
+            sb.globalThis = sb
+            vm.createContext(sb)
+            loadServerBase(sb)
+            runScriptIn(sb, TRACKER_PATH)
+            runScriptIn(sb, DANMAKU_PATH)
+            return {
+                sb: sb,
+                Surface: sb.global.Epiphy2DSurface,
+                stepTicks: function (n) {
+                    for (var i = 0; i < n; i++) {
+                        for (var ti = 0; ti < tickCbs.length; ti++) tickCbs[ti]({ server: mockSrv })
+                    }
+                },
+                unload: function () {
+                    for (var ui = 0; ui < unloadCbs.length; ui++) unloadCbs[ui]()
+                }
+            }
+        }
+
+        // 1. Spawn persistent world_plane -> saved under saves/<world>/kubejs_epiphy_world_planes.json & pushed immediately to nearby Alice
+        var srv1 = createWorldPlaneServerSandbox()
+        srv1.stepTicks(1)
+
+        // Security gate: non-OP player tier MUST NOT create persistent world planes
+        var rejPlayerKey = srv1.Surface.spawnWorldPlane({
+            tier: 'player',
+            namespace: 'u:' + alice.stringUuid,
+            id: 'evil_spam',
+            worldPos: [100, 66, 200],
+            title: 'HACK'
+        })
+        assert.strictEqual(rejPlayerKey, null, 'player tier must be blocked from persist:true spawnWorldPlane')
+        assert.strictEqual(srv1.Surface.getStats().persistedWorldPlanes, 0)
+
+        var signKey = srv1.Surface.spawnWorldPlane({
+            id: 'reactor_sign',
+            namespace: 'facility',
+            group: 'signs',
+            dimension: 'minecraft:overworld',
+            worldPos: [100, 66, 205],
+            billboard: 'vertical',
+            seeThrough: true,
+            maxDistance: 32,
+            vars: { load: 0.45 },
+            tracks: { load: { mode: 'lerp', speed: 10 } },
+            nodes: srv1.Surface.ui({ anchor: 'center' })
+                .rect('bg', 0, 0, 96, 24, 0xCC0A1018)
+                .text('txt', 0, 0, 'CORE LOAD: $load', 1.0, 0xFF55FFFF)
+                .build()
+        })
+        assert.strictEqual(signKey, 'facility:reactor_sign')
+        assert.ok(Object.prototype.hasOwnProperty.call(fsDisk, expectedJsonPath), 'world_plane must persist inside saves/<world>/kubejs_epiphy_world_planes.json')
+        assert.strictEqual(aliceSent.length, 1, 'Alice within 32m must immediately receive full push packet')
+        assert.strictEqual(aliceSent[0].pkt.surface, 'world_plane')
+        assert.strictEqual(aliceSent[0].pkt.action, 'push')
+        assert.strictEqual(aliceSent[0].pkt.seeThrough, true)
+        assert.strictEqual(aliceSent[0].pkt.persist, undefined, 'wire packet must NOT leak server-only persist control flag')
+
+        // Backup save snapshot #1 (with 1 plane: reactor_sign) for rollback test
+        var saveBackupSnapshot = fsDisk[expectedJsonPath]
+
+        // 2. Heartbeat patch after >=30 ticks (on the next 10-tick sync boundary at tick 40), out-of-range auto-deactivate, re-enter full push, cross-dim auto-deactivate
+        aliceSent.length = 0
+        srv1.stepTicks(40)
+        assert.strictEqual(aliceSent.length, 1, 'staying within view distance across heartbeat window must emit lightweight heartbeat patch')
+        assert.strictEqual(aliceSent[0].pkt.action, 'patch')
+
+        // Move Alice outside maxDistance + 4m hysteresis (distance = 50m > 36m) -> auto deactivate!
+        aliceSent.length = 0
+        alice.x = 150
+        srv1.stepTicks(10)
+        assert.strictEqual(aliceSent.length, 1, 'leaving view distance + hysteresis must emit targeted deactivate')
+        assert.strictEqual(aliceSent[0].pkt.action, 'deactivate')
+        assert.strictEqual(aliceSent[0].pkt.key, 'facility:reactor_sign')
+
+        // Move Alice back in range (distance = 5m <= 32m) -> re-syncs full push!
+        aliceSent.length = 0
+        alice.x = 100
+        srv1.stepTicks(10)
+        assert.strictEqual(aliceSent.length, 1)
+        assert.strictEqual(aliceSent[0].pkt.action, 'push')
+
+        // Teleport Alice to Nether -> auto deactivate!
+        aliceSent.length = 0
+        alice.level = netherLvl
+        overworldLvl.players = []
+        netherLvl.players = [alice]
+        srv1.stepTicks(10)
+        assert.strictEqual(aliceSent.length, 1, 'switching dimension must deactivate overworld world_plane')
+        assert.strictEqual(aliceSent[0].pkt.action, 'deactivate')
+
+        // Return Alice to Overworld
+        alice.level = overworldLvl
+        netherLvl.players = []
+        overworldLvl.players = [alice]
+        srv1.stepTicks(10)
+
+        // Spawn a 2nd plane (ground magic circle with pitch: -90), then simulate server restart + save rollback!
+        var circleKey = srv1.Surface.spawnWorldPlane({
+            id: 'magic_circle',
+            namespace: 'facility',
+            dimension: 'minecraft:overworld',
+            worldPos: [102, 65.05, 202],
+            billboard: 'fixed',
+            yaw: 0,
+            pitch: -90,
+            roll: 30,
+            seeThrough: false,
+            maxDistance: 48,
+            nodes: [{ id: 'ring_box', type: 'rect', anchor: 'center', x: 0, y: 0, w: 64, h: 64, fill: { mode: 'outline', color: 0xFFFFAA00, thickness: 2 } }]
+        })
+        assert.strictEqual(circleKey, 'facility:magic_circle')
+        assert.strictEqual(srv1.Surface.listWorldPlanes().length, 2)
+        srv1.unload()
+
+        // 3. Restart fresh server sandbox -> automatically restores BOTH planes from saves/<world>/kubejs_epiphy_world_planes.json
+        aliceSent.length = 0
+        var srv2 = createWorldPlaneServerSandbox()
+        srv2.stepTicks(10)
+        assert.strictEqual(srv2.Surface.listWorldPlanes().length, 2, 'restarted server must restore both planes from world save JSON')
+        assert.strictEqual(aliceSent.filter(function (m) { return m.pkt.action === 'push' }).length, 2)
+
+        // Simulate world folder rollback to snapshot #1 (before magic_circle existed) + reloadWorldPlanes()
+        aliceSent.length = 0
+        fsDisk[expectedJsonPath] = saveBackupSnapshot
+        pDataMap = {}
+        assert.strictEqual(srv2.Surface.reloadWorldPlanes(), 1, 'rollback reload must revert to 1 plane')
+        var rollbackDeacts = aliceSent.filter(function (m) { return m.pkt.action === 'deactivate' && m.pkt.key === 'facility:magic_circle' })
+        assert.strictEqual(rollbackDeacts.length, 1, 'rolled-back plane must immediately send deactivate to previously synced client')
+
+        // 4. Client 3D projection: isolated from 2D paintScreen, supports vertical/center/fixed (pitch:-90), seeThrough DisplayMode & try/finally PoseStack safety
+        var forgeHooks = {}
+        var cliPaints  = []
+        var cliNetCb   = null
+        var cNow       = 10000
+        var cliSb = {
+            console: { info: function () {}, warn: function () {}, error: function (m) { throw new Error(m) }, debug: function () {}, log: function () {} },
+            Date: { now: function () { return cNow } },
+            Platform: { isClientEnvironment: function () { return true } },
+            ForgeEvents: { onEvent: function (cls, fn) { forgeHooks[cls] = fn } },
+            Client: { getCurrentScreen: function () { return null } },
+            ClientEvents: { loggedOut: function () {}, loggedIn: function () {}, tick: function () {}, paintScreen: function (fn) { cliPaints.push(fn) } },
+            NetworkEvents: { dataReceived: function (chName, fn) { if (chName === 'epiphy:screen_danmaku') cliNetCb = fn } },
+            Java: {
+                loadClass: function (cls) {
+                    if (cls === 'net.minecraft.client.gui.Font$DisplayMode') {
+                        return { NORMAL: 'MODE_NORMAL', SEE_THROUGH: 'MODE_SEE_THROUGH' }
+                    }
+                    return null
+                }
+            },
+            Text: { of: function (s) { return { string: String(s) } } },
+            global: {}
+        }
+        cliSb.globalThis = cliSb
+        vm.createContext(cliSb)
+        loadStartupBase(cliSb)
+        runScriptIn(cliSb, RENDERER_PATH)
+        var R = cliSb.global.Epiphy2DRenderer
+        var levelStageHook = forgeHooks['net.minecraftforge.client.event.RenderLevelStageEvent']
+        assert.strictEqual(typeof levelStageHook, 'function', 'EpiphySpec must wire RenderLevelStageEvent for world_plane')
+        assert.strictEqual(R._hasActiveWorldPlanes(), false, 'idle renderer must report 0 active world planes for O(1) short-circuit')
+
+        // Deliver two world_plane packets: (A) seeThrough: true vertical hologram, (B) seeThrough: false fixed pitch:-90 ground magic circle
+        var signPkt = srv2.Surface.listWorldPlanes()[0]
+        assert.ok(signPkt != null)
+        cliNetCb({
+            data: srv2.Surface.buildPacket({
+                surface: 'world_plane',
+                id: 'holo_sign',
+                namespace: 'facility',
+                lifeMode: 'active',
+                activeHold: 80,
+                worldPos: [100, 66, 205],
+                billboard: 'vertical',
+                seeThrough: true,
+                maxDistance: 32,
+                vars: { load: 0.75 },
+                nodes: [
+                    { id: 'bg', type: 'rect', anchor: 'center', x: 0, y: 0, w: 64, h: 32, fill: { mode: 'solid', color: 0xCC112233 } },
+                    { id: 'lbl', type: 'text', anchor: 'center', x: 0, y: 0, text: 'LOAD=$load', color: 0xFF00FFFF }
+                ]
+            })
+        })
+        cliNetCb({
+            data: srv2.Surface.buildPacket({
+                surface: 'world_plane',
+                id: 'floor_seal',
+                namespace: 'facility',
+                lifeMode: 'active',
+                activeHold: 80,
+                worldPos: [100, 65, 202],
+                billboard: 'fixed',
+                yaw: 0,
+                pitch: -90,
+                roll: 0,
+                seeThrough: false,
+                maxDistance: 32,
+                nodes: [
+                    { id: 'seal_quad', type: 'rect', anchor: 'center', x: 0, y: 0, w: 64, h: 64, fill: { mode: 'solid', color: 0xAAFFAA00 } },
+                    { id: 'seal_txt', type: 'text', anchor: 'center', x: 0, y: 0, text: 'SEAL', color: 0xFFFFCC00 }
+                ]
+            })
+        })
+        assert.strictEqual(R._hasActiveWorldPlanes(), true)
+
+        // Verify 2D screen passes NEVER draw world_plane items
+        var screenDrawn = 0
+        var screenEv = {
+            width: 854, height: 480, level: 'minecraft:overworld',
+            font: { width: function () { return 24 } },
+            graphics: { flush: function () {}, pose: function () { return { translate: function () {} } } },
+            push: function () {}, pop: function () {}, translate: function () {}, rotateDeg: function () {}, scale: function () {},
+            setPositionColorShader: function () {}, resetShaderColor: function () {}, blend: function () {},
+            beginQuads: function () {}, end: function () {},
+            rectangle: function () { screenDrawn++ },
+            text: function () { screenDrawn++ }
+        }
+        forgeHooks['net.minecraftforge.client.event.RenderGuiEvent$Pre'](screenEv)
+        cliPaints[0](screenEv)
+        assert.strictEqual(screenDrawn, 0, 'world_plane MUST NOT render during 2D Pre-HUD or Post-HUD screen passes')
+
+        // Execute RenderLevelStageEvent and inspect 3D vertices, text DisplayMode & PoseStack balance
+        var poseDepth = 0
+        var curTranslation = [0, 0, 0]
+        var translateStack = []
+        var emittedVerts = {}
+        var drawnFontCalls = []
+
+        var mockPoseStack = {
+            pushPose: function () {
+                poseDepth++
+                translateStack.push(curTranslation.slice())
+            },
+            translate: function (dx, dy, dz) {
+                curTranslation[0] += dx; curTranslation[1] += dy; curTranslation[2] += dz
+            },
+            popPose: function () {
+                poseDepth--
+                curTranslation = translateStack.pop() || [0, 0, 0]
+            },
+            last: function () {
+                var tx = curTranslation[0], ty = curTranslation[1], tz = curTranslation[2]
+                return {
+                    pose: function () {
+                        return {
+                            m00: function () { return 1 }, m10: function () { return 0 }, m20: function () { return 0 }, m30: function () { return tx },
+                            m01: function () { return 0 }, m11: function () { return 1 }, m21: function () { return 0 }, m31: function () { return ty },
+                            m02: function () { return 0 }, m12: function () { return 0 }, m22: function () { return 1 }, m32: function () { return tz },
+                            m03: function () { return 0 }, m13: function () { return 0 }, m23: function () { return 0 }, m33: function () { return 1 }
+                        }
+                    }
+                }
+            }
+        }
+
+        var mockBufSrc = {
+            getBuffer: function (rt) {
+                var key = String(rt)
+                if (!emittedVerts[key]) emittedVerts[key] = []
+                return {
+                    vertex: function (x, y, z) {
+                        var rec = { x: x, y: y, z: z }
+                        var chain = {
+                            color: function (r, g, b, a) { rec.rgba = [r, g, b, a]; return chain },
+                            uv: function (u, v) { rec.uv = [u, v]; return chain },
+                            overlayCoords: function () { return chain },
+                            uv2: function () { return chain },
+                            normal: function () { return chain },
+                            endVertex: function () { emittedVerts[key].push(rec) }
+                        }
+                        return chain
+                    }
+                }
+            },
+            endBatch: function () {}
+        }
+
+        var mockFont = {
+            width: function (s) { return String(s || '').length * 6 },
+            drawInBatch: function (seq, lx, ly, argb, shadow, mat, bs, dispMode) {
+                drawnFontCalls.push({
+                    text: seq && seq.string ? seq.string : String(seq),
+                    dispMode: dispMode,
+                    mat: mat
+                })
+            }
+        }
+
+        levelStageHook({
+            stage: 'AFTER_TRANSLUCENT_BLOCKS',
+            dimension: 'minecraft:overworld',
+            poseStack: mockPoseStack,
+            bufferSource: mockBufSrc,
+            font: mockFont,
+            camera: { position: { x: 100, y: 66, z: 200 }, yRot: 0, xRot: 25 }
+        })
+
+        assert.strictEqual(poseDepth, 0, 'PoseStack depth must return to 0 after rendering world planes')
+        assert.strictEqual(drawnFontCalls.length, 2, 'both world_plane text nodes must render in 3D stage')
+
+        var holoTxt = drawnFontCalls.find(function (c) { return c.text === 'LOAD=0.75' })
+        var sealTxt = drawnFontCalls.find(function (c) { return c.text === 'SEAL' })
+        assert.ok(holoTxt != null, 'vars interpolation ($load -> 0.75) must work on world_plane text nodes')
+        assert.strictEqual(holoTxt.dispMode, 'MODE_SEE_THROUGH', 'seeThrough:true must pass Font$DisplayMode.SEE_THROUGH')
+        assert.ok(sealTxt != null)
+        assert.strictEqual(sealTxt.dispMode, 'MODE_NORMAL', 'seeThrough:false must pass Font$DisplayMode.NORMAL')
+
+        // Verify pitch: -90 floor_seal quad lies flat horizontally (all 4 vertices have virtually identical Y offset ~ -1.0 relative to camera y=66, while spanning X and Z by 1.0m)
+        var normalVerts = emittedVerts['epiphy:world_plane_normal']
+        assert.ok(Array.isArray(normalVerts) && normalVerts.length === 4, 'floor_seal must emit 4 quad vertices to normal renderType')
+        var minY = Infinity, maxY = -Infinity, minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity
+        for (var vi = 0; vi < normalVerts.length; vi++) {
+            var v = normalVerts[vi]
+            if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y
+            if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x
+            if (v.z < minZ) minZ = v.z; if (v.z > maxZ) maxZ = v.z
+        }
+        assert.ok((maxY - minY) < 1e-4, 'pitch:-90 horizontal magic circle must stay flat in Y (got span ' + (maxY - minY) + ')')
+        assert.ok(Math.abs((maxX - minX) - 1.0) < 1e-4 && Math.abs((maxZ - minZ) - 1.0) < 1e-4, '64x64px @ scale=1.0 must span 1.0m x 1.0m on XZ plane')
+
+        // Inject a throwing custom shader handler into a world_plane rect and assert try/finally still pops PoseStack cleanly!
+        R.registerShader('boom_test_wp', function () { throw new Error('Simulated shader failure inside world_plane') })
+        cliNetCb({
+            data: srv2.Surface.buildPacket({
+                surface: 'world_plane',
+                id: 'throw_plane',
+                worldPos: [100, 66, 203],
+                nodes: [{ id: 'bad', type: 'rect', x: 0, y: 0, w: 32, h: 16, fill: { mode: 'shader', shaderId: 'boom_test_wp' } }]
+            })
+        })
+        levelStageHook({
+            stage: 'AFTER_TRANSLUCENT_BLOCKS',
+            dimension: 'minecraft:overworld',
+            poseStack: mockPoseStack,
+            bufferSource: mockBufSrc,
+            font: mockFont,
+            camera: { position: { x: 100, y: 66, z: 200 }, yRot: 0, xRot: 0 }
+        })
+        assert.strictEqual(poseDepth, 0, 'PoseStack must STILL unwind to 0 even when a node throws inside world_plane!')
+        assert.strictEqual(R.getStats().phases.world_plane.frames >= 2, true, 'world_plane perf bucket must record rendered frames')
     })
 }

@@ -148,8 +148,8 @@
 ### 功能五：三维空间中的 2D 画布投影与姿态锚定（3D-Projected 2D Canvas）
 
 1. **通过什么（底层机制与原语）**：
-   - 将 2D 画布锚定至世界三维坐标 `(x, y, z)`，通过 `billboard: 'center' | 'vertical' | 'fixed'`（配 `yaw, pitch, roll`）控制朝向，通过 `seeThrough: boolean` 控制深度测试，通过 `persist: boolean` 写入 `saves/<world>/kubejs_epiphy_world_planes.json`（随存档同步回滚）；
-   - KubeJS 阶段优先驱动 1.20.1 原生 `Display` 实体簇；独立 Mod 阶段接入 **`TextureTarget`（FBO 离屏烘焙池）** 与 3D 射线平面求交交互 GUI。
+   - 将 2D 画布锚定至世界三维坐标 `(x, y, z)`，通过 `billboard: 'center' | 'vertical' | 'fixed'`（配 `yaw, pitch, roll`）控制朝向，通过 `seeThrough: boolean` 控制深度测试与 `Font$DisplayMode.SEE_THROUGH`，通过 `persist: boolean` 写入 `saves/<world>/kubejs_epiphy_world_planes.json`（随存档同步回滚）并按玩家视距 `maxDistance` 执行进入全量 `push` / 周期心跳 `patch` / 越界自动 `deactivate`；
+   - KubeJS 阶段通过 `EpiphySpec` 统一的 `RenderLevelStageEvent` (`AFTER_TRANSLUCENT_BLOCKS`) 零空闲开销桥接，100% 复用 `renderDeclarativeNodes` 图元树投影至世界 `PoseStack` 与 `MultiBufferSource`（零存档残留实体、支持完整 2D 图元与动态轨道插值）；独立 Mod 阶段接入 **`TextureTarget`（FBO 离屏烘焙池）** 与 3D 射线平面求交交互 GUI。
 2. **能做到什么（通用能力）**：
    - 将 2D 富文本与图案面板投射到三维世界中，自由配置是否跨重启保留、是否跟随玩家视角、是否隔墙透视。
 3. **已有的例子（具象应用）**：
@@ -249,6 +249,11 @@
 | `worldPos` | `【别名: at】` | `number[3]` | `[x, y, z]` | `null` | 米 (`m`) | `surface === 'world_plane'` 时的世界三维坐标 |
 | `billboard` | `【别名: facing】` | `string` | `'center' \| 'vertical' \| 'fixed'` | `'vertical'` | - | `surface === 'world_plane'` 时的朝向跟随模式 |
 | `seeThrough` | `【别名: xray】` | `boolean` | `true \| false` | `false` | - | `surface === 'world_plane'` 时是否穿透方块遮挡 |
+| `yaw` | - | `number` | `-360.0 .. 360.0` | `0.0` | 度 (`deg`) | `billboard === 'fixed'` 时的世界水平偏航角 |
+| `pitch` | - | `number` | `-180.0 .. 180.0` | `0.0` | 度 (`deg`) | `billboard === 'fixed'` 时的俯仰角（如 `-90` 平铺地面） |
+| `roll` | - | `number` | `-360.0 .. 360.0` | `0.0` | 度 (`deg`) | `surface === 'world_plane'` 时的平面内翻滚角 |
+| `maxDistance` | - | `number` | `2 .. 512`（玩家层 `<= 48`） | `64` | 米 (`m`) | `surface === 'world_plane'` 视距同步与渲染裁剪半径 |
+| `dimension` | - | `string` | `namespace:path`（长度 `<= 128`） | `''` | - | `surface === 'world_plane'` 所属维度标识 |
 
 #### (B) 图元节点 Schema（`NodeSpec`）
 | 主标准名 (Canonical) | 显式高频别名（至多 1 个） | 适用 `type` | 类型 | 范围 / 默认值 | 单位 | 说明 |
@@ -392,7 +397,7 @@ Phase 4 (Kotlin + Java 原生模组迁移：彻底移除淘汰别名 + 硬件级
 | [x] | **P2-2** | **会话级纹理重映射与 `fill.mode: 'shader'`**：`applyReplacedTexturesForGui` 接入 `Minecraft.getTextureManager().register` 真替换并在界面关闭/`loggedOut`/`clear` 自动还原；支持原版内置及外部注册自定义 Shader 与降级回退 | `Epiphy的-平面渲染器.js` | 纹理还原防污染单测 + Shader 降级单测 | 已完成 |
 | [~] | **P2-3** | **承载面 `surface: 'slot'` 物品槽位 2D 叠加层**：已完成 `slotMatch` 与局部偏移绘制（`renderPriority: 200`）及单测；**明确前置边界**：**单槽 `renderSlot` 物品底层夹心与高性能多槽批绘制阻塞于 Phase 4 原生模组 Mixin（KubeJS Rhino 逐槽循环存在实测帧率天花板），非 KubeJS 阶段可优雅完成** | `Epiphy的-平面渲染器.js` | 槽位匹配与局部坐标裁剪单测 | 部分完成（**阻塞于 Phase 4 Mixin，非 KubeJS 可完成**） |
 | [x] | **P2-4** | **双端正式更名并挂载 `Epiphy2DSurface` / `Epiphy2DRenderer`**：更名脚本文件并保留 `ScreenDanmaku` / `ScreenDanmakuClient` 兼容别名 | `Epiphy的-平面渲染组件.js`<br>`Epiphy的-平面渲染器.js`<br>`README*.md` | 别名等价性回归单测 | `0b5a013` (2026-11-19) |
-| [ ] | **P3-1** | **承载面 `surface: 'world_plane'`（世界 2D 平面 / 高级告示牌）**：实现 `saves/<world>/kubejs_epiphy_world_planes.json` 持久化、`billboard` 朝向控制、`seeThrough` 穿透开关与 1.20.1 `Display` 实体轨驱动 | 服务端/客户端平面渲染组件 | 跨重启持久化回滚单测 + 视距增量同步单测 | 待开始 |
+| [x] | **P3-1** | **承载面 `surface: 'world_plane'`（世界 2D 平面 / 全息告示牌）**：落地 `saves/<world>/kubejs_epiphy_world_planes.json` 存档级持久化与回滚对账、视距进入 `push` / 心跳 `patch` / 越界 `deactivate` 增量同步、`'player'` 层持久化安全拦截，以及客户端 `RenderLevelStageEvent` 三维平面投影（支持 `'center'\|'vertical'\|'fixed'` 含 `pitch: -90` 地面法阵、`seeThrough` `DisplayMode.SEE_THROUGH` 透视切换与完整声明式 `nodes[]` 节点树） | `docs/proto_v6_schema.json`<br>`Epiphy的-Spec与通用工具.js`<br>`Epiphy的-平面渲染组件.js`<br>`Epiphy的-平面渲染器.js` | 跨重启与存档回滚对账单测 + 视距增量同步 + 三维姿态投影与异常栈还原回归单测 (74/74) | 已完成 (2026-11-26) |
 | [x] | **P3-2** | **`Epiphy3DFX` 空间特效与通用物品三维渲染子系统双端闭环**：`Epiphy的-Spec与通用工具.js` 统一承载零 CCL 依赖的 `RenderGuiEvent$Pre`（2D）与 `RenderLevelStageEvent`（世界 3D）渲染相位桥接；落地纯通用 v6 分层声明式物品三维渲染器 `Epiphy的-物品三维渲染器.js` (`EpiphyItem3DRenderer v1.1.0`，`model`/`frame`/`motion`/`lod`/`layers` + `fx()` 构造器 + `registerShader`/`registerLayerType`/`registerPart`/`registerPreset` + 无闪烁加法发光柔光贴图与纯 Java `CCModel` ~0.54ms 渲染 + 无 CCL 单告警退回原版静态模型；Phase 4 独立 Mod 须自主实现去 CCL），具体测试物品全部下沉为下游案例脚本；服务端世界 3D 调度器 `Epiphy的-空间特效组件.js` (`Epiphy3DFXServer v1.2.0`，`epiphy:spatial_fx` 协议 `v1`、`surface: 'world'`、`computeSpatialFxCost` 配额、`channel`/`slot`、`addConstraint` 可扩展约束链与 `registerShapeSchema`/`registerPreset`）及客户端消费端 `Epiphy的-空间特效渲染器.js` (`Epiphy3DFX v2.3.0`，100% 物理零 CCL 依赖、内置 4 种纯原版图元默认渲染器、`followEntityUuid` 实体平滑插值追踪、同槽 `patch` 合并、`'player'`/`'system'` 隔离淘汰、`once`/`active` 生命周期与 `registerWorldShape` 渲染扩展） | `Epiphy的-Spec与通用工具.js`<br>`Epiphy的-物品三维渲染器.js`<br>`Epiphy的-空间特效组件.js`<br>`Epiphy的-空间特效渲染器.js` | 2D/3D 解耦 + 防案例倒灌门禁 + 无 CCL 降级 + 零 `Math.PI` NaN + 双端 `surface: 'world'` 闭环回归单测 | 已完成 (2026-11-22) |
 | [ ] | **P4-1** | **Kotlin + Java 原生模组迁移**：移除 `DEPRECATED_ALIASES`；**彻底移除 KubeJS 阶段临时借用的 `CodeChickenLib` 特例依赖（改用 Forge 原生 `IClientItemExtensions` + `BEWLR` / 自有 Mixin + 原版 `ShaderInstance` + 原生 Java VBO/网格提交自主实现物品 3D 渲染）**；接入 `fill.mask` 单 Pass 着色器、`TextureTarget` (FBO) 离屏缓存池（含声明式节点树整树/静态子树离屏缓存，默认关闭按需开启）、`GuiGraphics` Mixin、世界平面射线交互 GUI 与原生 3D VBO/Shader | 独立模组工程 | 原生模组集成测试 | 待开始 |
 
@@ -454,5 +459,9 @@ Phase 4 (Kotlin + Java 原生模组迁移：彻底移除淘汰别名 + 硬件级
   - **恢复纯 Java `CCModel.render` 极速热路径（~0.54ms vs JS 循环 8~25ms）**：经用户事前批准，在声明的可选 `CodeChickenLib` 特例范围内恢复预烘焙 `CCModel` + `CCRenderState` + `Matrix4`，补齐烘焙期 `validateQuadsFinite` 防火墙与 `model.computeNormals()`，并在自定义着色器覆层绘制后显式 `flushRenderType` 锁定 uniform 防止 Hand/GUI 串扰（Phase 4 独立 Mod 仍须彻底去 CCL 自实现）。
 - **2026-11-22 (`P3-2` 面向功能本身架构重构：`EpiphySpec v2.8.0` + `EpiphyItem3DRenderer v1.0.0` + `Epiphy3DFX v2.3.0`)**：
   - **纠正目的与结果混淆、确立“实现 → 通用能力 → 案例”铁律**：将 `RenderLevelStageEvent` 世界 3D 桥接迁入 `Epiphy的-Spec与通用工具.js`（与 `RenderGuiEvent$Pre` 并列，世界 3D 物理零 CCL 依赖）；将原名实不符且掺杂具体装备细节的 `Epiphy的-空间特效核心.js` 正名并按 `PROTO v6` 声明式分层架构重构为纯通用 [`Epiphy的-物品三维渲染器.js`](../kubejs/startup_scripts/通用组件/Epiphy的-物品三维渲染器.js)（`model`/`frame`/`motion`/`lod`/`layers` + `fx()` 链式构造器 + `registerShader`/`registerLayerType`/`registerPart`/`registerPreset` + 无闪烁加法发光柔光管线）；所有具体测试物品配置（含 `epiphy:imperius_test` 着色器注册与图层装配）彻底下沉归位至案例脚本 `Epiphy的小玩意_功能测试.js`，并在 Test 67 新增自动化防案例倒灌词法守卫。
+- **2026-11-26 (`P3-1` 世界悬浮 2D 平面双端闭环封版：`EpiphySpec v2.8.1` + `Epiphy2DSurface v6.3.0` + `Epiphy2DRenderer v6.3.0` + `proto_v6_schema 6.3.0`)**：
+  - **协议与启动期桥接**：`docs/proto_v6_schema.json` 升至 `6.3.0`（补全 `yaw`、`pitch`、`roll`、`maxDistance`、`dimension` 信封契约）；`EpiphySpec` `RenderLevelStageEvent` 桥接同时按需分发 `Epiphy3DFX` 与 `Epiphy2DRenderer`（零活跃世界平面时 $O(1)$ 短路零开销）；
+  - **服务端存档级持久化与视距增量同步 (`Epiphy2DSurface v6.3.0`)**：落地 `saves/<world>/kubejs_epiphy_world_planes.json`（经 `openJsonStore` 损坏锁保护 + `persistentData` 兜底，随存档复制/备份/回滚 1:1 同步回滚）；提供 `spawnWorldPlane` / `patchWorldPlane` / `removeWorldPlane` / `clearWorldPlanes` / `listWorldPlanes` / `reloadWorldPlanes` 及 `inDimension(..., { surface: 'world_plane', persist: true })`；按玩家视距执行进入全量 `push`、30 tick 极简心跳 `patch`、越过 4m 迟滞圈或跨维度自动单发 `deactivate`，并强制拒绝非 OP `'player'` 层创建持久化平面；
+  - **客户端三维投影渲染 (`Epiphy2DRenderer v6.3.0`)**：严格隔离 2D `paintScreen` 相位，在 `RenderLevelStageEvent` (`AFTER_TRANSLUCENT_BLOCKS`) 中支持 `'center'`、`'vertical'`、`'fixed'`（含 `pitch: -90` 地面平铺法阵）三维基向量投影、`seeThrough` 切换 `Font$DisplayMode.SEE_THROUGH` / `NORMAL`、100% 复用 `renderDeclarativeNodes` 全套图元树与插值轨道，以及 `try/finally` `PoseStack` 推弹对称保护；全量单测扩至 `74/74` 全部通过，KubeJS 阶段 `P0 ~ P3` 路线图圆满收官。
 
 

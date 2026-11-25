@@ -1,6 +1,6 @@
 // priority: 1200
 // ============================================================================
-// Epiphy 通用规范、共享协议契约与纯逻辑基座 (EpiphySpec + EpiphyProtocol v2.8.0)
+// Epiphy 通用规范、共享协议契约与纯逻辑基座 (EpiphySpec + EpiphyProtocol v2.8.1)
 //   许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 //   所属阶段：startup_scripts（服务端与客户端共享，单一前置加载项）
 //   职责说明：
@@ -105,7 +105,7 @@
         bossbar:   Object.freeze({ x: 0.25, y: 0.00, w: 0.50, h: 0.09 })
     };
 
-    var SPEC_VERSION          = '2.8.0';
+    var SPEC_VERSION          = '2.8.1';
 
     var DANMAKU_CHANNEL       = 'epiphy:screen_danmaku';
     var DANMAKU_PROTO_VERSION = 6;
@@ -1824,8 +1824,10 @@
         //   1. RenderGuiEvent$Pre -> global.Epiphy2DRenderer._onRenderGuiPre(event)：
         //      使默认弹幕 (renderPriority: 0) 与默认自绘 HUD (renderPriority: 50) 均绘制在原版 HUD 与 GUI 之下，
         //      同时保持自绘 HUD 位于弹幕之上；renderPriority >= aboveVanillaHudPriority (100) 时自动进入 Post 层。
-        //   2. RenderLevelStageEvent -> global.Epiphy3DFX._onRenderLevelStage(event)：
-        //      承载世界空间 3D 特效 (`surface: 'world'`)，零活跃特效时 O(1) 短路零开销，彻底物理隔离于物品 3D 可选 CCL 管线。
+        //   2. RenderLevelStageEvent -> global.Epiphy3DFX._onRenderLevelStage(event)
+        //      与 global.Epiphy2DRenderer._onRenderLevelStage(event)：
+        //      同时承载世界空间 3D 特效 (`surface: 'world'`) 与世界悬浮 2D 平面 (`surface: 'world_plane'`)，
+        //      零活跃实例时 O(1) 布尔短路零开销，彻底物理隔离于物品 3D 可选 CCL 管线。
         if (global.EpiphyRenderHooks == null || typeof global.EpiphyRenderHooks !== 'object') {
             global.EpiphyRenderHooks = {
                 preHudActive:      false,
@@ -1867,10 +1869,19 @@
                 if (!global.EpiphyRenderHooks.world3dRegistered) {
                     try {
                         ForgeEvents.onEvent('net.minecraftforge.client.event.RenderLevelStageEvent', function (forgeEvent) {
-                            var fx3d = (typeof global !== 'undefined' && global != null) ? global.Epiphy3DFX : null;
-                            if (fx3d == null || typeof fx3d._hasActiveWorldFx !== 'function' || !fx3d._hasActiveWorldFx()) return;
-                            if (typeof fx3d._onRenderLevelStage === 'function') {
-                                fx3d._onRenderLevelStage(forgeEvent);
+                            var g = (typeof global !== 'undefined' && global != null) ? global : null;
+                            if (g == null) return;
+                            var fx3d = g.Epiphy3DFX;
+                            if (fx3d != null && typeof fx3d._hasActiveWorldFx === 'function' && fx3d._hasActiveWorldFx()) {
+                                if (typeof fx3d._onRenderLevelStage === 'function') {
+                                    fx3d._onRenderLevelStage(forgeEvent);
+                                }
+                            }
+                            var r2d = g.Epiphy2DRenderer;
+                            if (r2d != null && typeof r2d._hasActiveWorldPlanes === 'function' && r2d._hasActiveWorldPlanes()) {
+                                if (typeof r2d._onRenderLevelStage === 'function') {
+                                    r2d._onRenderLevelStage(forgeEvent);
+                                }
                             }
                         });
                         global.EpiphyRenderHooks.world3dActive     = true;

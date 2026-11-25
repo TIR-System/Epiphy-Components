@@ -1,6 +1,6 @@
 {
   "$comment": "Epiphy 2D Surface Protocol v6 standalone machine-readable conformance schema (cross-language target for KubeJS & future Kotlin/Java native mod)",
-  "schemaVersion": "6.2.0",
+  "schemaVersion": "6.3.0",
   "protoVersion": 6,
   "compatibleProtoVersions": [5, 6],
   "channel": "epiphy:screen_danmaku",
@@ -132,6 +132,11 @@
     "worldPos":            { "type": "vec3" },
     "billboard":           { "type": "string",  "enum": ["center", "vertical", "fixed"] },
     "seeThrough":          { "type": "boolean" },
+    "yaw":                 { "type": "number",  "min": -360, "max": 360 },
+    "pitch":               { "type": "number",  "min": -180, "max": 180 },
+    "roll":                { "type": "number",  "min": -360, "max": 360 },
+    "maxDistance":         { "type": "number",  "min": 2, "max": 512 },
+    "dimension":           { "type": "string",  "maxLen": 128 },
     "_fromProto":          { "type": "number",  "enum": [5] }
   },
   "node": {
