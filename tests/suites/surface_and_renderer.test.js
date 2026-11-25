@@ -6028,5 +6028,203 @@ module.exports = function registerSuite(test, h) {
         })
         assert.strictEqual(poseDepth, 0, 'PoseStack must STILL unwind to 0 even when a node throws inside world_plane!')
         assert.strictEqual(R.getStats().phases.world_plane.frames >= 2, true, 'world_plane perf bucket must record rendered frames')
+
+        // 5. Verify world_plane supports type:'item' (with count badge & ItemRenderer.renderStatic) AND clip.mode:'scissor' (both leaf rect/sprite & group container)
+        var renderedWpItems = []
+        var staticItemCalls = []
+        drawnFontCalls.length = 0
+        emittedVerts = {}
+        R.clear('*')
+
+        cliNetCb({
+            data: srv2.Surface.buildPacket({
+                surface: 'world_plane',
+                id: 'item_and_scissor_plane',
+                namespace: 'facility',
+                lifeMode: 'active',
+                activeHold: 80,
+                worldPos: [100, 66, 204],
+                billboard: 'fixed',
+                yaw: 0,
+                pitch: 0,
+                roll: 0,
+                seeThrough: false,
+                nodes: [
+                    // Leaf rect with explicit clip.mode:'scissor' -> must degrade cleanly to 50% width (32px -> 0.5m) instead of drawing 100% unclipped
+                    {
+                        id: 'leaf_scissor_bar',
+                        type: 'rect',
+                        anchor: 'top_left',
+                        x: 0, y: 0, w: 64, h: 16,
+                        fill: { mode: 'solid', color: 0xFF00FF88 },
+                        clip: { dir: 'left', ratio: 0.5, mode: 'scissor' }
+                    },
+                    // Group container with clip.mode:'scissor' (left 50% of [0..64] -> [0..32])
+                    {
+                        id: 'grp_scissor',
+                        type: 'group',
+                        anchor: 'top_left',
+                        x: 0, y: 20, w: 64, h: 32,
+                        clip: { dir: 'left', ratio: 0.5, mode: 'scissor' },
+                        children: [
+                            // Spanning child rect [0..64] inside 32px scissor -> must be clipped to 32px (0.5m)
+                            { id: 'child_span_rect', type: 'rect', anchor: 'top_left', x: 0, y: 0, w: 64, h: 8, fill: { mode: 'solid', color: 0xFF3366FF } },
+                            // Inside item at x=4..20 (center=12 <= 32) -> must render + draw count '3'
+                            { id: 'item_in', type: 'item', anchor: 'top_left', x: 4, y: 10, w: 16, h: 16, item: 'minecraft:nether_star', count: 3 },
+                            // Outside item at x=44..60 (center=52 > 32) -> must be clipped out!
+                            { id: 'item_out', type: 'item', anchor: 'top_left', x: 44, y: 10, w: 16, h: 16, item: 'minecraft:barrier', count: 9 },
+                            // Inside text at x=8 <= 32 -> must render
+                            { id: 'txt_in', type: 'text', anchor: 'top_left', x: 8, y: 2, text: 'IN_CLIP', color: 0xFFFFFFFF },
+                            // Outside text at x=48 > 32 -> must be clipped out!
+                            { id: 'txt_out', type: 'text', anchor: 'top_left', x: 48, y: 2, text: 'OUT_CLIP', color: 0xFFFF0000 }
+                        ]
+                    }
+                ]
+            })
+        })
+
+        levelStageHook({
+            stage: 'AFTER_TRANSLUCENT_BLOCKS',
+            dimension: 'minecraft:overworld',
+            poseStack: mockPoseStack,
+            bufferSource: mockBufSrc,
+            font: mockFont,
+            camera: { position: { x: 100, y: 66, z: 200 }, yRot: 0, xRot: 0 },
+            itemRenderer: {
+                renderStatic: function (stack, ctxMode) {
+                    staticItemCalls.push({ id: stack.id, count: stack.count, mode: ctxMode })
+                }
+            },
+            onWorldPlaneItem: function (info) {
+                renderedWpItems.push(info)
+            }
+        })
+
+        assert.strictEqual(poseDepth, 0, 'PoseStack depth must return to 0 after rendering item & scissor world_plane')
+        assert.strictEqual(renderedWpItems.length, 1, 'only item_in inside the group scissor box must render; item_out must be clipped')
+        assert.strictEqual(renderedWpItems[0].item, 'minecraft:nether_star')
+        assert.strictEqual(renderedWpItems[0].count, 3)
+        assert.strictEqual(staticItemCalls.length, 1, 'ItemRenderer.renderStatic must be invoked for visible world_plane item node')
+        assert.strictEqual(staticItemCalls[0].id, 'minecraft:nether_star')
+        assert.ok(drawnFontCalls.some(function (c) { return c.text === '3' }), 'item node with count=3 must render stack count label on world_plane')
+        assert.ok(drawnFontCalls.some(function (c) { return c.text === 'IN_CLIP' }), 'text inside group scissor box must render')
+        assert.strictEqual(drawnFontCalls.some(function (c) { return c.text === 'OUT_CLIP' }), false, 'text outside group scissor box must be culled')
+
+        var clipVerts = emittedVerts['epiphy:world_plane_normal'] || []
+        assert.strictEqual(clipVerts.length, 8, 'leaf_scissor_bar (4 verts) + child_span_rect (4 verts) must both emit clipped quads')
+        for (var cvi = 0; cvi < clipVerts.length; cvi += 4) {
+            var qMinX = Infinity, qMaxX = -Infinity
+            for (var qj = 0; qj < 4; qj++) {
+                var vx = clipVerts[cvi + qj].x
+                if (vx < qMinX) qMinX = vx
+                if (vx > qMaxX) qMaxX = vx
+            }
+            var spanMeters = qMaxX - qMinX
+            assert.ok(Math.abs(spanMeters - 0.5) < 1e-4, '64px rect clipped by ratio=0.5 mode=scissor on world_plane must span 0.5m (32px), got ' + spanMeters)
+        }
+
+        // 6. Verify automatic AbstractContainerScreen menu.slots traversal for surface:'slot' during ClientEvents.paintScreen (renderScreenPass)
+        var slotScreen = {
+            title: '暮色拆解台',
+            getGuiLeft: function () { return 120 },
+            getGuiTop:  function () { return 60 },
+            getMenu: function () {
+                return {
+                    slots: [
+                        {
+                            index: 0, x: 16, y: 24,
+                            isActive: function () { return true },
+                            getItem: function () {
+                                return {
+                                    id: 'epiphy:chaos_relic',
+                                    count: 5,
+                                    isEmpty: function () { return false },
+                                    hasTag: function (t) { return t === 'epiphy:unstable_artifacts' }
+                                }
+                            }
+                        },
+                        {
+                            index: 1, x: 34, y: 24,
+                            isActive: function () { return true },
+                            getItem: function () {
+                                return {
+                                    id: 'minecraft:cobblestone',
+                                    count: 64,
+                                    isEmpty: function () { return false },
+                                    hasTag: function () { return false }
+                                }
+                            }
+                        },
+                        {
+                            index: 2, x: 52, y: 24,
+                            isActive: function () { return true },
+                            getItem: function () {
+                                return {
+                                    id: 'epiphy:void_shard',
+                                    count: 2,
+                                    isEmpty: function () { return false },
+                                    hasTag: function (t) { return t === 'epiphy:unstable_artifacts' }
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+        cliSb.Client.getCurrentScreen = function () { return slotScreen }
+
+        cliNetCb({
+            data: srv2.Surface.buildPacket({
+                surface: 'slot',
+                id: 'auto_slot_tag_highlight',
+                namespace: 'facility',
+                lifeMode: 'screen_session',
+                targetGui: { titleMatch: '拆解台' },
+                slotMatch: { tag: '#epiphy:unstable_artifacts' },
+                nodes: [
+                    { id: 'slot_hl', type: 'rect', anchor: 'top_left', x: 0, y: 0, w: 16, h: 16, fill: { mode: 'solid', color: 0x66FF00FF } },
+                    { id: 'slot_badge', type: 'text', anchor: 'top_left', x: 1, y: 1, text: '#$slotIndex:$count' }
+                ]
+            })
+        })
+
+        var curMatTx = 0, curMatTy = 0
+        var matStack = []
+        var slotRectScreenPositions = []
+        var slotBadgeTexts = []
+        var autoSlotPaintEv = {
+            width: 854, height: 480, level: 'minecraft:overworld',
+            font: { width: function (s) { return String(s || '').length * 6 } },
+            graphics: { flush: function () {} },
+            push: function () { matStack.push([curMatTx, curMatTy]) },
+            pop: function () {
+                var p = matStack.pop() || [0, 0]
+                curMatTx = p[0]; curMatTy = p[1]
+            },
+            translate: function (dx, dy) { curMatTx += (Number(dx) || 0); curMatTy += (Number(dy) || 0) },
+            rotateDeg: function () {},
+            scale: function () {},
+            setPositionColorShader: function () {},
+            blend: function () {},
+            beginQuads: function () {},
+            end: function () {},
+            rectangle: function (x, y, _z, w, h) {
+                slotRectScreenPositions.push({ absX: curMatTx + x, absY: curMatTy + y, w: w, h: h })
+            },
+            text: function (comp, x, y) {
+                slotBadgeTexts.push({ text: comp && comp.string ? comp.string : String(comp), absX: curMatTx + x, absY: curMatTy + y })
+            }
+        }
+
+        cliPaints[0](autoSlotPaintEv)
+        assert.strictEqual(matStack.length, 0, 'matrix stack must unwind to 0 after automatic slot rendering')
+        assert.strictEqual(slotRectScreenPositions.length, 2, 'only the 2 slots matching tag #epiphy:unstable_artifacts (slots 0 and 2) must draw')
+        // Slot 0: guiLeft(120) + slot.x(16) = 136, guiTop(60) + slot.y(24) = 84
+        assert.strictEqual(slotRectScreenPositions[0].absX, 136)
+        assert.strictEqual(slotRectScreenPositions[0].absY, 84)
+        // Slot 2: guiLeft(120) + slot.x(52) = 172, guiTop(60) + slot.y(24) = 84
+        assert.strictEqual(slotRectScreenPositions[1].absX, 172)
+        assert.strictEqual(slotRectScreenPositions[1].absY, 84)
+        assert.deepStrictEqual(slotBadgeTexts.map(function (b) { return b.text }), ['#0:5', '#2:2'], 'slot-scoped $slotIndex and $count variables must auto-bind per matched slot')
     })
 }

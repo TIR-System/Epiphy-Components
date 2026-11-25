@@ -6502,13 +6502,13 @@
         }
     }
 
-    function drawItemNode(event, node, x, y) {
+    function drawItemNode(event, node, x, y, fadeAlpha) {
         var itemId = String(node.item || '')
         if (!itemId || itemId === 'minecraft:air') return
         ensureItemPosePushed(event)
         flushBatchedBeforeImmediate()
         if (resolveEventCaps(event).hasRenderItem) {
-            event.renderItem(itemId, Math.round(x), Math.round(y))
+            event.renderItem(itemId, Math.round(x), Math.round(y), node, fadeAlpha)
             return
         }
         if (event.graphics != null && typeof Item !== 'undefined' && Item != null && typeof Item.of === 'function') {
@@ -6889,7 +6889,10 @@
 
                 var clipSpec   = c.clipSpec
                 var effAngle   = pAngle + nAngle
-                var useScissor = (clipSpec != null && clipSpec.mode === 'scissor' && Math.abs(effAngle) < 0.01)
+                var isWpEvent  = Boolean(event != null && event._isWorldPlane)
+                // 在 3D world_plane 上，叶节点（rect/sprite/nine_slice）即使声明 mode:'scissor' 也统一走 computeLocalClipRect 局部几何+UV裁剪，
+                // 仅 group 容器节点走 wpAdapter 的平面 2D 软件裁剪栈（enableScissor/disableScissor）
+                var useScissor = (clipSpec != null && clipSpec.mode === 'scissor' && Math.abs(effAngle) < 0.01 && (!isWpEvent || nType === NT_GROUP))
                 var needsPush  = (nType === NT_GROUP || nAngle !== 0 || Math.abs(nScale - 1.0) > 0.001)
 
                 // 动态但无局部变换/无 Scissor 的 solid/outline rect 合批轨
@@ -7015,7 +7018,7 @@
                             drawNineSliceNode(event, node, clipped.x, clipped.y, clipped.w, clipped.h, nAlpha)
                         }
                     } else if (nType === NT_ITEM) {
-                        drawItemNode(event, node, clipped.x, clipped.y)
+                        drawItemNode(event, node, clipped.x, clipped.y, nAlpha)
                     } else if (nType === NT_TEXT) {
                         drawDeclarativeTextNode(
                             event,
@@ -7138,13 +7141,209 @@
         }
     }
 
+    function resolveScreenGuiOrigin(screenObj) {
+        if (screenObj == null) return { hasGuiOrigin: false, guiLeft: 0, guiTop: 0 }
+        var rawLeft = null
+        var rawTop  = null
+        try {
+            if (typeof screenObj.getGuiLeft === 'function') rawLeft = screenObj.getGuiLeft()
+            else if (screenObj.guiLeft !== undefined && screenObj.guiLeft !== null) rawLeft = screenObj.guiLeft
+            else if (screenObj.f_97735_ !== undefined && screenObj.f_97735_ !== null) rawLeft = screenObj.f_97735_
+
+            if (typeof screenObj.getGuiTop === 'function') rawTop = screenObj.getGuiTop()
+            else if (screenObj.guiTop !== undefined && screenObj.guiTop !== null) rawTop = screenObj.guiTop
+            else if (screenObj.f_97736_ !== undefined && screenObj.f_97736_ !== null) rawTop = screenObj.f_97736_
+        } catch (eGuiOrig) { }
+        var hasOrig = (rawLeft !== null && rawTop !== null && isFinite(Number(rawLeft)) && isFinite(Number(rawTop)))
+        return {
+            hasGuiOrigin: hasOrig,
+            guiLeft:      hasOrig ? Number(rawLeft) : 0,
+            guiTop:       hasOrig ? Number(rawTop) : 0
+        }
+    }
+
+    function doesSlotStackMatchTag(stackObj, rawSlotObj, requiredTag) {
+        if (!requiredTag) return true
+        var normTag = String(requiredTag).replace(/^#/, '')
+        if (!normTag) return true
+        try {
+            if (stackObj != null) {
+                if (typeof stackObj.hasTag === 'function' && stackObj.hasTag(normTag)) return true
+                if (Array.isArray(stackObj.tags)) {
+                    for (var ti = 0; ti < stackObj.tags.length; ti++) {
+                        if (String(stackObj.tags[ti]).replace(/^#/, '') === normTag) return true
+                    }
+                }
+                if (typeof stackObj.getTags === 'function') {
+                    var tagList = stackObj.getTags()
+                    if (Array.isArray(tagList)) {
+                        for (var tli = 0; tli < tagList.length; tli++) {
+                            if (String(tagList[tli]).replace(/^#/, '') === normTag) return true
+                        }
+                    } else if (tagList != null && typeof tagList.toList === 'function') {
+                        var jList = tagList.toList()
+                        var sz = typeof jList.size === 'function' ? jList.size() : (jList.length || 0)
+                        for (var ji = 0; ji < sz; ji++) {
+                            var elem = typeof jList.get === 'function' ? jList.get(ji) : jList[ji]
+                            var locStr = (elem != null && typeof elem.location === 'function') ? String(elem.location()) : String(elem)
+                            if (locStr.replace(/^#/, '') === normTag) return true
+                        }
+                    }
+                }
+            }
+            if (rawSlotObj != null && Array.isArray(rawSlotObj.tags)) {
+                for (var rsi = 0; rsi < rawSlotObj.tags.length; rsi++) {
+                    if (String(rawSlotObj.tags[rsi]).replace(/^#/, '') === normTag) return true
+                }
+            }
+        } catch (eTagMatch) { }
+        return false
+    }
+
+    function extractSlotStackSummary(rawSlotObj, fallbackIdx) {
+        if (rawSlotObj == null) return null
+        try {
+            var active = true
+            if (typeof rawSlotObj.isActive === 'function') active = Boolean(rawSlotObj.isActive())
+            else if (typeof rawSlotObj.m_6659_ === 'function') active = Boolean(rawSlotObj.m_6659_())
+            else if (rawSlotObj.active !== undefined) active = Boolean(rawSlotObj.active)
+            if (!active) return null
+
+            var sIdx = (rawSlotObj.index !== undefined && rawSlotObj.index !== null)
+                ? Number(rawSlotObj.index)
+                : ((rawSlotObj.slotIndex !== undefined && rawSlotObj.slotIndex !== null)
+                    ? Number(rawSlotObj.slotIndex)
+                    : (typeof rawSlotObj.getSlotIndex === 'function' ? Number(rawSlotObj.getSlotIndex()) : fallbackIdx))
+            var sx = Number(rawSlotObj.x !== undefined ? rawSlotObj.x : (rawSlotObj.slotX !== undefined ? rawSlotObj.slotX : (rawSlotObj.f_40220_ !== undefined ? rawSlotObj.f_40220_ : 0))) || 0
+            var sy = Number(rawSlotObj.y !== undefined ? rawSlotObj.y : (rawSlotObj.slotY !== undefined ? rawSlotObj.slotY : (rawSlotObj.f_40221_ !== undefined ? rawSlotObj.f_40221_ : 0))) || 0
+
+            var stack = null
+            if (typeof rawSlotObj.getItem === 'function') stack = rawSlotObj.getItem()
+            else if (typeof rawSlotObj.m_7993_ === 'function') stack = rawSlotObj.m_7993_()
+            else if (rawSlotObj.stack !== undefined) stack = rawSlotObj.stack
+            else if (rawSlotObj.item !== undefined) stack = rawSlotObj.item
+
+            var itemId = ''
+            var count  = 0
+            if (rawSlotObj.itemId !== undefined && rawSlotObj.itemId !== null) {
+                itemId = String(rawSlotObj.itemId)
+                count  = Number(rawSlotObj.count != null ? rawSlotObj.count : (itemId && itemId !== 'minecraft:air' ? 1 : 0)) || 0
+            } else if (typeof stack === 'string') {
+                itemId = stack
+                count  = Number(rawSlotObj.count != null ? rawSlotObj.count : (itemId && itemId !== 'minecraft:air' ? 1 : 0)) || 0
+            } else if (stack != null) {
+                var isEmpty = (typeof stack.isEmpty === 'function')
+                    ? Boolean(stack.isEmpty())
+                    : ((typeof stack.m_41619_ === 'function') ? Boolean(stack.m_41619_()) : Boolean(stack.empty))
+                if (!isEmpty) {
+                    if (stack.id !== undefined && stack.id !== null) itemId = String(stack.id)
+                    else if (typeof stack.getId === 'function') itemId = String(stack.getId())
+                    else if (stack.item != null && stack.item.id != null) itemId = String(stack.item.id)
+                    count = Number(stack.count !== undefined ? stack.count : (typeof stack.getCount === 'function' ? stack.getCount() : (typeof stack.m_41613_ === 'function' ? stack.m_41613_() : 1))) || 1
+                }
+            }
+            if (!itemId) itemId = 'minecraft:air'
+            if (itemId === 'minecraft:air') count = 0
+
+            return {
+                slotIndex: sIdx,
+                x:         sx,
+                y:         sy,
+                itemId:    itemId,
+                count:     count,
+                stack:     stack,
+                rawSlot:   rawSlotObj
+            }
+        } catch (eSlotSum) {
+            return null
+        }
+    }
+
+    function extractContainerMenuSlots(screenObj) {
+        var result = []
+        if (screenObj == null) return result
+        try {
+            var menu = null
+            if (typeof screenObj.getMenu === 'function') menu = screenObj.getMenu()
+            else if (screenObj.menu != null) menu = screenObj.menu
+            else if (screenObj.f_97732_ != null) menu = screenObj.f_97732_
+
+            var rawSlots = null
+            if (menu != null) {
+                rawSlots = menu.slots != null ? menu.slots : menu.f_38839_
+            }
+            if (rawSlots == null && screenObj.slots != null) {
+                rawSlots = screenObj.slots
+            }
+            if (rawSlots == null) return result
+
+            if (Array.isArray(rawSlots)) {
+                for (var si = 0; si < rawSlots.length; si++) {
+                    var infoA = extractSlotStackSummary(rawSlots[si], si)
+                    if (infoA != null) result.push(infoA)
+                }
+            } else if (typeof rawSlots.size === 'function' && typeof rawSlots.get === 'function') {
+                var sz = Number(rawSlots.size()) || 0
+                for (var ji = 0; ji < sz; ji++) {
+                    var infoJ = extractSlotStackSummary(rawSlots.get(ji), ji)
+                    if (infoJ != null) result.push(infoJ)
+                }
+            } else if (typeof rawSlots.length === 'number') {
+                for (var li = 0; li < rawSlots.length; li++) {
+                    var infoL = extractSlotStackSummary(rawSlots[li], li)
+                    if (infoL != null) result.push(infoL)
+                }
+            }
+        } catch (eMenuSlots) { }
+        return result
+    }
+
+    function doesSlotMatchRule(slotMatch, slotInfo) {
+        if (slotInfo == null) return false
+        if (!isPlainObjLike(slotMatch)) return true
+        if (slotMatch.slotIndex !== undefined && slotMatch.slotIndex !== null && Number(slotMatch.slotIndex) >= 0) {
+            if (slotInfo.slotIndex === undefined || slotInfo.slotIndex === null || Number(slotInfo.slotIndex) !== Number(slotMatch.slotIndex)) {
+                return false
+            }
+        }
+        if (slotMatch.item) {
+            if (String(slotInfo.itemId || 'minecraft:air') !== String(slotMatch.item)) {
+                return false
+            }
+        }
+        if (slotMatch.tag) {
+            if (!doesSlotStackMatchTag(slotInfo.stack, slotInfo.rawSlot, slotMatch.tag)) {
+                return false
+            }
+        }
+        return true
+    }
+
+    function buildSlotScopedVars(baseVars, slotInfo) {
+        var out = {}
+        if (isPlainObjLike(baseVars)) {
+            for (var k in baseVars) {
+                if (Object.prototype.hasOwnProperty.call(baseVars, k)) out[k] = baseVars[k]
+            }
+        }
+        if (slotInfo != null) {
+            if (out.slotIndex === undefined) out.slotIndex = slotInfo.slotIndex
+            if (out.slotX === undefined)     out.slotX     = slotInfo.x
+            if (out.slotY === undefined)     out.slotY     = slotInfo.y
+            if (out.itemId === undefined)    out.itemId    = slotInfo.itemId
+            if (out.count === undefined)     out.count     = slotInfo.count
+        }
+        return out
+    }
+
     function renderGuiSurfacePass(screenOrEvent, phase, guiCtx) {
         var now = monotonicNowMs()
         flushPendingActions(now)
         var ctx = isPlainObjLike(guiCtx) ? guiCtx : {}
         var screenObj = ctx.screen || (screenOrEvent != null ? (screenOrEvent.screen || getActiveScreen(screenOrEvent)) : null)
-        var guiLeft = Number(ctx.guiLeft != null ? ctx.guiLeft : (screenObj != null && screenObj.guiLeft != null ? screenObj.guiLeft : 0)) || 0
-        var guiTop  = Number(ctx.guiTop != null ? ctx.guiTop : (screenObj != null && screenObj.guiTop != null ? screenObj.guiTop : 0)) || 0
+        var scrOrig = resolveScreenGuiOrigin(screenObj)
+        var guiLeft = Number(ctx.guiLeft != null ? ctx.guiLeft : scrOrig.guiLeft) || 0
+        var guiTop  = Number(ctx.guiTop != null ? ctx.guiTop : scrOrig.guiTop) || 0
         var fontObj = getClientFont(screenOrEvent, now)
         var rendered = 0
         var prevEv = ACTIVE_FRAME_EVENT
@@ -7190,22 +7389,31 @@
                         rendered++
                     }
                 } else if (phase === 'slot' && ov.surface === 'slot') {
-                    var slotX = Number(ctx.slotX || 0)
-                    var slotY = Number(ctx.slotY || 0)
-                    var slotMatch = ov.slotMatch
-                    var matchedSlot = true
-                    if (slotMatch != null) {
-                        if (slotMatch.item && ctx.itemId && String(ctx.itemId) !== String(slotMatch.item)) matchedSlot = false
-                        if (slotMatch.slotIndex != null && slotMatch.slotIndex >= 0 && ctx.slotIndex != null && Number(ctx.slotIndex) !== Number(slotMatch.slotIndex)) matchedSlot = false
-                    }
-                    if (matchedSlot && Array.isArray(ov.nodes) && ov.nodes.length > 0 && screenOrEvent != null) {
-                        if (typeof screenOrEvent.push === 'function') {
-                            screenOrEvent.push()
-                            pushed = true
-                            screenOrEvent.translate(guiLeft + slotX, guiTop + slotY)
+                    // 支持两种调用方式：(1) 外部显式传入单槽位 ctx (slotX/slotY/slotIndex/itemId)；(2) 未传单槽位坐标时自动遍历 screenObj 的 menu.slots
+                    var hasExplicitSlotCtx = (ctx.slotX !== undefined || ctx.slotY !== undefined || ctx.slotIndex !== undefined || ctx.itemId !== undefined)
+                    var candidateSlots = hasExplicitSlotCtx
+                        ? [extractSlotStackSummary(ctx, ctx.slotIndex != null ? Number(ctx.slotIndex) : 0)]
+                        : extractContainerMenuSlots(screenObj)
+                    if (Array.isArray(ov.nodes) && ov.nodes.length > 0 && screenOrEvent != null) {
+                        for (var csi = 0; csi < candidateSlots.length; csi++) {
+                            var sInfo = candidateSlots[csi]
+                            if (!doesSlotMatchRule(ov.slotMatch, sInfo)) continue
+                            var slotPushed = false
+                            try {
+                                if (typeof screenOrEvent.push === 'function') {
+                                    screenOrEvent.push()
+                                    slotPushed = true
+                                    screenOrEvent.translate(guiLeft + sInfo.x, guiTop + sInfo.y)
+                                }
+                                var slotVars = buildSlotScopedVars(vMap, sInfo)
+                                renderDeclarativeNodes(screenOrEvent, ov, ov.nodes, slotVars, fadeAlpha, fontObj, null, now, 0.0, 0)
+                                rendered++
+                            } finally {
+                                if (slotPushed && typeof screenOrEvent.pop === 'function') {
+                                    try { screenOrEvent.pop() } catch (eSPop) { }
+                                }
+                            }
                         }
-                        renderDeclarativeNodes(screenOrEvent, ov, ov.nodes, vMap, fadeAlpha, fontObj, null, now, 0.0, 0)
-                        rendered++
                     }
                 } else if ((phase === 'post' || phase === 'fg' || !phase) && ov.surface === 'gui') {
                     var fgList = (Array.isArray(ov.fgNodes) && ov.fgNodes.length > 0) ? ov.fgNodes : ov.nodes
@@ -7560,8 +7768,16 @@
                 SHAKE_VEC_SCRATCH.y = 0.0
                 shakeVec = SHAKE_VEC_SCRATCH
             }
-            var px = sw * item.rx + (item.ox || 0) + shakeVec.x
-            var py = sh * item.ry + (item.oy || 0) + shakeVec.y
+            var isGuiOrSlotItem = (item.surface === 'gui' || item.surface === 'slot')
+            var scrGuiOrig      = isGuiOrSlotItem ? resolveScreenGuiOrigin(curScreenObj) : null
+            var px, py
+            if (isGuiOrSlotItem && scrGuiOrig != null && scrGuiOrig.hasGuiOrigin) {
+                px = scrGuiOrig.guiLeft + (item.ox || 0) + shakeVec.x
+                py = scrGuiOrig.guiTop  + (item.oy || 0) + shakeVec.y
+            } else {
+                px = sw * item.rx + (item.ox || 0) + shakeVec.x
+                py = sh * item.ry + (item.oy || 0) + shakeVec.y
+            }
 
             var angDeg = item.angle || 0
             var cosR   = 1.0
@@ -7580,23 +7796,26 @@
 
             // 注：HUD 禁区避让（HUD_FORBIDDEN_PRESETS）仅在服务端 pos='edge'/'spread'/'random' 采样阶段生效；
             // 客户端仅负责屏幕边缘 clampBounds 兜底而不二次踢开固定坐标，确保显式指定 rx/ry 位置不被擅自改写。
-            if (item.clamp !== false) {
-                var wScaled  = (item.blockW || 0) * Math.abs(scaleX)
-                var hScaled  = (item.blockH || 12) * Math.abs(scaleY)
-                var halfExtX = 0.5 * (wScaled * cosA + hScaled * sinA)
-                var halfExtY = 0.5 * (wScaled * sinA + hScaled * cosA)
-                var halfSw   = sw * 0.5
-                var halfSh   = sh * 0.5
-                var minX     = min2(halfSw, halfExtX + CONFIG.clampPadPx)
-                var maxX     = max2(halfSw, sw - halfExtX - CONFIG.clampPadPx)
-                var minY     = min2(halfSh, halfExtY + CONFIG.clampPadPx)
-                var maxY     = max2(halfSh, sh - halfExtY - CONFIG.clampPadPx)
-                px = clampNum(px, minX, maxX)
-                py = clampNum(py, minY, maxY)
-            } else if (sw > 0 && sh > 0) {
-                if (isUnitOutOfViewport(0.0, 0.0, (item.blockW || 0) * 0.5 + 16.0, (item.blockH || 12) * 0.5 + 16.0, px, py, mxx, mxy, myx, myy, sw, sh, 28.0)) {
-                    item.drawErrors = 0
-                    continue
+            // 容器绑定层（surface='gui'/'slot'）严格锚定容器 guiLeft/guiTop 与槽位坐标，不参与全屏弹幕边界夹逼。
+            if (!isGuiOrSlotItem) {
+                if (item.clamp !== false) {
+                    var wScaled  = (item.blockW || 0) * Math.abs(scaleX)
+                    var hScaled  = (item.blockH || 12) * Math.abs(scaleY)
+                    var halfExtX = 0.5 * (wScaled * cosA + hScaled * sinA)
+                    var halfExtY = 0.5 * (wScaled * sinA + hScaled * cosA)
+                    var halfSw   = sw * 0.5
+                    var halfSh   = sh * 0.5
+                    var minX     = min2(halfSw, halfExtX + CONFIG.clampPadPx)
+                    var maxX     = max2(halfSw, sw - halfExtX - CONFIG.clampPadPx)
+                    var minY     = min2(halfSh, halfExtY + CONFIG.clampPadPx)
+                    var maxY     = max2(halfSh, sh - halfExtY - CONFIG.clampPadPx)
+                    px = clampNum(px, minX, maxX)
+                    py = clampNum(py, minY, maxY)
+                } else if (sw > 0 && sh > 0) {
+                    if (isUnitOutOfViewport(0.0, 0.0, (item.blockW || 0) * 0.5 + 16.0, (item.blockH || 12) * 0.5 + 16.0, px, py, mxx, mxy, myx, myy, sw, sh, 28.0)) {
+                        item.drawErrors = 0
+                        continue
+                    }
                 }
             }
 
@@ -7642,25 +7861,53 @@
 
                 if (item.hasGraphicNodes) {
                     var nodeFadeAlpha = inFade ? clampNum(1.0 - fadeProgress, 0.04, 1.0) : 1.0
-                    if (item.surface === 'gui' || item.surface === 'slot') {
-                        var activeScr = curScreenObj
-                        if (matchesTargetGui(activeScr, item.targetGui)) {
+                    var baseItemVars  = item.displayVars || item.vars || {}
+                    if (item.surface === 'gui') {
+                        var activeScrGui = curScreenObj
+                        if (matchesTargetGui(activeScrGui, item.targetGui)) {
                             if (item.replaceTextures != null) {
                                 anyGuiReplaceMatch = true
                                 applyReplacedTexturesForGui(item.replaceTextures)
                             }
                             if (Array.isArray(item.bgNodes) && item.bgNodes.length > 0) {
-                                renderDeclarativeNodes(event, item, item.bgNodes, item.displayVars || item.vars || {}, nodeFadeAlpha, fontObj, itemBatchCtx, now, angDeg, 0)
+                                renderDeclarativeNodes(event, item, item.bgNodes, baseItemVars, nodeFadeAlpha, fontObj, itemBatchCtx, now, angDeg, 0)
                             }
                             if (Array.isArray(item.nodes) && item.nodes.length > 0) {
-                                renderDeclarativeNodes(event, item, item.nodes, item.displayVars || item.vars || {}, nodeFadeAlpha, fontObj, itemBatchCtx, now, angDeg, 0)
+                                renderDeclarativeNodes(event, item, item.nodes, baseItemVars, nodeFadeAlpha, fontObj, itemBatchCtx, now, angDeg, 0)
                             }
                             if (Array.isArray(item.fgNodes) && item.fgNodes.length > 0) {
-                                renderDeclarativeNodes(event, item, item.fgNodes, item.displayVars || item.vars || {}, nodeFadeAlpha, fontObj, itemBatchCtx, now, angDeg, 0)
+                                renderDeclarativeNodes(event, item, item.fgNodes, baseItemVars, nodeFadeAlpha, fontObj, itemBatchCtx, now, angDeg, 0)
+                            }
+                        }
+                    } else if (item.surface === 'slot') {
+                        var activeScrSlot = curScreenObj
+                        if (matchesTargetGui(activeScrSlot, item.targetGui) && Array.isArray(item.nodes) && item.nodes.length > 0) {
+                            var menuSlots = extractContainerMenuSlots(activeScrSlot)
+                            for (var msi = 0; msi < menuSlots.length; msi++) {
+                                var mSlot = menuSlots[msi]
+                                if (!doesSlotMatchRule(item.slotMatch, mSlot)) continue
+                                ensureItemPosePushed(event)
+                                flushBatchedBeforeImmediate()
+                                var slotPosePushed = false
+                                try {
+                                    if (typeof event.push === 'function') {
+                                        event.push()
+                                        slotPosePushed = true
+                                        if (typeof event.translate === 'function') {
+                                            event.translate(mSlot.x, mSlot.y)
+                                        }
+                                    }
+                                    var slotScopedVMap = buildSlotScopedVars(baseItemVars, mSlot)
+                                    renderDeclarativeNodes(event, item, item.nodes, slotScopedVMap, nodeFadeAlpha, fontObj, null, now, angDeg, 0)
+                                } finally {
+                                    if (slotPosePushed && typeof event.pop === 'function') {
+                                        try { event.pop() } catch (eSlotPop) { }
+                                    }
+                                }
                             }
                         }
                     } else {
-                        renderDeclarativeNodes(event, item, item.nodes, item.displayVars || item.vars || {}, nodeFadeAlpha, fontObj, itemBatchCtx, now, angDeg, 0)
+                        renderDeclarativeNodes(event, item, item.nodes, baseItemVars, nodeFadeAlpha, fontObj, itemBatchCtx, now, angDeg, 0)
                     }
                 } else if (isShatterFade) {
                     var titleSkipS   = min2(item.titleVis, startSkipVis)
@@ -8607,8 +8854,19 @@
                     }
 
                     var pt0 = [0, 0, 0], pt1 = [0, 0, 0], pt2 = [0, 0, 0], pt3 = [0, 0, 0]
+                    var wpClipStack = []
+
+                    var isRoot2DPointClipped = function (px, py) {
+                        if (wpClipStack.length === 0) return false
+                        var cb = wpClipStack[wpClipStack.length - 1]
+                        var st2d = WP_2D_STACK[topIdx]
+                        var u = st2d.m00 * px + st2d.m01 * py + st2d.m02
+                        var v = st2d.m10 * px + st2d.m11 * py + st2d.m12
+                        return (u < cb.minU - 0.05 || u > cb.maxU + 0.05 || v < cb.minV - 0.05 || v > cb.maxV + 0.05)
+                    }
 
                     var wpAdapter = {
+                        _isWorldPlane: true,
                         push: function () {
                             var cur = WP_2D_STACK[topIdx]
                             topIdx++
@@ -8645,6 +8903,32 @@
                         getMatrix: function () {
                             return WP_2D_STACK[topIdx]
                         },
+                        enableScissor: function (x0, y0, x1, y1) {
+                            var st = WP_2D_STACK[topIdx]
+                            var u00 = st.m00 * x0 + st.m01 * y0 + st.m02
+                            var v00 = st.m10 * x0 + st.m11 * y0 + st.m12
+                            var u10 = st.m00 * x1 + st.m01 * y0 + st.m02
+                            var v10 = st.m10 * x1 + st.m11 * y0 + st.m12
+                            var u01 = st.m00 * x0 + st.m01 * y1 + st.m02
+                            var v01 = st.m10 * x0 + st.m11 * y1 + st.m12
+                            var u11 = st.m00 * x1 + st.m01 * y1 + st.m02
+                            var v11 = st.m10 * x1 + st.m11 * y1 + st.m12
+                            var minU = min2(min2(u00, u10), min2(u01, u11))
+                            var maxU = max2(max2(u00, u10), max2(u01, u11))
+                            var minV = min2(min2(v00, v10), min2(v01, v11))
+                            var maxV = max2(max2(v00, v10), max2(v01, v11))
+                            if (wpClipStack.length > 0) {
+                                var prevCb = wpClipStack[wpClipStack.length - 1]
+                                minU = max2(prevCb.minU, minU)
+                                minV = max2(prevCb.minV, minV)
+                                maxU = min2(prevCb.maxU, maxU)
+                                maxV = min2(prevCb.maxV, maxV)
+                            }
+                            wpClipStack.push({ minU: minU, minV: minV, maxU: maxU, maxV: maxV })
+                        },
+                        disableScissor: function () {
+                            if (wpClipStack.length > 0) wpClipStack.pop()
+                        },
                         setPositionColorShader: function () {
                             useTexMode = false
                         },
@@ -8670,13 +8954,42 @@
                                 : (typeof bufSrc.m_6299_ === 'function' ? bufSrc.m_6299_(rt) : null)
                         },
                         rectangle: function (x, y, _z, w, h, argb, u0, v0, u1, v1) {
-                            if (curQuadVc == null) return
-                            var zB = layerBias
-                            layerBias += 0.0006
+                            if (curQuadVc == null || w <= 0 || h <= 0) return
                             var tu0 = (u0 !== undefined) ? Number(u0) : 0.0
                             var tv0 = (v0 !== undefined) ? Number(v0) : 0.0
                             var tu1 = (u1 !== undefined) ? Number(u1) : 1.0
                             var tv1 = (v1 !== undefined) ? Number(v1) : 1.0
+                            if (wpClipStack.length > 0) {
+                                var cb = wpClipStack[wpClipStack.length - 1]
+                                if (cb.maxU <= cb.minU + 0.02 || cb.maxV <= cb.minV + 0.02) return
+                                var st2d = WP_2D_STACK[topIdx]
+                                if (Math.abs(st2d.m01) < 1e-4 && Math.abs(st2d.m10) < 1e-4 && Math.abs(st2d.m00) > 1e-5 && Math.abs(st2d.m11) > 1e-5) {
+                                    var invX0 = (cb.minU - st2d.m02) / st2d.m00
+                                    var invX1 = (cb.maxU - st2d.m02) / st2d.m00
+                                    var invY0 = (cb.minV - st2d.m12) / st2d.m11
+                                    var invY1 = (cb.maxV - st2d.m12) / st2d.m11
+                                    var cMinX = min2(invX0, invX1), cMaxX = max2(invX0, invX1)
+                                    var cMinY = min2(invY0, invY1), cMaxY = max2(invY0, invY1)
+                                    var nx0 = max2(x, cMinX), ny0 = max2(y, cMinY)
+                                    var nx1 = min2(x + w, cMaxX), ny1 = min2(y + h, cMaxY)
+                                    var nw = nx1 - nx0, nh = ny1 - ny0
+                                    if (nw <= 0.05 || nh <= 0.05) return
+                                    if (nw < w - 1e-4 || nh < h - 1e-4) {
+                                        var rL = (nx0 - x) / w, rR = (nx1 - x) / w
+                                        var rT = (ny0 - y) / h, rB = (ny1 - y) / h
+                                        var spanU = tu1 - tu0, spanV = tv1 - tv0
+                                        tu1 = tu0 + spanU * rR
+                                        tu0 = tu0 + spanU * rL
+                                        tv1 = tv0 + spanV * rB
+                                        tv0 = tv0 + spanV * rT
+                                        x = nx0; y = ny0; w = nw; h = nh
+                                    }
+                                } else if (isRoot2DPointClipped(x + w * 0.5, y + h * 0.5)) {
+                                    return
+                                }
+                            }
+                            var zB = layerBias
+                            layerBias += 0.0006
                             mapLocalPointToPlane3D(x,     y,     zB, pt0)
                             mapLocalPointToPlane3D(x,     y + h, zB, pt1)
                             mapLocalPointToPlane3D(x + w, y + h, zB, pt2)
@@ -8689,6 +9002,7 @@
                         },
                         vertex: function (_mat, x, y, _z, argb) {
                             if (curQuadVc == null) return
+                            if (wpClipStack.length > 0 && isRoot2DPointClipped(x, y)) return
                             mapLocalPointToPlane3D(x, y, layerBias, pt0)
                             emitWpQuadVertex(curQuadVc, WP_POSE_MAT4, pt0[0], pt0[1], pt0[2], 0.5, 0.5, argb)
                         },
@@ -8696,7 +9010,88 @@
                             layerBias += 0.0004
                             curQuadVc = null
                         },
+                        renderItem: function (itemId, lx, ly, node, nodeAlpha) {
+                            var iw = (node != null && node.w != null && isFinite(Number(node.w))) ? Number(node.w) : 16
+                            var ih = (node != null && node.h != null && isFinite(Number(node.h))) ? Number(node.h) : 16
+                            var icount = (node != null && node.count != null) ? max2(1, Math.round(Number(node.count))) : 1
+                            var cx = lx + iw * 0.5
+                            var cy = ly + ih * 0.5
+                            if (wpClipStack.length > 0 && isRoot2DPointClipped(cx, cy)) return
+
+                            var zB = layerBias + 0.0010
+                            layerBias += 0.0016
+                            mapLocalPointToPlane3D(cx, cy, zB, pt0)
+                            var worldRel = [
+                                WP_POSE_MAT4[0] * pt0[0] + WP_POSE_MAT4[1] * pt0[1] + WP_POSE_MAT4[2] * pt0[2] + WP_POSE_MAT4[3],
+                                WP_POSE_MAT4[4] * pt0[0] + WP_POSE_MAT4[5] * pt0[1] + WP_POSE_MAT4[6] * pt0[2] + WP_POSE_MAT4[7],
+                                WP_POSE_MAT4[8] * pt0[0] + WP_POSE_MAT4[9] * pt0[1] + WP_POSE_MAT4[10] * pt0[2] + WP_POSE_MAT4[11]
+                            ]
+
+                            if (forgeEvent != null && typeof forgeEvent.onWorldPlaneItem === 'function') {
+                                forgeEvent.onWorldPlaneItem({
+                                    item:        String(itemId),
+                                    count:       icount,
+                                    localPos:    [lx, ly],
+                                    localCenter: [cx, cy],
+                                    size:        [iw, ih],
+                                    planeOffset: [pt0[0], pt0[1], pt0[2]],
+                                    worldRelPos: worldRel,
+                                    seeThrough:  isXray
+                                })
+                            }
+
+                            var itemRen = (forgeEvent != null && forgeEvent.itemRenderer != null) ? forgeEvent.itemRenderer : null
+                            if (itemRen == null && MinecraftClass != null && !MC_INSTANCE_FAILED) {
+                                try {
+                                    var mcInst = MinecraftClass.getInstance()
+                                    if (mcInst != null) {
+                                        itemRen = typeof mcInst.getItemRenderer === 'function'
+                                            ? mcInst.getItemRenderer()
+                                            : (mcInst.itemRenderer != null ? mcInst.itemRenderer : mcInst.f_91061_)
+                                    }
+                                } catch (eIr) { itemRen = null }
+                            }
+                            if (itemRen != null && bufSrc != null) {
+                                var stackObj = null
+                                try {
+                                    if (typeof Item !== 'undefined' && Item != null && typeof Item.of === 'function') {
+                                        stackObj = Item.of(String(itemId), icount)
+                                    } else {
+                                        stackObj = { id: String(itemId), count: icount }
+                                    }
+                                } catch (eSt) { stackObj = { id: String(itemId), count: icount } }
+                                if (stackObj != null) {
+                                    var itemPushed = false
+                                    try {
+                                        if (pushPoseStackSafe(poseStack)) {
+                                            itemPushed = true
+                                            translatePoseStackSafe(poseStack, pt0[0], pt0[1], pt0[2])
+                                            var sMetersX = iw * planeScale
+                                            var sMetersY = ih * planeScale
+                                            if (typeof poseStack.scale === 'function') poseStack.scale(sMetersX, sMetersY, 0.01)
+                                            else if (typeof poseStack.m_85841_ === 'function') poseStack.m_85841_(sMetersX, sMetersY, 0.01)
+                                        }
+                                        if (typeof itemRen.renderStatic === 'function') {
+                                            itemRen.renderStatic(stackObj, 'FIXED', WP_FULL_BRIGHT, WP_NO_OVERLAY, poseStack, bufSrc, null, 0)
+                                        } else if (typeof itemRen.m_269128_ === 'function') {
+                                            itemRen.m_269128_(stackObj, null, WP_FULL_BRIGHT, WP_NO_OVERLAY, poseStack, bufSrc, null, 0)
+                                        }
+                                    } catch (eWpIt) {
+                                        logErrorThrottled('worldPlane renderItem', eWpIt)
+                                    } finally {
+                                        if (itemPushed) {
+                                            try { popPoseStackSafe(poseStack) } catch (ePopIt) { }
+                                        }
+                                    }
+                                }
+                            }
+                            if (icount > 1) {
+                                var cntAlpha = (nodeAlpha !== undefined && nodeAlpha !== null) ? Number(nodeAlpha) : 1.0
+                                wpAdapter.text(String(icount), lx + iw - 4, ly + ih - 7, toArgbWithAlpha(0xFFFFFFFF, cntAlpha), true)
+                            }
+                        },
                         text: function (compOrStr, lx, ly, argb, shadow) {
+                            if (wpClipStack.length > 0 && isRoot2DPointClipped(lx, ly)) return
                             var zB = layerBias + 0.0008
                             layerBias += 0.0012
                             var dispMode = isXray
