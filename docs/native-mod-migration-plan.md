@@ -11,13 +11,14 @@
 
 随着 `P3-1`（`surface: 'world_plane'`）与 `P3-2`（`Epiphy3DFX` & `EpiphyItem3DRenderer`）双端闭环落地，Epiphy 在 KubeJS 原型验证阶段的全部架构探路与协议收敛均已完成。进入 **Phase 4（独立原生 Mod 阶段）** 的核心目标不是把仓库内所有 `.js` 脚本机械翻译为字节码，而是**按职责科学切分「原生引擎层」与「KubeJS 数据魔改层」，保留已验证的声明式契约与安全边界，彻底卸除 Rhino 解释器与第三方渲染胶水限制，解锁原生字节码与 GPU 硬件级管线能力**。
 
-### 1.1 四条不可动摇的工程铁律
+### 1.1 五条不可动摇的工程铁律
 1. **能力导向与零案例倒灌铁律**：严格遵循 **【通过什么（底层机制）➔ 能够达成什么（通用能力）➔ 下游案例（具象应用）】**。核心引擎模块（`epiphy-core`）只提供正交原语、协议调度、渲染管线与可扩展注册表，**物理严禁包含任何特定整合包道具、Boss 或测试玩法代码**。
 2. **职责得当边界（单纯合成表等数据魔改留存 KubeJS，无需移植）**：
    - **迁入原生 Mod 的范畴**：15 个通用基础底座与双端视听引擎（日志、核心存储、权限阀、调试、Bugfix、区块追踪与地形批处理、2D 平面合成、世界/物品 3D 渲染、3D 空间音频）以及依赖高频 tick 状态机或底层渲染钩子的核心机制；
    - **明确不移植、继续留在 KubeJS 的范畴**：**单纯的【合成表增删改】**（如现行 `kubejs/server_scripts/合成表-*/` 下的原版、植物魔法、神秘遗物配方脚本 `ServerEvents.recipes`）、整合包级物品/方块 Tag 微调、战利品表调整、简单静态 Tooltip 文案补充等纯数据层胶水。此类功能天然契合 KubeJS 的声明式脚本与 `/reload` 热重载工作流，硬编码进编译态 Mod 只会丧失调参灵活性并无谓引入具体内容 Mod 依赖。
 3. **核心零业务第三方前置铁律（仅依赖 Forge + `Kotlin for Forge` + `MixinBooster` 现代字节码底座）**：原生 Mod 本体仅以 `Minecraft 1.20.1`、`Forge 47.2+`、官方语言加载器 **`Kotlin for Forge` (`kotlinforforge 4.12.0+`)** 与现代字节码换芯底座 **`Sinytra MixinBooster` (`org.sinytra.mixinbooster:mixin-booster`)** 为运行前置（**彻底告别 LexForge 残缺的 `Sponge Mixin 0.8.5`**，直接对齐 1.21+ NeoForge 原生内置的 `Fabric Mixin` + `MixinExtras` 标准；严禁自行 Jar-in-Jar 重复打包 `kotlin-stdlib`）。KubeJS 阶段在物品 3D 渲染中临时借用的 `CodeChickenLib` 特例将在原生 Mod 中 **100% 移除并自主实现**；`ModernUI`、`Curios API`、`KubeJS` 全部作为编译期 `compileOnly` + 运行期 `ModList.get().isLoaded(...)` 物理隔离的可选软兼容桥接。
 4. **语义收敛与官方别名上限规范（保留至多 `2` 个官方别名）**：正式移除过渡期冻结的历史无序淘汰表（`DEPRECATED_DANMAKU_ALIASES`、`DEPRECATED_PRIORITY_ALIASES` 及早期十余种混杂枚举），全模块统一执行 **「1 个主标准名 + 至多 2 个显式官方别名（合计至多 3 个高频名称）」** 规范——所有官方别名均在 API/DSL/JSON 入口单点归一化为主标准名，内部管线与网络二进制帧零别名。
+5. **开源源码优先与反编译边界铁律（GitHub 源码优先，反编译/反混淆仅用于闭源 Mod）**：在调研第三方 Mod 机制、编写软兼容桥接（`epiphy-compat`）或定位 Mixin 注入点时，**凡是目标项目可以从 GitHub 等托管平台直接获取对应版本源码的（如 `Kotlin for Forge`、`MixinBooster`、`MixinExtras`、`KubeJS`、`ModernUI`、`Curios API`、`Twilight Forest`、`Botania` 等），必须优先直接拉取或查阅其官方源码**，以准确掌握完整上下文、原始参数命名与设计意图；**反编译与反混淆工具仅用于无法获取源码的闭源 Mod**（或仅在已知源码前提下辅助核对最终打包产物的捆绑版本与编译器合成字节码），严禁放着现成开源仓库不看而直接去反编译混淆 Jar 盲猜逻辑。
 
 ### 1.2 构建与语言分工选型
 | 维度 | 选型方案 | 选型依据 |
