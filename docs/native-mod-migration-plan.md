@@ -1,8 +1,8 @@
 # Epiphy 独立原生模组（Kotlin + Java · Phase 4）迁移工程计划书
 
-> **文档状态**：Phase 4 原生化工程蓝图与渐进换芯实施计划（v1.6）  
+> **文档状态**：Phase 4 原生化工程蓝图与 Core 优先实施计划（v1.7）  
 > **许可证声明 (License)**：本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)  
-> **前置基线**：KubeJS 过渡期 `P0 ~ P3` 全量里程碑已封版（15 个通用组件、74/74 回归单测、[`docs/proto_v6_schema.json`](proto_v6_schema.json) `v6.3.0`，封版分支归档为 **`legacy-kubejs`**）  
+> **前置基线**：KubeJS 过渡期 `P0 ~ P3` 全量里程碑已封版并归档至远端分支 **`legacy-kubejs`**（Tag `v6.3.0-kubejs-eol`）；`main` 分支已移除旧脚本外壳并在仓库根目录直接铺开原生 Mod 工程  
 > **关联文档**：[`README-LLM.md`](../README-LLM.md) · [`docs/rendering-subsystem-roadmap.md`](rendering-subsystem-roadmap.md)
 
 ---
@@ -42,21 +42,18 @@
 5. **加载器支持范围（暂不推出 Fabric 版）**：
    - 原生 Mod 当前仅面向 **Minecraft Forge 1.20.1**（并为后续 NeoForge 预留演进路径），**暂时不会推出 Fabric 版本**。
 
-### 1.4 分支归档规范与「Core 底座 + 视听热路径原生加速」渐进迁移策略
-为避免一次性重写全部 15 个组件导致长周期无法进服联调与测试中断，Phase 4 采用 **「分支封存 + 抽底换芯（先打包原生 `lib/core` 与高消耗视听算子，向存量 KubeJS 组件暴露加速接口）」** 的渐进演进路线：
+### 1.4 仓库根目录铺开、「先做稳 Core 与阻塞原语、再改脚本绑 Core」实施准则
+底层核心的鲁棒性直接决定整个项目的长期可维护性与扩展性。因此工程实施严格拒绝“急于合并吞并 KubeJS 业务脚本”，按以下节奏稳扎稳打推进：
 
-1. **Git 分支切换与归档规范（`legacy-kubejs`）**：
-   - 在正式动工前，将现行纯 KubeJS 封版态的 `main` 分支完整派生并推送至远端归档分支 **`legacy-kubejs`**（同步打上封版归档 Tag），冻结保存纯脚本时代的完整可运行快照；
-   - **`main` 分支**随即转为 Phase 4 原生 Mod 主开发分支：承载原生 Gradle 工程（`epiphy-mod`）以及**当前阶段尚未迁入原生层、继续留在 KubeJS 配合运行与测试的组件脚本**。每当某一组件或算子由原生 Mod 正式接管，即从 `main` 的 `kubejs/` 中移除对应旧脚本或冗余热路径代码。
-2. **首期 `lib/core` 边界划分（聚焦真核心与高开销热路径，低频治理脚本暂留 KubeJS）**：
-   - **首期打包进原生 `lib/core` 的基础底座**：`EpiphySpec`（跨端协议/缓存/预设底座与渲染事件桥接）+ **`EpiphyServerCore`（外置存储 `epiphy-data/`、`JsonStore`、世界/实体工具）+ `EpiphyLog`（异步按天日志与限频）+ `EpiphyDebug`（统一诊断面板与性能采样）**，并通过前置激活的 `EpiphyKubeJSPlugin` 向 `global.*` 暴露同名兼容接口，确保所有未迁移的 KubeJS 组件与单测无缝衔接（`/epiphy debug` 通过既有的 `global.EpiphySubcommandQueue` 延迟队列交由 KubeJS 层的权限阀挂载，零耦合倒挂）。
-   - **首期明确暂不迁入、继续作为 KubeJS 组件运行的模块**：**`EpiphyPermissionValve`（权限阀）**、**`EpiphyBugfix`（退出血量修复）** 与 **`EpiphyCreativeTab`（创造模式物品栏）**（及阶段一暂留的 `EpiphyBlockTracker`）。这些组件属于低频触发的管理、进退服或启动注册逻辑，无 Rhino 每帧性能瓶颈，在首期保留为 KubeJS 脚本既能大幅压缩 `lib/core` 首发排错面，又能直接充当检验原生 `lib/core` 暴露接口稳定性的真实上游客户（待后期收尾阶段再按需决定收编）。
-3. **视听子系统「类 CodeChickenLib 模式」算子先行下沉（Native Hot-Path Accelerators）**：
-   - 借鉴此前物品 3D 脚本通过调用 `CodeChickenLib` (`CCModel` / `IItemRenderer`) 绕开 Rhino 性能天花板的成功经验，**从首期 `lib/core` 阶段开始，不再等视听调度器整块重写，而是优先把视听子系统中原本靠复杂间接操作（多层 SRG 反射、第三方胶水、Rhino 逐顶点/逐帧循环、手工矩阵拼装）实现的高性能消耗功能剥离进原生 `epiphy-core`**，封装为干净的 Java/Kotlin 原生加速接口反向提供给 KubeJS 视听组件调用：
-     - **物品 3D 原生加速接口（首期直接平替并拔除 `CodeChickenLib`）**：在 `epiphy-core` 实现原生 `IClientItemExtensions`/`ItemRendererMixin`、原版 `ShaderInstance` 绑定与紧凑 Java 网格/VBO 提交器，暴露 `EpiphyNativeItem3D` 给 KubeJS 物品 3D 组件直接调用，第一时间卸除外部 CCL 依赖；
-     - **世界 3D 几何批提交接口（消除 Rhino 逐帧三角函数与逐顶点 JNI）**：在 `epiphy-core` 内置预烘焙单位 `ring`/`beam`/`helix`/`sphere` 网格与实体插值矩阵计算，KubeJS `Epiphy3DFX` 保留轻量状态机，每帧仅做 1 次原生批调用；
-     - **2D 平面合成热路径与夹心/FBO 接口（消除 `Epiphy2DRenderer` 间接绕路）**：将高消耗的 `world_plane` 2D→3D 矩阵顶点投影、多层程序化几何视差 (`parallax`)/渐变矩形批量顶点写入、`TextureTarget` (FBO) 离屏缓存池，以及 `AbstractContainerScreen`/`GuiGraphics` 真槽位夹心与无污染贴图重映射 Mixin 下沉至 `epiphy-core`，暴露接口供 KubeJS 平面渲染器直接驱动；
-     - **客户端 3D 音频底层桥接接口（消除脆弱的 `SoundEngine` SRG 反射链）**：用编译期校验的 Mixin `@Accessor` 封装 OpenAL `Channel` 3D 坐标更新、暂停保流与 `minecraft:` BGM 避让原语，提供给 KubeJS `EpiphyAudioClient` 直接调用。
+1. **`legacy-kubejs` 封存与 `main` 根目录铺开**：
+   - 纯 KubeJS 封版快照永久冻结于远端分支 **`legacy-kubejs`**（Tag `v6.3.0-kubejs-eol`）；
+   - **`main` 分支已删去旧脚本与 Node 测试外壳，直接在仓库根目录铺开原生 Gradle 模组工程**（`epiphy-api`、`epiphy-core`、`epiphy-showcase`）。
+2. **第一阶段核心重心：先把 `Core` 鲁棒底座与原 KubeJS 硬性阻塞项彻底做扎实（不急着合并业务脚本）**：
+   - **高鲁棒服务端基础设施底座**：在 `epiphy-core` 率先锤炼 `AtomicJsonStore<T>`（fsync + `.tmp` 原子替换 + `.bak` 校验自愈 + 双坏隔离与 `corruptLocked` 防覆写锁）、`EpiphyDataManager`（`WindowsPath` 规范化与复制存档路径变更自动分叉）、`EpiphyLogEngine`（有界异步写盘、滑动窗口限频折叠、世界日志动态切换）与 `EpiphyDebugHub`（提供者异常隔离与零分配环形纳秒采样器 `RollingNanoSampler`），全量配套故障注入与字节码隔离 JUnit 测试；
+   - **提前攻克原 KubeJS 阶段的硬性阻塞原语**：在 `Core` 阶段一并落地此前脚本层无法实现或被迫采用高危变通的底层能力——包括 **`FboCachePool` (`TextureTarget` 离屏缓存池 + 预乘 Alpha 复合)**、**`AbstractContainerScreenMixin` 四相位 `gui`/`slot` 真夹心**、**`GuiGraphicsMixin` 零全局污染贴图重映射**、**`epiphy:ui_masked_fill` 双采样器蒙版核心着色器**、**`ItemRendererMixin` 零 CCL 原生物品 3D 挂载钩子** 以及 **`SoundEngine`/`SoundManager` 编译期 `@Accessor` 零反射音频桥接**。
+3. **第二阶段开始动脚本：将脚本中低效高危部分绑定到原生 `Core` 上**：
+   - 待上述 `Core` 底座与阻塞原语验收稳固后，再开始改造实机 KubeJS 脚本——通过单一克制的顶层网关 **`EpiphyNative`**，把脚本里低效高危的部分（如解释器热循环渲染、手搓缓存池、全局 `TextureManager` 篡改、脆弱 SRG 反射、第三方 `CodeChickenLib` 依赖）逐项替换绑定到原生 `Core` 原语上；
+   - 低频治理脚本（如权限阀、Bugfix、创造栏及纯数据合成表脚本）在前期无需急于吞并进编译态，待底层完全成熟后再按需演进收口。
 
 ---
 
@@ -246,24 +243,18 @@ side = "BOTH"
 为同时实现 **「纯契约秒级单测」、「核心引擎零第三方依赖编译期硬锁死」、「可选软兼容桥接单 Jar 统一 SRG/RefMap 重映射（规避 ForgeGradle 6 跨子工程合并重映射丢失问题）」**，采用如下 `epiphy-mod/` 工程结构：
 
 ```text
-epiphy-mod/                   # Kotlin for Forge 原生模组 Gradle 根工程 (Gradle 8.10.2 + JDK 17 Toolchain)
+. (仓库根目录直接铺开 Gradle 多模块工程)
 ├── epiphy-api/               # 纯公共契约子工程（零 Minecraft/Forge 依赖，毫秒级 JUnit 测试）
-│   └── dev.epiphy.api.*      #   PROTO v6 / FX3D / Audio 数据模型、官方双别名映射、BoundedCache、PresetRegistry、SemVer
+│   └── dev.epiphy.api.*      #   PROTO v6 模型、官方双别名映射、BoundedCache、PresetRegistry、SemVer
 ├── epiphy-core/              # 原生核心主模组子工程（产出唯一主发行 Jar，统一执行单次 reobfJar）
 │   ├── src/main/             #   [零第三方业务依赖 SourceSet：编译类路径物理不含 KubeJS / ModernUI / Curios]
-│   │   ├── dev.epiphy.core.* #     双端共享网络编解码与生命周期引导
-│   │   ├── dev.epiphy.server.*#    epiphy-data 外置存储、JsonStore、日志、调试中心、区块引擎与服务端调度
-│   │   ├── dev.epiphy.client.*#    2D/3D/音频原生加速后端 (去CCL原生物品3D、世界3D批提交、FBO池) 与客户端引擎
-│   │   └── dev.epiphy.mixin.*#     纯 Java Mixin（EpiphyMixinPlugin 环境守卫、GUI/Slot 夹心、纹理重映射、OpenAL Accessor）
+│   │   ├── dev.epiphy.core.* #     EpiphyRuntime、AtomicJsonStore、EpiphyDataManager、EpiphyLogEngine、EpiphyDebugHub
+│   │   ├── dev.epiphy.client.*#    FboCachePool、GuiInterceptionHooks、EpiphyCoreShaders (ui_masked_fill)、Item3DRenderHooks、NativeAudioClientAccess
+│   │   └── dev.epiphy.mixin.*#     纯 Java Mixin（EpiphyMixinPlugin、AbstractContainerScreenMixin、GuiGraphicsMixin、ItemRendererMixin、Sound*Accessor）
 │   └── src/compat/           #   [软兼容隔离 SourceSet：独占 compileOnly(KubeJS/ModernUI/Curios)，随主 Jar 统一重映射]
-│       ├── compat.kubejs.*   #     EpiphyKubeJSPlugin (kubejs.plugins.txt)：向 KubeJS global.* 暴露原生底座与视听加速接口
-│       ├── compat.modernui.* #     ModernUI TextLayoutEngine 直连排版与 SDF 单 Pass 描边快路径
-│       └── compat.curios.*   #     Curios API 饰品栏安全物品检索桥接
-└── epiphy-showcase/          # 可选独立案例与附属内容子工程（不打入核心发行 Jar，用于实机验收与重型玩法示范）
-    └── dev.epiphy.showcase.* #   rnfmabj_test 测试方块、imperius_test 物品 3D 示范、失稳拆解台迁移参考
-
-kubejs/ (整合包数据魔改与待迁移过渡层)
-└── server_scripts/合成表-*/   # 原版、植物魔法、神秘遗物等单纯合成表修改与当前阶段暂留联调的 KubeJS 组件
+│       └── compat.kubejs.*   #     EpiphyKubeJSPlugin (kubejs.plugins.txt)：暴露单一克制的顶层网关 EpiphyNative
+├── epiphy-showcase/          # 可选独立案例与附属内容子工程（不打入核心发行 Jar）
+└── docs/                     # 协议 JSON Schema (proto_v6_schema.json)、架构路线图与迁移工程计划书
 ```
 
 ---
@@ -367,26 +358,26 @@ kubejs/ (整合包数据魔改与待迁移过渡层)
 
 ## 7. 分里程碑渐进实施路线图（Milestones M0 ~ M5）
 
-遵循 §1.4 确立的 **「`legacy-kubejs` 封存 ➔ 首期 `lib/core` 底座 + KubeJS 接口暴露 ➔ 视听高消耗算子先行下沉（类 CCL 加速后端模式）➔ 调度层与剩余组件逐步收口」** 路线推进：
+遵循 §1.4 确立的 **「`legacy-kubejs` 封存 & `main` 根目录铺开 ➔ 夯实 `Core` 鲁棒底座并攻克 KubeJS 阻塞原语（不急于吞并脚本）➔ 改动脚本将低效高危部分绑定至原生 `Core` ➔ 引擎全量深化与收口」** 路线推进：
 
 ```mermaid
 flowchart TD
-    M0["M0: legacy-kubejs 分支归档 & KFF 4.12 脚手架<br/>(Kotlin 2.2.21 + MixinBooster + EpiphyKubeJSPlugin 前置桥接)"] --> M1
-    M1["M1: 首期 lib/core 核心底座原生化<br/>(Spec + ServerCore + Log + Debug 暴露给 KubeJS；权限阀/Bugfix/创造栏留存 KubeJS 联调)"] --> M2
-    M2["M2: 视听高消耗热路径算子下沉进 Core (类 CCL 加速接口模式)<br/>(去CCL原生物品3D内核 + 世界3D网格批提交 + 2D FBO/视差/GUI夹心Mixin + OpenAL音频桥接)"] --> M3
+    M0["M0 (已完成): legacy-kubejs 封存 & 根目录铺开 KFF 4.12 工程<br/>(Kotlin 2.2.21 + MixinBooster + Schema/字节码 JUnit 门禁)"] --> M1
+    M1["M1 (当前核心): 夯实 Core 鲁棒底座 & 落地原 KubeJS 阻塞原语<br/>(AtomicJsonStore + DataManager + AsyncLog + DebugHub + FBO池/GUI真夹心Mixin/Mask着色器/零CCL钩子/Audio Accessor)"] --> M2
+    M2["M2: 视听几何/批绘制算子完善 & 改造脚本绑定原生 Core<br/>(将脚本中低效热循环、缓存池、全局贴图篡改、SRG反射与CCL依赖全部绑至 EpiphyNative)"] --> M3
     M3["M3: 世界区块引擎原生化<br/>(LevelChunk 咽喉 Mixin + Palette 直读 BlockTracker + 三级门控 WorldOps)"] --> M4
-    M4["M4: 视听服务端/客户端调度层与二进制网络通道收口<br/>(epiphy:main BitMask 二进制帧 + 2D/3D/Audio 完整原生状态机)"] --> M5
-    M5["M5: 暂留 KubeJS 组件收尾迁移与实机压测封版<br/>(PermissionValve / Bugfix Mixin / CreativeTab 收编 + 旧档单向迁移器 + 全量验收)"]
+    M4["M4: 视听双端原生调度器与 BitMask 二进制网络通道<br/>(epiphy:main 18~32B 增量帧 + world_plane 射线交互 + 条件 UI 挟持管线)"] --> M5
+    M5["M5: 低频治理模块按需收口、单向存档迁移与正式封版<br/>(PermissionValve / Bugfix Mixin / CreativeTab + 全量压测验收)"]
 ```
 
 | 里程碑 | 核心交付物 | 关键验收门禁（Definition of Done） |
 | :--- | :--- | :--- |
-| **M0：`legacy-kubejs` 归档与 KFF 脚手架 + KubeJS 桥接底座** | 将现行纯脚本 `main` 封存推送至 **`legacy-kubejs`** 分支；在 `main` 建立 `kotlinforforge 4.12.0` (`Kotlin 2.2.21`) + `MixinBooster` + `mixinextras-forge` 四模块工程，并**前置打通 `epiphy-compat` (`EpiphyKubeJSPlugin`) 向 KubeJS `global.*` 注入原生门面的机制** | `./gradlew check` 全绿；`runClient` / `runServer` 零崩溃、零客户端类泄漏、零重复 Kotlin stdlib 打包；KubeJS 脚本可正常读写原生测试门面 |
-| **M1：首期 `lib/core` 基础设施底座（保存量脚本运行）** | 完成 **`EpiphySpec` + `EpiphyServerCore` (`JsonStore` + `epiphy-data/`) + `EpiphyLog` + `EpiphyDebug`** 原生化并暴露同名 `global.*` 接口，移除对应 4 个旧 `.js` 脚本；**`权限阀`、`Bugfix`、`创造模式栏` 与业务层继续作为 KubeJS 组件运行** | 存量 KubeJS 权限阀、方块追踪、视听组件与 `拆解台-混沌殉爆` 在原生 `lib/core` 底座上 **100% 正常加载运行**；`/epiphy debug` 通过延迟队列正常挂载至 KubeJS 权限阀，既有回归测试全绿 |
-| **M2：视听子系统高消耗热路径下沉 `core`（提供原生加速接口）** | 将视听层通过复杂反射/胶水/解释器循环实现的高开销部分迁入 `epiphy-core` 并暴露接口给 KubeJS 视听脚本调用：① **原生物品 3D 内核**（彻底移除 `CodeChickenLib`）；② **世界 3D 预烘焙网格批提交**；③ **2D `world_plane` 投影 / 视差批处理 / `TextureTarget` FBO / `gui`&`slot` 夹心 Mixin**；④ **`SoundEngine`/`Channel` Accessor 音频底层接口** | 在**卸载 CodeChickenLib** 的环境中，`imperius_test` 3D 武器正常渲染且单件耗时 `< 0.08ms`；KubeJS 2D/3D/音频组件切换至调用 `epiphy-core` 加速接口后帧耗时显著下降，GUI/槽位真夹心与非 `minecraft:` BGM 保护全部实机通过 |
-| **M3：方块追踪与地形批处理引擎原生化** | 完成 `LevelChunk.setBlockState` 唯一咽喉观察 Mixin、`LevelChunkSection` Palette 直读 `BlockTracker` 与三级开销门控 `WorldOps`，向 KubeJS 暴露 `EpiphyBlockTracker` / `EpiphyWorldOps` 并移除旧 `.js` | 1000+ 绑定方块扫描 `< 0.5ms/tick`；KubeJS 弹幕/音频 `bindBlock` 与拆解台流体剥离无缝衔接 |
-| **M4：视听双端调度状态机与紧凑二进制协议收口** | 将 KubeJS 侧剩余的 2D/3D/音频包调度状态机迁入原生层，启用 `epiphy:main` `FriendlyByteBuf` BitMask 二进制帧（`patch` 包压至 `18~32B`），补齐 `fill.mask` 着色器与 `world_plane` 射线交互，并继续向 KubeJS 脚本暴露完整高层 API | 20 条弹幕 + 2 个复杂遥测面板 + 54 槽位覆盖层总耗时 `<= 0.4ms`；KubeJS 玩法脚本通过 `EpiphyKubeJSPlugin` 调用原生视听接口行为一致 |
-| **M5：暂留脚本收编、单向存档迁移与正式封版** | 收编前期留在 KubeJS 层的 `EpiphyPermissionValve`、`EpiphyBugfix`（转为 `LivingEntityMixin`）与 `EpiphyCreativeTab`；落地 `kubejs_epiphy_*.json` 旧档首次启动单向导入器，仅保留 `合成表-*/` 等纯数据胶水在 KubeJS 层 | 纯净 `Forge + KFF + MixinBooster`（无论装或不装 KubeJS）双环境实机与 Dedicated Server 压测通过，正式发布原生 Mod（纯 KubeJS 旧版同步进入 EOL） |
+| **M0：分支封存与根目录模组脚手架** | 纯脚本归档至 **`legacy-kubejs`**（`v6.3.0-kubejs-eol`）；在 `main` 根目录铺开 `kotlinforforge 4.12.0` + `MixinBooster` + `mixinextras-forge` 工程、双别名 Schema JUnit 与字节码隔离门禁 | `./gradlew check build` 全绿；零 `kotlin/` `kotlinx/` 字节码泄漏；`EpiphyMod.class` 零客户端类引用 |
+| **M1：Core 鲁棒底座与 KubeJS 阻塞原语攻坚** | 不急于合并业务脚本，率先打磨高鲁棒 **`AtomicJsonStore`、`EpiphyDataManager`、`EpiphyLogEngine`、`EpiphyDebugHub`**，并一次性实现原 KubeJS 阶段被阻塞的 **`FboCachePool`、`AbstractContainerScreen`/`GuiGraphics` 夹心与贴图重映射 Mixin、`ui_masked_fill` 着色器、零 CCL `ItemRendererMixin` 钩子与 `SoundEngine` `@Accessor`** | 存储损坏隔离锁、`.bak` 自愈、复制存档分叉、异步日志限频折叠 JUnit 100% 通过；全部客户端阻塞 Mixin 通过 `Fabric Mixin AP` 生成完整 SRG `epiphy.refmap.json` 且 `reobfJar` 全绿 |
+| **M2：热路径批算子补齐与脚本侧绑定改造** | 补齐 2D/3D 紧凑顶点批发射算子，并**开始改造实机 KubeJS 脚本**：通过单一顶层网关 `EpiphyNative` 将脚本中的重度渲染开销、缓存池、GUI 贴图替换、音频反射与物品 3D 渲染全部绑在原生 `Core` 上 | 卸载 `CodeChickenLib` 后 3D 武器正常渲染；脚本接入原生缓存池、FBO 与 Mixin 钩子后帧耗时大幅下降且零全局状态残留 |
+| **M3：方块追踪与地形批处理引擎原生化** | 完成 `LevelChunk.setBlockState` 唯一咽喉观察 Mixin、`LevelChunkSection` Palette 直读 `BlockTracker` 与三级开销门控 `WorldOps` | 1000+ 绑定方块扫描 `< 0.5ms/tick`；方块事件与流体剥离算子通过压力测试 |
+| **M4：视听双端原生调度与紧凑二进制协议** | 落地原生 2D/3D/音频双端状态机、`epiphy:main` `FriendlyByteBuf` BitMask 二进制帧（`patch` 包压至 `18~32B`）、`world_plane` 3D 射线交互及三级条件 UI 挟持管线 | 20 条弹幕 + 2 个复杂遥测面板 + 54 槽位覆盖层总耗时 `<= 0.4ms`；开闭任意 GUI 贴图与 OpenGL 状态 100% 零泄漏 |
+| **M5：低频治理模块收编、单向迁移与封版** | 收编前期留在脚本层的 `PermissionValve`、`Bugfix`（`LivingEntityMixin`）、`CreativeTab` 并提供旧档 `kubejs_epiphy_*.json` 单向导入器（合成表等纯数据层永久保留在 KubeJS） | 客户端与 Dedicated Server 双环境压测通过，正式发布原生 Mod（纯 KubeJS 旧版进入 EOL） |
 
 ---
 

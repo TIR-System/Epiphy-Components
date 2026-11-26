@@ -1,31 +1,25 @@
-﻿# KubeJS generated / backup / cache directories
-_backup_*/
-probe/
+﻿# Epiphy Native Mod (Gradle / ForgeGradle / IDE / Runtime Artifacts)
+.gradle/
+.kotlin/
+**/build/
+**/run/
+**/out/
+.idea/
+*.iml
+.vscode/
 *.log
 *.tmp
 *.bak
+logs/
+crash-reports/
 epiphy-data/
-kubejs/config/epiphy_permissions/
 
-# Excluded media / redundant source audio (user-supplied locally if needed)
-*.mp3
-kubejs/assets/epiphy/sounds/children_of_the_city.ogg
+# Explicitly track Gradle Wrapper JAR
+!gradle/wrapper/gradle-wrapper.jar
 
-# Local tooling / OS / Node / Gradle & IDE artifacts
+# OS & legacy local artifacts
 node_modules/
-coverage/
-.rhino/
-.rhino-local.json
-.vscode/
-.idea/
-*.iml
-.gradle/
-epiphy-mod/.gradle/
-epiphy-mod/**/build/
-epiphy-mod/**/run/
-epiphy-mod/**/out/
-epiphy-mod/**/logs/
-epiphy-mod/**/crash-reports/
-!epiphy-mod/gradle/wrapper/gradle-wrapper.jar
+_backup_*/
+probe/
 .DS_Store
 Thumbs.db
