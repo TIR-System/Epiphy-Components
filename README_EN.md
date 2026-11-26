@@ -1,104 +1,135 @@
 # Epiphy KubeJS Components & Scripts (`epiphy-kubejs-components`)
 
-[中文 (默认)](README.md) · [English](README_EN.md) · [LLM Engineering Guide](README-LLM.md) · [License (RAL 1.6)](LICENSE.md)
+[中文 (默认)](README.md) · [English](README_EN.md) · [Native Mod Migration Plan](docs/native-mod-migration-plan.md) · [Rendering Subsystem Roadmap](docs/rendering-subsystem-roadmap.md) · [LLM Engineering Guide](README-LLM.md) · [License (RAL 1.6)](LICENSE.md)
 
-A collection of shared server/client infrastructure modules, audiovisual presentation engines (screen danmaku + 3D spatial audio), gameplay bugfixes, and modpack customization scripts built for **Minecraft 1.20.1 / Forge 47.x / KubeJS 2001.6.x**.
+A declarative audiovisual presentation engine and hardened server infrastructure library for **Minecraft 1.20.1 (Forge 47.x + KubeJS 2001.6.x)**.  
+It enables modpack authors and developers to script **screen danmaku, animated 2D HUD telemetry panels, 3D world holographic signs, multi-layer 3D item VFX, and 3D spatial soundscapes**, backed by **anti-rollback permission controls, low-overhead chunk block tracking, cost-gated terrain/fluid batch operations**, and **vanilla logout HP truncation fixes**.
 
-> **Status, Roadmap & Platform Notes**
-> - **Early Testing Notice (⚠️ Unstable)**: This project is currently in an **early testing stage**. APIs, data schemas, command syntax, and module boundaries are not yet frozen — **current behavior may be unstable and major breaking changes can occur frequently**. Not recommended for production worlds requiring strict long-term stability yet.
-> - **Migration Direction**: Once stabilized and feature-complete, this project will transition to **Kotlin + Java** native mod development, with most features becoming standalone modules; **KubeJS is a transitional dependency prior to that migration**.
-> - **Loader Compatibility**: Currently tested on **Forge 47.x**. Apart from a small number of Forge-specific compatibility hooks, the core design is **theoretically compatible with Fabric as well**, though **untested on Fabric**.
+> [!IMPORTANT]
+> **Lifecycle, Compatibility & Platform Policy (Final Baseline Before Phase 4 Native Mod)**
+> 1. **No Coexistence Period — Pure KubeJS Version Enters Direct EOL**: This project is transitioning into a standalone **Kotlin + Java** native mod (see [`docs/native-mod-migration-plan.md`](docs/native-mod-migration-plan.md)). **Once the native mod is officially released, there will be NO coexistence period and NO Maintenance LTS for these pure KubeJS scripts — the KubeJS-only version will immediately enter EOL (End of Life) with no further official maintenance.**
+> 2. **One-Way Upgrade — Back Up Your Data**: We **do NOT guarantee that save or external data will remain readable if you downgrade from the native mod back to the KubeJS version**. Please back up your world and `epiphy-data/` before upgrading.
+> 3. **Calling Native Mod APIs via KubeJS & Legacy Compatibility**:
+>    - **Recommended Script Workflow**: After native mod migration, **calling the interfaces directly exposed by the native Epiphy mod from KubeJS scripts is fully supported — if you prefer scripting, this remains the recommended approach and will receive broad long-term support**;
+>    - **Legacy Script Expectations**: Existing KubeJS scripts will still get **similar behavior** via the same call patterns (minor bugs or behavioral differences in unadapted scripts are expected as the underlying APIs have been upgraded and will continue to evolve). While we strive for forward compatibility, native mod migration is a major update — **incompatible legacy features will NOT be specially patched**.
+> 4. **Forge Only**: Both the current scripts and the upcoming native mod target **Forge** (`Kotlin for Forge`). **There are currently NO plans for a Fabric version.**
 
-### Runtime Requirements & Third-Party Mod Dependencies
+### Runtime Requirements & Optional Mod Integrations
 
-- **Base Requirements (Required)**: `Minecraft 1.20.1` · `Forge 47.x` · `KubeJS 2001.6.x` (transitional)
-- **Optional Third-Party Mod Exceptions in Common Components** (Policy: any third-party mod dependency is treated strictly as an exception with clean Fail-Soft fallback when absent):
+- **Required Base**: `Minecraft 1.20.1` · `Forge 47.x` · `KubeJS 2001.6.x`
+- **Optional Third-Party Mods in Common Components** (all degrade cleanly with zero crashes or log spam when absent):
 
-| Third-Party Mod | Level | Affected Common Component | Role & Fallback Behavior | Native Mod (Phase 4) Plan |
-| :--- | :---: | :--- | :--- | :--- |
-| **CodeChickenLib** | Optional Exception | `Epiphy的-物品三维渲染器.js` | Entry-point hook & pure-Java mesh submission fast path for custom 3D item rendering (`IItemRenderer` / `TransformUtils` / `CCShaderInstance` / `CCModel` / `CCRenderState` / `ColourAttribute` / `Matrix4` / `Vector3` / `Vertex5`, working around KubeJS lacking `Item.initializeClient` and Rhino per-vertex overhead); falls back cleanly to vanilla static item models with a single warning when absent (**World 3D `surface: 'world'` event bridge lives in `Epiphy的-Spec与通用工具.js`, physically 0% CCL dependency**) | **Remove completely & self-implement** (native `IClientItemExtensions` + `BEWLR` / own Mixin + vanilla `ShaderInstance` + native Java VBO/mesh) |
-| **ModernUI** | Optional Fast Path | `Epiphy的-平面渲染器.js` | Enables direct text layout cache and single-pass SDF outline when installed; transparently falls back to vanilla pipeline when absent | Keep as optional compatibility branch |
-| **Curios API** | Optional Utility | `Epiphy的-服务端核心.js` | Powers Curios slot lookups (`findPlayerCurio`); safely skipped when absent | Keep as optional soft compatibility |
+| Optional Mod | Used By | What It Does / Fallback When Absent | Native Mod (Phase 4) Plan |
+| :--- | :--- | :--- | :--- |
+| **CodeChickenLib** | `Epiphy的-物品三维渲染器.js` | Provides custom 3D item rendering hooks and pure-Java mesh submission (~0.54ms); **when absent, logs 1 warning and falls back to vanilla static 2D item icons** (World 3D FX has 0% CCL dependency) | **Remove completely** & self-implement in native mod |
+| **ModernUI** | `Epiphy的-平面渲染器.js` | Enables direct text layout caching and single-pass SDF outline rendering; **when absent, transparently uses vanilla font rendering** | Keep as optional compatibility fast path |
+| **Curios API** | `Epiphy的-服务端核心.js` | Allows querying Curios accessory slots (`findPlayerCurio`); **when absent, safely skips Curios slots** | Keep as optional soft compatibility bridge |
 
-- **Gameplay / Modpack-Specific Script Dependencies** (required only by the corresponding gameplay/recipe scripts; common components run standalone without them): `Twilight Forest` (Unstable Uncrafting Table meltdown chain & liveroot recipe), `Draconic Evolution` + `BrandonsCore` + `CodeChickenLib` (Chaos Implosion wave & hidden Chaos Crystal item), `Enigmatic Legacy` (supreme relic exemption & cursed ring recipe), `Botania` (liveroot recipe).
+- **Gameplay / Recipe Script Dependencies** (only needed by specific showcase/recipe scripts; the 15 common components run standalone without them): `Twilight Forest` (Unstable Uncrafting Table meltdown & liveroot recipe), `Draconic Evolution` + `BrandonsCore` + `CodeChickenLib` (Chaos Implosion wave & hidden Chaos Crystal item), `Enigmatic Legacy` (supreme relic exemption & cursed ring recipe), `Botania` (liveroot recipe).
 
 ---
 
-## Engineering Architecture & Module Dependencies
+## What Can It Do? (Core Capabilities)
 
-### 1. Vertical Layer Topology (Text Box Diagram)
+### 1. 📺 2D Planar Compositor, Screen Danmaku & World Holograms
+> Server: `Epiphy2DSurface / ScreenDanmaku v6.3.0` · Client: `Epiphy2DRenderer / ScreenDanmakuClient v6.3.0`
+
+- **Four Projection Surfaces (`surface`)**:
+  - `screen`: Screen danmaku and declarative HUD panels (rendered below vanilla hotbar/health bars and above regular danmaku by default, with customizable `renderPriority` / `zIndex`);
+  - `gui`: Dynamically replaces container GUI textures for the active screen session (auto-restored on close) or injects background/foreground decorative layers;
+  - `slot`: Automatically matches container slots by index or item ID to render dynamic badges, cooldown masks, or highlights over slots;
+  - `world_plane`: 3D-projected 2D holographic signs and ground magic circles anchored in the world (with save-scoped persistence, view-distance sync, billboard modes, and `seeThrough` X-ray support).
+- **Declarative Scene Graph & 60fps Client Interpolation**: Built-in `rect` (solid, outline, 3-stop gradient, procedural/textured parallax, shader), `sprite`, `nine_slice`, `item`, `text` (typewriter, per-char shake, glow/stroke outlines), and `group` primitives. Client-side `lerp`, `trail`, and `impulse` tracks animate properties smoothly at 60fps from tiny server `action: 'patch'` updates.
+
+### 2. ✨ Declarative 3D Item VFX & World Spatial FX
+> Item 3D: `EpiphyItem3DRenderer v1.1.0` · World Server: `Epiphy3DFXServer v1.2.0` · World Client: `Epiphy3DFX v2.3.0`
+
+- **3D Item Rendering (`EpiphyItem3DRenderer`)**: Chainable `fx()` DSL for attaching custom GLSL core shader overlays (e.g., parallax cosmos windows), rotating gyro rings (`ribbon_ring`), dual spiral ribbons (`ribbon_helix`), and orbiting star flares (`sprite_cluster`) to items with true hardware depth occlusion in first/third person and GUI slots.
+- **World Spatial FX (`surface: 'world'`)**: Physically 0% third-party mod dependency. Spawns 3D `ring`, `beam`, `helix`, and `sphere` primitives at world coordinates or smoothly tracking entities (`followEntityUuid`), complete with `channel`/`slot` incremental patching and custom shape extensions.
+
+### 3. 🔊 3D Spatial Audio & Gentle Music Ducking
+> Server: `EpiphyAudio v5.8.0` · Client: `EpiphyAudioClient v5.6.0`
+
+- **Multi-Source 3D Soundscapes**: Bind audio to fixed coordinates, blocks (`bindBlock`), moving entities, or dimensions with real-time OpenAL 3D channel position updates and distance attenuation curves.
+- **Cluster Merging & Stream Standby**: Adjacent identical sound blocks automatically merge into a single union soundscape (recalculated seamlessly when blocks break). Exiting range or muting pauses the stream in standby so re-entering resumes smoothly without restarting.
+- **Mod-Safe Music Ducking (`duckMusic`)**: Gently pauses only vanilla `minecraft:` background music while custom BGM plays and unpauses afterward — **never killing or muting other mods' custom BGM**.
+
+### 4. 🛡️ Hardened Server Infrastructure, Block Engine & Standalone Bugfixes
+> Core: `EpiphyServerCore / EpiphyServerBase v2.6.0` · Security: `EpiphyPermissionValve v5.4.0` · World: `EpiphyBlockTracker / EpiphyWorldOps v2.5.1` · Fix: `EpiphyBugfix v1.0.0`
+
+- **Dual-Track Storage (`epiphy-data/`)**: Strictly separates world-state data that must roll back with saves (`saves/<world>/`) from anti-rollback security audits and daily readable logs (`<gameDir>/epiphy-data/`). Automatically detects copied world folders to fork isolated directories and self-heals corrupted JSON files from `.bak` backups with write-lock protection.
+- **Anti-Rollback 3-State Permission Valve**: Grants fine-grained sub-scopes (like `/epiphy danmaku self` or `audio.play`) to non-OP players while enforcing strict quota, cooldown, and namespace isolation. Revocations write external tombstones in `revocations.json` so rolling back a world save cannot resurrect revoked permissions.
+- **Progressive Chunk Scanner & Cost-Gated WorldOps**: Scans bound blocks across ticks without stalling the server thread, paired with a 3-tier cost-gated fluid draining and terrain clearing engine (protecting bedrock, containers, and designated lava rings).
+- **Logout HP Truncation Fix (`EpiphyBugfix`)**: Zero-dependency server module that fixes the vanilla bug where players with `maxHealth > 20` (from Curios/attributes) have their health truncated back to 20 upon rejoining a world.
+
+---
+
+## Architecture & 15 Common Components Quick Reference
+
+### 1. Four-Layer Topology
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────────┐
-│ Layer 1 · Startup Stage (Cross-Side Contracts & Asset/Content Registrations)     │
+│ Layer 1 · Startup Stage (Cross-Side Contracts, Item 3D Pipeline & Registrations) │
 ├──────────────────────────────────────────────────────────────────────────────────┤
 │  Epiphy的-Spec与通用工具.js (P:1200) ──► EpiphySpec / Protocol / 2D&3D Hooks     │
 │  Epiphy的-物品三维渲染器.js (P:1050) ──► EpiphyItem3DRenderer (opt: CCL fallback)│
 │  创造模式栏-epiphy.js       (P:1000) ──► global.EpiphyCreativeTab (epiphy:stuff)  │
-│     ├──► Epiphy的小玩意-原版_其他Mod的隐藏物品.js                                 │
-│     ├──► Epiphy的小玩意-终极拆解台_不稳定.js  (paired with assets/epiphy/)        │
-│     └──► Epiphy的小玩意_功能测试.js           (integrates Danmaku/Audio & 3D item)│
+│     └──► Hidden Items / Unstable Uncrafting Table (5 stages) / Test Showcases    │
 └────────────────────────────┬─────────────────────────────┬───────────────────────┘
                              │ (optional fallback)          │ (hard dep)
                              ▼                             ▼
 ┌──────────────────────────────────────────────────────────────────────────────────┐
 │ Layer 2 · Server Foundation Layer (Load Order: Priority 1100 ──► 900)            │
 ├──────────────────────────────────────────────────────────────────────────────────┤
-│  P:1100  Epiphy的-日志.js         ──► EpiphyLog           (standalone log hub)    │
-│  P:1080  Epiphy的-服务端核心.js   ──► EpiphyServerCore/Base (opt: Spec / Log)     │
-│  P:1050  Epiphy的-方块与区块组件.js ──► EpiphyBlockTracker/WorldOps (opt: Log)    │
-│  P:1000  Epiphy的-权限阀.js       ──► EpiphyPermissionValve (hard: ServerBase)    │
-│  P:950   Epiphy的-调试组件.js     ──► EpiphyDebug         (hard:Base; opt:Log/Val)│
-│  P:900   Epiphy的-基础bug修复.js  ──► EpiphyBugfix        (zero hard deps; opt:Log)│
+│  P:1100  Epiphy的-日志.js           ──► EpiphyLog            (rate-limit/log)    │
+│  P:1080  Epiphy的-服务端核心.js     ──► EpiphyServerCore/Base (storage/DSL)     │
+│  P:1050  Epiphy的-方块与区块组件.js ──► EpiphyBlockTracker/WorldOps (scan/ops)  │
+│  P:1000  Epiphy的-权限阀.js         ──► EpiphyPermissionValve (3-state/tombstone)│
+│  P:950   Epiphy的-调试组件.js       ──► EpiphyDebug          (metrics/renderperf)│
+│  P:900   Epiphy的-基础bug修复.js    ──► EpiphyBugfix         (logout HP restore) │
 └────────────────────────────┬─────────────────────────────────────────────────────┘
-                             │ global.* APIs & deferred registration queues
+                             │ global.* APIs & Preset Registries
                              ▼
 ┌──────────────────────────────────────────────────────────────────────────────────┐
-│ Layer 3 · Server Scheduling & Gameplay Layer                                     │
+│ Layer 3 · Server Scheduling & Gameplay Scripts                                   │
 ├──────────────────────────────────────────────────────────────────────────────────┤
-│  Epiphy的-平面渲染组件.js (P:500) ◄══ Hard    : Spec + ServerBase                 │
-│                                   ◄── Optional: Log / BlockTracker / Valve       │
-│  Epiphy的-空间特效组件.js (P:500) ◄══ Hard    : Spec + ServerBase (constraints)   │
-│                                   ◄── Optional: Log                              │
-│  Epiphy的-音频组件.js     (P:500) ◄══ Hard    : Spec + ServerBase                 │
-│                                   ◄── Optional: Log / BlockTracker / Valve       │
-│  拆解台-混沌殉爆.v18.js   (P:10)  ◄══ Hard    : Unstable + Core/WorldOps/Danmaku │
-│  合成表-*/*.js            (P:0)   ◄── Standalone recipes (vanilla / target mods) │
-└───────────┬─────────────────────────────┬──────────────────────────┬─────────────┘
-            │ epiphy:screen_danmaku       │ epiphy:spatial_fx        │ epiphy:audio
-            ▼ (S2C packets)               ▼ (S2C packets)            ▼ (S2C packets)
+│  Epiphy的-平面渲染组件.js (P:500)  │ Epiphy的-空间特效组件.js (P:500) │ Audio    │
+│  拆解台-混沌殉爆.v18.js   (P:10)   │ 合成表-*/*.js            (P:0)   │ (P:500)  │
+└───────────┬────────────────────────┴────┬─────────────────────────────┴────┬─────┘
+            │ epiphy:screen_danmaku       │ epiphy:spatial_fx                │ epiphy:audio
+            ▼ (S2C packets)               ▼ (S2C packets)                    ▼ (S2C packets)
 ┌──────────────────────────────────────────────────────────────────────────────────┐
-│ Layer 4 · Client Rendering & Audio Playback Layer (Presentation Consumers Only)  │
+│ Layer 4 · Client Presentation Layer (Rendering & Audio Playback Consumers Only)  │
 ├──────────────────────────────────────────────────────────────────────────────────┤
-│  Epiphy的-平面渲染器.js     ──► 2D Graph/Anim/Vanilla+ModernUI (opt startup:Spec)│
-│  Epiphy的-空间特效渲染器.js ──► 3D Item Facade + World FX (`surface: 'world'`)   │
-│  Epiphy的-音频播放器.js     ──► 3D Soundscape/Ducking/Retry  (opt startup: Spec) │
-│  拆解台描述.js              ──► Client item tooltip descriptions                 │
+│  Epiphy的-平面渲染器.js     ──► 2D Scene Graph / Tracks / GUI&Slot / World Plane │
+│  Epiphy的-空间特效渲染器.js ──► World 3D FX Renderer (0% CCL) + Item 3D Facade   │
+│  Epiphy的-音频播放器.js     ──► OpenAL 3D Soundscape / Music Ducking / Retry     │
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 2. Architecture Layer Quick Reference Table
+### 2. Managed Components Reference Table
 
-| Layer | Modules | Stage / Priority | Primary Exports / Role |
-| :--- | :--- | :--- | :--- |
-| **L1 Cross-Side Spec** | `Epiphy的-Spec与通用工具.js` | `startup` / `1200` | `EpiphySpec v2.8.1`, `EpiphyProtocol`, `EpiphyMath` (incl. cross-stage `NativeMath` polyfill, `RenderGuiEvent$Pre` 2D & `RenderLevelStageEvent` World-3D bridges, 2D/3D cost models) |
-| **L1 Item 3D** | `Epiphy的-物品三维渲染器.js` | `startup` / `1050` | `EpiphyItem3DRenderer v1.1.0` (generic v6 layered declarative item 3D pipeline, `fx()` DSL, extensible `registerShader`/`registerLayerType`/`registerPart`/`registerPreset`, flicker-free additive pure-Java `CCModel` ~0.54ms, Fail-Soft vanilla fallback without CCL) |
-| **L1 Content Reg** | `创造模式栏-epiphy.js` | `startup` / `1000` | `EpiphyCreativeTab v1.0.0` (`epiphy:stuff`) |
-| **L1 Content Reg** | Hidden Items / Test Block / Unstable Table | `startup` | Custom items, test block & 5-stage blocks |
-| **L2 Infrastructure** | `Epiphy的-日志.js` | `server` / `1100` | `EpiphyLog v1.2.0` (rate-limit, `once`, `catchWarn`, external `.log` sink) |
-| **L2 Infrastructure** | `Epiphy的-服务端核心.js` | `server` / `1080` | `EpiphyServerCore / EpiphyServerBase v2.6.0` (accessors, world/entity/Curios helpers, `openJsonStore` stateful persistence & `.bak` recovery, `epiphy-data/`, world fork, DSL) |
-| **L2 Infrastructure** | `Epiphy的-方块与区块组件.js` | `server` / `1050` | `EpiphyBlockTracker / EpiphyWorldOps v2.5.1` (section scanning, persist dispatch, cost-gated fluid purge, terrain ops & preset registry) |
-| **L2 Access Control** | `Epiphy的-权限阀.js` | `server` / `1000` | `EpiphyPermissionValve v5.4.0` (`/epiphy`, 3-state scopes, command-block mutation lock, tombstones, fail-closed auth) |
-| **L2 Diagnostics** | `Epiphy的-调试组件.js` | `server` / `950` | `EpiphyDebug v1.1.0` (`/epiphy debug`, including `renderperf` client perf logger control) |
-| **L2 Standalone Fix** | `Epiphy的-基础bug修复.js` | `server` / `900` | `EpiphyBugfix v1.0.0` (logout HP restoration) |
-| **L3 Presentation** | `Epiphy的-平面渲染组件.js` | `server` / `500` | `Epiphy2DSurface / ScreenDanmaku v6.3.0` (2D scene graph, grouped deep-merge options, `channel`/`slot`, `id`-first `ui()` DSL, preset/widget registries, built-in `'progress_bar'` preset & danmaku scheduler; internal logic not for cross-module reuse) |
-| **L3 Presentation** | `Epiphy的-空间特效组件.js` | `server` / `500` | `Epiphy3DFXServer v1.2.0` (`surface: 'world'` 3D FX scheduler, `channel`/`slot`, `addConstraint` extensible rule pipeline, custom shape schemas & upward presets; internal logic not for cross-module reuse) |
-| **L3 Presentation** | `Epiphy的-音频组件.js` | `server` / `500` | `EpiphyAudio v5.8.0` (standalone scheduler with preset registry; internal logic not for cross-module reuse) |
-| **L3 Gameplay** | `拆解台-混沌殉爆.v18.js` | `server` / `10` | Meltdown progression (hard-requiring Core/WorldOps/Danmaku; persisted countdown, native 2D preset HUD + `channel`/`slot` incremental `patch`, anti-spoof relic & mainhand pickaxe check) |
-| **L3 Gameplay** | `合成表-*` (Vanilla / Botania / Enigmatic) | `server` / `0` | Standalone recipe adjustments |
-| **L4 Client** | `平面渲染器` / `空间特效渲染器` / `音频播放器` / `拆解台描述` | `client` | `Epiphy2DRenderer / ScreenDanmakuClient v6.3.0`, `Epiphy3DFX v2.3.0`, `EpiphyAudioClient v5.6.0` |
+| Layer | Script File | Stage (Priority) | Global Export & Version | Summary |
+| :--- | :--- | :---: | :--- | :--- |
+| **L1 Spec** | `Epiphy的-Spec与通用工具.js` | `startup` (`1200`) | `EpiphySpec v2.8.1`<br>`EpiphyProtocol` / `EpiphyMath` | Cross-side protocol constants, parsers, LRU/FIFO bounded caches, preset registry, Rhino `Math` polyfill & 2D/3D render bridges |
+| **L1 Item 3D** | `Epiphy的-物品三维渲染器.js` | `startup` (`1050`) | `EpiphyItem3DRenderer v1.1.0` | Declarative generic item 3D pipeline (`fx()` DSL, custom core shaders, pre-baked rings/helices/flares, Fail-Soft vanilla fallback without CCL) |
+| **L1 Tab** | `创造模式栏-epiphy.js` | `startup` (`1000`) | `EpiphyCreativeTab v1.0.0` | Manages the unified `epiphy:stuff` creative tab and cross-script item queue |
+| **L2 Log** | `Epiphy的-日志.js` | `server` (`1100`) | `EpiphyLog v1.2.0` | Rate-limited console logging, deduplicated warnings, `catchWarn` & world-routed daily `.log` files in `epiphy-data/` |
+| **L2 Core** | `Epiphy的-服务端核心.js` | `server` (`1080`) | `EpiphyServerCore / EpiphyServerBase v2.6.0` | Safe world/entity/Curios helpers, `openJsonStore` (`.bak` recovery & corrupt lock), copied-save auto-forking & Brigadier DSL |
+| **L2 World** | `Epiphy的-方块与区块组件.js` | `server` (`1050`) | `EpiphyBlockTracker / EpiphyWorldOps v2.5.1` | Progressive chunk-section block tracker, persistence dispatch & 3-tier cost-gated fluid/terrain batch operations |
+| **L2 Security** | `Epiphy的-权限阀.js` | `server` (`1000`) | `EpiphyPermissionValve v5.4.0` | `/epiphy` root command, 3-state hierarchical scopes, command-block lock, external revocation tombstones & 2-step `namegrant` |
+| **L2 Debug** | `Epiphy的-调试组件.js` | `server` (`950`) | `EpiphyDebug v1.1.0` | `/epiphy debug` multi-module telemetry, health checks & client `renderperf` sampling toggle |
+| **L2 Bugfix** | `Epiphy的-基础bug修复.js` | `server` (`900`) | `EpiphyBugfix v1.0.0` | Standalone zero-dependency fix restoring high-cap player HP truncated to 20 on world rejoin |
+| **L3 2D Server** | `Epiphy的-平面渲染组件.js` | `server` (`500`) | `Epiphy2DSurface / ScreenDanmaku v6.3.0` | 2D scene graph scheduler, `ui()` DSL, `channel`/`slot` incremental sync, persisted `world_plane` holograms & danmaku |
+| **L3 3D Server** | `Epiphy的-空间特效组件.js` | `server` (`500`) | `Epiphy3DFXServer v1.2.0` | World 3D spatial FX (`surface: 'world'`) server scheduler, quota isolation, `channel`/`slot` & extensible constraint chain |
+| **L3 Audio** | `Epiphy的-音频组件.js` | `server` (`500`) | `EpiphyAudio v5.8.0` | 3D spatial audio server scheduler, adjacent block sphere-cluster merging, entity tracking & player-tier quota isolation |
+| **L4 2D Client** | `Epiphy的-平面渲染器.js` | `client` | `Epiphy2DRenderer / ScreenDanmakuClient v6.3.0` | Client 2D node precompilation & batched rendering, track interpolation, GUI texture remap & slot overlays, 3D world planes & ModernUI fast path |
+| **L4 3D Client** | `Epiphy的-空间特效渲染器.js` | `client` | `Epiphy3DFX v2.3.0` | Client world 3D FX renderer (100% zero-CCL, built-in ring/beam/helix/sphere & entity tracking) + item 3D status facade |
+| **L4 Audio** | `Epiphy的-音频播放器.js` | `client` | `EpiphyAudioClient v5.6.0` | Client OpenAL 3D position syncing, mute standby pause, gentle vanilla `minecraft:` music ducking & stream retry |
 
-### 3. Dependency & Fallback Specification (YAML)
+<details>
+<summary><b>📋 Click to Expand: Module Dependency & Fallback Specification (YAML)</b></summary>
 
 ```yaml
 # ==================== Layer 1 · Startup ====================
@@ -203,20 +234,40 @@ Epiphy的-音频播放器.js:
   on_missing: Uses built-in v5 protocol constants & basic helpers when Startup Spec is absent
 ```
 
+</details>
+
 ---
 
-## Core Capabilities
+## Quick Start: Installation, Commands & Verification
 
-1. **Shared Infrastructure & External `epiphy-data/` Storage**:
-   - Centralized protocol constants, argument parsers, bounded `'fifo'`/`'lru'` cache pool (`createBoundedCache`), controlled deep-merge (`mergeTracksMap`/`mergeGroupedOptions`), and cross-stage upward preset registry (`createPresetRegistry`/`registerPreset`) (`EpiphySpec`), rate-limited logging with external readable `.log` rotation & KubeJS `ClassFilter` fallback (`EpiphyLog v1.2.0`), server accessors & stateful JSON persistence facade `openJsonStore` with `.bak` recovery and corrupt write-lock (`EpiphyServerCore / EpiphyServerBase v2.6.0`), and progressive chunk-section block tracking with 3-tier cost-gated terrain batch engine (`EpiphyBlockTracker / EpiphyWorldOps v2.5.1`).
-   - External runtime root `<gameDir>/epiphy-data/` (`config/`, `worlds/`, `players/`, `events/`, `logs/`, `presets/`, `backups/`). Worlds bind via save-local `epiphy_world_id.json` and external `<slug>__<shortId>/meta.json`, automatically forking a fresh world folder when `lastWorldPath` changes (e.g., copied test saves) and notifying OPs on join.
-   - **Permissions & Anti-Rollback Hardening (`EpiphyPermissionValve v5.4.0`)**: `Class.isInstance`-verified command dispatch with hierarchical permission scopes (allowing individual subcommands like `danmaku.self` or `audio.play` to be granted to non-OPs, child revocations overriding parent module grants, and `exactScopeOnly` broadcast gates for `danmaku.broadcast` / `audio.broadcast`), default strict UUID mode (explicitly documenting offline-server risks without TrueUUID or password-login plugins), external `revocations.json` tombstones blocking save-rollback resurrection, and Fail-Closed `auth_mode.json` requiring real OP/console 2-step confirmation via `/epiphy auth namegrant enable|confirm` (plus `scopes`, `grantname`, `revokename`, `where`, `reload`), hardened with prototype-key filtering, null `getContext()` source fallback, and synced `at`/`atMs` post-revocation timestamps.
-   - **Diagnostics & Standalone Fix**: Live health/perf inspector (`EpiphyDebug v1.1.0`) and standalone server-authoritative logout HP restoration (`EpiphyBugfix v1.0.0`).
-2. **Audiovisual Presentation Engines (with Non-OP Player Resource Isolation)**:
-   - **2D Planar Compositor & Screen Danmaku (`Epiphy2DSurface / ScreenDanmaku v6.3.0` / `Epiphy2DRenderer / ScreenDanmakuClient v6.3.0`)**: `PROTO v6` declarative 6-type 2D scene graph (`rect`, `sprite`, `nine_slice`, `item`, `text`, `group`), unified `rect.fill` (`solid`, `outline`, `gradient`, `parallax`, `shader`), dual-mode clipping (`local`, `scissor`), client interpolation tracks (`lerp`, `trail`, `impulse`), grouped option deep-merge (`layout`/`life`/`motion`/`style`/`data`/`tracks`), unknown-key typo warnings, scoped `channel`/`slot` handles (automatic full push vs incremental `action: 'patch'`), `id`-first chainable `ui()` DSL (`steppedPlate`, `corners`, `steppedLine`, `ticks`, `boxes`, `texts`, `region`, `widget`), built-in `'progress_bar'` preset + `progressTracks`, and upward preset/custom widget registration (`registerPreset`, `registerWidget`); client hot-path optimizations include arrival-time declarative node precompilation (`isStaticFastRect` fast path), `stepHz` micro-caching, hoisted zero-closure rect batching + per-frame `resolveEventCaps`, parallax early culling, left-anchor zero-`font.width` skip + per-node text width caching, `'lru'` shared text layout cache, normalized coordinates with HUD zone avoidance, typewriter reveals, `per_char` glyph shake, outlines/glow, inline rich tags, dedicated `ModernUI (LGPL-3.0)` fast-path optimizations with automatic vanilla fallback, `once`/`active`/`screen_session` lifecycles, persisted/login-delayed emission, and namespace-isolated block bindings. Adds `/epiphy danmaku self` for individual player banners; non-OP `authorized` commands stay in `'player'` tier with parameter/rate/target clamping, while JS API, OP, console, and command blocks remain unrestricted.
-   - **3D Spatial FX & Declarative Item 3D Subsystem (`EpiphyItem3DRenderer v1.1.0` / `Epiphy3DFXServer v1.2.0` / `Epiphy3DFX v2.3.0`)**: Strictly decoupled from the 2D planar renderer and designed around capability-first principles (implementation -> generic capability -> downstream showcases). Item rendering (`EpiphyItem3DRenderer`) shares the layered declarative `PROTO v6` schema (`model`/`frame`/`motion`/`lod`/`layers`) and chainable `fx()` DSL, offering extensible `registerShader`, 4 built-in pre-baked primitives (`surface_overlay`/`ribbon_ring`/`ribbon_helix`/`sprite_cluster`), `registerLayerType`/`registerPart`/`registerPreset`, and flicker-free additive pure-Java `CCModel` submission (~0.54ms, cleanly falling back to vanilla static models when CodeChickenLib is absent). World FX (`surface: 'world'`, channel `epiphy:spatial_fx`, proto v1, physically 0% CCL dependency) is driven by the `RenderLevelStageEvent` bridge in `Epiphy的-Spec与通用工具.js` (O(1) idle short-circuit), providing server-side scheduling, `'player'`/`'system'` quota & eviction isolation, stateful `channel`/`slot` incremental `patch`, extensible `addConstraint` rule pipelines, smooth `followEntityUuid` entity interpolation, built-in pure-vanilla renderers for all 4 core shapes (`ring`/`beam`/`helix`/`sphere`), and `registerShapeSchema` / `registerWorldShape` hooks.
-   - **Spatial Audio (`EpiphyAudio v5.8.0` / `EpiphyAudioClient v5.6.0`)**: Fixed coordinate, block, tracked entity, dimension, and server-wide handles with upward preset registration (`registerPreset`, `playPreset`, `{ preset }`, including `bindBlock` preset resolution); attenuation curves; live 3D `Channel` selfPosition syncing; `pause` standby on category mute/out-of-range; coalesced scan `merge` cluster consolidation; namespace-filtered gentle `pause`/`unpause` vanilla music ducking (`duckMusic` pauses only `minecraft:` `MUSIC` channels, preserves `duckedMusicInsts` when `chanMap` is transiently null, and never pauses or stops other mods' BGM); validated `configure`; unstarted timeout cleanup; late tracker upgrade; and retry-safe `pendingReset`. Non-OP `authorized` commands enter `'player'` tier (`priority <= 3`, `u:<uuid>:` key prefix, `audio.broadcast` required for `>4` targets or cross-dim, and one-way eviction protecting `'system'` audio).
-3. **Gameplay Content & Tweaks**: `epiphy:stuff` creative tab and hidden-item collection (including Chaos Crystal CCL 3D OBJ + Chaos Shader rendering), `epiphy:rnfmabj_test` broadcast test block, the 5-stage Twilight Forest Uncrafting Table chaotic meltdown event with supreme-relic exemptions, and recipe adjustments.
+### 1. Installing into a Modpack
+1. Ensure your instance runs **Minecraft 1.20.1 + Forge 47.x + KubeJS 2001.6.x** (no Fabric version planned).
+2. Merge `kubejs/` into both the client `.minecraft/` folder and dedicated server root.
+3. On launch, `<gameDir>/epiphy-data/` is created automatically for anti-rollback permissions and daily logs (git-ignored; never commit runtime data).
+4. **Note on Test Block Audio**: For copyright and size reasons, `children_of_the_city.ogg` is omitted from this repository (see [`docs/audio-assets.md`](docs/audio-assets.md)). The test block's danmaku and placement logic work without it; supply your own `.ogg` or rebind the sound ID if you want BGM playback.
+
+### 2. Common In-Game Commands (OP or Granted Scope)
+
+| Command | Description |
+| :--- | :--- |
+| `/epiphy help` | List all mounted subcommands |
+| `/epiphy auth list` / `scopes` / `where` | Inspect authorized players, fine-grained permission scopes, and `epiphy-data/` paths |
+| `/epiphy debug status` / `check` | View active handle counts, cache hit rates, and run health self-checks |
+| `/epiphy debug renderperf on\|dump\|off` | Toggle client per-phase render timing and dump stats to `epiphy-data/logs/client_render_perf.json` |
+| `/epiphy danmaku self <text>` | Emit a personal screen banner (can be granted to regular players via `danmaku.self`) |
+| `/epiphy audio list` / `info` | Inspect active 3D audio handles and listener states |
+
+### 3. Running Sandbox Unit Tests & Static Checks
+
+Verify all logic and Rhino syntax locally in Node.js without booting Minecraft:
+
+```bash
+npm install               # Install zero-dependency acorn parser on first clone
+npm test                  # Run 7 sandbox test suites + PROTO v6 Schema check + Rhino AST guard
+npm run sync-docs:check   # Verify 3-segment semver parity across all 15 component headers & 4 docs
+```
+
+- **Real Rhino Bytecode Compilation**: Point `RHINO_JAR`, `MC_MODS_DIR`, or `.rhino-local.json` to a local JDK + `rhino-forge-*.jar` for real `Context.compileString` verification in `scripts/rhino-check.js`; otherwise it automatically falls back to `local-acorn-ast` to catch `Math.PI`, `??`, `let/const`, and other Rhino pitfalls.
 
 ---
 
@@ -225,24 +276,23 @@ Epiphy的-音频播放器.js:
 ```text
 .
 ├── kubejs/
-│   ├── assets/epiphy/            # Sound assets (.ogg, see docs/audio-assets.md), core shaders (shaders/core/), models, textures, blockstates, zh_cn lang
-│   ├── client_scripts/           # 通用组件/ (2D planar renderer, 3D spatial FX client, spatial audio player) & gameplay item tooltips
-│   ├── server_scripts/           # 通用组件/ (server core, block/chunk engine, valve, log, debug, bugfix, 2D/3D/audio schedulers) & gameplay/mod recipes
-│   └── startup_scripts/          # 通用组件/ (Spec & 2D/3D hooks, generic declarative item 3D renderer, creative tab) & 小玩意与案例/, 拆解台-混沌殉爆/
+│   ├── assets/epiphy/            # Sound assets (.ogg), core shaders (shaders/core/), models, textures & lang
+│   ├── client_scripts/           # 通用组件/ (2D planar renderer, 3D spatial FX client, audio player) & tooltips
+│   ├── server_scripts/           # 通用组件/ (log, server core, block/chunk engine, valve, debug, bugfix, 2D/3D/audio) & recipes
+│   └── startup_scripts/          # 通用组件/ (Spec & hooks, item 3D renderer, creative tab) & showcases / meltdown blocks
 ├── docs/
-│   ├── audio-assets.md                           # Audio asset exclusion & BYO placement notes
-│   ├── kube-mods-rhino-es5-es6-compatibility.md  # Bytecode & runtime audit of kube-mods/rhino
 │   ├── native-mod-migration-plan.md              # Phase 4 standalone native mod (Kotlin + Java) migration plan
+│   ├── rendering-subsystem-roadmap.md            # 2D Planar Compositor & 3D Spatial FX roadmap & v6 specification
 │   ├── proto_v6_schema.json                      # Authoritative PROTO v6 JSON Schema contract
-│   └── rendering-subsystem-roadmap.md            # 2D Planar Compositor & 3D Spatial FX roadmap & v6 protocol specification
+│   ├── kube-mods-rhino-es5-es6-compatibility.md  # Bytecode & runtime audit of kube-mods/rhino
+│   └── audio-assets.md                           # Audio asset exclusion & BYO placement notes
 ├── scripts/
 │   ├── rhino-check.js            # Real Rhino / acorn AST syntax & semantic-drift gate
-│   └── sync-doc-versions.js      # SSOT 3-segment version sync & anti-drift check across headers & docs (npm run sync-docs)
+│   └── sync-doc-versions.js      # SSOT 3-segment version sync & anti-drift check (npm run sync-docs)
 ├── tests/
 │   ├── run.js                    # Unified test runner (supports suite/name filtering)
 │   ├── helpers/harness.js        # Shared KubeJS VM sandbox & path harness
-│   ├── suites/*.test.js          # 7 domain-grouped test suites (exact count reported by npm test)
-│   └── pure_functions.test.js    # Backwards-compatible shim forwarding to tests/run.js
+│   └── suites/*.test.js          # 7 domain-grouped regression test suites
 ├── README.md                     # Chinese README (default)
 ├── README_EN.md                  # English README
 ├── README-LLM.md                 # Engineering rules & persistent context for LLMs
@@ -251,49 +301,22 @@ Epiphy的-音频播放器.js:
 
 ---
 
-## Installation & Testing
+## Authors & License
 
-### Installing into a Modpack
-1. Current transitional runtime requirement: **Minecraft 1.20.1 / Forge 47.x / KubeJS 2001.6.x** (theoretically compatible with Fabric; untested).
-2. Merge `kubejs/` into both client `.minecraft/` and dedicated server root.
-3. In-game (OP required for admin actions), use `/epiphy help`, `/epiphy auth list`, `/epiphy auth where`, and `/epiphy debug`; runtime data is stored in `<gameDir>/epiphy-data/` (git-ignored; never commit runtime artifacts).
-4. **Excluded Assets & Config Notice**:
-   - The third-party commercial track `children_of_the_city.ogg` is intentionally omitted from this public repository (and git-ignored; see [`docs/audio-assets.md`](docs/audio-assets.md)). [`sounds.json`](kubejs/assets/epiphy/sounds.json) and the test block script retain the `epiphy:children_of_the_city` sound event slot for optional user-supplied audio without breaking the block's danmaku/placement behavior when absent.
-   - Only runtime-loaded `.ogg` sound effects are included; redundant `.mp3` sources, leftover `.bak` backups, and KubeJS default templates/IDE configs (`example_*`, `kubejs/README.txt`, `kubejs/config/*.properties`, `probejs.json`, `jsconfig.json`) were removed so merging `kubejs/` will not overwrite existing modpack configs.
-
-### Running Sandbox Unit Tests & Rhino Checks
-```bash
-npm install
-npm test
-```
-
-> **Notes**:
-> - Run `npm install` first on a fresh clone to install the zero-dependency `acorn` devDependency; `scripts/rhino-check.js` fails fast (`exit 1`) if `acorn` is missing rather than downgrading to a weak check.
-> - `npm test` runs `node tests/run.js` (V8 sandbox tests + `docs/proto_v6_schema.json` protocol conformance) followed by `node scripts/rhino-check.js` (mandatory `acorn` AST semantic-drift guard + real Rhino / `local-acorn-ast` syntax validation).
-> - If a JDK and `rhino-forge-*.jar` are available locally, point `RHINO_JAR`, `MC_MODS_DIR`, or git-ignored `.rhino-local.json` to them for real `Context.compileString` verification (pass `--require-rhino` to forbid fallback); otherwise it falls back to `local-acorn-ast`.
-> - For rendering or frame-budget changes, verify in-game and toggle `/epiphy debug renderperf on|dump` to inspect `epiphy-data/logs/client_render_perf.json`.
-
-### Git Commit Convention
-- **Format**: `<subject> [(<scope>)] <中文说明> | <English description>` (both Chinese and English summaries are required in every commit message).
-- **Standard `<subject>` types**: `feat` / `fix` / `refactor` / `perf` / `docs` / `style` / `test` / `chore` / `build` / `ci` / `revert` (see [`README-LLM.md`](README-LLM.md) Section 6 for full details).
-
----
-
-## Authors & Roles
-
-- **Epiphy-iLLUMs**: Creator, Gameplay Design, Lead Maintainer; responsible for designing and implementing substantial core features, overall project structure, modular architecture planning, error correction, and refactoring direction.
+### Authors & Roles
+- **Epiphy-iLLUMs**: Creator, Gameplay Design, Lead Maintainer; responsible for core feature design and implementation, project structure, modular architecture planning, error correction, and refactoring direction.
 - **Gemini 4 series**: Architecture Collaboration, Component Implementation & Debugging.
 - **Claude 5.5 series**: Architecture Collaboration, Component Implementation, Error Correction & Optimization Proposals.
 - **DeepSeek**: Mascot.
 
----
+### License (`RAL-1.6`)
 
-## License
+Licensed under **RAL 1.6 (Reciprocal Attribution License 1.6)** — see [`LICENSE.md`](LICENSE.md) for the authoritative Chinese legal text:
+- **Source-Available & Attribution**: Modification, extension, and forking are permitted with mandatory attribution to original authors and contributors;
+- **Reciprocal Open-Source Obligation**: Modifications, derivatives, and static/dynamic linking dependencies must disclose source under compatible terms;
+- **Commercial Boundaries**: Commercial integration as a non-primary component is permitted, while **direct standalone resale of this work is prohibited**;
+- **Incompatible Licenses**: Conflicting non-forkable licenses (e.g., PolyForm Shield 1.0.0) are barred (except source-isolated Pure Compatibility Code under `r2` Sections 2.12 & 11.8).
 
-Licensed under **RAL 1.6 (Reciprocal Attribution License 1.6)** — see [`LICENSE.md`](LICENSE.md) for the full legal text.
-
-Summary (the Chinese original in [`LICENSE.md`](LICENSE.md) governs in case of ambiguity):
-- **Source-Available Reciprocal License**: Preserves modification and fork freedoms with mandatory attribution;
-- **Strict Reciprocity**: Modifications, derivatives, static linking, and dynamic linking dependencies trigger reciprocal source disclosure; wrapper layers cannot be used to evade obligations;
-- **Commercial Boundaries**: Commercial integration as a non-primary component is permitted, **direct standalone resale is prohibited**, and Managed SaaS requires full-stack open source;
-- **Incompatible Licenses**: Conflicting non-forkable licenses (e.g., PolyForm Shield 1.0.0) are barred from inclusion or bridging (except source-isolated Pure Compatibility Code permitted as a special exception under `r2` Sections 2.12 & 11.8).
+> [!TIP]
+> **For Modpack & Script Authors: Downstream KubeJS `.js` Scripts Do NOT Need a License Declaration**  
+> Because KubeJS `.js` scripts are inherently distributed as plain source files directly downloaded to players' computers, **downstream `.js` scripts built on KubeJS and Epiphy components do NOT need to declare a license**.

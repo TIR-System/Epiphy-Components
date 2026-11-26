@@ -136,7 +136,11 @@
    - 支持细粒度分层 `scope`（如 `danmaku.self`、`audio.play`）独立授予非 OP；明确撤销子 `scope` 须覆盖父模块授权；标记 `exactScopeOnly` 的高危能力（如 `danmaku.broadcast` / `audio.broadcast`）不得从模块级授权继承。
    - 任何新增音频/弹幕能力不得允许 `'player'` 源绕过命名空间隔离、越权停止 `'system'` 或他人对象，也不得挤压系统演出配额/槽位；同时不得反向给脚本 API、OP、控制台或命令方块施压额外玩家限流。
 4. **长期原生化迁出计划（见 [`docs/native-mod-migration-plan.md`](docs/native-mod-migration-plan.md)）**：
-   - **基于 `Kotlin for Forge` (`4.12.0+`) + `Sinytra MixinBooster` (`Fabric Mixin`) 现代混编底座**：原生模组采用 `modLoader = "kotlinforforge"`（`loaderVersion = "[4,5)"`），依托 KFF 提供的 `@Mod object`、`MOD_BUS` / `FORGE_BUS`、`runForDist`、`AutoKotlinEventBusSubscriber`、`ObjectHolderDelegate`、`PoseStack.use` 及随包内置的 `kotlinx-coroutines-core` 与 `kotlinx-serialization-json`（严禁自行重复打包 `kotlin-stdlib`）；字节码层统一采用 **`MixinBooster`** (`org.sinytra.mixinbooster:mixin-booster` 替换 LexForge 残缺 `0.8.5` 为现代 `Fabric Mixin`) + **`mixinextras-forge` (`jarJar`)**，直接对齐 1.21+ NeoForge 标准，底层 Mixin 与紧凑 VBO 字节写入使用 Java 17。
+   - **基于 `Kotlin for Forge` (`4.12.0+`) + `Sinytra MixinBooster` (`Fabric Mixin`) 现代混编底座（仅限 Forge，暂不推出 Fabric 版）**：原生模组采用 `modLoader = "kotlinforforge"`（`loaderVersion = "[4,5)"`），依托 KFF 提供的 `@Mod object`、`MOD_BUS` / `FORGE_BUS`、`runForDist`（通过无客户端类型跳板分流）、`AutoKotlinEventBusSubscriber`、`ObjectHolderDelegate`、自建 `inline fun PoseStack.withPose`（禁用 `kfflib` 无 `finally` 的 `PoseStack.use`）及随包内置的 `Kotlin 2.2.21`、`kotlinx-coroutines-core 1.10.2` 与 `kotlinx-serialization-json 1.9.0`（严禁自行重复打包 `kotlin-stdlib`）；字节码层统一采用 **`MixinBooster`** (`org.sinytra.mixinbooster:mixin-booster` 替换 LexForge 残缺 `0.8.5` 为现代 `Fabric Mixin`) + **`mixinextras-forge` (`jarJar`)**，直接对齐 1.21+ NeoForge 标准，底层 Mixin 与紧凑 VBO 字节写入使用 Java 17。**原生 Mod 暂时不会推出 Fabric 版。**
+   - **生命周期切换（无共存期、纯 KubeJS 版直接 EOL）与兼容性契约**：
+     - **直接 EOL**：Mod 正式发布后不会有共存期，纯 KubeJS 脚本版不会有 Maintenance LTS，将直接进入 **EOL** 并停止官方维护；
+     - **不保证降级数据可读**：不保证从新版 Mod 降级回旧 KubeJS 版时数据完整可读，玩家须自行备份；
+     - **向前兼容、旧脚本调用定位与下游 JS 免许可证声明**：尽力保证向前兼容性，但因 Mod 化属大更新，**不兼容的旧功能不会特意修复**。Mod 化后，**通过 KubeJS 调用 Mod 形式直接暴露的 Epiphy 组件接口（`EpiphyKubeJSPlugin`）依然是官方推荐并广泛支持的脚本使用模式**；原有 KubeJS 脚本仍可通过同样调用方式拿到**行为类似**的功能（因接口升级与后续迭代，旧脚本直接调用可能出现 Bug 属预期行为）。此外，由于 `.js` 脚本原本就需要将源码直接下载到玩家的电脑上，**基于 KubeJS 和 Epiphy 组件的下游 `.js` 脚本无需声明许可证**（注：本仓库自身的 `.js` 组件与测试文件仍维持仓库 `RAL-1.6` 头部规范）。
    - **原生化 vs 留存 KubeJS 的职责边界**：15 个通用基础底座与视听引擎迁入原生 Mod；**单纯的【合成表修改】（如 `kubejs/server_scripts/合成表-*/`）、Tag 微调等整合包数据胶水继续保留在 KubeJS 层，无需移植**。
    - **官方别名保留上限**：全模块统一保留 **「1 个主标准名 + 至多 2 个显式官方别名」**（入口单点归一化为主标准名，仅裁撤超出该上限的历史无序 `DEPRECATED_*_ALIASES`）。
    - **第三方 Mod 钩子去依赖清单（写成独立原生 Mod 后必须全部自主实现）**：

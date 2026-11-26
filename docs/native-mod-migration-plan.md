@@ -28,6 +28,20 @@
 | **Kotlin + Java 混编分工** | **Kotlin (`2.2.21`，严格对齐 KFF `4.12.0` 运行时 ABI)**：`@Mod object` 单例入口、`@Serializable` 数据模型、`ui {}`/`fx {}` 类型安全 DSL、服务端调度状态机、权限域树与 KubeJS 插件桥接<br>**Java 17**：全部 Mixin 类、OpenGL / `BufferBuilder` / VBO 紧凑字节流写入、每帧零装箱热路径矩阵运算 | `kotlin("plugin.serialization")` 编译器插件版本必须与 KFF `4.12.0` 内置的 `kotlinx-serialization 1.9.0`（Kotlin `2.2.21` 代际）严格一致，防止 `@Serializable` 合成体在运行期发生 `IncompatibleClassChangeError` / `NoSuchMethodError`；同时兼顾 Java 在底层渲染热路径与 Mixin 织入上的绝对确定性 |
 | **字节码注入** | **`Sinytra MixinBooster` (`Fabric Mixin 0.15+`)** + **`MixinExtras` (`jarJar`)** | 彻底替换 LexForge 自带的残缺 `Sponge Mixin 0.8.5`，完整解锁接口注入、构造器 `super()` 前注入、匿名内部类修复及 `@WrapOperation` / `@Local` / `@Share`，且代码与未来 1.21+ NeoForge 100% 零修改对齐 |
 
+### 1.3 生命周期切换、兼容性契约与加载器支持声明 (EOL & Compatibility Policy)
+1. **无共存期、纯 KubeJS 脚本版直接进入 EOL**：
+   - 原生 Mod 正式发布后，**不会设立双版本共存期**，原有的 KubeJS 纯脚本组件版本也**不会提供 Maintenance LTS（长期维护支持）**，将直接进入生命周期结束（**EOL, End of Life**），官方维护随即终止。
+2. **单向数据迁移、不保证降级回退可读（玩家须自行备份）**：
+   - 数据迁移仅保障从 KubeJS 版向原生 Mod 版的单向升级；**官方不保证从新版原生 Mod 降级回旧版 KubeJS 脚本时存档与外置数据仍完整可读**。KubeJS 纯脚本版的生命周期即将结束，玩家与服主在升级或切换前应自行完整备份存档与数据。
+3. **向前兼容性边界（尽力兼容，但不兼容的旧功能不特意修补）**：
+   - 原生 Mod 会尽可能保证核心契约的向前兼容性，但鉴于 Mod 化属于架构级大版本更新，**对于因底层管线重构或语义收敛而产生的不兼容功能，不会特意进行逆向修复或兼容兜底**。
+4. **KubeJS 脚本调用原生 Mod 接口的定位、兼容性与许可证豁免**：
+   - **官方推荐并广泛支持的脚本模式**：通过 KubeJS 脚本直接调用 Mod 形式的 Epiphy 组件所暴露的接口（见 §6.3 `EpiphyKubeJSPlugin`）完全可行。如果下游整合包或开发者仍需要以脚本形式编排功能，**官方依然推荐这种「KubeJS 调原生 Mod 接口」模式，并将对此提供广泛支持**。
+   - **旧有 KubeJS 脚本的运行预期**：在 Mod 化之后，原有的 KubeJS 调用脚本仍能够通过同样的调用方式拿到**行为类似**的功能；但由于底层接口本身已整体升级且未来还会持续迭代，旧脚本在未适配情况下直接调用出现细微行为差异或 Bug 属于**预期行为**。
+   - **下游 JS 脚本无需声明许可证**：由于 KubeJS 的 `.js` 脚本在整合包分发与运行中原本就需要将明文源码直接下载到玩家的电脑上（天然满足源码可见性），**下游基于 KubeJS 和 Epiphy 组件编写的 `.js` 脚本无需额外声明许可证**。
+5. **加载器支持范围（暂不推出 Fabric 版）**：
+   - 原生 Mod 当前仅面向 **Minecraft Forge 1.20.1**（并为后续 NeoForge 预留演进路径），**暂时不会推出 Fabric 版本**。
+
 ---
 
 ## 2. 基于 `Kotlin for Forge` (`4.12.0`) 的开发模板与实现规范
@@ -317,18 +331,20 @@ kubejs/ (整合包数据魔改层 —— 永久保留在 KubeJS，无需移植�
 - **通道划分**：基于 Forge `NetworkRegistry.newSimpleChannel` 建立 `epiphy:main` 多路复用协议通道（协议主版本管理，客户端连接时自动握手校验）；
 - **紧凑二进制序列化**：保留 [`docs/proto_v6_schema.json`](proto_v6_schema.json) 的全部逻辑字段语义，但在网络线上不再走冗长的 `CompoundTag` 键值对，而是用 `FriendlyByteBuf` 按位掩码（BitMask）仅编码非默认字段（高频 `action: 'patch'` 心跳包体积从数百字节压缩至 **`18 ~ 32 Bytes`**！）。
 
-### 6.2 存储层：严守「随档回滚 vs 外置抗回滚」数据边界与自动迁移
-完全继承 [`README-LLM.md`](../README-LLM.md) §5.1 确立的双轨数据边界，并提供**旧存档首次启动自动无损迁移**：
+### 6.2 存储层：严守「随档回滚 vs 外置抗回滚」数据边界与单向升级迁移
+完全继承 [`README-LLM.md`](../README-LLM.md) §5.1 确立的双轨数据边界，并提供**旧存档首次启动单向自动迁移**（**注：不保证从原生 Mod 降级回旧 KubeJS 纯脚本版时数据完整可读，升级前玩家应自行备份存档与 `epiphy-data/`**）：
 
-| 数据类别 | KubeJS 阶段位置 | 原生 Mod 阶段位置 | 自动迁移策略 |
+| 数据类别 | KubeJS 阶段位置 | 原生 Mod 阶段位置 | 自动迁移策略（仅单向升级） |
 | :--- | :--- | :--- | :--- |
-| **随存档同步回滚的世界状态**<br>（方块追踪表、`world_plane` 全息牌、退出 HP 恢复、事件倒计时） | `saves/<world>/kubejs_epiphy_tracked_blocks.json`<br>`saves/<world>/kubejs_epiphy_world_planes.json`<br>`persistentData` | 原版维度/世界级 `SavedData` (`data/epiphy_*.dat`) 或 `saves/<world>/epiphy/*.json` | 世界加载时若新存储为空且检测到旧 `kubejs_epiphy_*.json`，自动解析导入新存储并将旧文件重命名为 `.migrated_to_mod.bak` |
-| **抗回滚安全、审计与跨档索引**<br>（权限阀授权、`revocations.json` 墓碑、`auth_mode.json`、`worlds_index.json`、外部运行日志） | `<gameDir>/epiphy-data/` | **原路径原格式 100% 保留 `<gameDir>/epiphy-data/`** | 零迁移损耗直接无缝接管！原权限授权、撤销墓碑与世界分叉记录在升级为原生 Mod 后开箱即用 |
+| **随存档同步回滚的世界状态**<br>（方块追踪表、`world_plane` 全息牌、退出 HP 恢复、事件倒计时） | `saves/<world>/kubejs_epiphy_tracked_blocks.json`<br>`saves/<world>/kubejs_epiphy_world_planes.json`<br>`persistentData` | 原版维度/世界级 `SavedData` (`data/epiphy_*.dat`) 或 `saves/<world>/epiphy/*.json` | 世界加载时若新存储为空且检测到旧 `kubejs_epiphy_*.json`，自动解析导入新存储并将旧文件重命名为 `.migrated_to_mod.bak`（降级回旧 KubeJS 版不保证可读） |
+| **抗回滚安全、审计与跨档索引**<br>（权限阀授权、`revocations.json` 墓碑、`auth_mode.json`、`worlds_index.json`、外部运行日志） | `<gameDir>/epiphy-data/` | **原路径原格式 100% 保留 `<gameDir>/epiphy-data/`** | 原权限授权、撤销墓碑与世界分叉记录在升级为原生 Mod 后直接无缝接管；后续随 Mod 迭代扩充的新字段不保证旧 KubeJS 脚本逆向兼容 |
 
-### 6.3 `EpiphyKubeJSPlugin`：引擎原生化 + 魔改数据层留存 KubeJS 的黄金协同
+### 6.3 `EpiphyKubeJSPlugin`：通过 KubeJS 调用原生 Mod 接口的推荐模式与兼容预期
 当整合包同时安装了 `KubeJS` 时，`epiphy-compat` 中的 `EpiphyKubeJSPlugin` 自动激活：
-- 通过 `registerBindings` 直接注入底层由原生 Kotlin/Java 驱动的 `EpiphySpec`、`EpiphyServerCore`、`EpiphyBlockTracker`、`EpiphyWorldOps`、`EpiphyPermissionValve`、`Epiphy2DSurface` (`ScreenDanmaku`)、`Epiphy2DRenderer` (`ScreenDanmakuClient`)、`Epiphy3DFXServer`、`Epiphy3DFX`、`EpiphyItem3DRenderer` 与 `EpiphyAudio`（所有字段与方法均遵循「1 主标准名 + 至多 2 个显式官方别名」契约）；
-- **最佳协同形态**：原生 Mod 承担重型计算、安全底座与 GPU 渲染管线；KubeJS 继续发挥其在**合成表修改 (`合成表-*/`)、Tag 归集与快速热重载联动脚本**上的天然优势，脚本层一行调用即可驱动原生 C++/GPU 级引擎。
+- 通过 `registerBindings` 直接暴露底层由原生 Kotlin/Java 驱动的 `EpiphySpec`、`EpiphyServerCore`、`EpiphyBlockTracker`、`EpiphyWorldOps`、`EpiphyPermissionValve`、`Epiphy2DSurface` (`ScreenDanmaku`)、`Epiphy2DRenderer` (`ScreenDanmakuClient`)、`Epiphy3DFXServer`、`Epiphy3DFX`、`EpiphyItem3DRenderer` 与 `EpiphyAudio`（所有字段与方法均遵循「1 主标准名 + 至多 2 个显式官方别名」契约）；
+- **广泛支持的推荐脚本模式**：如果需要以脚本形式使用 Epiphy 组件，**通过 KubeJS 调用 Mod 形式直接暴露的上述接口是官方推荐的标准做法，并将获得长期广泛支持**（原生 Mod 承担重型计算、安全底座与 GPU 渲染管线；KubeJS 专注于合成表修改 `合成表-*/`、Tag 归集与热重载联动调用）；
+- **存量旧脚本兼容预期**：原有的 KubeJS 脚本在 Mod 化后仍能通过相同调用方式获得**行为类似**的功能，但鉴于接口在大版本升级后会持续演进，未适配旧脚本可能出现 Bug 属预期行为，且大更新中不兼容的旧特性不会特意逆向修补；
+- **下游 JS 脚本免许可证声明**：因 `.js` 脚本天然需将源码直接随包分发到玩家电脑上，下游基于 KubeJS 和 Epiphy 组件编写的 `.js` 脚本无需声明许可证。
 
 ---
 
