@@ -1,0 +1,32 @@
+modLoader = "kotlinforforge"
+loaderVersion = "[4,5)"
+license = "RAL-1.6"
+
+[[mods]]
+modId = "epiphy"
+version = "${file.jarVersion}"
+displayName = "Epiphy Core"
+description = '''
+Declarative 2D/3D presentation engine, native hot-path accelerators, spatial audio, chunk-section block tracker, and hardened server infrastructure.
+'''
+
+[[dependencies.epiphy]]
+modId = "forge"
+mandatory = true
+versionRange = "[47.2,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.epiphy]]
+modId = "minecraft"
+mandatory = true
+versionRange = "[1.20.1,1.20.2)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.epiphy]]
+modId = "kotlinforforge"
+mandatory = true
+versionRange = "[4.12.0,5)"
+ordering = "AFTER"
+side = "BOTH"

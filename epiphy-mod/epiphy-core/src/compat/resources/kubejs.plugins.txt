@@ -1,0 +1,1 @@
+dev.epiphy.compat.kubejs.EpiphyKubeJSPlugin
