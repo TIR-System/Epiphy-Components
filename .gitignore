@@ -11,11 +11,21 @@ kubejs/config/epiphy_permissions/
 *.mp3
 kubejs/assets/epiphy/sounds/children_of_the_city.ogg
 
-# Local tooling / OS / Node artifacts
+# Local tooling / OS / Node / Gradle & IDE artifacts
 node_modules/
 coverage/
 .rhino/
 .rhino-local.json
 .vscode/
+.idea/
+*.iml
+.gradle/
+epiphy-mod/.gradle/
+epiphy-mod/**/build/
+epiphy-mod/**/run/
+epiphy-mod/**/out/
+epiphy-mod/**/logs/
+epiphy-mod/**/crash-reports/
+!epiphy-mod/gradle/wrapper/gradle-wrapper.jar
 .DS_Store
 Thumbs.db

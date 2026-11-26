@@ -1,8 +1,8 @@
 # Epiphy 独立原生模组（Kotlin + Java · Phase 4）迁移工程计划书
 
-> **文档状态**：Phase 4 原生化工程蓝图与架构实施计划（v1.5）  
+> **文档状态**：Phase 4 原生化工程蓝图与渐进换芯实施计划（v1.6）  
 > **许可证声明 (License)**：本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)  
-> **前置基线**：KubeJS 过渡期 `P0 ~ P3` 全量里程碑已封版（15 个通用组件、74/74 回归单测、[`docs/proto_v6_schema.json`](proto_v6_schema.json) `v6.3.0`）  
+> **前置基线**：KubeJS 过渡期 `P0 ~ P3` 全量里程碑已封版（15 个通用组件、74/74 回归单测、[`docs/proto_v6_schema.json`](proto_v6_schema.json) `v6.3.0`，封版分支归档为 **`legacy-kubejs`**）  
 > **关联文档**：[`README-LLM.md`](../README-LLM.md) · [`docs/rendering-subsystem-roadmap.md`](rendering-subsystem-roadmap.md)
 
 ---
@@ -24,7 +24,7 @@
 | 维度 | 选型方案 | 选型依据 |
 | :--- | :--- | :--- |
 | **目标平台与语言加载器** | `Minecraft 1.20.1` · `Forge 47.2.x` · **`Kotlin for Forge 4.12.0+`**（内置 `neoforge` 过渡包，预留 1.21 演进边界） | 与本地实机测试端（已装 `kotlinforforge-4.12.0-all.jar`）100% 对齐；直接复用 KFF `4.12.0` 语言提供器内建的 **`Kotlin 2.2.21`**（`@Metadata(mv = [2, 2, 0])`）、**`kotlinx-coroutines-core 1.10.2`** 与 **`kotlinx-serialization-json 1.9.0`** |
-| **JDK、Gradle 与映射** | `Java 17` + `Gradle 8.8+` + `ParchmentMC 1.20.1` + `ForgeGradle [6.0,6.2)` | 编译期 Mojmap + 参数名可读，发布构建自动重映射 SRG，彻底告别 KubeJS 阶段手动双探 `m_xxxx_` / `f_xxxx_` 的反射脆弱性 |
+| **JDK、Gradle 与映射** | `Java 17`（通过 Foojay Toolchain 自动解析）+ `Gradle 8.10.2`（兼容 Java 21/23 宿主 Daemon）+ `ParchmentMC 1.20.1` + `ForgeGradle [6.0,6.2)` | 编译期 Mojmap + 参数名可读，发布构建自动重映射 SRG，彻底告别 KubeJS 阶段手动双探 `m_xxxx_` / `f_xxxx_` 的反射脆弱性 |
 | **Kotlin + Java 混编分工** | **Kotlin (`2.2.21`，严格对齐 KFF `4.12.0` 运行时 ABI)**：`@Mod object` 单例入口、`@Serializable` 数据模型、`ui {}`/`fx {}` 类型安全 DSL、服务端调度状态机、权限域树与 KubeJS 插件桥接<br>**Java 17**：全部 Mixin 类、OpenGL / `BufferBuilder` / VBO 紧凑字节流写入、每帧零装箱热路径矩阵运算 | `kotlin("plugin.serialization")` 编译器插件版本必须与 KFF `4.12.0` 内置的 `kotlinx-serialization 1.9.0`（Kotlin `2.2.21` 代际）严格一致，防止 `@Serializable` 合成体在运行期发生 `IncompatibleClassChangeError` / `NoSuchMethodError`；同时兼顾 Java 在底层渲染热路径与 Mixin 织入上的绝对确定性 |
 | **字节码注入** | **`Sinytra MixinBooster` (`Fabric Mixin 0.15+`)** + **`MixinExtras` (`jarJar`)** | 彻底替换 LexForge 自带的残缺 `Sponge Mixin 0.8.5`，完整解锁接口注入、构造器 `super()` 前注入、匿名内部类修复及 `@WrapOperation` / `@Local` / `@Share`，且代码与未来 1.21+ NeoForge 100% 零修改对齐 |
 
@@ -41,6 +41,22 @@
    - **下游 JS 脚本无需声明许可证**：由于 KubeJS 的 `.js` 脚本在整合包分发与运行中原本就需要将明文源码直接下载到玩家的电脑上（天然满足源码可见性），**下游基于 KubeJS 和 Epiphy 组件编写的 `.js` 脚本无需额外声明许可证**。
 5. **加载器支持范围（暂不推出 Fabric 版）**：
    - 原生 Mod 当前仅面向 **Minecraft Forge 1.20.1**（并为后续 NeoForge 预留演进路径），**暂时不会推出 Fabric 版本**。
+
+### 1.4 分支归档规范与「Core 底座 + 视听热路径原生加速」渐进迁移策略
+为避免一次性重写全部 15 个组件导致长周期无法进服联调与测试中断，Phase 4 采用 **「分支封存 + 抽底换芯（先打包原生 `lib/core` 与高消耗视听算子，向存量 KubeJS 组件暴露加速接口）」** 的渐进演进路线：
+
+1. **Git 分支切换与归档规范（`legacy-kubejs`）**：
+   - 在正式动工前，将现行纯 KubeJS 封版态的 `main` 分支完整派生并推送至远端归档分支 **`legacy-kubejs`**（同步打上封版归档 Tag），冻结保存纯脚本时代的完整可运行快照；
+   - **`main` 分支**随即转为 Phase 4 原生 Mod 主开发分支：承载原生 Gradle 工程（`epiphy-mod`）以及**当前阶段尚未迁入原生层、继续留在 KubeJS 配合运行与测试的组件脚本**。每当某一组件或算子由原生 Mod 正式接管，即从 `main` 的 `kubejs/` 中移除对应旧脚本或冗余热路径代码。
+2. **首期 `lib/core` 边界划分（聚焦真核心与高开销热路径，低频治理脚本暂留 KubeJS）**：
+   - **首期打包进原生 `lib/core` 的基础底座**：`EpiphySpec`（跨端协议/缓存/预设底座与渲染事件桥接）+ **`EpiphyServerCore`（外置存储 `epiphy-data/`、`JsonStore`、世界/实体工具）+ `EpiphyLog`（异步按天日志与限频）+ `EpiphyDebug`（统一诊断面板与性能采样）**，并通过前置激活的 `EpiphyKubeJSPlugin` 向 `global.*` 暴露同名兼容接口，确保所有未迁移的 KubeJS 组件与单测无缝衔接（`/epiphy debug` 通过既有的 `global.EpiphySubcommandQueue` 延迟队列交由 KubeJS 层的权限阀挂载，零耦合倒挂）。
+   - **首期明确暂不迁入、继续作为 KubeJS 组件运行的模块**：**`EpiphyPermissionValve`（权限阀）**、**`EpiphyBugfix`（退出血量修复）** 与 **`EpiphyCreativeTab`（创造模式物品栏）**（及阶段一暂留的 `EpiphyBlockTracker`）。这些组件属于低频触发的管理、进退服或启动注册逻辑，无 Rhino 每帧性能瓶颈，在首期保留为 KubeJS 脚本既能大幅压缩 `lib/core` 首发排错面，又能直接充当检验原生 `lib/core` 暴露接口稳定性的真实上游客户（待后期收尾阶段再按需决定收编）。
+3. **视听子系统「类 CodeChickenLib 模式」算子先行下沉（Native Hot-Path Accelerators）**：
+   - 借鉴此前物品 3D 脚本通过调用 `CodeChickenLib` (`CCModel` / `IItemRenderer`) 绕开 Rhino 性能天花板的成功经验，**从首期 `lib/core` 阶段开始，不再等视听调度器整块重写，而是优先把视听子系统中原本靠复杂间接操作（多层 SRG 反射、第三方胶水、Rhino 逐顶点/逐帧循环、手工矩阵拼装）实现的高性能消耗功能剥离进原生 `epiphy-core`**，封装为干净的 Java/Kotlin 原生加速接口反向提供给 KubeJS 视听组件调用：
+     - **物品 3D 原生加速接口（首期直接平替并拔除 `CodeChickenLib`）**：在 `epiphy-core` 实现原生 `IClientItemExtensions`/`ItemRendererMixin`、原版 `ShaderInstance` 绑定与紧凑 Java 网格/VBO 提交器，暴露 `EpiphyNativeItem3D` 给 KubeJS 物品 3D 组件直接调用，第一时间卸除外部 CCL 依赖；
+     - **世界 3D 几何批提交接口（消除 Rhino 逐帧三角函数与逐顶点 JNI）**：在 `epiphy-core` 内置预烘焙单位 `ring`/`beam`/`helix`/`sphere` 网格与实体插值矩阵计算，KubeJS `Epiphy3DFX` 保留轻量状态机，每帧仅做 1 次原生批调用；
+     - **2D 平面合成热路径与夹心/FBO 接口（消除 `Epiphy2DRenderer` 间接绕路）**：将高消耗的 `world_plane` 2D→3D 矩阵顶点投影、多层程序化几何视差 (`parallax`)/渐变矩形批量顶点写入、`TextureTarget` (FBO) 离屏缓存池，以及 `AbstractContainerScreen`/`GuiGraphics` 真槽位夹心与无污染贴图重映射 Mixin 下沉至 `epiphy-core`，暴露接口供 KubeJS 平面渲染器直接驱动；
+     - **客户端 3D 音频底层桥接接口（消除脆弱的 `SoundEngine` SRG 反射链）**：用编译期校验的 Mixin `@Accessor` 封装 OpenAL `Channel` 3D 坐标更新、暂停保流与 `minecraft:` BGM 避让原语，提供给 KubeJS `EpiphyAudioClient` 直接调用。
 
 ---
 
@@ -225,28 +241,29 @@ side = "BOTH"
 
 ---
 
-## 3. 多模块 Gradle 工程与迁入/留存边界切分
+## 3. 多模块 Gradle 工程与编译期硬隔离布局
 
-采用清晰的四子工程（Multi-Project Gradle）+ KubeJS 数据脚本留存切分：
+为同时实现 **「纯契约秒级单测」、「核心引擎零第三方依赖编译期硬锁死」、「可选软兼容桥接单 Jar 统一 SRG/RefMap 重映射（规避 ForgeGradle 6 跨子工程合并重映射丢失问题）」**，采用如下 `epiphy-mod/` 工程结构：
 
 ```text
-epiphy-mod/                   # Kotlin for Forge 原生模组仓库
-├── epiphy-api/               # 纯公共契约层（零内部实现耦合，供下游附属 Mod 或脚本插件依赖）
-│   └── dev.epiphy.api.*      #   PROTO v6 / FX3D / Audio 数据模型、官方双别名映射、Preset/Widget/Shader 接口、Kotlin DSL
-├── epiphy-core/              # 原生核心引擎本体（仅依赖 Forge + KFF，产出主模组 Jar）
-│   ├── dev.epiphy.core.*     #   双端共享协议编解码、数学与有界 LRU/FIFO 缓存、预设中心
-│   ├── dev.epiphy.server.*   #   epiphy-data 外置存储、权限阀、日志、调试中心、方块/区块引擎、2D/3D/音频服务端调度器、Bugfix
-│   ├── dev.epiphy.client.*   #   2D 平面合成器 (+FBO池)、世界/物品原生 3D 渲染器 (零CCL)、3D 空间音频播放器
-│   └── dev.epiphy.mixin.*    #   纯 Java Mixin（GUI/Slot 夹心、纹理重映射、第三方物品 3D 钩子）
-├── epiphy-compat/            # 可选软兼容桥接层（全部 compileOnly，按 ModList 动态装配）
-│   ├── compat.modernui.*     #   ModernUI TextLayoutEngine 直连排版与 SDF 单 Pass 描边快路径
-│   ├── compat.curios.*       #   Curios API 饰品栏安全物品检索桥接
-│   └── compat.kubejs.*       #   EpiphyKubeJSPlugin：向 KubeJS 脚本暴露原生 Epiphy* 绑定门面（支持主名 + 至多 2 个官方别名）
-└── epiphy-showcase/          # 可选独立案例与附属内容包（不打入核心发行 Jar，用于实机验收与重型玩法示范）
-    └── dev.epiphy.showcase.* #   rnfmabj_test 测试方块、imperius_test 物品 3D 示范、失稳拆解台混沌殉爆迁移参考
+epiphy-mod/                   # Kotlin for Forge 原生模组 Gradle 根工程 (Gradle 8.10.2 + JDK 17 Toolchain)
+├── epiphy-api/               # 纯公共契约子工程（零 Minecraft/Forge 依赖，毫秒级 JUnit 测试）
+│   └── dev.epiphy.api.*      #   PROTO v6 / FX3D / Audio 数据模型、官方双别名映射、BoundedCache、PresetRegistry、SemVer
+├── epiphy-core/              # 原生核心主模组子工程（产出唯一主发行 Jar，统一执行单次 reobfJar）
+│   ├── src/main/             #   [零第三方业务依赖 SourceSet：编译类路径物理不含 KubeJS / ModernUI / Curios]
+│   │   ├── dev.epiphy.core.* #     双端共享网络编解码与生命周期引导
+│   │   ├── dev.epiphy.server.*#    epiphy-data 外置存储、JsonStore、日志、调试中心、区块引擎与服务端调度
+│   │   ├── dev.epiphy.client.*#    2D/3D/音频原生加速后端 (去CCL原生物品3D、世界3D批提交、FBO池) 与客户端引擎
+│   │   └── dev.epiphy.mixin.*#     纯 Java Mixin（EpiphyMixinPlugin 环境守卫、GUI/Slot 夹心、纹理重映射、OpenAL Accessor）
+│   └── src/compat/           #   [软兼容隔离 SourceSet：独占 compileOnly(KubeJS/ModernUI/Curios)，随主 Jar 统一重映射]
+│       ├── compat.kubejs.*   #     EpiphyKubeJSPlugin (kubejs.plugins.txt)：向 KubeJS global.* 暴露原生底座与视听加速接口
+│       ├── compat.modernui.* #     ModernUI TextLayoutEngine 直连排版与 SDF 单 Pass 描边快路径
+│       └── compat.curios.*   #     Curios API 饰品栏安全物品检索桥接
+└── epiphy-showcase/          # 可选独立案例与附属内容子工程（不打入核心发行 Jar，用于实机验收与重型玩法示范）
+    └── dev.epiphy.showcase.* #   rnfmabj_test 测试方块、imperius_test 物品 3D 示范、失稳拆解台迁移参考
 
-kubejs/ (整合包数据魔改层 —— 永久保留在 KubeJS，无需移植进原生 Mod)
-└── server_scripts/合成表-*/   # 原版、植物魔法、神秘遗物等单纯合成表修改、Tag 调整与轻量整合包数据胶水
+kubejs/ (整合包数据魔改与待迁移过渡层)
+└── server_scripts/合成表-*/   # 原版、植物魔法、神秘遗物等单纯合成表修改与当前阶段暂留联调的 KubeJS 组件
 ```
 
 ---
@@ -348,27 +365,28 @@ kubejs/ (整合包数据魔改层 —— 永久保留在 KubeJS，无需移植�
 
 ---
 
-## 7. 分里程碑实施路线图（Milestones M0 ~ M5）
+## 7. 分里程碑渐进实施路线图（Milestones M0 ~ M5）
+
+遵循 §1.4 确立的 **「`legacy-kubejs` 封存 ➔ 首期 `lib/core` 底座 + KubeJS 接口暴露 ➔ 视听高消耗算子先行下沉（类 CCL 加速后端模式）➔ 调度层与剩余组件逐步收口」** 路线推进：
 
 ```mermaid
 flowchart TD
-    M0["M0: KFF 4.12 四模块脚手架与契约测试底座<br/>(Kotlin for Forge + Mixin + Schema & 双别名 JUnit)"] --> M1
-    M1["M1: L1/L2 服务端核心与安全底座<br/>(kotlinx.serialization JsonStore + epiphy-data + PermissionValve + Log/Debug/Bugfix)"] --> M2
-    M2["M2: 世界追踪引擎与 3D 空间声场<br/>(Chunk Palette BlockTracker + WorldOps + OpenAL Audio)"] --> M3
-    M2 --> M4
-    M3["M3: 2D 平面合成器完全体<br/>(PROTO v6 + FBO 缓存池 + Mixin GUI/Slot 夹心 + mask 着色器 + world_plane 交互)"] --> M5
-    M4["M4: 零 CCL 原生 3D 渲染子系统<br/>(原生 VBO 物品 3D 渲染器 + 世界 3D 实例管线)"] --> M5
-    M5["M5: KubeJS 插件桥接、旧档自动迁移与实机压测封版<br/>(EpiphyKubeJSPlugin + 存档迁移器 + 留存配方脚本协同验收)"]
+    M0["M0: legacy-kubejs 分支归档 & KFF 4.12 脚手架<br/>(Kotlin 2.2.21 + MixinBooster + EpiphyKubeJSPlugin 前置桥接)"] --> M1
+    M1["M1: 首期 lib/core 核心底座原生化<br/>(Spec + ServerCore + Log + Debug 暴露给 KubeJS；权限阀/Bugfix/创造栏留存 KubeJS 联调)"] --> M2
+    M2["M2: 视听高消耗热路径算子下沉进 Core (类 CCL 加速接口模式)<br/>(去CCL原生物品3D内核 + 世界3D网格批提交 + 2D FBO/视差/GUI夹心Mixin + OpenAL音频桥接)"] --> M3
+    M3["M3: 世界区块引擎原生化<br/>(LevelChunk 咽喉 Mixin + Palette 直读 BlockTracker + 三级门控 WorldOps)"] --> M4
+    M4["M4: 视听服务端/客户端调度层与二进制网络通道收口<br/>(epiphy:main BitMask 二进制帧 + 2D/3D/Audio 完整原生状态机)"] --> M5
+    M5["M5: 暂留 KubeJS 组件收尾迁移与实机压测封版<br/>(PermissionValve / Bugfix Mixin / CreativeTab 收编 + 旧档单向迁移器 + 全量验收)"]
 ```
 
 | 里程碑 | 核心交付物 | 关键验收门禁（Definition of Done） |
 | :--- | :--- | :--- |
-| **M0：KFF + MixinBooster 工程脚手架** | 建立基于 `kotlinforforge 4.12.0` + `MixinBooster` (`Fabric Mixin`) + `mixinextras-forge` (`jarJar`) 的四模块 Gradle 工程（`api`/`core`/`compat`/`showcase`）；接入 Parchment 与 `EpiphyMixinPlugin` 自检；在 `epiphy-api` 落地 `proto_v6_schema.json` 与「1 主名 + 至多 2 官方别名」JUnit 门禁 | `./gradlew check` 全绿；安装 `Forge + Kotlin for Forge 4.12.0 + MixinBooster` 启动客户端与专用服务端（Dedicated Server）零崩溃、零客户端类泄漏、零重复 Kotlin stdlib 打包 |
-| **M1：核心存储与权限安全底座** | 基于 KFF 内置 `kotlinx.serialization` 完成 `JsonStore`、`epiphy-data/` 世界自动分叉、`EpiphyLog` 协程异步写盘、`EpiphyPermissionValve`（三态域 + 墓碑 + 二次口令确认）、`EpiphyDebug` 与 `EpiphyBugfix` | 100% 复现并通过现行权限阀防提权、防回滚墓碑、损坏文件 `.corrupt.bak` 隔离锁 JUnit 测试；直接读取现有测试端 `epiphy-data/` 零报错兼容 |
-| **M2：方块/区块引擎与空间音频** | 完成基于 `LevelChunkSection` Palette 直读的 `BlockTracker`、三级门控 `WorldOps` 地形/流体批处理，以及基于 Mixin `@Accessor` 的双端 `EpiphyAudio` 3D 声场与温和 BGM 避让 | 1000+ 绑定方块区块扫描耗时 `< 0.5ms/tick`；ESC 暂停/失焦恢复、球簇合并与非 `minecraft:` 模组音乐零误停测试通过 |
-| **M3：2D 平面合成器完全体** | 完成 `PROTO v6` 全部 6 类图元、混合图文全富文本 Pass-Grouped 合批（完结 `P1-2`）、`TextureTarget` FBO 池、`AbstractContainerScreen` & `GuiGraphics` 夹心 Mixin（完结 `P2-1`/`P2-3`）、`fill.mask` 着色器与 `world_plane` 射线交互 | 20 条并发弹幕 + 2 个复杂遥测面板 + 54 槽位动态覆盖层同屏总 CPU/GPU 提交耗时 **`<= 0.4 ms`**；开闭任意 GUI 贴图与 OpenGL 状态 100% 零泄漏 |
-| **M4：零 CCL 原生 3D 子系统** | 完成 `EpiphyItem3DRenderer` 原生 VBO + `ShaderInstance` + `IClientItemExtensions`/`ItemRendererMixin` 实现（**彻底删除 CCL**），以及 `Epiphy3DFX` 世界 3D 特效渲染器 | 在**未安装 CodeChickenLib** 的 `Forge + KFF` 客户端中，多层自定义着色器 + 星环/螺旋/粒子簇三维物品在第一/三人称与 GUI 槽位中完美渲染，零穿模、单件耗时 `< 0.08ms` |
-| **M5：兼容桥接、存档迁移与封版** | 完成 `EpiphyKubeJSPlugin`、`ModernUI`/`Curios` 软兼容隔离模块、旧存档 `kubejs_epiphy_*.json` 自动迁移器，并与留存 KubeJS 的 `合成表-*/` 脚本联合实机验收 | 旧测试存档升级加载后世界平面与追踪方块 100% 自动无损恢复；KubeJS 合成表热重载与原生引擎协同工作正常；Dedicated Server 压力回归通过 |
+| **M0：`legacy-kubejs` 归档与 KFF 脚手架 + KubeJS 桥接底座** | 将现行纯脚本 `main` 封存推送至 **`legacy-kubejs`** 分支；在 `main` 建立 `kotlinforforge 4.12.0` (`Kotlin 2.2.21`) + `MixinBooster` + `mixinextras-forge` 四模块工程，并**前置打通 `epiphy-compat` (`EpiphyKubeJSPlugin`) 向 KubeJS `global.*` 注入原生门面的机制** | `./gradlew check` 全绿；`runClient` / `runServer` 零崩溃、零客户端类泄漏、零重复 Kotlin stdlib 打包；KubeJS 脚本可正常读写原生测试门面 |
+| **M1：首期 `lib/core` 基础设施底座（保存量脚本运行）** | 完成 **`EpiphySpec` + `EpiphyServerCore` (`JsonStore` + `epiphy-data/`) + `EpiphyLog` + `EpiphyDebug`** 原生化并暴露同名 `global.*` 接口，移除对应 4 个旧 `.js` 脚本；**`权限阀`、`Bugfix`、`创造模式栏` 与业务层继续作为 KubeJS 组件运行** | 存量 KubeJS 权限阀、方块追踪、视听组件与 `拆解台-混沌殉爆` 在原生 `lib/core` 底座上 **100% 正常加载运行**；`/epiphy debug` 通过延迟队列正常挂载至 KubeJS 权限阀，既有回归测试全绿 |
+| **M2：视听子系统高消耗热路径下沉 `core`（提供原生加速接口）** | 将视听层通过复杂反射/胶水/解释器循环实现的高开销部分迁入 `epiphy-core` 并暴露接口给 KubeJS 视听脚本调用：① **原生物品 3D 内核**（彻底移除 `CodeChickenLib`）；② **世界 3D 预烘焙网格批提交**；③ **2D `world_plane` 投影 / 视差批处理 / `TextureTarget` FBO / `gui`&`slot` 夹心 Mixin**；④ **`SoundEngine`/`Channel` Accessor 音频底层接口** | 在**卸载 CodeChickenLib** 的环境中，`imperius_test` 3D 武器正常渲染且单件耗时 `< 0.08ms`；KubeJS 2D/3D/音频组件切换至调用 `epiphy-core` 加速接口后帧耗时显著下降，GUI/槽位真夹心与非 `minecraft:` BGM 保护全部实机通过 |
+| **M3：方块追踪与地形批处理引擎原生化** | 完成 `LevelChunk.setBlockState` 唯一咽喉观察 Mixin、`LevelChunkSection` Palette 直读 `BlockTracker` 与三级开销门控 `WorldOps`，向 KubeJS 暴露 `EpiphyBlockTracker` / `EpiphyWorldOps` 并移除旧 `.js` | 1000+ 绑定方块扫描 `< 0.5ms/tick`；KubeJS 弹幕/音频 `bindBlock` 与拆解台流体剥离无缝衔接 |
+| **M4：视听双端调度状态机与紧凑二进制协议收口** | 将 KubeJS 侧剩余的 2D/3D/音频包调度状态机迁入原生层，启用 `epiphy:main` `FriendlyByteBuf` BitMask 二进制帧（`patch` 包压至 `18~32B`），补齐 `fill.mask` 着色器与 `world_plane` 射线交互，并继续向 KubeJS 脚本暴露完整高层 API | 20 条弹幕 + 2 个复杂遥测面板 + 54 槽位覆盖层总耗时 `<= 0.4ms`；KubeJS 玩法脚本通过 `EpiphyKubeJSPlugin` 调用原生视听接口行为一致 |
+| **M5：暂留脚本收编、单向存档迁移与正式封版** | 收编前期留在 KubeJS 层的 `EpiphyPermissionValve`、`EpiphyBugfix`（转为 `LivingEntityMixin`）与 `EpiphyCreativeTab`；落地 `kubejs_epiphy_*.json` 旧档首次启动单向导入器，仅保留 `合成表-*/` 等纯数据胶水在 KubeJS 层 | 纯净 `Forge + KFF + MixinBooster`（无论装或不装 KubeJS）双环境实机与 Dedicated Server 压测通过，正式发布原生 Mod（纯 KubeJS 旧版同步进入 EOL） |
 
 ---
 
