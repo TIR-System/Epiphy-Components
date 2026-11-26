@@ -90,8 +90,10 @@ interface EpiphyDebugProvider {
     val order: Int get() = 100
 
     fun summary(): String
+    fun detailLines(): List<String> = emptyList()
     fun metrics(): Map<String, Any?> = emptyMap()
     fun runHealthChecks(): List<HealthCheckItem> = emptyList()
+    fun actionDescriptions(): Map<String, String> = emptyMap()
     fun invokeAction(actionName: String, args: List<String> = emptyList()): String? = null
 }
 
@@ -116,9 +118,15 @@ class EpiphyDebugHub {
 
     fun unregister(id: String): Boolean = providers.remove(id.trim().lowercase()) != null
 
-    fun listProviderIds(): List<String> =
+    fun hasProvider(id: String): Boolean = providers.containsKey(id.trim().lowercase())
+
+    fun getProvider(id: String): EpiphyDebugProvider? = providers[id.trim().lowercase()]
+
+    fun orderedProviders(): List<EpiphyDebugProvider> =
         providers.values.sortedWith(compareBy<EpiphyDebugProvider> { it.order }.thenBy { it.id })
-            .map { it.id.trim().lowercase() }
+
+    fun listProviderIds(): List<String> =
+        orderedProviders().map { it.id.trim().lowercase() }
 
     fun collectSummaries(): Map<String, String> {
         val ordered = providers.values.sortedWith(compareBy<EpiphyDebugProvider> { it.order }.thenBy { it.id })

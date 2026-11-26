@@ -174,4 +174,34 @@ class CoreInfrastructureRobustnessTest {
         assertEquals(64, FboCachePool.alignBucketDim(45))
         assertEquals(2048, FboCachePool.alignBucketDim(9999))
     }
+
+    @Test
+    fun `EpiphyDataManager forbids permission configs inside world saves and RawJsonFileStore heals backups`(
+        @TempDir tempDir: Path
+    ) {
+        val dm = EpiphyDataManager(tempDir)
+        val saveDir = tempDir.resolve("saves").resolve("TestWorld")
+        Files.createDirectories(saveDir)
+        val ctx = dm.bindWorld(saveDir, "TestWorld")
+
+        // 外部 epiphy-data/worlds/<folder>/ 与 epiphy-data/config/ 必须放行
+        val extSec = dm.resolveExternalWorldSecurityFiles(ctx)
+        assertFalse(dm.isPathInsideWorldSave(Path.of(extSec["permissionsFile"]!!)))
+        assertFalse(dm.isPathInsideWorldSave(dm.resolveGlobalConfigFile("logging.json")))
+
+        // 存档目录内部 saves/<world>/ 必须被严格拦截
+        val inSavePerm = saveDir.resolve("kubejs_epiphy_permissions.json")
+        assertTrue(dm.isPathInsideWorldSave(inSavePerm))
+        var blocked = false
+        try {
+            dm.requireExternalSecurityPath(inSavePerm)
+        } catch (_: SecurityException) {
+            blocked = true
+        }
+        assertTrue(blocked, "Permission config inside world save must throw SecurityException")
+
+        val rawStore = dev.epiphy.core.storage.RawJsonFileStore(tempDir.resolve("epiphy-data/config/test_raw.json"))
+        assertTrue(rawStore.saveRawJsonText("""{"hello":"world","v":1}"""))
+        assertEquals("ok", rawStore.loadRaw().status)
+    }
 }

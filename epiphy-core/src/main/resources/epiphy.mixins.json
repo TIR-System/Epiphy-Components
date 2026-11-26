@@ -8,6 +8,8 @@
   "mixins": [],
   "client": [
     "client.AbstractContainerScreenMixin",
+    "client.AbstractSoundInstanceAccessor",
+    "client.GuiAccessor",
     "client.GuiGraphicsMixin",
     "client.ItemRendererMixin",
     "client.SoundEngineAccessor",

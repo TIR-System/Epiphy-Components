@@ -345,7 +345,7 @@ side = "BOTH"
 | 数据类别 | KubeJS 阶段位置 | 原生 Mod 阶段位置 | 自动迁移策略（仅单向升级） |
 | :--- | :--- | :--- | :--- |
 | **随存档同步回滚的世界状态**<br>（方块追踪表、`world_plane` 全息牌、退出 HP 恢复、事件倒计时） | `saves/<world>/kubejs_epiphy_tracked_blocks.json`<br>`saves/<world>/kubejs_epiphy_world_planes.json`<br>`persistentData` | 原版维度/世界级 `SavedData` (`data/epiphy_*.dat`) 或 `saves/<world>/epiphy/*.json` | 世界加载时若新存储为空且检测到旧 `kubejs_epiphy_*.json`，自动解析导入新存储并将旧文件重命名为 `.migrated_to_mod.bak`（降级回旧 KubeJS 版不保证可读） |
-| **抗回滚安全、审计与跨档索引**<br>（权限阀授权、`revocations.json` 墓碑、`auth_mode.json`、`worlds_index.json`、外部运行日志） | `<gameDir>/epiphy-data/` | **原路径原格式 100% 保留 `<gameDir>/epiphy-data/`** | 原权限授权、撤销墓碑与世界分叉记录在升级为原生 Mod 后直接无缝接管；后续随 Mod 迭代扩充的新字段不保证旧 KubeJS 脚本逆向兼容 |
+| **抗回滚安全、审计与跨档索引**<br>（权限阀授权、`revocations.json` 墓碑、`auth_mode.json`、`worlds_index.json`、外部运行日志） | `<gameDir>/epiphy-data/` | **原路径原格式 100% 保留 `<gameDir>/epiphy-data/`**（**硬性安全红线：权限设置等安全配置文件严禁存放在 `saves/<world>/` 存档目录内部，亦绝不从存档内部导入任何旧权限文件**，由 `EpiphyDataManager.requireExternalSecurityPath` 双端强制拦截，防止存档回滚复活已撤销权限或外来地图夹带提权配置） | 原外部权限授权、撤销墓碑与世界分叉记录在升级为原生 Mod 后直接无缝接管；后续随 Mod 迭代扩充的新字段不保证旧 KubeJS 脚本逆向兼容 |
 
 ### 6.3 `EpiphyKubeJSPlugin`：通过 KubeJS 调用原生 Mod 接口的推荐模式与兼容预期
 当整合包同时安装了 `KubeJS` 时，`epiphy-compat` 中的 `EpiphyKubeJSPlugin` 自动激活：

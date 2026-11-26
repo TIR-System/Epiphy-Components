@@ -53,7 +53,46 @@ object EpiphyCoreShaders {
     }
 
     @JvmStatic
+    fun registerDynamicShader(idStr: String, formatName: String?, uniformNames: List<String>): Boolean {
+        val rl = ResourceLocation.tryParse(if (':' in idStr) idStr.trim() else "epiphy:${idStr.trim()}") ?: return false
+        val fmt = when (formatName?.trim()?.uppercase()) {
+            "NEW_ENTITY" -> DefaultVertexFormat.NEW_ENTITY
+            "POSITION_COLOR" -> DefaultVertexFormat.POSITION_COLOR
+            "POSITION_COLOR_TEX_LIGHTMAP" -> DefaultVertexFormat.POSITION_COLOR_TEX_LIGHTMAP
+            else -> DefaultVertexFormat.POSITION_COLOR_TEX
+        }
+        specs[rl] = ShaderSpec(rl, fmt, uniformNames)
+        return true
+    }
+
+    @JvmStatic
     fun getShader(id: ResourceLocation): CompiledShaderHandle? = loadedShaders[id]
+
+    @JvmStatic
+    fun getShaderByString(idStr: String): CompiledShaderHandle? {
+        val rl = ResourceLocation.tryParse(if (':' in idStr) idStr.trim() else "epiphy:${idStr.trim()}") ?: return null
+        return loadedShaders[rl]
+    }
+
+    @JvmStatic
+    fun listRegisteredShaderIds(): List<String> = specs.keys.map { it.toString() }.sorted()
+
+    @JvmStatic
+    fun getShaderDiagnostics(): Map<String, Map<String, Any?>> {
+        val out = LinkedHashMap<String, Map<String, Any?>>()
+        for ((id, spec) in specs) {
+            val loaded = loadedShaders[id]
+            val hasAllUniforms = loaded != null && spec.uniformNames.all { loaded.uniforms.containsKey(it) }
+            out[id.toString()] = mapOf(
+                "id" to id.toString(),
+                "registered" to true,
+                "loaded" to (loaded != null),
+                "hasUniforms" to hasAllUniforms,
+                "uniformsFound" to (loaded?.uniforms?.keys?.toList() ?: emptyList<String>())
+            )
+        }
+        return out
+    }
 
     internal fun onRegisterShaders(event: RegisterShadersEvent) {
         for ((id, spec) in specs) {

@@ -276,6 +276,73 @@ class EpiphyDataManager(rawGameDir: Path) {
         return out
     }
 
+    /**
+     * 硬性安全边界：校验目标路径是否位于任何世界存档目录（`saves/<world>/` 或当前绑定的 `saveRootPath`）内部。
+     * 权限设置（`permissions.json`、`revocations.json`、`auth_mode.json`）及全局配置文件严禁存放在存档内部，
+     * 防止存档回滚复活已撤销权限或外部恶意存档自带提权配置。
+     */
+    fun isPathInsideWorldSave(rawTarget: Path): Boolean {
+        val cleanTarget = normalizeCleanPath(rawTarget)
+        val activeSave = activeWorldContext?.saveRootPath
+        if (activeSave != null && cleanTarget.startsWith(activeSave)) {
+            return true
+        }
+        val defaultSavesRoot = gameDir.resolve("saves").normalize()
+        if (cleanTarget.startsWith(defaultSavesRoot)) {
+            return true
+        }
+        // 兜底检查路径片段：任何包含 `/saves/<world>/` 且不在 `epiphy-data` 下的路径一律视为存档内路径
+        if (!cleanTarget.startsWith(dataRoot)) {
+            val key = toCanonicalPathKey(cleanTarget)
+            if (key.contains("/saves/")) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * 强制断言安全/权限配置文件位于存档外部的 `epiphy-data/` 管辖目录中；若误指入存档目录则立即抛出 [SecurityException]。
+     */
+    fun requireExternalSecurityPath(rawTarget: Path): Path {
+        val cleanTarget = normalizeCleanPath(rawTarget)
+        if (isPathInsideWorldSave(cleanTarget)) {
+            throw SecurityException(
+                "[EpiphySecurity] Permission/security config file MUST NOT reside inside a world save directory: $cleanTarget"
+            )
+        }
+        return cleanTarget
+    }
+
+    /**
+     * 解析全局实例级配置文件路径（位于 `<gameDir>/epiphy-data/config/<fileName>`，严格处于存档外部）。
+     */
+    fun resolveGlobalConfigFile(fileName: String): Path {
+        ensureSkeletonDirectories()
+        val safeName = fileName.trim().trimStart('/', '\\')
+        require(safeName.isNotEmpty() && !safeName.contains("..")) { "Invalid global config filename: $fileName" }
+        return requireExternalSecurityPath(configDir.resolve(safeName).normalize())
+    }
+
+    /**
+     * 解析指定世界在外部 `epiphy-data/worlds/<folderName>/` 下的安全权限配置文件集合（严禁落入 `saves/<world>/`）。
+     */
+    fun resolveExternalWorldSecurityFiles(ctx: BoundWorldContext? = activeWorldContext): Map<String, String> {
+        ensureSkeletonDirectories()
+        val baseDir = ctx?.externalWorldDir ?: configDir.resolve("_unbound_security")
+        if (!Files.isDirectory(baseDir)) {
+            Files.createDirectories(baseDir)
+        }
+        val perm = requireExternalSecurityPath(baseDir.resolve("permissions.json"))
+        val rev = requireExternalSecurityPath(baseDir.resolve("revocations.json"))
+        val mode = requireExternalSecurityPath(baseDir.resolve("auth_mode.json"))
+        return mapOf(
+            "permissionsFile" to perm.toString().replace('\\', '/'),
+            "revocationsFile" to rev.toString().replace('\\', '/'),
+            "authModeFile" to mode.toString().replace('\\', '/')
+        )
+    }
+
     private fun loadIndexMap(): Map<String, String> =
         when (val res = indexStore.load()) {
             is AtomicJsonStore.LoadOutcome.Loaded -> res.value.worlds
