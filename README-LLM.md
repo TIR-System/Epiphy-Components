@@ -29,6 +29,7 @@
    - `epiphy-core`：
      - `src/main`：核心基础设施与客户端渲染/音频底层原语。编译类路径不引入 KubeJS / ModernUI / Curios 等第三方业务 Mod。
      - `src/compat`：可选软兼容桥接层（`compileOnly` 依赖 KubeJS / ModernUI / Curios），随主模块统一参与单次 `reobfJar` 与 `jarJar` 打包。
+   - **长期模块化家族方向**（详见 [`docs/native-mod-migration-plan.md`](docs/native-mod-migration-plan.md) §9）：`epiphy-api` 将保持零 Minecraft/Forge 依赖并持续扩张纯契约与 SPI 能力；`surface2d`、`fx3d`、`audio`、`permission` 规划在未来拆分为与 `epiphy-core` 同级、单向依赖核心底座的独立模组（类 FTB 家族式组织形态，但聚焦视听表现与外置治理方向），并通过 Forge 原生 `Jar-in-Jar` 同时支持分散安装与单 JAR 聚合分发。日常开发应避免上述四个业务域之间产生横向交叉依赖。
 2. **Kotlin for Forge (`4.12.0`) 与 Mixin 边界**：
    - 运行时复用 KFF `4.12.0` 提供的 `Kotlin 2.2.21`、`kotlinx-coroutines-core 1.10.2` 与 `kotlinx-serialization-json 1.9.0`，构建产物严禁自行打包 `kotlin/` 或 `kotlinx/` 字节码（由 `verifyNoBundledKotlin` 门禁检查）。
    - `runForDist` 为 `inline` 函数，`EpiphyMod` 与 `dev.epiphy.core.*` 严禁在字节码中直接引用 `net.minecraft.client.*`、`com.mojang.blaze3d.*` 或客户端专属事件类，统一通过无客户端参数类型的 `EpiphyClientBootstrap.init(MOD_BUS, FORGE_BUS)` 跳板转发（由 `BytecodeSafetyGuardTest` 检查）。

@@ -403,3 +403,58 @@ flowchart TD
 | **4. Iris / OptiFine 光影管线与自定义 Core Shader / Mixin 冲突** | 中高 | 物品与世界 3D 优先通过标准 `MultiBufferSource` 管线与 `RenderLevelStageEvent.Stage.AFTER_TRANSLUCENT_BLOCKS` 提交；当探测到活跃光影接管且自定义 Core Shader 被拦截时，复用已验证的 Fail-Soft 降级矩阵平滑退回标准发光贴图通道。 |
 | **5. 可选联动 Mod（KubeJS / ModernUI / Curios）未安装时引发类验证错误** | 中 | 所有可选联动代码物理隔离在独立包 `dev.epiphy.compat.<modid>.*`，主模块仅在确认 `ModList.get().isLoaded("<modid>")` 为 `true` 后通过独立桥接入口触发类加载，并在 CI 分别运行“全装联动”与“仅 Forge + KFF 纯净”两套启动测试。 |
 | **6. Kotlin 隐式装箱或非 `inline` 扩展污染每帧渲染热路径与 `PoseStack` 安全性** | 低中 | 底层顶点发射、矩阵栈变换、字素查表与 Mixin 类强制使用纯 Java 17 或 Kotlin 基本类型数组（`FloatArray` / `IntArray`）+ 自建带 `try / finally` 的 `inline fun PoseStack.withPose`（禁用 `kfflib` 非内联且无 `finally` 的 `PoseStack.use`），通过 JFR 监控确保稳定态渲染热路径每帧堆分配趋近于 `0 Bytes`。 |
+
+---
+
+## 9. 长期演进蓝图：类 FTB 家族式模块化架构与双形态分发
+
+在核心能力收敛稳定后，Epiphy 系列将演进为**组织形态类似 FTB 模组家族（共享基础库 + 同级独立功能模块）、能力方向聚焦于视听表现层与外置治理基础设施**的模块化体系：
+
+### 9.1 架构定位与 `epiphy-api` 扩张方向
+1. **系列组织形态与差异化方向**：
+   - 借鉴 FTB 系列（`FTB Library` + `FTB Teams` / `FTB Chunks` / `FTB Quests` 等）“共享基础底座 + 同级可插拔功能模组”的家族化组织方式；
+   - 能力方向与 FTB 偏重任务/队伍/区块管理的定位相互区分：Epiphy 家族专注于**高自由度声明式 2D/3D 视听表现层、空间音频控制、抗回滚外置存储与细粒度服务端权限策略阀**。
+2. **`epiphy-api` 的零游戏依赖扩张策略**：
+   - `epiphy-api` 始终保持**零 Minecraft / Forge 类库依赖**（纯 JVM 契约层），并在后续迭代中持续扩张其能力范围，逐步承接跨模块共享的协议模型（`PROTO v6` 及后续演进）、SPI 扩展契约（配置分段、遥测提供者、KubeJS 命名空间挂载点）、通用缓存与状态机数据结构，以及独立于游戏版本运行的权限策略与规则校验模型。
+
+### 9.2 目标模块拓扑与双形态分发机制
+```mermaid
+flowchart BT
+    API["epiphy-api<br/>(纯 JVM 契约 / SPI / 数据模型，零 MC 依赖)"]
+    CORE["epiphy-core (modId: epiphy)<br/>(外置存储 / 配置框架 / 异步日志 / 诊断遥测 / 栈水位线与熔断)"]
+
+    S2D["epiphy-surface2d<br/>(2D 平面合成 / 文字合批 / FBO / GUI 拦截)"]
+    FX3D["epiphy-fx3d<br/>(物品 3D 图层 / 空间三维图元 / Shader)"]
+    AUD["epiphy-audio<br/>(OpenAL 3D 声源 / BGM 避让)"]
+    PERM["epiphy-permission<br/>(三态权限阀 / 抗回滚墓碑 / 命令拦截)"]
+
+    BUNDLE["epiphy-bundle (可选聚合发行包)<br/>通过 Forge 原生 Jar-in-Jar 打包以上模块"]
+
+    CORE --> API
+    S2D --> CORE
+    S2D --> API
+    FX3D --> CORE
+    FX3D --> API
+    AUD --> CORE
+    AUD --> API
+    PERM --> CORE
+    PERM --> API
+
+    BUNDLE -. jarJar 聚合 .-> CORE
+    BUNDLE -. jarJar 聚合 .-> S2D
+    BUNDLE -. jarJar 聚合 .-> FX3D
+    BUNDLE -. jarJar 聚合 .-> AUD
+    BUNDLE -. jarJar 聚合 .-> PERM
+```
+
+- **分散独立分发**：`epiphy-core` 与四个同级功能模块各自产出标准 Forge Mod JAR，拥有独立 `modId`、独立 `mods.toml`（声明强依赖 `epiphy`）、独立 `*.mixins.json` / `*.refmap.json` 与 `ServiceLoader` 注册项。仅需服务端能力（例如 `core + permission`）的整合包无需引入任何客户端渲染 Mixin。
+- **单 JAR 聚合分发（`epiphy-bundle`）**：采用 Forge 1.20.1 原生支持的 **`Jar-in-Jar`（`META-INF/jarjar/metadata.json`）** 将 `epiphy-core`、各独立功能模块 JAR 及 `mixinextras-forge` 打包为单个聚合发行包，避免类合并式 Fat-Jar 导致的 `mods.toml` / `refmap` / `lang` / SPI 覆盖问题；同时借助 Forge 原生 `SemVer` 版本仲裁去重机制，允许用户在保留聚合包的前提下单独放入更高版本的独立子模块进行覆盖升级。
+
+### 9.3 物理拆分前的逻辑解耦准备（两阶段演进）
+为避免过早物理拆包拖慢功能收敛，按两阶段推进：
+1. **阶段一（当前单模块内逻辑隔离）**：
+   - 将 **Mixin 归属**按职责保持正交：`PoseStackAccessor` 归属 `core`；容器与 `GuiGraphics` Mixin 归属 `surface2d`；`ItemRendererMixin` 归属 `fx3d`；`Sound*Accessor` 归属 `audio`；
+   - 将 **游戏内配置页（`EpiphyConfigScreen`）**、**KubeJS 根网关（`EpiphyNative` 子命名空间挂载）** 与 **五元组遥测采样源（`EpiphyRenderPerfReporter`）** 收口为基于 `epiphy-api` 契约的 SPI 注册制；
+   - 在字节码测试门禁中约束 `surface2d`、`fx3d`、`audio`、`permission` 四个包之间禁止交叉引用，仅允许单向依赖 `core` 与 `api`。
+2. **阶段二（物理拆子工程与聚合壳包）**：
+   - 待逻辑边界清零且接口稳定后，在 `settings.gradle.kts` 中将四个功能域平移为同级 Gradle 子项目，并新增 `epiphy-bundle` 壳子工程产出单 JAR 聚合包，下游 KubeJS 的 `EpiphyNative.*` 调用路径保持兼容不变。
