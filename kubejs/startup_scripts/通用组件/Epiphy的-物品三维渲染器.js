@@ -398,8 +398,11 @@
     function normalizeMaterial(rawMat, defaults) {
         var d = isPlainObjLike(defaults) ? defaults : {}
         var m = isPlainObjLike(rawMat) ? rawMat : {}
-        var blend = String(m.blend != null ? m.blend : (d.blend != null ? d.blend : 'additive')).toLowerCase()
-        if (blend !== 'translucent' && blend !== 'additive') blend = 'additive'
+        var blend = String(m.blend != null ? m.blend : (d.blend != null ? d.blend : 'additive')).trim().toLowerCase()
+        if (blend !== 'translucent' && blend !== 'additive' && blend !== 'premultiplied' && blend !== 'multiply' && blend !== 'screen' && blend !== 'opaque') {
+            logErrorThrottled('unknownBlend_' + blend, '未知 blend 模式 "' + blend + '"，已回退为 translucent')
+            blend = 'translucent'
+        }
         return {
             shader:     m.shader != null ? String(m.shader) : (d.shader != null ? String(d.shader) : null),
             texture:    m.texture != null ? String(m.texture) : (d.texture != null ? String(d.texture) : 'epiphy:textures/effect/white_pixel.png'),
@@ -1258,12 +1261,24 @@
         }
         var flushBase  = (cfg.model == null || cfg.model.flushBase !== false)
         var renderBase = (cfg.model == null || cfg.model.renderBase !== false)
-        if (nat3d.bindCompiledItemFromJs(itemId, cfg.motion.speed, cfg.motion.attackExpand, cfg.lod.guiScale, rawPasses, flushBase, renderBase)) {
+        var bindStatus = (typeof nat3d.bindCompiledItemWithStatus === 'function')
+            ? String(nat3d.bindCompiledItemWithStatus(itemId, cfg.motion.speed, cfg.motion.attackExpand, cfg.lod.guiScale, rawPasses, flushBase, renderBase) || '')
+            : (nat3d.bindCompiledItemFromJs(itemId, cfg.motion.speed, cfg.motion.attackExpand, cfg.lod.guiScale, rawPasses, flushBase, renderBase) ? 'BOUND' : 'FAILED')
+
+        if (bindStatus === 'BOUND') {
             BACKEND_STATUS.mode = 'native_mod_gpu'
-            BAKED_ITEMS[itemId] = { passes: rawPasses.length, overlays: ovCnt, geometries: geoCnt, totalVerts: totalVerts }
+            BAKED_ITEMS[itemId] = { passes: rawPasses.length, overlays: ovCnt, geometries: geoCnt, totalVerts: totalVerts, status: 'bound' }
             BAKED_COUNT = Object.keys(BAKED_ITEMS).length
             return true
         }
+        if (bindStatus === 'PENDING_REGISTRY') {
+            if (BACKEND_STATUS.mode !== 'native_mod_gpu') {
+                BACKEND_STATUS.mode = 'native_mod_pending'
+            }
+            BAKED_ITEMS[itemId] = { passes: rawPasses.length, overlays: ovCnt, geometries: geoCnt, totalVerts: totalVerts, status: 'pending_registry' }
+            return false
+        }
+        logErrorThrottled('nativeBindReject_' + itemId, '原生物品 3D 绑定未生效 (' + itemId + ', status=' + bindStatus + ', passes=' + rawPasses.length + ')')
         return false
     }
 

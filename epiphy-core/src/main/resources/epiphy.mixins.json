@@ -12,6 +12,7 @@
     "client.GuiAccessor",
     "client.GuiGraphicsMixin",
     "client.ItemRendererMixin",
+    "client.PoseStackAccessor",
     "client.SoundEngineAccessor",
     "client.SoundManagerAccessor"
   ]

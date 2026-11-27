@@ -22,10 +22,12 @@ data class SemVer(
         if (major != other.major) return major.compareTo(other.major)
         if (minor != other.minor) return minor.compareTo(other.minor)
         if (patch != other.patch) return patch.compareTo(other.patch)
-        if (preRelease == other.preRelease) return 0
-        if (preRelease == null) return 1
-        if (other.preRelease == null) return -1
-        return preRelease.compareTo(other.preRelease)
+        val aPre = preRelease
+        val bPre = other.preRelease
+        if (aPre == bPre) return 0
+        if (aPre == null) return 1
+        if (bPre == null) return -1
+        return comparePreReleaseIdentifiers(aPre, bPre)
     }
 
     override fun toString(): String =
@@ -49,6 +51,39 @@ data class SemVer(
         @JvmStatic
         fun parse(raw: String): SemVer =
             parseOrNull(raw) ?: throw IllegalArgumentException("Invalid 3-segment SemVer: '$raw'")
+
+        private fun isDigitsOnly(s: String): Boolean =
+            s.isNotEmpty() && s.all { it in '0'..'9' }
+
+        /**
+         * 遵循 SemVer 2.0.0 §11 预发布标识符比较规则：
+         * 按 `.` 拆分后逐段比对，纯非负整数段按数值大小比较（如 `alpha.2 < alpha.10`），且纯数字段优先级低于含字母段。
+         */
+        private fun comparePreReleaseIdentifiers(a: String, b: String): Int {
+            val aParts = a.split('.')
+            val bParts = b.split('.')
+            val minLen = minOf(aParts.size, bParts.size)
+            for (i in 0 until minLen) {
+                val segA = aParts[i]
+                val segB = bParts[i]
+                if (segA == segB) continue
+                val numA = isDigitsOnly(segA)
+                val numB = isDigitsOnly(segB)
+                if (numA && numB) {
+                    val trimmedA = segA.trimStart('0').ifEmpty { "0" }
+                    val trimmedB = segB.trimStart('0').ifEmpty { "0" }
+                    if (trimmedA.length != trimmedB.length) {
+                        return trimmedA.length.compareTo(trimmedB.length)
+                    }
+                    return trimmedA.compareTo(trimmedB)
+                }
+                if (numA != numB) {
+                    return if (numA) -1 else 1
+                }
+                return segA.compareTo(segB)
+            }
+            return aParts.size.compareTo(bParts.size)
+        }
 
         @JvmStatic
         fun isInClosedRange(actual: String?, minInclusive: String?, maxInclusive: String?): Boolean {

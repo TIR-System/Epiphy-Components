@@ -2,6 +2,8 @@
 package dev.epiphy.client.fx3d.item
 
 import com.mojang.blaze3d.vertex.PoseStack
+import dev.epiphy.client.util.PoseStackWatermark
+import dev.epiphy.client.util.RenderFaultCircuitBreaker
 import net.minecraft.client.renderer.MultiBufferSource
 import net.minecraft.client.resources.model.BakedModel
 import net.minecraft.world.item.Item
@@ -11,11 +13,15 @@ import java.util.Collections
 import java.util.IdentityHashMap
 
 /**
- * 不依赖 `CodeChickenLib` 的原生物品 3D 图层挂载注册表。
+ * 原生物品 3D 图层挂载注册表（不依赖 `CodeChickenLib`）。
  *
- * 工作机制：使用 `IdentityHashMap<Item, BoundItemEntry>` 按物品实例引用匹配已绑定渲染器；
- * 未绑定任何物品时，Mixin 入口读取 `hasBoundItems` 布尔标志后直接返回。
- * 已知边界：当前仅包裹单层 `PoseStack` 推弹并捕获异常，后续需接入栈深度水位线校验与异常计数熔断机制。
+ * 工作机制：
+ * 1. 使用 `IdentityHashMap<Item, BoundItemEntry>` 按物品实例引用匹配已绑定渲染器；未绑定任何物品时，Mixin 入口读取 `hasBoundItems` 布尔标志后直接返回；
+ * 2. 对启用了 `isolateBuffer = true` 的绑定物品，将单次绘制转导至 `NativeItem3DEngine` 的局部独立 `MultiBufferSource.BufferSource`，避免刷新深度缓冲时打断外部容器共享批次；
+ * 3. 分发自定义图层时通过 [PoseStackWatermark] 保证矩阵栈深度平衡，并由 [RenderFaultCircuitBreaker] 计数限频告警与超阈值熔断。
+ *
+ * 已知边界：
+ * - 当第三方光影模组传入非标准 `MultiBufferSource.BufferSource` 实现时，`resolveRenderBuffer` 会保留外部传入的 `MultiBufferSource` 实例以维持光影管线兼容。
  */
 object Item3DRenderHooks {
 
@@ -34,11 +40,18 @@ object Item3DRenderHooks {
 
     private class BoundItemEntry(
         val renderBase: Boolean,
+        val isolateBuffer: Boolean,
         val renderer: Item3DOverlayRenderer
     )
 
     private val registry: MutableMap<Item, BoundItemEntry> =
         Collections.synchronizedMap(IdentityHashMap())
+
+    val circuitBreaker = RenderFaultCircuitBreaker(
+        module = "EpiphyItem3D",
+        channelTag = "Item3DRenderHooks",
+        tripThreshold = 8
+    )
 
     @Volatile
     @JvmField
@@ -46,8 +59,13 @@ object Item3DRenderHooks {
 
     @JvmStatic
     @JvmOverloads
-    fun bindItem(item: Item, renderBase: Boolean = true, renderer: Item3DOverlayRenderer) {
-        registry[item] = BoundItemEntry(renderBase, renderer)
+    fun bindItem(
+        item: Item,
+        renderBase: Boolean = true,
+        isolateBuffer: Boolean = true,
+        renderer: Item3DOverlayRenderer
+    ) {
+        registry[item] = BoundItemEntry(renderBase, isolateBuffer, renderer)
         hasBoundItems = registry.isNotEmpty()
     }
 
@@ -64,11 +82,36 @@ object Item3DRenderHooks {
     }
 
     @JvmStatic
+    fun resetCircuitBreaker() {
+        circuitBreaker.reset()
+    }
+
+    @JvmStatic
     fun shouldRenderBaseModel(stack: ItemStack): Boolean {
         if (!hasBoundItems || stack.isEmpty) return true
-        if (!NativeItem3DEngine.enabled) return true
+        if (!NativeItem3DEngine.enabled || circuitBreaker.isTripped) return true
         val entry = registry[stack.item] ?: return true
         return entry.renderBase
+    }
+
+    @JvmStatic
+    fun resolveRenderBuffer(
+        stack: ItemStack,
+        bakedModel: BakedModel?,
+        outerBuffer: MultiBufferSource
+    ): MultiBufferSource {
+        if (!hasBoundItems || stack.isEmpty || !NativeItem3DEngine.enabled || circuitBreaker.isTripped) {
+            return outerBuffer
+        }
+        val entry = registry[stack.item] ?: return outerBuffer
+        if (!entry.isolateBuffer) return outerBuffer
+        if (bakedModel != null && bakedModel.isCustomRenderer) return outerBuffer
+        return NativeItem3DEngine.acquireIsolatedBufferSource(outerBuffer)
+    }
+
+    @JvmStatic
+    fun finishIsolatedRenderBuffer(activeBuffer: MultiBufferSource?) {
+        NativeItem3DEngine.releaseIsolatedBufferSource(activeBuffer)
     }
 
     @JvmStatic
@@ -82,10 +125,9 @@ object Item3DRenderHooks {
         combinedOverlay: Int,
         bakedModel: BakedModel
     ) {
-        if (!hasBoundItems || stack.isEmpty) return
+        if (!hasBoundItems || stack.isEmpty || circuitBreaker.isTripped) return
         val entry = registry[stack.item] ?: return
-        poseStack.pushPose()
-        try {
+        PoseStackWatermark.runGuarded(poseStack, circuitBreaker, stack.item.toString()) {
             entry.renderer.renderOverlay(
                 stack,
                 displayContext,
@@ -96,10 +138,6 @@ object Item3DRenderHooks {
                 combinedOverlay,
                 bakedModel
             )
-        } catch (_: Throwable) {
-            // 单件物品图层异常静默隔离，确保手持与容器界面渲染栈不发生泄漏
-        } finally {
-            runCatching { poseStack.popPose() }
         }
     }
 

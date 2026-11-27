@@ -93,6 +93,29 @@ val compatSourceSet: SourceSet = sourceSets.create("compat") {
     runtimeClasspath += output + mainSourceSet.output + mainSourceSet.runtimeClasspath
 }
 
+val generatedBuildConstantsDir = layout.buildDirectory.dir("generated/sources/buildConstants/kotlin/main")
+val generateBuildConstants by tasks.registering {
+    val modVer = providers.gradleProperty("mod_version")
+    val outDir = generatedBuildConstantsDir
+    inputs.property("mod_version", modVer)
+    outputs.dir(outDir)
+    doLast {
+        val pkgDir = outDir.get().asFile.resolve("dev/epiphy")
+        pkgDir.mkdirs()
+        pkgDir.resolve("EpiphyBuildConstants.kt").writeText(
+            """
+            // 自动生成自 gradle.properties 单一事实源 (SSOT)，请勿手动编辑
+            package dev.epiphy
+
+            internal object EpiphyBuildConstants {
+                const val MOD_VERSION: String = "${modVer.get()}"
+            }
+            """.trimIndent() + "\n",
+            Charsets.UTF_8
+        )
+    }
+}
+
 val apiProject = project(":epiphy-api")
 
 minecraft {
@@ -166,10 +189,27 @@ mixin {
 
 kotlin {
     jvmToolchain(17)
+    sourceSets.named("main") {
+        kotlin.srcDir(generatedBuildConstantsDir)
+    }
+}
+
+tasks.named("compileKotlin") {
+    dependsOn(generateBuildConstants)
 }
 
 tasks.withType<JavaCompile>().configureEach {
     options.encoding = "UTF-8"
+}
+
+// MixinGradle 将 refmap 与 searge 复合映射写入 build/tmp/compileJava/；
+// 禁用增量清空并在映射文件缺失时强制重跑，防止仅修改 Kotlin 文件后触发 reobfJar 找不到 tsrg 或打出空 refmap。
+tasks.named<JavaCompile>("compileJava") {
+    options.isIncremental = false
+    outputs.upToDateWhen {
+        project.layout.buildDirectory.file("tmp/compileJava/compileJava-mappings.tsrg").get().asFile.isFile &&
+            project.layout.buildDirectory.file("tmp/compileJava/compileJava-refmap.json").get().asFile.isFile
+    }
 }
 
 tasks.named<ProcessResources>("processResources") {
@@ -217,23 +257,49 @@ tasks.named<Jar>("jarJar") {
 // ============================================================================
 val verifyNoBundledKotlin by tasks.registering {
     group = "verification"
-    description = "Verifies that built mod JARs do not bundle kotlin/ or kotlinx/ classes."
-    dependsOn(tasks.named("jar"))
+    description = "Verifies thin and fat (-all) JARs for zero bundled Kotlin classes, Mixin refmap integrity, and mods.toml dependencies."
+    dependsOn(tasks.named("jar"), tasks.named("jarJar"))
     doLast {
-        val jarFile = tasks.named<Jar>("jar").get().archiveFile.get().asFile
-        if (!jarFile.isFile) {
-            throw GradleException("Expected mod JAR does not exist: ${jarFile.absolutePath}")
-        }
-        JarFile(jarFile).use { jf ->
-            val leaked = jf.entries().asSequence()
-                .map { it.name }
-                .filter { it.endsWith(".class") && (it.startsWith("kotlin/") || it.startsWith("kotlinx/")) }
-                .take(10)
-                .toList()
-            if (leaked.isNotEmpty()) {
-                throw GradleException(
-                    "FATAL: Bundled Kotlin runtime classes detected in ${jarFile.name} (violates KFF LinkageError guard): $leaked"
+        val thinJar = tasks.named<Jar>("jar").get().archiveFile.get().asFile
+        val fatJar = tasks.named<Jar>("jarJar").get().archiveFile.get().asFile
+        for (jarFile in listOf(thinJar, fatJar)) {
+            if (!jarFile.isFile) {
+                throw GradleException("Expected mod JAR does not exist: ${jarFile.absolutePath}")
+            }
+            JarFile(jarFile).use { jf ->
+                val leaked = jf.entries().asSequence()
+                    .map { it.name }
+                    .filter { it.endsWith(".class") && (it.startsWith("kotlin/") || it.startsWith("kotlinx/")) }
+                    .take(10)
+                    .toList()
+                if (leaked.isNotEmpty()) {
+                    throw GradleException(
+                        "FATAL: Bundled Kotlin runtime classes detected in ${jarFile.name} (violates KFF LinkageError guard): $leaked"
+                    )
+                }
+
+                val modsTomlEntry = jf.getJarEntry("META-INF/mods.toml")
+                    ?: throw GradleException("Missing META-INF/mods.toml in ${jarFile.name}")
+                val modsTomlText = jf.getInputStream(modsTomlEntry).bufferedReader(Charsets.UTF_8).readText()
+                if (!modsTomlText.contains("modId = \"mixinbooster\"")) {
+                    throw GradleException("META-INF/mods.toml in ${jarFile.name} must declare mandatory 'mixinbooster' dependency!")
+                }
+
+                val refmapEntry = jf.getJarEntry("epiphy.refmap.json")
+                    ?: throw GradleException("Missing epiphy.refmap.json in ${jarFile.name}; Mixins would silently fail in production!")
+                val refmapText = jf.getInputStream(refmapEntry).bufferedReader(Charsets.UTF_8).readText()
+                val requiredMixinKeys = listOf(
+                    "dev/epiphy/mixin/client/AbstractContainerScreenMixin",
+                    "dev/epiphy/mixin/client/GuiGraphicsMixin",
+                    "dev/epiphy/mixin/client/ItemRendererMixin",
+                    "dev/epiphy/mixin/client/PoseStackAccessor",
+                    "dev/epiphy/mixin/client/SoundEngineAccessor"
                 )
+                for (mk in requiredMixinKeys) {
+                    if (!refmapText.contains(mk)) {
+                        throw GradleException("epiphy.refmap.json in ${jarFile.name} is missing obfuscation mappings for '$mk'!")
+                    }
+                }
             }
         }
     }

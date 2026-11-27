@@ -28,6 +28,5 @@ rootProject.name = "epiphy-mod"
 
 include(
     "epiphy-api",
-    "epiphy-core",
-    "epiphy-showcase"
+    "epiphy-core"
 )

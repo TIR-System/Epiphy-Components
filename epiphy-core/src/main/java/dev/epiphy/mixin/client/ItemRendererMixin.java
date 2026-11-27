@@ -11,18 +11,41 @@ import net.minecraft.world.item.ItemStack;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.ModifyVariable;
 import org.spongepowered.asm.mixin.injection.Slice;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * 物品 3D 自定义图层挂载 Mixin（注入 {@link ItemRenderer#render}）：
+ * 物品 3D 自定义图层挂载与单物品局部缓冲隔离 Mixin（注入 {@link ItemRenderer#render}）：
  * <ul>
- *   <li>当已绑定物品的模型配置指定 {@code renderBase = false} 时，在局部坐标系完成 {@code translate(-0.5, -0.5, -0.5)} 后跳过原版基底 {@link BakedModel} 绘制，提交自定义 3D 图层并对称执行 {@code popPose()}；</li>
- *   <li>当保持默认 {@code renderBase = true} 时，利用 {@link Slice} 从 {@code renderByItem} 之后开始匹配末尾的退出 {@code popPose()}（避开前段动态附魔纹理分支内部的局部 {@code popPose()}），在原版基底提交之后追加自定义 3D 图层。</li>
+ *   <li>当已绑定物品启用了 {@code flushBase = true} 且非自定义特殊渲染器时，在方法入口将该次调用的 {@link MultiBufferSource} 替换为单物品复用的局部缓冲源，
+ *       使基底深度刷新仅刷出当前单件物品的顶点，避免在容器界面多槽位绘制中途打断外部共享 {@code BufferSource} 的其他物品队列；</li>
+ *   <li>当模型配置指定 {@code renderBase = false} 时，在局部坐标系完成 {@code translate(-0.5, -0.5, -0.5)} 后跳过原版基底 {@link BakedModel} 绘制，提交自定义 3D 图层、刷出局部缓冲并对称执行 {@code popPose()}；</li>
+ *   <li>当保持默认 {@code renderBase = true} 时，利用 {@link Slice} 从 {@code renderByItem} 之后匹配末尾退出 {@code popPose()}，在原版基底提交之后追加自定义 3D 图层，并在方法返回处统一收尾归还局部缓冲源。</li>
  * </ul>
  */
 @Mixin(ItemRenderer.class)
 public abstract class ItemRendererMixin {
+
+    @ModifyVariable(
+        method = "render(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/ItemDisplayContext;ZLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;IILnet/minecraft/client/resources/model/BakedModel;)V",
+        at = @At("HEAD"),
+        argsOnly = true
+    )
+    private MultiBufferSource epiphy$isolateBoundItemBuffer(
+        MultiBufferSource outerBuffer,
+        ItemStack itemStack,
+        ItemDisplayContext displayContext,
+        boolean leftHand,
+        PoseStack poseStack,
+        MultiBufferSource originalBuffer,
+        int combinedLight,
+        int combinedOverlay,
+        BakedModel model
+    ) {
+        if (!Item3DRenderHooks.hasBoundItems) return outerBuffer;
+        return Item3DRenderHooks.resolveRenderBuffer(itemStack, model, outerBuffer);
+    }
 
     @Inject(
         method = "render(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/ItemDisplayContext;ZLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;IILnet/minecraft/client/resources/model/BakedModel;)V",
@@ -46,17 +69,21 @@ public abstract class ItemRendererMixin {
     ) {
         if (!Item3DRenderHooks.hasBoundItems) return;
         if (!Item3DRenderHooks.shouldRenderBaseModel(itemStack)) {
-            Item3DRenderHooks.dispatchCustomLayers(
-                itemStack,
-                displayContext,
-                leftHand,
-                poseStack,
-                buffer,
-                combinedLight,
-                combinedOverlay,
-                model
-            );
-            poseStack.popPose();
+            try {
+                Item3DRenderHooks.dispatchCustomLayers(
+                    itemStack,
+                    displayContext,
+                    leftHand,
+                    poseStack,
+                    buffer,
+                    combinedLight,
+                    combinedOverlay,
+                    model
+                );
+            } finally {
+                Item3DRenderHooks.finishIsolatedRenderBuffer(buffer);
+                poseStack.popPose();
+            }
             ci.cancel();
         }
     }
@@ -97,5 +124,24 @@ public abstract class ItemRendererMixin {
             combinedOverlay,
             model
         );
+    }
+
+    @Inject(
+        method = "render(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/ItemDisplayContext;ZLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;IILnet/minecraft/client/resources/model/BakedModel;)V",
+        at = @At("RETURN")
+    )
+    private void epiphy$releaseIsolatedBufferOnReturn(
+        ItemStack itemStack,
+        ItemDisplayContext displayContext,
+        boolean leftHand,
+        PoseStack poseStack,
+        MultiBufferSource buffer,
+        int combinedLight,
+        int combinedOverlay,
+        BakedModel model,
+        CallbackInfo ci
+    ) {
+        if (!Item3DRenderHooks.hasBoundItems) return;
+        Item3DRenderHooks.finishIsolatedRenderBuffer(buffer);
     }
 }

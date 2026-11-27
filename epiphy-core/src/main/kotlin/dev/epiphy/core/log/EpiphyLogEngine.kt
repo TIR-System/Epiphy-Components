@@ -63,6 +63,9 @@ class EpiphyLogEngine(
         private set
 
     @Volatile
+    var fileLoggingEnabled: Boolean = true
+
+    @Volatile
     var globalDebugEnabled: Boolean = false
 
     @Volatile
@@ -71,7 +74,8 @@ class EpiphyLogEngine(
     private val moduleDebugFlags = ConcurrentHashMap<String, Boolean>()
     private val rateBuckets = ConcurrentHashMap<String, RateBucket>()
     private val onceKeys = ConcurrentHashMap.newKeySet<String>()
-    private val droppedEntries = AtomicLong(0L)
+    private val pendingDroppedNotices = AtomicLong(0L)
+    private val totalDroppedEntries = AtomicLong(0L)
     private val totalWrittenLines = AtomicLong(0L)
 
     private val queue = ArrayBlockingQueue<QueueCommand>(queueCapacity.coerceAtLeast(128))
@@ -155,11 +159,12 @@ class EpiphyLogEngine(
 
     fun statsSnapshot(): Map<String, Any> = mapOf(
         "currentLogDir" to currentLogDir.toString(),
+        "fileLoggingEnabled" to fileLoggingEnabled,
         "globalDebug" to globalDebugEnabled,
         "deprecationWarnings" to deprecationWarningsEnabled,
         "queuedCommands" to queue.size,
         "writtenLines" to totalWrittenLines.get(),
-        "droppedEntries" to droppedEntries.get(),
+        "droppedEntries" to totalDroppedEntries.get(),
         "onceKeysCount" to onceKeys.size
     )
 
@@ -198,9 +203,12 @@ class EpiphyLogEngine(
             Level.ERROR -> slf4j.error(consoleLine)
         }
 
+        if (!fileLoggingEnabled) return
+
         val entry = QueueCommand.Entry(now, level, module, tag, finalMessage)
         if (!queue.offer(entry)) {
-            droppedEntries.incrementAndGet()
+            pendingDroppedNotices.incrementAndGet()
+            totalDroppedEntries.incrementAndGet()
         }
     }
 
@@ -246,13 +254,17 @@ class EpiphyLogEngine(
                 }
                 when (cmd) {
                     is QueueCommand.Entry -> {
+                        if (!fileLoggingEnabled) {
+                            closeWriterQuietly()
+                            continue
+                        }
                         val zone = ZoneId.systemDefault()
                         val instant = Instant.ofEpochMilli(cmd.timestampMs)
                         val date = LocalDate.ofInstant(instant, zone)
                         val w = ensureWriterFor(date)
                         if (w != null) {
                             runCatching {
-                                val dropped = droppedEntries.getAndSet(0L)
+                                val dropped = pendingDroppedNotices.getAndSet(0L)
                                 if (dropped > 0L) {
                                     w.write("${TIME_FMT.format(instant.atZone(zone))} [WARN] [EpiphyLog/Backpressure] Dropped $dropped log entries due to full queue")
                                     w.newLine()

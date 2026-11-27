@@ -13,6 +13,7 @@ import dev.epiphy.core.config.EpiphyConfig
 import dev.epiphy.core.debug.RollingNanoSampler
 import dev.epiphy.core.storage.RawJsonFileStore
 import dev.epiphy.core.world.NativeSectionScanner
+import dev.latvian.mods.kubejs.BuiltinKubeJSPlugin
 import dev.latvian.mods.kubejs.KubeJSPlugin
 import dev.latvian.mods.kubejs.script.BindingsEvent
 import net.minecraft.world.level.chunk.LevelChunkSection
@@ -35,18 +36,10 @@ class EpiphyKubeJSPlugin : KubeJSPlugin() {
     override fun registerBindings(event: BindingsEvent) {
         event.add("EpiphyNative", EpiphyNativeJsFacade)
 
-        val globalMap = event.manager?.let { mgr ->
-            runCatching {
-                val field = mgr.javaClass.getField("global")
-                @Suppress("UNCHECKED_CAST")
-                field.get(mgr) as? MutableMap<String, Any?>
-            }.getOrNull()
-        }
-        if (globalMap != null) {
-            globalMap["EpiphyNative"] = EpiphyNativeJsFacade
-            for ((name, facade) in EpiphyBridgeRegistry.snapshotGlobalComponents()) {
-                globalMap[name] = facade
-            }
+        val globalMap = BuiltinKubeJSPlugin.GLOBAL
+        globalMap["EpiphyNative"] = EpiphyNativeJsFacade
+        for ((name, facade) in EpiphyBridgeRegistry.snapshotGlobalComponents()) {
+            globalMap[name] = facade
         }
     }
 }

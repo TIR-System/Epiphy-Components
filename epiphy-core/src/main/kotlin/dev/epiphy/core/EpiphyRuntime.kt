@@ -1,6 +1,7 @@
 // 许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 package dev.epiphy.core
 
+import dev.epiphy.core.config.EpiphyConfig
 import dev.epiphy.core.debug.EpiphyDebugHub
 import dev.epiphy.core.debug.EpiphyDebugProvider
 import dev.epiphy.core.debug.HealthCheckItem
@@ -34,6 +35,13 @@ object EpiphyRuntime {
         dataManager = EpiphyDataManager(gameDir)
         dataManager.ensureSkeletonDirectories()
         logEngine = EpiphyLogEngine(dataManager.rootLogsDir)
+
+        val syncCommonLogConfig = Runnable {
+            logEngine.fileLoggingEnabled = EpiphyConfig.asyncFileLogging
+            logEngine.deprecationWarningsEnabled = EpiphyConfig.deprecationWarnings
+        }
+        EpiphyConfig.addSyncListener(syncCommonLogConfig)
+        syncCommonLogConfig.run()
 
         debugHub.register(object : EpiphyDebugProvider {
             override val id: String = "core"

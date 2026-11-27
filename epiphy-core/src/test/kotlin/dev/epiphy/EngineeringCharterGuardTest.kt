@@ -49,6 +49,8 @@ class EngineeringCharterGuardTest {
             "epiphy-core/src/main/java/dev/epiphy/core/world/NativeSectionScanner.java",
             "epiphy-core/src/main/kotlin/dev/epiphy/client/surface2d/fbo/FboCachePool.kt",
             "epiphy-core/src/main/kotlin/dev/epiphy/client/surface2d/hook/GuiInterceptionHooks.kt",
+            "epiphy-core/src/main/kotlin/dev/epiphy/client/util/PoseStackWatermark.kt",
+            "epiphy-core/src/main/kotlin/dev/epiphy/client/util/RenderFaultCircuitBreaker.kt",
             "epiphy-core/src/main/java/dev/epiphy/client/surface2d/NativeSurface2DAccelerator.java",
             "epiphy-core/src/main/java/dev/epiphy/client/surface2d/text/NativeTextBatchEngine.java",
             "epiphy-core/src/main/kotlin/dev/epiphy/client/shader/EpiphyCoreShaders.kt",
@@ -293,7 +295,8 @@ class EngineeringCharterGuardTest {
             root.resolve("README.md"),
             root.resolve("README_EN.md"),
             root.resolve("README-LLM.md"),
-            root.resolve("docs/native-mod-migration-plan.md")
+            root.resolve("docs/native-mod-migration-plan.md"),
+            root.resolve("epiphy-core/src/main/resources/META-INF/mods.toml")
         )
         for (doc in primaryDocs) {
             if (!Files.isRegularFile(doc)) continue
@@ -332,5 +335,18 @@ class EngineeringCharterGuardTest {
                     violations.take(25).joinToString("\n  - ")
             )
         }
+    }
+
+    @Test
+    fun `version single source of truth matches between gradle properties and EpiphyMod VERSION`() {
+        val root = locateRepoRoot()
+        val props = java.util.Properties()
+        Files.newBufferedReader(root.resolve("gradle.properties"), StandardCharsets.UTF_8).use { props.load(it) }
+        val expectedModVersion = props.getProperty("mod_version")?.trim()
+        assertTrue(!expectedModVersion.isNullOrEmpty(), "mod_version must be defined in gradle.properties")
+        assertTrue(
+            expectedModVersion == EpiphyMod.VERSION,
+            "Version drift detected: gradle.properties mod_version='$expectedModVersion' vs EpiphyMod.VERSION='${EpiphyMod.VERSION}'"
+        )
     }
 }

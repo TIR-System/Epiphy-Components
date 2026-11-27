@@ -59,12 +59,13 @@
 ./gradlew check build
 ```
 
-`check` 任务自动执行五项工程门禁：
-1. `epiphy-api:test` (`ProtoV6ContractAndAliasTest`)：对照 [`docs/proto_v6_schema.json`](docs/proto_v6_schema.json) 校验协议字段与「至多 2 个官方别名」规则；
-2. `epiphy-core:test` (`EngineeringCharterGuardTest`)：执行动态反向案例词汇隔离检查、注释与主干文档反自夸/反无依据耗时断言检查，以及核心引擎类边界说明完整性校验；
-3. `epiphy-core:test` (`CoreInfrastructureRobustnessTest`)：文件 I/O 故障注入测试（`.bak` 恢复、双坏拒写锁、复制存档分叉、外置权限路径拦截、异步日志限频折叠与分位数统计）；
-4. `epiphy-core:test` (`BytecodeSafetyGuardTest`)：通过 ASM 扫描编译产物，校验 `EpiphyMod.class` 与 `EpiphyConfig.class` 不直接引用客户端专属类（保障 Dedicated Server 加载安全），并校验 `PoseStack.withPose` 生成了 JVM `finally` 异常表；
-5. `epiphy-core:verifyNoBundledKotlin`：检查构建 Jar 内未混入 `kotlin/` 或 `kotlinx/` 标准库字节码（避免与 KFF 模块层冲突）。
+`check` 任务自动执行六项工程门禁：
+1. `epiphy-api:test` (`ProtoV6ContractAndAliasTest`)：对照 [`docs/proto_v6_schema.json`](docs/proto_v6_schema.json) 校验协议字段、「至多 2 个官方别名」规则与 SemVer 2.0 预发布数值序；
+2. `epiphy-core:test` (`EngineeringCharterGuardTest`)：执行动态反向案例词汇隔离检查、注释与主干文档反自夸/反无依据耗时断言检查、核心引擎类边界说明完整性校验，以及 `gradle.properties` 版本单一事实源对齐检查；
+3. `epiphy-core:test` (`CoreInfrastructureRobustnessTest`)：文件 I/O 故障注入测试（`.bak` 恢复、锚点自愈保 UUID、双坏拒写锁、复制存档分叉、外置权限路径拦截、异步日志开关与累计丢弃统计）；
+4. `epiphy-core:test` (`ClientSubsystemsRegressionTest`)：客户端渲染、音频与桥接无头回归套件（`PoseStackWatermark` 多层溢出/下溢恢复、`RenderFaultCircuitBreaker` 致命错误重抛与阈值熔断、界面级 GUI 纹理重映射失效、`NativeTextBatchEngine` 跨图集分桶次数 $== K$ 与颜色继承、`NativeItem3DBridge` 显式 `BlendMode` 与绑定状态码、`NativeAudioClientAccess` 异步线程停止观测）；
+5. `epiphy-core:test` (`BytecodeSafetyGuardTest`)：通过 ASM 扫描编译产物，校验 `EpiphyMod.class` 与 `EpiphyConfig.class` 不直接引用客户端专属类、校验 `PoseStack.withPose` 异常表，并校验启动与 KubeJS 插件入口无 `java.lang.reflect` 反射调用；
+6. `epiphy-core:verifyNoBundledKotlin`：同时检查瘦包与 `-all.jar` 胖包，校验未混入 `kotlin/` 或 `kotlinx/` 标准库字节码、`META-INF/mods.toml` 已声明 `mixinbooster` 前置，且 `epiphy.refmap.json` 完整包含各 Mixin 混淆映射。
 
 ---
 

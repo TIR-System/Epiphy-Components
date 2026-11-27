@@ -2,18 +2,33 @@
 package dev.epiphy.client.fx3d.item
 
 import dev.epiphy.client.shader.EpiphyCoreShaders
+import net.minecraft.client.renderer.RenderType
+import net.minecraft.resources.ResourceLocation
 
 /**
  * 面向脚本层暴露的物品 3D 动态绑定桥接门面（仅在客户端注册至 `EpiphyBridgeRegistry`）。
  *
- * 负责将脚本层传入的面片顶点、颜色、材质参数与运动学配置整理为 `NativeItem3DEngine.CompiledItemModel`，
- * 并转交 `NativeItem3DEngine` 与 `EpiphyCoreShaders`。
+ * 工作机制：
+ * 1. 将脚本层传入的面片顶点、颜色、显式混合模式与运动学配置解析并校验为 `NativeItem3DEngine.CompiledItemModel`（过滤非有限浮点坐标）；
+ * 2. 通过 [bindCompiledItemWithStatus] 如实返回挂载结果（`"BOUND"`、`"PENDING_REGISTRY"`、`"EMPTY_PASSES"`、`"INVALID_ID"`），避免将延迟挂起或空面片误报为已成功绑定；
+ * 3. 混合模式交由 [NativeItem3DEngine.BlendMode.parseOrWarn] 显式解析，未知字符串输出一次性告警并回退至 `"translucent"`。
  *
  * 已知边界：
- * - `bindCompiledItemFromJs` 当前仅在解析完成后调用注册并返回 `true`，尚未把“物品尚未在 Forge 注册表就绪而暂存 `pendingSpecs`”或“全部面片因格式不合法被跳过”区分成不同返回值；
- * - 材质 `blend` 字段当前仅区分 `"translucent"` 与非 `"translucent"`（其余值统一按加法混合处理），尚未建立多混合模式的显式枚举校验。
+ * - 在 KubeJS `startup_scripts` 早期调用时，若目标物品尚未完成 Forge 注册表注入，方法会返回 `"PENDING_REGISTRY"`（而 [bindCompiledItemFromJs] 返回 `false`），需待 `FMLClientSetupEvent` 触发 `rebindAllPending()` 完成最终绑定。
  */
 object NativeItem3DBridge {
+
+    /** 供无头单元测试替换 `RenderType` 构造逻辑，避免在未初始化 OpenGL 上下文时创建客户端 `RenderStateShard`。 */
+    @Volatile
+    internal var renderTypeFactoryOverrideForTest: ((
+        shaderId: String?,
+        texStr: String,
+        blendMode: NativeItem3DEngine.BlendMode,
+        blur: Boolean,
+        cull: Boolean,
+        depthWrite: Boolean,
+        depthTest: Boolean
+    ) -> RenderType)? = null
 
     fun setConfig(enabled: Boolean, overlaysEnabled: Boolean, geometryEnabled: Boolean, guiGlobalScale: Float) {
         NativeItem3DEngine.enabled = enabled
@@ -22,7 +37,7 @@ object NativeItem3DBridge {
         NativeItem3DEngine.guiGlobalScale = guiGlobalScale
     }
 
-    fun registerShader(shaderId: String, vertexFormat: String?, uniformNames: List<*>) : Boolean {
+    fun registerShader(shaderId: String, vertexFormat: String?, uniformNames: List<*>): Boolean {
         val names = uniformNames.mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotEmpty) }
         return EpiphyCoreShaders.registerDynamicShader(shaderId, vertexFormat, names)
     }
@@ -34,9 +49,36 @@ object NativeItem3DBridge {
     fun getStats(): Map<String, Any?> = NativeItem3DEngine.collectStats()
 
     /**
-     * 接收脚本层编译好的面片与变换描述并烘焙为原生紧凑数组模型挂载至 `Item3DRenderHooks`。
+     * 编译并尝试将物品 3D 模型挂载至注册表，返回明确状态码：
+     * - `"BOUND"`：已在 `ForgeRegistries.ITEMS` 解析到物品并完成挂载；
+     * - `"PENDING_REGISTRY"`：模型面片有效，但物品尚未在注册表就绪，已登记至待重绑表；
+     * - `"EMPTY_PASSES"`：无任何通过有限值与结构校验的有效面片；
+     * - `"INVALID_ID"`：`itemId` 为空或不是合法的 `ResourceLocation`。
      */
-    @Suppress("UNCHECKED_CAST")
+    @JvmOverloads
+    fun bindCompiledItemWithStatus(
+        itemId: String,
+        speedMul: Double,
+        attackExpand: Double,
+        guiScale: Double,
+        rawPasses: List<*>,
+        flushBase: Boolean = true,
+        renderBase: Boolean = true
+    ): String {
+        val cleanId = itemId.trim()
+        if (cleanId.isEmpty() || ResourceLocation.tryParse(cleanId) == null) {
+            return NativeItem3DEngine.BindStatus.INVALID_ID.name
+        }
+        val model = parseCompiledItemModel(cleanId, speedMul, attackExpand, guiScale, rawPasses, flushBase, renderBase)
+        if (model.passes.isEmpty() || model.totalVertices <= 0) {
+            return NativeItem3DEngine.BindStatus.EMPTY_PASSES.name
+        }
+        return NativeItem3DEngine.registerCompiledItemWithStatus(model).name
+    }
+
+    /**
+     * 布尔兼容入口：仅当物品已真实解析并挂载至 `Item3DRenderHooks`（即状态为 `"BOUND"`）时返回 `true`。
+     */
     @JvmOverloads
     fun bindCompiledItemFromJs(
         itemId: String,
@@ -46,7 +88,19 @@ object NativeItem3DBridge {
         rawPasses: List<*>,
         flushBase: Boolean = true,
         renderBase: Boolean = true
-    ): Boolean {
+    ): Boolean =
+        bindCompiledItemWithStatus(itemId, speedMul, attackExpand, guiScale, rawPasses, flushBase, renderBase) ==
+            NativeItem3DEngine.BindStatus.BOUND.name
+
+    internal fun parseCompiledItemModel(
+        cleanId: String,
+        speedMul: Double,
+        attackExpand: Double,
+        guiScale: Double,
+        rawPasses: List<*>,
+        flushBase: Boolean,
+        renderBase: Boolean
+    ): NativeItem3DEngine.CompiledItemModel {
         val bakedPasses = ArrayList<NativeItem3DEngine.BakedPass>(rawPasses.size)
         var overlayCount = 0
         var geomCount = 0
@@ -62,7 +116,10 @@ object NativeItem3DBridge {
             val matMap = map["material"] as? Map<*, *> ?: emptyMap<Any?, Any?>()
             val shaderId = matMap["shader"]?.toString()?.takeIf { it.isNotBlank() }
             val texStr = matMap["texture"]?.toString() ?: "epiphy:textures/effect/white_pixel.png"
-            val additive = (matMap["blend"]?.toString()?.lowercase() != "translucent")
+            val blendMode = NativeItem3DEngine.BlendMode.parseOrWarn(
+                matMap["blend"]?.toString(),
+                "$cleanId/$passId"
+            )
             val blur = (matMap["blur"] as? Boolean) ?: true
             val cull = (matMap["cull"] as? Boolean) ?: false
             val depthTest = (matMap["depthTest"] as? Boolean) ?: true
@@ -72,7 +129,7 @@ object NativeItem3DBridge {
             val rawVerts = map["xyzUv"] as? List<*> ?: continue
             val rawCols = map["rgba"] as? List<*> ?: continue
             val vertCount = rawCols.size
-            if (vertCount == 0 || rawVerts.size < vertCount * 5) continue
+            if (vertCount == 0 || (vertCount and 3) != 0 || rawVerts.size < vertCount * 5) continue
 
             val xyzUv = FloatArray(vertCount * 5)
             var finiteOk = true
@@ -119,7 +176,12 @@ object NativeItem3DBridge {
                 }
             }
 
-            val rt = NativeItem3DEngine.getOrCreateRenderType(shaderId, texStr, additive, blur, cull, depthWrite, depthTest)
+            val overrideFactory = renderTypeFactoryOverrideForTest
+            val rt = if (overrideFactory != null) {
+                overrideFactory(shaderId, texStr, blendMode, blur, cull, depthWrite, depthTest)
+            } else {
+                NativeItem3DEngine.getOrCreateRenderType(shaderId, texStr, blendMode, blur, cull, depthWrite, depthTest)
+            }
             bakedPasses.add(
                 NativeItem3DEngine.BakedPass(
                     id = passId,
@@ -138,8 +200,8 @@ object NativeItem3DBridge {
             if (isOverlay) overlayCount++ else geomCount++
         }
 
-        val model = NativeItem3DEngine.CompiledItemModel(
-            itemId = itemId,
+        return NativeItem3DEngine.CompiledItemModel(
+            itemId = cleanId,
             renderBase = renderBase,
             flushBase = flushBase,
             speedMul = speedMul.toFloat().let { if (it.isFinite()) it else 1.0f },
@@ -150,8 +212,6 @@ object NativeItem3DBridge {
             geometryCount = geomCount,
             totalVertices = totalVerts
         )
-        NativeItem3DEngine.registerCompiledItem(model)
-        return true
     }
 
     private fun numF(raw: Any?, def: Float): Float {
@@ -159,7 +219,7 @@ object NativeItem3DBridge {
         return if (f.isFinite()) f else def
     }
 
-    private fun parseUniformBinding(raw: Any?): NativeItem3DEngine.UniformBinding? = when (raw) {
+    internal fun parseUniformBinding(raw: Any?): NativeItem3DEngine.UniformBinding? = when (raw) {
         is String -> when (raw) {
             "time" -> NativeItem3DEngine.UniformBinding.Time
             "viewYaw" -> NativeItem3DEngine.UniformBinding.ViewYaw
@@ -169,7 +229,10 @@ object NativeItem3DBridge {
             "attackProgress" -> NativeItem3DEngine.UniformBinding.AttackProgress
             else -> null
         }
-        is Number -> NativeItem3DEngine.UniformBinding.Const1f(raw.toFloat())
+        is Number -> {
+            val f = raw.toFloat()
+            if (f.isFinite()) NativeItem3DEngine.UniformBinding.Const1f(f) else null
+        }
         is List<*> -> when (raw.size) {
             2 -> NativeItem3DEngine.UniformBinding.Const2f(numF(raw[0], 0f), numF(raw[1], 0f))
             3 -> NativeItem3DEngine.UniformBinding.Const3f(numF(raw[0], 0f), numF(raw[1], 0f), numF(raw[2], 0f))

@@ -122,6 +122,25 @@ class ProtoV6ContractAndAliasTest {
         assertFalse(SemVer.isInClosedRange("3.0.0", "2.6.0", "2.9.9"))
         assertTrue(SemVer.parse("1.0.0") > SemVer.parse("1.0.0-alpha.1"))
 
+        // SemVer 2.0.0 §11 预发布数字段数值序回归（防止 alpha.10 按字典序小于 alpha.2）
+        assertTrue(SemVer.parse("0.1.0-alpha.10") > SemVer.parse("0.1.0-alpha.2"))
+        val orderedSpec = listOf(
+            "1.0.0-alpha",
+            "1.0.0-alpha.1",
+            "1.0.0-alpha.beta",
+            "1.0.0-beta",
+            "1.0.0-beta.2",
+            "1.0.0-beta.11",
+            "1.0.0-rc.1",
+            "1.0.0"
+        ).map(SemVer::parse)
+        for (i in 0 until orderedSpec.size - 1) {
+            assertTrue(
+                orderedSpec[i] < orderedSpec[i + 1],
+                "Expected ${orderedSpec[i]} < ${orderedSpec[i + 1]}"
+            )
+        }
+
         val lru = BoundedCache<String, Int>(2, EvictionPolicy.LRU)
         lru.set("a", 1)
         lru.set("b", 2)

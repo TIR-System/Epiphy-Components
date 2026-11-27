@@ -1,6 +1,7 @@
 // 许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 package dev.epiphy.client
 
+import com.mojang.blaze3d.systems.RenderSystem
 import com.mojang.logging.LogUtils
 import dev.epiphy.client.audio.NativeAudioClientAccess
 import dev.epiphy.client.config.EpiphyConfigScreen
@@ -18,19 +19,23 @@ import net.minecraft.server.packs.resources.ResourceManagerReloadListener
 import net.minecraftforge.client.ConfigScreenHandler
 import net.minecraftforge.client.event.ClientPlayerNetworkEvent
 import net.minecraftforge.client.event.RegisterClientReloadListenersEvent
+import net.minecraftforge.client.event.ScreenEvent
+import net.minecraftforge.event.TickEvent
 import net.minecraftforge.eventbus.api.IEventBus
-import net.minecraftforge.fml.ModList
 import net.minecraftforge.fml.ModLoadingContext
 import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent
 
 /**
- * 客户端安全隔离启动跳板。
- * `init(IEventBus, IEventBus)` 方法签名仅包含双端共享的 `IEventBus` 接口，确保专用服务端零客户端类加载。
+ * 客户端隔离启动入口。
+ * `init(IEventBus, IEventBus)` 方法签名仅包含双端共享的 `IEventBus` 接口，避免专用服务端在类验证阶段触碰客户端类。
  */
 object EpiphyClientBootstrap {
     private val LOGGER = LogUtils.getLogger()
 
-    val sharedFboPool: FboCachePool by lazy { FboCachePool() }
+    private val fboPoolLazy = lazy { FboCachePool() }
+    val sharedFboPool: FboCachePool get() = fboPoolLazy.value
+
+    private var fboPurgeTickCounter: Int = 0
 
     /**
      * 面向脚本层暴露的世界 3D 批渲染网关实例（仅客户端加载）。
@@ -92,19 +97,18 @@ object EpiphyClientBootstrap {
         modBus.addListener(EpiphyCoreShaders::onRegisterShaders)
         modBus.addListener(::onRegisterReloadListeners)
         forgeBus.addListener(::onClientLoggingOut)
+        forgeBus.addListener(::onScreenClosing)
+        forgeBus.addListener(::onClientTick)
 
-        // 注册 Forge 游戏内模组列表【配置 (Config)】可视化界面入口
         ModLoadingContext.get().registerExtensionPoint(ConfigScreenHandler.ConfigScreenFactory::class.java) {
             ConfigScreenHandler.ConfigScreenFactory { _, parent -> EpiphyConfigScreen(parent) }
         }
 
-        // 绑定配置热同步监听器：界面保存或配置文件重载时立即同步至各客户端引擎
         EpiphyConfig.addSyncListener {
             applyClientConfigNow()
         }
         applyClientConfigNow()
 
-        // 注册客户端原生高性能加速原语，供 KubeJS 脚本外挂绑定调用
         EpiphyBridgeRegistry.registerAccelerator("surface2d.fbo", sharedFboPool)
         EpiphyBridgeRegistry.registerAccelerator("surface2d.guiHooks", GuiInterceptionHooks)
         EpiphyBridgeRegistry.registerAccelerator("surface2d.accel", NativeSurface2DAccelerator.INSTANCE)
@@ -121,7 +125,7 @@ object EpiphyClientBootstrap {
         NativeItem3DEngine.geometryEnabled = EpiphyConfig.item3DGeometryEnabled
         NativeItem3DEngine.guiGlobalScale = EpiphyConfig.item3DGuiScale
 
-        if (!EpiphyConfig.fboCacheEnabled) {
+        if (!EpiphyConfig.fboCacheEnabled && fboPoolLazy.isInitialized()) {
             runCatching { sharedFboPool.destroyAll() }
         }
         if (!EpiphyConfig.guiTextureRemapEnabled) {
@@ -135,33 +139,51 @@ object EpiphyClientBootstrap {
     private fun onClientSetup(event: FMLClientSetupEvent) {
         event.enqueueWork {
             EpiphyConfig.syncFromSpecs()
-            if (ModList.get().isLoaded("modernui")) {
-                runCatching {
-                    val cls = Class.forName("dev.epiphy.compat.modernui.ModernUiGlyphCaptureBackend")
-                    cls.getMethod("tryInstall").invoke(null)
-                }.onFailure { err ->
-                    LOGGER.debug("[EpiphyClient] ModernUI soft-compat backend skipped: {}", err.toString())
-                }
-            }
             val bound = NativeItem3DEngine.rebindAllPending()
-            LOGGER.info("[EpiphyClient] Client native rendering & audio primitives initialized (bound3dItems={}).", bound)
+            val unresolved = NativeItem3DEngine.auditUnresolvedPendingItems()
+            LOGGER.info(
+                "[EpiphyClient] Client rendering & audio primitives initialized (bound3dItems={}, unresolved3dItems={}).",
+                bound,
+                unresolved.size
+            )
         }
     }
 
     private fun onRegisterReloadListeners(event: RegisterClientReloadListenersEvent) {
         event.registerReloadListener(ResourceManagerReloadListener {
-            // F3+T 重载资源包时清空离屏 FBO、纹理存在性缓存与物品 RenderType 缓存，并重新绑定待挂载 3D 物品
-            sharedFboPool.destroyAll()
+            if (fboPoolLazy.isInitialized()) {
+                sharedFboPool.destroyAll()
+            }
             NativeSurface2DAccelerator.INSTANCE.clearResourceCache()
             NativeItem3DEngine.clearRenderTypeCache()
+            GuiInterceptionHooks.resetCircuitBreaker()
+            Item3DRenderHooks.resetCircuitBreaker()
             NativeItem3DEngine.rebindAllPending()
         })
     }
 
+    private fun onScreenClosing(event: ScreenEvent.Closing) {
+        GuiInterceptionHooks.onScreenClosing(event.screen)
+    }
+
+    private fun onClientTick(event: TickEvent.ClientTickEvent) {
+        if (event.phase != TickEvent.Phase.END) return
+        fboPurgeTickCounter++
+        if (fboPurgeTickCounter >= 200) {
+            fboPurgeTickCounter = 0
+            if (fboPoolLazy.isInitialized() && RenderSystem.isOnRenderThread()) {
+                sharedFboPool.purgeIdle()
+            }
+        }
+    }
+
     private fun onClientLoggingOut(event: ClientPlayerNetworkEvent.LoggingOut) {
-        // 退出服务器或单人存档时清空当前纹理重映射表、恢复被暂停的原版音乐记录并释放离屏 FBO 缓冲
         GuiInterceptionHooks.clearAllTextureRemaps()
+        GuiInterceptionHooks.resetCircuitBreaker()
+        Item3DRenderHooks.resetCircuitBreaker()
         NativeAudioClientAccess.setVanillaMusicDucked(false)
-        sharedFboPool.destroyAll()
+        if (fboPoolLazy.isInitialized()) {
+            sharedFboPool.destroyAll()
+        }
     }
 }

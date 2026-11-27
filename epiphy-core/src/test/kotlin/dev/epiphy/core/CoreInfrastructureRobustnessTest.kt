@@ -239,4 +239,58 @@ class CoreInfrastructureRobustnessTest {
         }
         assertEquals(0, corruptBackups.size, "Legacy object-valued worlds_index.json must not trigger false corrupt quarantine!")
     }
+
+    @Test
+    fun `EpiphyDataManager preserves existing worldId when anchor json heals from backup on load`(
+        @TempDir tempDir: Path
+    ) {
+        val dm = EpiphyDataManager(tempDir)
+        val saveDir = tempDir.resolve("saves").resolve("BackupHealWorld")
+        Files.createDirectories(saveDir)
+
+        val firstBind = dm.bindWorld(saveDir, "BackupHealWorld")
+        val anchorPath = saveDir.resolve("data").resolve("epiphy_world_id.json")
+        val anchorBakPath = saveDir.resolve("data").resolve("epiphy_world_id.json.bak")
+        // 生成有效 .bak 副本并破坏正本，模拟异常断电后锚点文件损坏
+        Files.copy(anchorPath, anchorBakPath, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        Files.writeString(anchorPath, "{truncated_anchor_json", StandardCharsets.UTF_8)
+
+        val rebound = dm.bindWorld(saveDir, "BackupHealWorld")
+        assertEquals(
+            firstBind.worldId,
+            rebound.worldId,
+            "RecoveredFromBackup anchor must preserve the original worldId instead of generating a new UUID!"
+        )
+        assertFalse(rebound.forkedOnThisLoad)
+    }
+
+    @Test
+    fun `EpiphyLogEngine respects fileLoggingEnabled switch and retains monotonic droppedEntries count`(
+        @TempDir tempDir: Path
+    ) {
+        val silentDir = tempDir.resolve("silent_logs")
+        EpiphyLogEngine(silentDir).use { log ->
+            log.fileLoggingEnabled = false
+            log.info("TestMod", "NoDisk", "Console only message")
+            Thread.sleep(50L)
+            assertFalse(Files.exists(silentDir), "Disabling fileLoggingEnabled must prevent log directory/file creation")
+        }
+
+        val burstDir = tempDir.resolve("burst_logs")
+        EpiphyLogEngine(burstDir, defaultRateLimitMs = 0L, queueCapacity = 128).use { log ->
+            for (i in 0 until 2000) {
+                log.info("BurstTest", "Flood", "Line #$i payload")
+            }
+            assertTrue(log.flushSync(3_000L))
+            val stats = log.statsSnapshot()
+            val dropped = (stats["droppedEntries"] as Number).toLong()
+            if (dropped > 0L) {
+                // 再写一条触发 writer 线程消费后，验证累计 droppedEntries 不会被清零
+                log.info("BurstTest", "AfterDrain", "Post-drain check")
+                assertTrue(log.flushSync(2_000L))
+                val statsAfter = log.statsSnapshot()
+                assertEquals(dropped, (statsAfter["droppedEntries"] as Number).toLong())
+            }
+        }
+    }
 }

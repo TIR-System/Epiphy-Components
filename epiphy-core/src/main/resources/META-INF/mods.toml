@@ -11,14 +11,14 @@ displayURL = "https://github.com/TIR-System/Epiphy-Components"
 authors = "Epiphy-iLLUMs, Gemini 4 Series, Claude 5.5 Series"
 credits = "Mascot: DeepSeek"
 description = '''
-Epiphy 原生高性能表现层与基础设施核心模组（Minecraft 1.20.1 · Forge · Kotlin for Forge）。
+Epiphy 表现层与基础设施核心模组（Minecraft 1.20.1 · Forge · Kotlin for Forge）。
 
-核心能力概览：
-• 声明式 2D 平面合成与富文本引擎：支持屏幕/容器夹心层/物品槽位/世界三维平面多载体渲染、离屏 FBO 静态面板缓存、零全局污染会话级 GUI 纹理重映射，以及原生字形捕获与图集分桶（Atlas-Bucketed）逐字抖动合批加速。
-• 零第三方依赖 3D 物品与空间特效管线：基于原生 ShaderInstance、延迟缓冲同步与预烘焙网格实现多层材质覆层、环绕几何流光与世界空间三维图元渲染。
-• 三维空间音频与高鲁棒服务端底座：提供编译期 Accessor 零反射 OpenAL 声源控制、原版背景音乐温和避让、区块段调色板极速方块扫描，以及带损坏隔离锁与跨档分叉保护的外置 epiphy-data/ 原子持久化体系。
+功能概览：
+• 声明式 2D 平面合成与富文本渲染：支持屏幕、容器分层、物品槽位与世界三维平面载体，提供离屏 FBO 静态面板缓存、界面级 GUI 纹理重映射，以及字形捕获与按字体纹理图集分桶的逐字合批渲染。
+• 3D 物品与空间特效管线：基于原版 ShaderInstance、单物品隔离缓冲刷新与预烘焙网格实现物品材质覆层、环绕几何图层与世界空间三维图元绘制。
+• 空间音频与外置数据底座：基于编译期 Mixin Accessor 访问客户端声源与声道控制、支持原版背景音乐暂停避让、区块段调色板方块预筛，以及带备份恢复、损坏拒写锁与跨路径分叉检测的外置 epiphy-data/ 存储管理。
 
-提示：点击左侧【配置 (Config)】按钮可在游戏内实时调整 2D/3D 渲染精度、帧耗时预算与音频选项，无需重启客户端。
+提示：点击左侧【配置 (Config)】按钮可在游戏内调整 2D/3D 渲染选项、帧预算与音频开关。
 '''
 
 [[dependencies.epiphy]]
@@ -40,4 +40,11 @@ modId = "kotlinforforge"
 mandatory = true
 versionRange = "[4.12.0,5)"
 ordering = "AFTER"
+side = "BOTH"
+
+[[dependencies.epiphy]]
+modId = "mixinbooster"
+mandatory = true
+versionRange = "[0.1.3,)"
+ordering = "NONE"
 side = "BOTH"

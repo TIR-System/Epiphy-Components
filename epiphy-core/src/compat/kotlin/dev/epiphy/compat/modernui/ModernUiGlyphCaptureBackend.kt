@@ -2,13 +2,20 @@
 package dev.epiphy.compat.modernui
 
 import com.mojang.logging.LogUtils
+import dev.epiphy.EpiphyMod
 import dev.epiphy.client.surface2d.text.GlyphCaptureBackend
 import dev.epiphy.client.surface2d.text.NativeTextBatchEngine
+import dev.epiphy.client.util.RenderFaultCircuitBreaker
 import icyllis.modernui.mc.text.TextLayout
 import icyllis.modernui.mc.text.TextLayoutEngine
 import net.minecraft.client.gui.Font
 import net.minecraft.client.renderer.MultiBufferSource
 import net.minecraft.network.chat.Style
+import net.minecraftforge.api.distmarker.Dist
+import net.minecraftforge.eventbus.api.SubscribeEvent
+import net.minecraftforge.fml.ModList
+import net.minecraftforge.fml.common.Mod
+import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent
 import org.joml.Matrix4f
 import java.lang.invoke.MethodHandle
 import java.lang.invoke.MethodHandles
@@ -178,9 +185,25 @@ object ModernUiGlyphCaptureBackend : GlyphCaptureBackend {
             }
             true
         } catch (err: Throwable) {
+            RenderFaultCircuitBreaker.rethrowIfFatalJvmError(err)
             degraded = true
             LOGGER.warn("[EpiphyCompat] ModernUI glyph capture degraded cleanly to vanilla Font: {}", err.toString())
             false
+        }
+    }
+}
+
+/**
+ * 客户端软兼容自注册订阅器（本身方法签名不含任何 `icyllis.modernui.*` 类型，未安装 ModernUI 时不会触发类加载失败，且无需 `Class.forName` 反射）。
+ */
+@Mod.EventBusSubscriber(modid = EpiphyMod.ID, bus = Mod.EventBusSubscriber.Bus.MOD, value = [Dist.CLIENT])
+object ModernUiClientCompatSubscriber {
+    @JvmStatic
+    @SubscribeEvent
+    fun onClientSetup(event: FMLClientSetupEvent) {
+        if (!ModList.get().isLoaded("modernui")) return
+        event.enqueueWork {
+            ModernUiGlyphCaptureBackend.tryInstall()
         }
     }
 }

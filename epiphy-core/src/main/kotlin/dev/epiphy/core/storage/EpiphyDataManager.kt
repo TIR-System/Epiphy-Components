@@ -113,8 +113,11 @@ class EpiphyDataManager(rawGameDir: Path) {
 
         val anchorPath = saveRoot.resolve("data").resolve("epiphy_world_id.json")
         val anchorStore = AtomicJsonStore(anchorPath, SaveWorldAnchor.serializer(), lockOnCorrupt = false)
-        val existingAnchor = (anchorStore.load() as? AtomicJsonStore.LoadOutcome.Loaded)?.value
-            ?: (anchorStore.load() as? AtomicJsonStore.LoadOutcome.RecoveredFromBackup)?.value
+        val existingAnchor = when (val anchorOutcome = anchorStore.load()) {
+            is AtomicJsonStore.LoadOutcome.Loaded -> anchorOutcome.value
+            is AtomicJsonStore.LoadOutcome.RecoveredFromBackup -> anchorOutcome.value
+            else -> null
+        }
 
         val currentIndexMap = LinkedHashMap(loadIndexMap())
 

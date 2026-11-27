@@ -10,6 +10,7 @@ import com.mojang.blaze3d.vertex.Tesselator
 import com.mojang.blaze3d.vertex.VertexFormat
 import net.minecraft.client.Minecraft
 import net.minecraft.client.renderer.GameRenderer
+import org.lwjgl.opengl.GL11
 
 /**
  * `TextureTarget` (FBO) 按需离屏缓存池，供静态或低频变更的声明式 2D 节点子树复用合成纹理。
@@ -39,8 +40,13 @@ class FboCachePool(
         var lastUsedAtMs: Long = System.currentTimeMillis()
     )
 
+    private class IdleTargetEntry(
+        val target: TextureTarget,
+        val recycledAtMs: Long
+    )
+
     private val activeSurfaces = LinkedHashMap<String, CachedFboSurface>(32, 0.75f, true)
-    private val idlePoolByBucket = HashMap<Long, ArrayDeque<TextureTarget>>()
+    private val idlePoolByBucket = HashMap<Long, ArrayDeque<IdleTargetEntry>>()
 
     val activeCount: Int
         @Synchronized get() = activeSurfaces.size
@@ -108,7 +114,11 @@ class FboCachePool(
         if (entry.dirty) {
             val mc = Minecraft.getInstance()
             val mainTarget = mc.mainRenderTarget
+            val scissorWasEnabled = GL11.glIsEnabled(GL11.GL_SCISSOR_TEST)
             try {
+                if (scissorWasEnabled) {
+                    GL11.glDisable(GL11.GL_SCISSOR_TEST)
+                }
                 entry.target.setClearColor(0f, 0f, 0f, 0f)
                 entry.target.clear(Minecraft.ON_OSX)
                 entry.target.bindWrite(true)
@@ -124,6 +134,9 @@ class FboCachePool(
             } finally {
                 entry.target.unbindWrite()
                 mainTarget.bindWrite(true)
+                if (scissorWasEnabled) {
+                    GL11.glEnable(GL11.GL_SCISSOR_TEST)
+                }
                 RenderSystem.defaultBlendFunc()
                 RenderSystem.setShaderColor(1f, 1f, 1f, 1f)
             }
@@ -176,12 +189,30 @@ class FboCachePool(
 
     @Synchronized
     fun purgeIdle(nowMs: Long = System.currentTimeMillis()) {
+        if (activeSurfaces.isEmpty() && idlePoolByBucket.isEmpty()) return
+        RenderSystem.assertOnRenderThread()
         val iter = activeSurfaces.entries.iterator()
         while (iter.hasNext()) {
             val (_, entry) = iter.next()
             if ((nowMs - entry.lastUsedAtMs) > idleExpireMs) {
                 iter.remove()
-                entry.target.destroyBuffers()
+                runCatching { entry.target.destroyBuffers() }
+            }
+        }
+
+        val bucketIter = idlePoolByBucket.entries.iterator()
+        while (bucketIter.hasNext()) {
+            val (_, queue) = bucketIter.next()
+            val qIter = queue.iterator()
+            while (qIter.hasNext()) {
+                val idleEntry = qIter.next()
+                if ((nowMs - idleEntry.recycledAtMs) > idleExpireMs) {
+                    qIter.remove()
+                    runCatching { idleEntry.target.destroyBuffers() }
+                }
+            }
+            if (queue.isEmpty()) {
+                bucketIter.remove()
             }
         }
     }
@@ -193,8 +224,8 @@ class FboCachePool(
         }
         activeSurfaces.clear()
         for (q in idlePoolByBucket.values) {
-            for (t in q) {
-                runCatching { t.destroyBuffers() }
+            for (idleEntry in q) {
+                runCatching { idleEntry.target.destroyBuffers() }
             }
             q.clear()
         }
@@ -205,7 +236,9 @@ class FboCachePool(
         val bKey = packBucketKey(bw, bh)
         val queue = idlePoolByBucket[bKey]
         if (queue != null && queue.isNotEmpty()) {
-            return queue.removeLast()
+            val borrowed = queue.removeLast().target
+            if (queue.isEmpty()) idlePoolByBucket.remove(bKey)
+            return borrowed
         }
         return TextureTarget(bw, bh, true, Minecraft.ON_OSX).apply {
             setClearColor(0f, 0f, 0f, 0f)
@@ -220,7 +253,8 @@ class FboCachePool(
             return
         }
         val bKey = packBucketKey(bw, bh)
-        idlePoolByBucket.getOrPut(bKey) { ArrayDeque(4) }.addLast(target)
+        idlePoolByBucket.getOrPut(bKey) { ArrayDeque(4) }
+            .addLast(IdleTargetEntry(target, System.currentTimeMillis()))
     }
 
     companion object {

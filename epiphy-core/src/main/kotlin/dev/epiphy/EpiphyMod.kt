@@ -24,7 +24,7 @@ import thedarkcolour.kotlinforforge.forge.runForDist
 @Mod(EpiphyMod.ID)
 object EpiphyMod {
     const val ID: String = "epiphy"
-    const val VERSION: String = "0.1.0-alpha.1"
+    const val VERSION: String = EpiphyBuildConstants.MOD_VERSION
 
     val LOGGER = LogUtils.getLogger()
 

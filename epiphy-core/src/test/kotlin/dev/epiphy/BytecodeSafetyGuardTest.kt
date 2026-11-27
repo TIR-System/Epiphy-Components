@@ -116,4 +116,51 @@ class BytecodeSafetyGuardTest {
             "PoseStack.withPose must emit a real JVM finally exception table entry (got $tryCatchBlocksCount)"
         )
     }
+
+    @Test
+    fun `EpiphyClientBootstrap and EpiphyKubeJSPlugin avoid runtime java lang reflect calls`() {
+        val compatDirs = File("build/classes/kotlin/compat").takeIf { it.isDirectory }
+        val targets = mutableListOf(findMainClassFile("dev/epiphy/client/EpiphyClientBootstrap.class"))
+        if (compatDirs != null) {
+            val kjsPluginClass = compatDirs.toPath().resolve("dev/epiphy/compat/kubejs/EpiphyKubeJSPlugin.class")
+            if (Files.isRegularFile(kjsPluginClass)) {
+                targets.add(kjsPluginClass)
+            }
+        }
+
+        for (clsPath in targets) {
+            val reflectionCalls = ArrayList<String>()
+            ClassReader(Files.readAllBytes(clsPath)).accept(object : ClassVisitor(Opcodes.ASM9) {
+                override fun visitMethod(
+                    access: Int,
+                    name: String?,
+                    descriptor: String?,
+                    signature: String?,
+                    exceptions: Array<out String>?
+                ): MethodVisitor {
+                    return object : MethodVisitor(Opcodes.ASM9) {
+                        override fun visitMethodInsn(
+                            opcode: Int,
+                            owner: String?,
+                            mName: String?,
+                            mDesc: String?,
+                            isInterface: Boolean
+                        ) {
+                            if (owner == "java/lang/Class" && (mName == "forName" || mName == "getField" || mName == "getDeclaredField" || mName == "getMethod" || mName == "getDeclaredMethod")) {
+                                reflectionCalls.add("$owner.$mName$mDesc")
+                            }
+                            if (owner != null && owner.startsWith("java/lang/reflect/")) {
+                                reflectionCalls.add("$owner.$mName$mDesc")
+                            }
+                        }
+                    }
+                }
+            }, 0)
+
+            assertTrue(
+                reflectionCalls.isEmpty(),
+                "Unexpected reflection calls found in ${clsPath.fileName}: $reflectionCalls"
+            )
+        }
+    }
 }

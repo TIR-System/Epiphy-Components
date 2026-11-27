@@ -6,6 +6,8 @@ import com.mojang.blaze3d.vertex.BufferBuilder;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.Tesselator;
 import com.mojang.blaze3d.vertex.VertexFormat;
+import dev.epiphy.api.cache.BoundedCache;
+import dev.epiphy.api.cache.EvictionPolicy;
 import dev.epiphy.client.shader.EpiphyCoreShaders;
 import dev.epiphy.client.surface2d.hook.GuiInterceptionHooks;
 import dev.epiphy.client.surface2d.text.NativeTextBatchEngine;
@@ -33,7 +35,8 @@ public final class NativeSurface2DAccelerator {
 
     public static final NativeSurface2DAccelerator INSTANCE = new NativeSurface2DAccelerator();
 
-    private static final ConcurrentHashMap<String, Boolean> textureExistsCache = new ConcurrentHashMap<>(256);
+    private static final BoundedCache<String, Boolean> textureExistsCache =
+            new BoundedCache<>(2048, EvictionPolicy.LRU);
 
     private NativeSurface2DAccelerator() {}
 
@@ -161,14 +164,11 @@ public final class NativeSurface2DAccelerator {
         if (mc == null || mc.getResourceManager() == null) return false;
         ResourceLocation rl = ResourceLocation.tryParse(rawPath.trim());
         if (rl == null) {
-            textureExistsCache.put(rawPath, Boolean.FALSE);
+            textureExistsCache.set(rawPath, Boolean.FALSE);
             return false;
         }
         boolean exists = mc.getResourceManager().getResource(rl).isPresent();
-        if (textureExistsCache.size() > 2048) {
-            textureExistsCache.clear();
-        }
-        textureExistsCache.put(rawPath, exists);
+        textureExistsCache.set(rawPath, exists);
         return exists;
     }
 
@@ -209,7 +209,7 @@ public final class NativeSurface2DAccelerator {
             boolean vertical,
             boolean hasMid, int midArgb, float midPos
     ) {
-        if (mat == null || w <= 0.0f || h <= 0.0f) return;
+        if (mat == null || w <= 0.0f || h <= 0.0f || !RenderSystem.isOnRenderThread()) return;
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
         RenderSystem.setShader(GameRenderer::getPositionColorShader);
@@ -247,7 +247,7 @@ public final class NativeSurface2DAccelerator {
             float u0, float v0, float u1, float v1,
             int tintArgb, float threshold
     ) {
-        if (mat == null || maskTexPath == null || w <= 0.0f || h <= 0.0f) return false;
+        if (mat == null || maskTexPath == null || w <= 0.0f || h <= 0.0f || !RenderSystem.isOnRenderThread()) return false;
         EpiphyCoreShaders.CompiledShaderHandle handle = EpiphyCoreShaders.INSTANCE.getUiMaskedFillShader();
         if (handle == null) return false;
 

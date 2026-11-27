@@ -2,6 +2,7 @@
 package dev.epiphy.client.surface2d.text;
 
 import com.mojang.blaze3d.vertex.VertexConsumer;
+import dev.epiphy.client.util.RenderFaultCircuitBreaker;
 import dev.epiphy.core.config.EpiphyConfig;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.renderer.MultiBufferSource;
@@ -28,7 +29,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <h3>已知边界</h3>
  * <ul>
- *   <li>内部复用的捕获器与分桶数组面向客户端主渲染线程单线程设计，不支持多线程并发调用 {@link #renderScene}；</li>
+ *   <li>捕获器与分桶缓冲通过 {@link ThreadLocal} 隔离线程状态（客户端主渲染线程每帧复用同一实例，同时兼容无头单元测试）；</li>
  *   <li>若自定义字体渲染后端输出非 4 顶点整数倍的图元或含非有限坐标，该片段会被标记为不可捕获并交由上层常规路径回退绘制。</li>
  * </ul>
  */
@@ -86,10 +87,16 @@ public final class NativeTextBatchEngine {
     private Font lastSeenFont = null;
     private int lastSeenBackendEpoch = -1;
 
-    private final GlyphQuadCapturer sharedCapturer = new GlyphQuadCapturer();
-    private final PassBucketBuffer pass0Buckets = new PassBucketBuffer(); // 外圈 (glow / stroke / split halo)
-    private final PassBucketBuffer pass1Buckets = new PassBucketBuffer(); // 阴影 / 虚化残影 (shadow / blur mist)
-    private final PassBucketBuffer pass2Buckets = new PassBucketBuffer(); // 正文前景 (foreground)
+    private static final class ThreadScratch {
+        final GlyphQuadCapturer capturer = new GlyphQuadCapturer();
+        final PassBucketBuffer pass0Buckets = new PassBucketBuffer(); // 外圈 (glow / stroke / split halo)
+        final PassBucketBuffer pass1Buckets = new PassBucketBuffer(); // 阴影 / 虚化残影 (shadow / blur mist)
+        final PassBucketBuffer pass2Buckets = new PassBucketBuffer(); // 正文前景 (foreground)
+    }
+
+    private final ThreadLocal<ThreadScratch> threadScratch = ThreadLocal.withInitial(ThreadScratch::new);
+    private final RenderFaultCircuitBreaker captureBreaker =
+            new RenderFaultCircuitBreaker("EpiphySurface2D", "NativeTextCapture", 16, 5_000L, null);
 
     // 遥测计数器
     private final AtomicLong scenesCompiled = new AtomicLong(0L);
@@ -117,6 +124,7 @@ public final class NativeTextBatchEngine {
             lastSeenFont = null;
             lastSeenBackendEpoch = -1;
         }
+        captureBreaker.reset();
     }
 
     private static float fastSinTurns(double turns) {
@@ -391,7 +399,10 @@ public final class NativeTextBatchEngine {
         if (!EpiphyConfig.surface2DEnabled || !EpiphyConfig.nativeTextBatcherEnabled) {
             return false;
         }
-        if (!(sceneHandle instanceof CompiledPerCharScene scene) || baseItemMat == null || bufferSource == null || font == null) {
+        if (!(sceneHandle instanceof CompiledPerCharScene scene) || baseItemMat == null || bufferSource == null) {
+            return false;
+        }
+        if (font == null && this.optionalBackend == null) {
             return false;
         }
         if (keepEndVis <= startSkipVis || scene.topCount == 0) {
@@ -499,6 +510,10 @@ public final class NativeTextBatchEngine {
 
         boolean preferSdfGlobal = backend != null && (defOutCode != OUT_NONE || isBlurFade || isSplitFade || (isPerCharShake && scene.rotDegAmp > 0.0f));
 
+        ThreadScratch scratch = threadScratch.get();
+        PassBucketBuffer pass0Buckets = scratch.pass0Buckets;
+        PassBucketBuffer pass1Buckets = scratch.pass1Buckets;
+        PassBucketBuffer pass2Buckets = scratch.pass2Buckets;
         pass0Buckets.reset();
         pass1Buckets.reset();
         pass2Buckets.reset();
@@ -512,7 +527,7 @@ public final class NativeTextBatchEngine {
                     float uw = scene.width[uIdx];
                     if (!isOutOfViewport(scene.baseX[uIdx] + uw * 0.5f, scene.baseY[uIdx] + 4.0f, uw * 0.5f + 4.0f, 6.0f, px, py, mxx, mxy, myx, myy, screenW, screenH, offPadPx)) {
                         if (!emitSingleNodeToBuckets(
-                                scene, uIdx, scene.baseX[uIdx], scene.baseY[uIdx], 0.0f,
+                                scratch, scene, uIdx, scene.baseX[uIdx], scene.baseY[uIdx], 0.0f,
                                 font, backend, seeThrough, preferSdfGlobal,
                                 qualityLevel, defOutCode, defOutlineColor, defOutlineWidth,
                                 shadow, baseA, isSplitFade, isBlurFade,
@@ -536,7 +551,7 @@ public final class NativeTextBatchEngine {
                             continue;
                         }
                         if (!emitSingleNodeToBuckets(
-                                scene, sIdx, scene.baseX[sIdx], scene.baseY[sIdx], 0.0f,
+                                scratch, scene, sIdx, scene.baseX[sIdx], scene.baseY[sIdx], 0.0f,
                                 font, backend, seeThrough, preferSdfGlobal,
                                 qualityLevel, defOutCode, defOutlineColor, defOutlineWidth,
                                 shadow, baseA, isSplitFade, isBlurFade,
@@ -662,7 +677,7 @@ public final class NativeTextBatchEngine {
             }
 
             if (!emitSingleNodeToBuckets(
-                    scene, uIdx, scene.baseX[uIdx] + offDx, scene.baseY[uIdx] + offDy, offRot,
+                    scratch, scene, uIdx, scene.baseX[uIdx] + offDx, scene.baseY[uIdx] + offDy, offRot,
                     font, backend, seeThrough, preferSdfGlobal,
                     qualityLevel, defOutCode, defOutlineColor, defOutlineWidth,
                     shadow, baseA, isSplitFade, isBlurFade,
@@ -698,6 +713,7 @@ public final class NativeTextBatchEngine {
     }
 
     private boolean emitSingleNodeToBuckets(
+            ThreadScratch scratch,
             CompiledPerCharScene scene,
             int nodeIdx,
             float floatX,
@@ -729,6 +745,10 @@ public final class NativeTextBatchEngine {
         String rawText = scene.rawTexts[nodeIdx];
         if (rawText == null || rawText.isEmpty()) return true;
 
+        PassBucketBuffer pass0Buckets = scratch.pass0Buckets;
+        PassBucketBuffer pass1Buckets = scratch.pass1Buckets;
+        PassBucketBuffer pass2Buckets = scratch.pass2Buckets;
+
         byte rawOut = scene.outlineCode[nodeIdx];
         byte outMode = rawOut == OUT_INHERIT ? defOutCode : (qualityLevel <= 0 ? OUT_NONE : rawOut);
         int outCol = scene.outlineColor[nodeIdx] >= 0 ? scene.outlineColor[nodeIdx] : defOutlineColor;
@@ -739,7 +759,7 @@ public final class NativeTextBatchEngine {
         boolean needTransform = hasScale || hasRot;
         boolean preferSdf = backend != null && (preferSdfGlobal || outMode != OUT_NONE || needTransform);
 
-        CapturedGlyphUnit unit = getOrCaptureGlyphUnit(font, backend, rawText, seeThrough, preferSdf);
+        CapturedGlyphUnit unit = getOrCaptureGlyphUnit(scratch.capturer, font, backend, rawText, seeThrough, preferSdf);
         if (unit == null || !unit.capturable) {
             return false;
         }
@@ -865,6 +885,7 @@ public final class NativeTextBatchEngine {
     }
 
     private CapturedGlyphUnit getOrCaptureGlyphUnit(
+            GlyphQuadCapturer capturer,
             Font font,
             GlyphCaptureBackend backend,
             String rawText,
@@ -879,22 +900,25 @@ public final class NativeTextBatchEngine {
             }
         }
 
-        sharedCapturer.reset();
+        capturer.reset();
         boolean usedCompat = false;
         boolean ok = false;
 
-        if (backend != null) {
+        if (backend != null && !captureBreaker.isTripped()) {
             try {
-                if (backend.captureGlyphs(font, rawText, seeThrough, preferSdf, sharedCapturer, SENTINEL_R, SENTINEL_G, SENTINEL_B)) {
+                if (backend.captureGlyphs(font, rawText, seeThrough, preferSdf, capturer, SENTINEL_R, SENTINEL_G, SENTINEL_B)) {
                     usedCompat = true;
                     ok = true;
+                    captureBreaker.recordSuccess();
                 }
-            } catch (Throwable ignored) {
-                sharedCapturer.reset();
+            } catch (Throwable err) {
+                RenderFaultCircuitBreaker.rethrowIfFatalJvmError(err);
+                captureBreaker.recordFailure(err, "compatBackend");
+                capturer.reset();
             }
         }
 
-        if (!ok) {
+        if (!ok && font != null) {
             try {
                 Font.DisplayMode mode = seeThrough ? Font.DisplayMode.SEE_THROUGH : Font.DisplayMode.NORMAL;
                 font.drawInBatch(
@@ -904,18 +928,20 @@ public final class NativeTextBatchEngine {
                         SENTINEL_PACKED_ARGB,
                         false,
                         identityMatrix,
-                        sharedCapturer,
+                        capturer,
                         mode,
                         0,
                         FULL_BRIGHT_LIGHT
                 );
                 ok = true;
             } catch (Throwable err) {
+                RenderFaultCircuitBreaker.rethrowIfFatalJvmError(err);
+                captureBreaker.recordFailure(err, "vanillaFont");
                 ok = false;
             }
         }
 
-        CapturedGlyphUnit built = ok ? sharedCapturer.buildUnit(usedCompat) : CapturedGlyphUnit.UNCAPTURABLE;
+        CapturedGlyphUnit built = ok ? capturer.buildUnit(usedCompat) : CapturedGlyphUnit.UNCAPTURABLE;
         synchronized (glyphCache) {
             glyphCache.put(key, built);
         }
