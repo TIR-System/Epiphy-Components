@@ -5,19 +5,21 @@ import com.mojang.blaze3d.vertex.PoseStack
 import dev.epiphy.mixin.client.PoseStackAccessor
 import org.joml.Matrix3f
 import org.joml.Matrix4f
+import java.util.Deque
 
 /**
  * 基于 `PoseStackAccessor` 的矩阵栈深度水位线守卫。
  *
  * 工作机制：
- * 1. 进入回调前读取 `PoseStack` 内部双端队列当前深度 `entryDepth`，备份入口栈顶的 4x4 姿态矩阵与 3x3 法线矩阵，随后推入一层隔离工作帧；
- * 2. 回调抛出的普通异常交由 [RenderFaultCircuitBreaker] 计数与限频告警，致命 JVM 错误直接向外重抛；
+ * 1. 进入回调前检查 `PoseStack` 内部双端队列；若上游已意外传入空栈（`size == 0`），先注入一帧单位矩阵根帧再读取 `entryDepth` 并备份栈顶 `4x4 / 3x3` 矩阵；
+ * 2. 推入一层隔离工作帧后执行回调，普通运行期异常交由 [RenderFaultCircuitBreaker] 计数与限频告警，致命 JVM 错误直接向外重抛；
  * 3. 在 `finally` 阶段核对栈深：
- *    - 若回调内部多执行了 `pushPose()` 未弹出（栈溢出泄漏），循环弹出多余帧直至恢复 `entryDepth`，并向熔断器记录结构异常；
- *    - 若回调内部多执行了 `popPose()` 误弹出外层帧（栈下溢透支），补推缺失帧至 `entryDepth` 并将入口矩阵备份写回栈顶帧，同时向熔断器记录结构异常。
+ *    - 若回调内部多执行了 `pushPose()` 未弹出（栈溢出泄漏），循环弹出多余帧直至恢复 `entryDepth`，并记录结构异常；
+ *    - 若回调内部多执行了 `popPose()` 误弹出外层帧甚至将栈彻底弹空至 `size == 0`（此时原版 `PoseStack.pushPose()` 会因 `Deque.getLast()` 抛 `NoSuchElementException`），
+ *      守卫先通过新建种子栈帧直接向空 `Deque` 填回首帧使 `size >= 1`，再补推至 `entryDepth` 并写回入口备份矩阵。
  *
  * 已知边界：
- * - 若在未启用 Mixin 转换的无头测试环境中传入普通 `PoseStack`（未实现 [PoseStackAccessor]），守卫会退化为外层单次对称 `pushPose/popPose`；测试可通过实现 [PoseStackAccessor] 的子类验证完整双向深度恢复。
+ * - 若在未启用 Mixin 转换的无头环境中传入未实现 [PoseStackAccessor] 的普通 `PoseStack`，守卫仅能执行外层单次对称 `pushPose/popPose`；无头测试可通过实现 [PoseStackAccessor] 的子类验证包括 `size == 0` 空栈在内的完整恢复逻辑。
  */
 object PoseStackWatermark {
 
@@ -44,7 +46,11 @@ object PoseStackWatermark {
             }
         }
 
-        val entryDepth = deque.size.coerceAtLeast(1)
+        if (deque.isEmpty()) {
+            appendSeedRootFrame(deque, Matrix4f(), Matrix3f())
+        }
+
+        val entryDepth = deque.size
         val entryTop = poseStack.last()
         val backupPose = Matrix4f(entryTop.pose())
         val backupNormal = Matrix3f(entryTop.normal())
@@ -77,6 +83,9 @@ object PoseStackWatermark {
                 )
             } else {
                 val underflowLayers = expectedWorkingDepth - actualAfterDepth
+                if (deque.isEmpty()) {
+                    appendSeedRootFrame(deque, backupPose, backupNormal)
+                }
                 while (deque.size < entryDepth) {
                     poseStack.pushPose()
                 }
@@ -86,11 +95,18 @@ object PoseStackWatermark {
                 restoreTopMatrices(poseStack, backupPose, backupNormal)
                 val ctx = if (!detailContext.isNullOrBlank()) "[$detailContext] " else ""
                 breaker.recordStructuralAnomaly(
-                    "${ctx}PoseStack underflow detected: listener over-popped -$underflowLayers layer(s); rebuilt depth to $entryDepth"
+                    "${ctx}PoseStack underflow detected: listener over-popped -$underflowLayers layer(s) (afterSize=$actualAfterDepth); rebuilt depth to $entryDepth"
                 )
             }
         }
         return !caughtFailure
+    }
+
+    private fun appendSeedRootFrame(deque: Deque<PoseStack.Pose>, pose: Matrix4f, normal: Matrix3f) {
+        val seedFrame = PoseStack().last()
+        seedFrame.pose().set(pose)
+        seedFrame.normal().set(normal)
+        deque.addLast(seedFrame)
     }
 
     private fun restoreTopMatrices(poseStack: PoseStack, backupPose: Matrix4f, backupNormal: Matrix3f) {

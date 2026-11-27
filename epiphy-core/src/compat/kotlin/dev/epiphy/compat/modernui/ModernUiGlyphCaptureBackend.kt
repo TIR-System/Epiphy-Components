@@ -2,20 +2,16 @@
 package dev.epiphy.compat.modernui
 
 import com.mojang.logging.LogUtils
-import dev.epiphy.EpiphyMod
+import dev.epiphy.client.compat.EpiphyClientCompatModule
 import dev.epiphy.client.surface2d.text.GlyphCaptureBackend
 import dev.epiphy.client.surface2d.text.NativeTextBatchEngine
 import dev.epiphy.client.util.RenderFaultCircuitBreaker
+import icyllis.modernui.mc.text.ModernTextRenderer
 import icyllis.modernui.mc.text.TextLayout
 import icyllis.modernui.mc.text.TextLayoutEngine
 import net.minecraft.client.gui.Font
 import net.minecraft.client.renderer.MultiBufferSource
-import net.minecraft.network.chat.Style
-import net.minecraftforge.api.distmarker.Dist
-import net.minecraftforge.eventbus.api.SubscribeEvent
 import net.minecraftforge.fml.ModList
-import net.minecraftforge.fml.common.Mod
-import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent
 import org.joml.Matrix4f
 import java.lang.invoke.MethodHandle
 import java.lang.invoke.MethodHandles
@@ -23,15 +19,16 @@ import java.lang.invoke.MethodType
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * ModernUI 可选软兼容字形网格捕获后端（位于 `src/compat`，仅在运行环境加载了 `modernui` 时启用）。
+ * ModernUI 可选软兼容字形网格捕获后端（位于 `src/compat`，通过 [ModernUiClientCompatModule] `ServiceLoader` SPI 在客户端启动时按需启用）。
  *
  * 版本适配与行为：
  * - ModernUI `3.8 ~ 3.9` 的 `TextLayout.drawText` 为 13 参数，而 `3.10.1+ ~ 3.12+` 为 14 参数（增加了 `float density`）；
  * - 初始化阶段通过 `MethodHandles.publicLookup()` 探测两个公开方法签名，匹配其一后用于捕获字形 Quad；
- * - 含彩色 Emoji 的文本片段走常规纹理采样（`preferredMode = 0`），避免按单通道 SDF 距离场采样导致彩色贴图偏色；其余需要缩放、旋转或描边的片段请求 SDF 模式（`preferredMode = 1`）。
+ * - 使用单参数 `TextLayoutEngine.lookupVanillaLayout(rawText)` 解析含 `§` 样式的文本并重置 `TextLayout` 内部保活计时器（`mTimer = 0`）；
+ * - 含彩色 Emoji 或用户在 ModernUI 设置中关闭 `sAllowSDFTextIn2D` 的片段走常规纹理采样（`preferredMode = 0`），其余旋转、缩放或描边片段启用 SDF 矢量距离场模式（`preferredMode = 1`）。
  *
  * 已知边界：
- * - 依赖 `icyllis.modernui.mc.text.TextLayoutEngine` 与 `TextLayout` 的上述公开签名；若更高版本调整了参数列表或运行期抛出异常，当前后端会将 `degraded` 置为 `true` 并回退至原版 `Font` 字形捕获。
+ * - 依赖 `icyllis.modernui.mc.text.TextLayoutEngine`、`ModernTextRenderer` 与 `TextLayout` 的公开方法签名；若未来大版本移除上述签名或运行期调用异常，会将 `degraded` 置为 `true` 并回退至原版 `Font` 字形捕获。
  */
 object ModernUiGlyphCaptureBackend : GlyphCaptureBackend {
 
@@ -41,12 +38,15 @@ object ModernUiGlyphCaptureBackend : GlyphCaptureBackend {
     private val identityMat = Matrix4f()
     private val epochCounter = AtomicInteger(1)
     @Volatile private var lastEngineRef: Any? = null
+    @Volatile private var lastResLevel: Int = -1
     @Volatile private var degraded: Boolean = false
 
     // 14 参数签名 (ModernUI 3.10.1+ / 3.12.x)
     private val drawText14Handle: MethodHandle?
     // 13 参数签名 (ModernUI 3.8.x / 3.9.x)
     private val drawText13Handle: MethodHandle?
+    // ModernUI 3.10+ 可选 getResLevel() 探测句柄
+    private val getResLevelHandle: MethodHandle?
 
     init {
         val lookup = MethodHandles.publicLookup()
@@ -100,27 +100,39 @@ object ModernUiGlyphCaptureBackend : GlyphCaptureBackend {
         } else {
             null
         }
+
+        getResLevelHandle = runCatching {
+            lookup.findVirtual(
+                TextLayoutEngine::class.java,
+                "getResLevel",
+                MethodType.methodType(Int::class.javaPrimitiveType)
+            )
+        }.getOrNull()
     }
 
     @JvmStatic
-    fun tryInstall() {
+    fun tryInstall(): Boolean {
         if (drawText14Handle == null && drawText13Handle == null) {
             LOGGER.info("[EpiphyCompat] ModernUI detected, but TextLayout.drawText signature was not matched; using vanilla Font glyph capture.")
-            return
+            return false
         }
+        degraded = false
         NativeTextBatchEngine.INSTANCE.optionalBackend = this
         LOGGER.info(
-            "[EpiphyCompat] Installed ModernUI SDF glyph capture backend (arity={}).",
+            "[EpiphyCompat] Installed ModernUI SDF glyph capture backend via SPI (arity={}).",
             if (drawText14Handle != null) 14 else 13
         )
+        return true
     }
 
     override fun currentEpoch(): Int {
         if (degraded) return -1
         return runCatching {
-            val engine = TextLayoutEngine.getInstance()
-            if (engine !== lastEngineRef) {
+            val engine = TextLayoutEngine.getInstance() ?: return -1
+            val resLvl = getResLevelHandle?.let { h -> (h.invokeExact(engine) as Int) } ?: 0
+            if (engine !== lastEngineRef || resLvl != lastResLevel) {
                 lastEngineRef = engine
+                lastResLevel = resLvl
                 epochCounter.incrementAndGet()
             } else {
                 epochCounter.get()
@@ -129,7 +141,7 @@ object ModernUiGlyphCaptureBackend : GlyphCaptureBackend {
     }
 
     override fun captureGlyphs(
-        font: Font,
+        font: Font?,
         rawText: String,
         seeThrough: Boolean,
         preferSdf: Boolean,
@@ -145,8 +157,9 @@ object ModernUiGlyphCaptureBackend : GlyphCaptureBackend {
 
         return try {
             val engine = TextLayoutEngine.getInstance() ?: return false
-            val layout = engine.lookupVanillaLayout(rawText, Style.EMPTY) ?: return false
-            val mode = if (preferSdf && !layout.hasColorEmoji()) 1 else 0
+            val layout = engine.lookupVanillaLayout(rawText) ?: return false
+            val allowSdf2d = runCatching { ModernTextRenderer.sAllowSDFTextIn2D }.getOrDefault(true)
+            val mode = if (preferSdf && allowSdf2d && !layout.hasColorEmoji()) 1 else 0
             if (h14 != null) {
                 h14.invokeExact(
                     layout,
@@ -194,16 +207,13 @@ object ModernUiGlyphCaptureBackend : GlyphCaptureBackend {
 }
 
 /**
- * 客户端软兼容自注册订阅器（本身方法签名不含任何 `icyllis.modernui.*` 类型，未安装 ModernUI 时不会触发类加载失败，且无需 `Class.forName` 反射）。
+ * 客户端 `ServiceLoader` SPI 注册入口：自身签名不含任何 `icyllis.modernui.*` 类型，未安装 ModernUI 时安全跳过。
  */
-@Mod.EventBusSubscriber(modid = EpiphyMod.ID, bus = Mod.EventBusSubscriber.Bus.MOD, value = [Dist.CLIENT])
-object ModernUiClientCompatSubscriber {
-    @JvmStatic
-    @SubscribeEvent
-    fun onClientSetup(event: FMLClientSetupEvent) {
+class ModernUiClientCompatModule : EpiphyClientCompatModule {
+    override val id: String = "modernui"
+
+    override fun onClientSetup() {
         if (!ModList.get().isLoaded("modernui")) return
-        event.enqueueWork {
-            ModernUiGlyphCaptureBackend.tryInstall()
-        }
+        ModernUiGlyphCaptureBackend.tryInstall()
     }
 }

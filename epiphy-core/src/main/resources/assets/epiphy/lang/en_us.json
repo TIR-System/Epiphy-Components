@@ -34,7 +34,9 @@
   "epiphy.config.client.enableVanillaMusicDucking": "Duck Vanilla Music During Managed BGM",
   "epiphy.config.client.enableVanillaMusicDucking.tooltip": "Gently mutes vanilla background music while managed custom music streams are playing.",
   "epiphy.config.client.debugPerfSampling": "Microsecond Render Performance Sampling",
-  "epiphy.config.client.debugPerfSampling.tooltip": "Enables microsecond-resolution native render telemetry (inspect via /epiphy debug renderperf).",
+  "epiphy.config.client.debugPerfSampling.tooltip": "Enables 512-frame rolling window CPU submit telemetry (P50 / P95 / Max).",
+  "epiphy.config.client.exportPerfReport": "Export 5-Tuple Perf Report",
+  "epiphy.config.client.exportPerfReport.tooltip": "Writes rolling latency percentiles and the 5-tuple environment baseline to epiphy-data/logs/render-perf-report.md.",
   "epiphy.config.common.enableAsyncFileLogging": "Enable Async File Logging",
   "epiphy.config.common.enableAsyncFileLogging.tooltip": "Writes diagnostic and audit logs asynchronously under <gameDir>/epiphy-data/.",
   "epiphy.config.common.logDeprecationWarnings": "Log Legacy Alias Warnings",
@@ -49,5 +51,8 @@
   "epiphy.config.value.off": "OFF",
   "epiphy.config.button.reset": "Reset Defaults",
   "epiphy.config.button.cancel": "Cancel",
-  "epiphy.config.button.save": "Save & Apply"
+  "epiphy.config.button.save": "Save & Apply",
+  "epiphy.config.button.exportReport": "Export Report",
+  "epiphy.config.button.exportedOk": "Saved to logs/",
+  "epiphy.config.button.exportFailed": "Export Failed"
 }

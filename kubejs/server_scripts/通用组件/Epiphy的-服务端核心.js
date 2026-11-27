@@ -216,6 +216,21 @@
         var defMs = (defaultIntervalMs != null && defaultIntervalMs > 0) ? defaultIntervalMs : 5000;
         var localCatches = 0;
         return {
+            debug: function (tag, msg, notifyPlayer, intervalMs) {
+                var logApi = resolveEpiphyLog();
+                if (logApi && typeof logApi.debug === 'function') {
+                    return logApi.debug(mod, tag, msg);
+                }
+                return false;
+            },
+            info: function (tag, msg, notifyPlayer, intervalMs) {
+                var logApi = resolveEpiphyLog();
+                if (logApi && typeof logApi.info === 'function') {
+                    return logApi.info(mod, tag, msg, notifyPlayer || null);
+                }
+                var iv = intervalMs != null ? intervalMs : 0;
+                return fallbackRateLog('info', mod, String(tag || 'general'), msg, notifyPlayer, iv);
+            },
             warn: function (tag, msg, notifyPlayer, intervalMs) {
                 var logApi = resolveEpiphyLog();
                 var iv = intervalMs != null ? intervalMs : defMs;

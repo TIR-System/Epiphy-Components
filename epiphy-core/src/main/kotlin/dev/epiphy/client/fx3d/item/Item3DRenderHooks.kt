@@ -95,7 +95,7 @@ object Item3DRenderHooks {
     }
 
     @JvmStatic
-    fun resolveRenderBuffer(
+    fun acquireIsolatedRenderBuffer(
         stack: ItemStack,
         bakedModel: BakedModel?,
         outerBuffer: MultiBufferSource
@@ -110,8 +110,8 @@ object Item3DRenderHooks {
     }
 
     @JvmStatic
-    fun finishIsolatedRenderBuffer(activeBuffer: MultiBufferSource?) {
-        NativeItem3DEngine.releaseIsolatedBufferSource(activeBuffer)
+    fun releaseIsolatedRenderBuffer(leasedBuffer: MultiBufferSource?) {
+        NativeItem3DEngine.releaseIsolatedBufferSource(leasedBuffer)
     }
 
     @JvmStatic

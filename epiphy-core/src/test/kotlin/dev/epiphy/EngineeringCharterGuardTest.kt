@@ -47,6 +47,7 @@ class EngineeringCharterGuardTest {
             "epiphy-core/src/main/kotlin/dev/epiphy/core/debug/EpiphyDebugHub.kt",
             "epiphy-core/src/main/kotlin/dev/epiphy/core/config/EpiphyConfig.kt",
             "epiphy-core/src/main/java/dev/epiphy/core/world/NativeSectionScanner.java",
+            "epiphy-core/src/main/kotlin/dev/epiphy/client/debug/EpiphyRenderPerfReporter.kt",
             "epiphy-core/src/main/kotlin/dev/epiphy/client/surface2d/fbo/FboCachePool.kt",
             "epiphy-core/src/main/kotlin/dev/epiphy/client/surface2d/hook/GuiInterceptionHooks.kt",
             "epiphy-core/src/main/kotlin/dev/epiphy/client/util/PoseStackWatermark.kt",

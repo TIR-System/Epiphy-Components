@@ -1398,8 +1398,8 @@
     }
 
     var INV_TWO_PI    = 0.15915494309189535
-    var TRIG_LUT_SIZE = 256
-    var TRIG_LUT_MASK = 255
+    var TRIG_LUT_SIZE = 1024
+    var TRIG_LUT_MASK = 1023
     var TRIG_COS_LUT  = []
     var TRIG_SIN_LUT  = []
     ;(function initTrigLut() {
@@ -8180,6 +8180,9 @@
                                         Number(sh),
                                         Number(offPadPx)
                                     ))
+                                    if (handledByNativeText) {
+                                        itemBatchCtx.drawn++
+                                    }
                                     if (handledByNativeText && blinkCursor.length > 0 && visRange.hi > visRange.lo) {
                                         var tailUnit = charUnits[visRange.hi - 1]
                                         if (tailUnit != null && tailUnit.isMerged && Array.isArray(tailUnit.subFrags)) {

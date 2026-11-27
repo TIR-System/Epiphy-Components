@@ -21,10 +21,10 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <h3>工作机制</h3>
  * <ol>
- *   <li><b>字形 Quad 捕获（{@link GlyphQuadCapturer}）</b>：首次遇到某文本片段时，在单位矩阵下执行一次排版输出
- *       （支持可选软兼容 SDF 后端与原版 {@link Font#drawInBatch} 回退），记录产出的 {@link RenderType}、局部顶点坐标、UV 与固有色并存入有界 LRU 缓存；</li>
- *   <li><b>场景预编译（{@link CompiledPerCharScene}）</b>：将分段后的富文本单元编译为紧凑原始类型数组，后续每帧通过单次方法调用完成可见区间定位、视口裁剪与逐字运动学偏移计算；</li>
- *   <li><b>分阶段与按图集归并提交</b>：按深度阶段（Pass 0 外圈 ➔ Pass 1 阴影/残影 ➔ Pass 2 正文）顺序，在每个阶段内将落入同一纹理页 {@link RenderType} 的字符 Quad 归并到同一缓冲区后集中写入 {@link VertexConsumer}，减少多纹理页交替切换带来的断批次数。</li>
+ *   <li><b>当帧动态图集同步捕获（{@link GlyphQuadCapturer}）</b>：每个渲染帧（{@link #beginRenderFrame}）对当帧可见的不重复字符执行一次字形捕获并存入当帧去重表，
+ *       既保证动态字体图集（如 ModernUI {@code GLFontAtlas} 的字形保活计时器、动态扩容重排与窗口缩放 {@code resLevel} 变更）每帧拿到有效 UV 与最新纹理页 {@link RenderType}，又避免同帧重复字符多次捕获；</li>
+ *   <li><b>场景预编译（{@link CompiledPerCharScene}）</b>：将分段后的富文本单元编译为紧凑原始类型数组，每帧通过单次调用完成可见区间定位、视口裁剪、倾斜/缩放自动 SDF 判定与逐字运动学偏移计算；</li>
+ *   <li><b>分阶段与按图集归并提交</b>：按深度阶段（Pass 0 外圈 ➔ Pass 1 阴影/残影 ➔ Pass 2 正文）顺序，在每个阶段内将落入同一纹理页 {@link RenderType} 的字符 Quad 归并后集中写入 {@link VertexConsumer}，减少跨图集页交替切换引发的断批。</li>
  * </ol>
  *
  * <h3>已知边界</h3>
@@ -75,19 +75,19 @@ public final class NativeTextBatchEngine {
 
     private volatile GlyphCaptureBackend optionalBackend = null;
     private final Matrix4f identityMatrix = new Matrix4f();
-
-    // 仅在客户端主渲染线程访问的 LRU 字形网格缓存与可复用分桶缓冲
-    private final LinkedHashMap<GlyphCacheKey, CapturedGlyphUnit> glyphCache =
-            new LinkedHashMap<>(512, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<GlyphCacheKey, CapturedGlyphUnit> eldest) {
-                    return size() > MAX_GLYPH_CACHE_ENTRIES;
-                }
-            };
-    private Font lastSeenFont = null;
-    private int lastSeenBackendEpoch = -1;
+    private final AtomicLong renderFrameSeq = new AtomicLong(1L);
 
     private static final class ThreadScratch {
+        long syncedFrameSeq = -1L;
+        Font syncedFont = null;
+        int syncedBackendEpoch = -1;
+        final LinkedHashMap<GlyphCacheKey, CapturedGlyphUnit> frameGlyphCache =
+                new LinkedHashMap<>(256, 0.75f, false) {
+                    @Override
+                    protected boolean removeEldestEntry(Map.Entry<GlyphCacheKey, CapturedGlyphUnit> eldest) {
+                        return size() > MAX_GLYPH_CACHE_ENTRIES;
+                    }
+                };
         final GlyphQuadCapturer capturer = new GlyphQuadCapturer();
         final PassBucketBuffer pass0Buckets = new PassBucketBuffer(); // 外圈 (glow / stroke / split halo)
         final PassBucketBuffer pass1Buckets = new PassBucketBuffer(); // 阴影 / 虚化残影 (shadow / blur mist)
@@ -97,6 +97,7 @@ public final class NativeTextBatchEngine {
     private final ThreadLocal<ThreadScratch> threadScratch = ThreadLocal.withInitial(ThreadScratch::new);
     private final RenderFaultCircuitBreaker captureBreaker =
             new RenderFaultCircuitBreaker("EpiphySurface2D", "NativeTextCapture", 16, 5_000L, null);
+    private final AtomicLong lastObservedCacheSize = new AtomicLong(0L);
 
     // 遥测计数器
     private final AtomicLong scenesCompiled = new AtomicLong(0L);
@@ -118,12 +119,16 @@ public final class NativeTextBatchEngine {
         return this.optionalBackend;
     }
 
+    /**
+     * 推进客户端渲染帧序号，使当帧首次逐字渲染重新同步动态字体图集（如 ModernUI 纹理页与保活计时器），同帧内多条文本共享字形去重结果。
+     */
+    public void beginRenderFrame() {
+        renderFrameSeq.incrementAndGet();
+    }
+
     public void clearCache() {
-        synchronized (glyphCache) {
-            glyphCache.clear();
-            lastSeenFont = null;
-            lastSeenBackendEpoch = -1;
-        }
+        renderFrameSeq.incrementAndGet();
+        lastObservedCacheSize.set(0L);
         captureBreaker.reset();
     }
 
@@ -137,9 +142,15 @@ public final class NativeTextBatchEngine {
         return SIN_LUT[idx];
     }
 
-    private static double hashUnit(double n) {
-        double x = Math.sin(n * 12.9898 + 78.233) * 43758.5453;
-        return x - Math.floor(x);
+    private static double hashUnit(double seed) {
+        double s = Double.isFinite(seed) ? seed : 0.0;
+        int lo = (int) (long) Math.floor(s * 65536.0);
+        int hi = (int) (long) Math.floor(s);
+        int h = lo ^ ((hi ^ 0x9E3779B9) * 0x85EBCA6B);
+        h = (h ^ (h >>> 16)) * 0x85EBCA6B;
+        h = (h ^ (h >>> 13)) * 0xC2B2AE35;
+        long u = (h ^ (h >>> 16)) & 0xFFFFFFFFL;
+        return u * 2.3283064365386963e-10;
     }
 
     private static byte encodeOutlineMode(String raw, byte emptyCode) {
@@ -411,15 +422,16 @@ public final class NativeTextBatchEngine {
 
         long t0Ns = System.nanoTime();
 
-        // 0. 检查字体或排版后端 Epoch 是否发生重载
+        // 0. 同步当帧去重字形表（每帧首条渲染时清空上一帧快照，防止跨帧持有已被动态字体图集重排或回收的旧 UV）
+        ThreadScratch scratch = threadScratch.get();
         GlyphCaptureBackend backend = this.optionalBackend;
         int curEpoch = backend != null ? backend.currentEpoch() : 0;
-        if (font != lastSeenFont || curEpoch != lastSeenBackendEpoch) {
-            synchronized (glyphCache) {
-                glyphCache.clear();
-                lastSeenFont = font;
-                lastSeenBackendEpoch = curEpoch;
-            }
+        long curFrame = renderFrameSeq.get();
+        if (scratch.syncedFrameSeq != curFrame || scratch.syncedFont != font || scratch.syncedBackendEpoch != curEpoch) {
+            scratch.frameGlyphCache.clear();
+            scratch.syncedFrameSeq = curFrame;
+            scratch.syncedFont = font;
+            scratch.syncedBackendEpoch = curEpoch;
         }
 
         boolean isBlurFade = inFade && "blur".equals(fadeStyleStr);
@@ -508,9 +520,15 @@ public final class NativeTextBatchEngine {
             effShakeAmp = (float) Math.max(0.05, Math.min(2.5, activeShakeAmp));
         }
 
-        boolean preferSdfGlobal = backend != null && (defOutCode != OUT_NONE || isBlurFade || isSplitFade || (isPerCharShake && scene.rotDegAmp > 0.0f));
+        // 整条弹幕存在倾斜旋转或非 1.0 缩放（含入场弹跳、收缩淡出、斜角投影）时，同样启用 SDF 距离场抗锯齿模式
+        boolean hasItemTransform = Math.abs(mxy) > 1e-4f
+                || Math.abs(myx) > 1e-4f
+                || Math.abs(mxx - 1.0f) > 1e-3f
+                || Math.abs(myy - 1.0f) > 1e-3f
+                || Math.abs(baseItemMat.m01()) > 1e-4f
+                || Math.abs(baseItemMat.m10()) > 1e-4f;
+        boolean preferSdfGlobal = backend != null && (hasItemTransform || defOutCode != OUT_NONE || isBlurFade || isSplitFade || (isPerCharShake && scene.rotDegAmp > 0.0f));
 
-        ThreadScratch scratch = threadScratch.get();
         PassBucketBuffer pass0Buckets = scratch.pass0Buckets;
         PassBucketBuffer pass1Buckets = scratch.pass1Buckets;
         PassBucketBuffer pass2Buckets = scratch.pass2Buckets;
@@ -759,7 +777,7 @@ public final class NativeTextBatchEngine {
         boolean needTransform = hasScale || hasRot;
         boolean preferSdf = backend != null && (preferSdfGlobal || outMode != OUT_NONE || needTransform);
 
-        CapturedGlyphUnit unit = getOrCaptureGlyphUnit(scratch.capturer, font, backend, rawText, seeThrough, preferSdf);
+        CapturedGlyphUnit unit = getOrCaptureGlyphUnit(scratch, font, backend, rawText, seeThrough, preferSdf);
         if (unit == null || !unit.capturable) {
             return false;
         }
@@ -885,7 +903,7 @@ public final class NativeTextBatchEngine {
     }
 
     private CapturedGlyphUnit getOrCaptureGlyphUnit(
-            GlyphQuadCapturer capturer,
+            ThreadScratch scratch,
             Font font,
             GlyphCaptureBackend backend,
             String rawText,
@@ -893,13 +911,12 @@ public final class NativeTextBatchEngine {
             boolean preferSdf
     ) {
         GlyphCacheKey key = new GlyphCacheKey(rawText, seeThrough, preferSdf);
-        synchronized (glyphCache) {
-            CapturedGlyphUnit existing = glyphCache.get(key);
-            if (existing != null) {
-                return existing;
-            }
+        CapturedGlyphUnit existing = scratch.frameGlyphCache.get(key);
+        if (existing != null) {
+            return existing;
         }
 
+        GlyphQuadCapturer capturer = scratch.capturer;
         capturer.reset();
         boolean usedCompat = false;
         boolean ok = false;
@@ -942,9 +959,8 @@ public final class NativeTextBatchEngine {
         }
 
         CapturedGlyphUnit built = ok ? capturer.buildUnit(usedCompat) : CapturedGlyphUnit.UNCAPTURABLE;
-        synchronized (glyphCache) {
-            glyphCache.put(key, built);
-        }
+        scratch.frameGlyphCache.put(key, built);
+        lastObservedCacheSize.set(scratch.frameGlyphCache.size());
         return built;
     }
 
@@ -993,10 +1009,7 @@ public final class NativeTextBatchEngine {
     public Map<String, Object> collectStats() {
         long frames = framesRendered.get();
         long avgUs = frames > 0L ? Math.round((totalRenderNanos.get() / 1000.0) / frames) : 0L;
-        int cachedSize;
-        synchronized (glyphCache) {
-            cachedSize = glyphCache.size();
-        }
+        int cachedSize = (int) lastObservedCacheSize.get();
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("enabled", EpiphyConfig.nativeTextBatcherEnabled);
         out.put("outlineQualityLevel", EpiphyConfig.outlineQualityLevel);

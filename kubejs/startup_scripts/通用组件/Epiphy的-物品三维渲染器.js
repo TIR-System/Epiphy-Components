@@ -1218,7 +1218,7 @@
         var cfg = getBoundItemConfig(itemId)
         if (cfg == null) return false
 
-        nat3d.setConfig(Boolean(CONFIG.enabled), Boolean(CONFIG.overlaysEnabled), Boolean(CONFIG.geometryEnabled), Number(CONFIG.guiGlobalScale || 1.0))
+        // 原生模组在场时，渲染总开关与 GUI 全局缩放倍率以 EpiphyConfig 为单一权威源，不在每次物品绑定时反向覆盖配置。
         var rawPasses = []
         var totalVerts = 0
         var ovCnt = 0

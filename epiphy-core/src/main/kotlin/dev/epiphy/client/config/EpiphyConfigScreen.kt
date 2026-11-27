@@ -1,6 +1,7 @@
 // 许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
 package dev.epiphy.client.config
 
+import dev.epiphy.client.debug.EpiphyRenderPerfReporter
 import dev.epiphy.core.config.EpiphyConfig
 import dev.epiphy.core.config.EpiphyConfig.TextOutlineQuality
 import net.minecraft.ChatFormatting
@@ -156,6 +157,18 @@ class EpiphyConfigScreen(private val parent: Screen?) : Screen(Component.transla
         rows.add(boolOption("epiphy.config.client.enableSpatialAudio", { draftSpatialAudio }) { draftSpatialAudio = it })
         rows.add(boolOption("epiphy.config.client.enableVanillaMusicDucking", { draftMusicDucking }) { draftMusicDucking = it })
         rows.add(boolOption("epiphy.config.client.debugPerfSampling", { draftDebugPerf }) { draftDebugPerf = it })
+        rows.add(
+            OptionRow(
+                Component.translatable("epiphy.config.client.exportPerfReport"),
+                Component.translatable("epiphy.config.client.exportPerfReport.tooltip"),
+                Button.builder(Component.translatable("epiphy.config.button.exportReport").withStyle(ChatFormatting.GOLD)) { btn ->
+                    val ok = runCatching { EpiphyRenderPerfReporter.exportMarkdownReport() }.isSuccess
+                    btn.message = Component.translatable(
+                        if (ok) "epiphy.config.button.exportedOk" else "epiphy.config.button.exportFailed"
+                    ).withStyle(if (ok) ChatFormatting.GREEN else ChatFormatting.RED)
+                }.bounds(0, 0, controlWidth, 20).build()
+            )
+        )
         rows.add(boolOption("epiphy.config.common.enableAsyncFileLogging", { draftAsyncLog }) { draftAsyncLog = it })
         rows.add(boolOption("epiphy.config.common.logDeprecationWarnings", { draftDeprecationWarn }) { draftDeprecationWarn = it })
 

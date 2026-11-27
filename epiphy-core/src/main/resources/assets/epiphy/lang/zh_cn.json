@@ -34,7 +34,9 @@
   "epiphy.config.client.enableVanillaMusicDucking": "播放受管音乐时避让原版 BGM",
   "epiphy.config.client.enableVanillaMusicDucking.tooltip": "当存在活跃的受管音乐声源时，自动温和静音原版 minecraft: 背景音乐，防止双曲混响冲突。",
   "epiphy.config.client.debugPerfSampling": "客户端渲染微秒级性能采样",
-  "epiphy.config.client.debugPerfSampling.tooltip": "开启客户端渲染热路径高精度微秒遥测采样（配合 /epiphy debug renderperf 查看详细指标）。",
+  "epiphy.config.client.debugPerfSampling.tooltip": "开启客户端渲染提交段 512 帧滑动窗口耗时遥测采样（统计 P50 / P95 / Max）。",
+  "epiphy.config.client.exportPerfReport": "导出五元组性能实测报告",
+  "epiphy.config.client.exportPerfReport.tooltip": "将当前滑动窗口耗时分布连同分辨率、GUI 缩放、光影状态、负载计数与显卡基线写入 epiphy-data/logs/render-perf-report.md。",
   "epiphy.config.common.enableAsyncFileLogging": "启用 epiphy-data 异步日志落盘",
   "epiphy.config.common.enableAsyncFileLogging.tooltip": "在后台独立写盘线程中将运行诊断与审计日志写入 <游戏目录>/epiphy-data/，减少主线程磁盘 I/O 等待。",
   "epiphy.config.common.logDeprecationWarnings": "记录旧版协议别名迁移提示",
@@ -49,5 +51,8 @@
   "epiphy.config.value.off": "关闭",
   "epiphy.config.button.reset": "恢复默认",
   "epiphy.config.button.cancel": "取消",
-  "epiphy.config.button.save": "保存并立即生效"
+  "epiphy.config.button.save": "保存并立即生效",
+  "epiphy.config.button.exportReport": "导出报告",
+  "epiphy.config.button.exportedOk": "已导出至 logs/",
+  "epiphy.config.button.exportFailed": "导出失败"
 }

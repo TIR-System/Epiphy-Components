@@ -189,6 +189,7 @@ object NativeItem3DBridge {
                     visibleIn = visibleIn,
                     renderType = rt,
                     shaderId = shaderId,
+                    depthTest = depthTest,
                     flushAfter = flushAfter,
                     uniforms = uniformList,
                     transform = trSpec,

@@ -180,9 +180,10 @@ dependencies {
     "compatCompileOnly"(fg.deobf("icyllis.modernui:ModernUI-Forge:$modernuiVersion"))
     "compatCompileOnly"(fg.deobf("top.theillusivec4.curios:curios-forge:$curiosVersion:api"))
 
-    // 4. 字节码隔离与契约单元测试
+    // 4. 字节码隔离、无头回归与 Rhino 双路径对等性单元测试
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.3")
     testImplementation("org.ow2.asm:asm:9.7")
+    testImplementation("dev.latvian.mods:rhino-forge:2001.2.2-build.17")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

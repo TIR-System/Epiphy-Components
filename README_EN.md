@@ -44,13 +44,14 @@ Provides a declarative 2D/3D presentation pipeline, off-screen FBO cache pools, 
 ./gradlew check build
 ```
 
-`check` runs six automated verification gates:
+`check` runs seven automated verification gates:
 1. `ProtoV6ContractAndAliasTest`: Checks parity against [`docs/proto_v6_schema.json`](docs/proto_v6_schema.json), enforces the `<= 2` official aliases limit, and verifies SemVer 2.0 numeric pre-release ordering;
 2. `EngineeringCharterGuardTest`: Enforces dynamic reverse case-isolation, declarative neutral comment/doc tone, boundary documentation on core engine classes, and `mod_version` single-source-of-truth parity;
 3. `CoreInfrastructureRobustnessTest`: Fault-injection I/O tests for `.bak` recovery, world-anchor backup healing, corrupt write-lock quarantine, copied-world auto-forking, external security path enforcement, async log switches, and monotonic drop counters;
-4. `ClientSubsystemsRegressionTest`: Headless regression suite covering `PoseStackWatermark` overflow/underflow recovery, `RenderFaultCircuitBreaker` fatal `Error` passthrough and tripping, `Screen`-scoped GUI texture remaps, `NativeTextBatchEngine` multi-atlas bucketing ($== K$), `NativeItem3DBridge` explicit `BlendMode` and bind status codes, and `NativeAudioClientAccess` async channel stop tracking;
-5. `BytecodeSafetyGuardTest`: ASM bytecode inspection verifying `EpiphyMod.class` and `EpiphyConfig.class` carry no direct client-only class references, `PoseStack.withPose` emits a JVM `finally` handler, and bootstrap/KubeJS entrypoints invoke no `java.lang.reflect` APIs;
-6. `verifyNoBundledKotlin`: Inspects both thin and `-all.jar` artifacts to ensure zero bundled `kotlin/` or `kotlinx/` stdlib classes, mandatory `mixinbooster` dependency in `mods.toml`, and complete Mixin obfuscation entries in `epiphy.refmap.json`.
+4. `ClientSubsystemsRegressionTest`: Headless regression suite covering `PoseStackWatermark` overflow/underflow recovery (including `size == 0` empty-stack depletion), reentrant multi-slot item buffer leasing and exception unwind release, `RenderFaultCircuitBreaker` fatal `Error` passthrough and tripping, `Screen`-scoped GUI texture remaps, `NativeTextBatchEngine` tilted SDF requests and per-frame atlas refresh, `NativeItem3DBridge` explicit `BlendMode` and bind status codes, and `NativeAudioClientAccess` monotonic terminal stop tracking;
+5. `DualPathEquivalenceTest`: Runs real KubeJS 2D/3D scripts in embedded `rhino-forge` side-by-side against `NativeItem3DEngine` and `NativeTextBatchEngine` on identical specs, asserting parity of pass counts, vertex counts, material keys, transform fingerprints, and per-character shake trajectories;
+6. `BytecodeSafetyGuardTest`: ASM bytecode inspection verifying `EpiphyMod.class` and `EpiphyConfig.class` carry no direct client-only class references, `PoseStack.withPose` emits a JVM `finally` handler, and bootstrap/KubeJS entrypoints invoke no `java.lang.reflect` APIs;
+7. `verifyNoBundledKotlin`: Inspects both thin and `-all.jar` artifacts to ensure zero bundled `kotlin/` or `kotlinx/` stdlib classes, mandatory `mixinbooster` dependency in `mods.toml`, complete Mixin obfuscation entries in `epiphy.refmap.json`, and strict UTF-8 decoding (zero `U+FFFD`) across all packaged text resources.
 
 ---
 

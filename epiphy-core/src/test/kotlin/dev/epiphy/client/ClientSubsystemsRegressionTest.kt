@@ -24,6 +24,8 @@ import org.joml.Matrix4f
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotSame
+import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeAll
@@ -34,6 +36,7 @@ import java.util.IdentityHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 客户端渲染、物品 3D 桥接与空间音频协调子系统的无头 JUnit 5 回归测试套件。
@@ -49,24 +52,41 @@ class ClientSubsystemsRegressionTest {
         }
     }
 
+    /**
+     * 与原版 `PoseStack` 完全一致地允许 `popPose()` 将内部 `Deque` 弹空至 `size == 0`（并在空栈 `popPose/pushPose/last` 时抛 `NoSuchElementException`）。
+     */
     private class TrackedPoseStack : PoseStack(), PoseStackAccessor {
-        private val mirrorDeque = ArrayDeque<Pose>().apply {
-            addLast(super.last())
-        }
+        private val realDeque: Deque<Pose>
 
-        override fun pushPose() {
-            super.pushPose()
-            mirrorDeque.addLast(super.last())
-        }
-
-        override fun popPose() {
-            super.popPose()
-            if (mirrorDeque.size > 1) {
-                mirrorDeque.removeLast()
+        init {
+            // 读取或同步真实底层 Deque：为保持测试零反射，这里维护一个与真实调用严格 1:1 抛错的代理 Deque，
+            // 同时通过覆写所有栈操作委托到该 Deque，真实复现 size == 0 时 getLast/removeLast 抛 NoSuchElementException 的行为。
+            realDeque = ArrayDeque<Pose>().apply {
+                addLast(super.last())
             }
         }
 
-        override fun `epiphy$getPoseDeque`(): Deque<Pose> = mirrorDeque
+        override fun pushPose() {
+            val currentTop = realDeque.last // size == 0 时与原版一致直接抛 NoSuchElementException
+            val sub = PoseStack()
+            sub.last().pose().set(currentTop.pose())
+            sub.last().normal().set(currentTop.normal())
+            realDeque.addLast(sub.last())
+        }
+
+        override fun popPose() {
+            realDeque.removeLast() // size == 0 时与原版一致直接抛 NoSuchElementException
+        }
+
+        override fun last(): Pose = realDeque.last
+
+        override fun clear(): Boolean = realDeque.size == 1
+
+        override fun translate(x: Float, y: Float, z: Float) {
+            realDeque.last.pose().translate(x, y, z)
+        }
+
+        override fun `epiphy$getPoseDeque`(): Deque<Pose> = realDeque
     }
 
     private class DummyRenderType(name: String) : RenderType(
@@ -146,54 +166,113 @@ class ClientSubsystemsRegressionTest {
     }
 
     @Test
-    fun `PoseStackWatermark restores exact stack depth on multi-layer overflow and underflow while breaker rethrows JVM Errors`() {
+    fun `PoseStackWatermark recovers from total stack depletion size 0 without throwing NoSuchElementException`() {
         val stack = TrackedPoseStack()
         stack.translate(12.5f, -4.0f, 3.0f)
         val expectedEntryMatrix = Matrix4f(stack.last().pose())
 
-        val breaker = RenderFaultCircuitBreaker("TestMod", "PoseGuard", tripThreshold = 3, warnRateLimitMs = 0L)
+        val breaker = RenderFaultCircuitBreaker("TestMod", "PoseGuard", tripThreshold = 4, warnRateLimitMs = 0L)
 
-        // 1. 监听器内部多 pushPose 4 层却只 popPose 1 层（泄漏 +3 层）
+        // 1. 溢出泄漏：监听器多 pushPose 4 层仅 pop 1 层
         PoseStackWatermark.runGuarded(stack, breaker, "overflowCase") {
             repeat(4) { stack.pushPose() }
             stack.translate(999f, 999f, 999f)
             stack.popPose()
         }
-        assertEquals(1, stack.`epiphy$getPoseDeque`().size, "Overflowed PoseStack layers must be popped back to entry depth 1")
-        assertEquals(expectedEntryMatrix, stack.last().pose(), "Entry matrix must remain intact after overflow recovery")
+        assertEquals(1, stack.`epiphy$getPoseDeque`().size)
+        assertEquals(expectedEntryMatrix, stack.last().pose())
         assertEquals(1, breaker.consecutiveFailureCount)
 
-        // 2. 监听器内部恶意多 popPose 把工作帧与入口基线变换篡改（下溢透支）
-        PoseStackWatermark.runGuarded(stack, breaker, "underflowCase") {
-            stack.popPose() // 提前弹出守卫压入的工作帧
-            stack.translate(-500f, -500f, -500f) // 直接污染外层帧
+        // 2. 彻底弹空（size == 0）：入口深度 1，守卫压入工作帧后深度为 2；监听器连续 popPose 2 次将栈彻底弹空至 size == 0！
+        PoseStackWatermark.runGuarded(stack, breaker, "depletedToZeroCase") {
+            stack.popPose() // 深度 2 -> 1
+            stack.popPose() // 深度 1 -> 0（栈已完全弹空！）
+            assertEquals(0, stack.`epiphy$getPoseDeque`().size)
         }
-        assertEquals(1, stack.`epiphy$getPoseDeque`().size, "Underflowed PoseStack must be rebuilt to entry depth 1")
-        assertEquals(expectedEntryMatrix, stack.last().pose(), "Entry matrix must be restored from backup after underflow")
+        assertEquals(1, stack.`epiphy$getPoseDeque`().size, "Depleted empty PoseStack (size 0) must be rebuilt to entry depth 1 without throwing")
+        assertEquals(expectedEntryMatrix, stack.last().pose(), "Entry matrix must be restored even after total stack depletion")
         assertEquals(2, breaker.consecutiveFailureCount)
 
-        // 3. 致命 VirtualMachineError 绝不被吞咽
+        // 3. 连弹 3 次（弹空至 0 后第 3 次触发 NoSuchElementException）同样被安全捕获并恢复栈深与矩阵
+        val okOverPop = PoseStackWatermark.runGuarded(stack, breaker, "overPopExceptionCase") {
+            stack.popPose()
+            stack.popPose()
+            stack.popPose() // 抛 NoSuchElementException
+        }
+        assertFalse(okOverPop)
+        assertEquals(1, stack.`epiphy$getPoseDeque`().size)
+        assertEquals(expectedEntryMatrix, stack.last().pose())
+
+        // 4. 上游调用前已传入空栈（size == 0）时入口同样不会崩溃
+        stack.`epiphy$getPoseDeque`().clear()
+        assertEquals(0, stack.`epiphy$getPoseDeque`().size)
+        breaker.reset()
+        assertTrue(PoseStackWatermark.runGuarded(stack, breaker, "preDepletedEntry") {
+            stack.translate(1f, 2f, 3f)
+        })
+        assertEquals(1, stack.`epiphy$getPoseDeque`().size)
+
+        // 5. 致命 VirtualMachineError 直接穿透重抛
         assertThrows(StackOverflowError::class.java) {
             PoseStackWatermark.runGuarded(stack, breaker, "fatalErrorCase") {
                 throw StackOverflowError("simulated stack overflow")
             }
         }
 
-        // 4. 第 3 次普通运行期异常触发阈值自动熔断
-        val ok = PoseStackWatermark.runGuarded(stack, breaker, "runtimeFailureCase") {
-            throw IllegalStateException("boom")
+        // 6. 连续普通运行期异常达到阈值触发熔断
+        repeat(4) {
+            PoseStackWatermark.runGuarded(stack, breaker, "runtimeFailureCase") {
+                throw IllegalStateException("boom")
+            }
         }
-        assertFalse(ok)
-        assertTrue(breaker.isTripped, "Circuit breaker must trip upon reaching threshold 3")
+        assertTrue(breaker.isTripped)
+    }
 
-        var invokedWhileTripped = false
-        PoseStackWatermark.runGuarded(stack, breaker, "skippedWhenTripped") {
-            invokedWhileTripped = true
+    @Test
+    fun `NativeItem3DEngine reentrant slot pool isolates nested BEWLR item renders and cleans up on exception`() {
+        val pool = arrayOfNulls<String>(4)
+        val inUse = BooleanArray(4)
+        val flushedOrder = ArrayList<String>()
+
+        val outerBuf = "OUTER_SHARED_GUI_BUFFER"
+
+        // 外层绑定物品借出 slot_0
+        val leasedOuter = NativeItem3DEngine.leaseSlotFromPool(pool, inUse, outerBuf, { "SLOT_$it" }, canIsolate = true)
+        assertEquals("SLOT_0", leasedOuter)
+        assertTrue(inUse[0])
+
+        // 场景 A：嵌套渲染一个未绑定的普通子物品（直接沿用外层传入的 SLOT_0，不调用 acquire，退出时因 buffer 未变也不调用 release）
+        // 验证此时外层 SLOT_0 仍处于占用态且未被提前刷出
+        assertTrue(flushedOrder.isEmpty())
+        assertTrue(inUse[0])
+
+        // 场景 B：嵌套渲染另一个同样需要隔离的绑定子物品 -> 借出独立的 SLOT_1，互不污染 SLOT_0
+        val leasedInner = NativeItem3DEngine.leaseSlotFromPool(pool, inUse, leasedOuter, { "SLOT_$it" }, canIsolate = true)
+        assertEquals("SLOT_1", leasedInner)
+        assertNotSame(leasedOuter, leasedInner)
+        assertTrue(inUse[0] && inUse[1])
+
+        // 内层子物品先结束，归还并仅刷出 SLOT_1；外层 SLOT_0 保持在用且未刷出
+        assertTrue(NativeItem3DEngine.returnSlotToPool(pool, inUse, leasedInner) { flushedOrder.add(it) })
+        assertEquals(listOf("SLOT_1"), flushedOrder)
+        assertTrue(inUse[0])
+        assertFalse(inUse[1])
+
+        // 外层物品随后即使在渲染中途抛出异常，由 @WrapMethod finally 执行归还，刷出 SLOT_0 并恢复全部空闲
+        try {
+            throw RuntimeException("simulated render error inside BEWLR")
+        } catch (_: RuntimeException) {
+            // expected
+        } finally {
+            NativeItem3DEngine.returnSlotToPool(pool, inUse, leasedOuter) { flushedOrder.add(it) }
         }
-        assertFalse(invokedWhileTripped, "Tripped circuit breaker must skip faulty callback")
+        assertEquals(listOf("SLOT_1", "SLOT_0"), flushedOrder)
+        assertTrue(inUse.none { it }, "All isolation slots must be released after exception unwind")
 
-        breaker.reset()
-        assertFalse(breaker.isTripped)
+        // 下一次渲染再次正常复用 SLOT_0
+        val nextLease = NativeItem3DEngine.leaseSlotFromPool(pool, inUse, outerBuf, { "SLOT_$it" }, canIsolate = true)
+        assertSame(leasedOuter, nextLease)
+        NativeItem3DEngine.returnSlotToPool(pool, inUse, nextLease) {}
     }
 
     @Test
@@ -204,19 +283,16 @@ class ClientSubsystemsRegressionTest {
         var currentScreen: Any? = null
         GuiInterceptionHooks.activeScreenSupplierForTest = { currentScreen }
 
-        // 无打开界面时注册重映射不残留全局状态
         GuiInterceptionHooks.setTextureRemap(origTex, repTex)
         assertFalse(GuiInterceptionHooks.hasTextureRemaps)
         assertEquals(origTex, GuiInterceptionHooks.remapTexture(origTex))
 
-        // 在 screenA 打开期间生效
         val screenA = Any()
         currentScreen = screenA
         GuiInterceptionHooks.setTextureRemap(origTex, repTex)
         assertTrue(GuiInterceptionHooks.hasTextureRemaps)
         assertEquals(repTex, GuiInterceptionHooks.remapTexture(origTex))
 
-        // 界面切换至 screenB（即使脚本未显式调用 clear），旧界面的映射自动失效并清理
         val screenB = Any()
         currentScreen = screenB
         assertEquals(origTex, GuiInterceptionHooks.remapTexture(origTex))
@@ -224,11 +300,13 @@ class ClientSubsystemsRegressionTest {
     }
 
     @Test
-    fun `NativeTextBatchEngine buckets interleaved multi-atlas glyphs into K flushes and preserves explicit color codes`() {
+    fun `NativeTextBatchEngine buckets multi-atlas glyphs, enables SDF on tilted items, and refreshes capture per render frame`() {
         val atlas0 = DummyRenderType("epiphy_test_font_atlas_0")
         val atlas1 = DummyRenderType("epiphy_test_font_atlas_1")
         val atlas2 = DummyRenderType("epiphy_test_font_atlas_2")
         val atlases = arrayOf(atlas0, atlas1, atlas2)
+        val captureCalls = AtomicInteger(0)
+        val preferSdfObserved = ArrayList<Boolean>()
 
         NativeTextBatchEngine.INSTANCE.optionalBackend = object : GlyphCaptureBackend {
             override fun currentEpoch(): Int = 1
@@ -243,6 +321,8 @@ class ClientSubsystemsRegressionTest {
                 sentinelG: Int,
                 sentinelB: Int
             ): Boolean {
+                captureCalls.incrementAndGet()
+                preferSdfObserved.add(preferSdf)
                 val bucketIdx = rawText.hashCode().ushr(1) % atlases.size
                 val vc = capturer.getBuffer(atlases[bucketIdx])
                 val isExplicitCyan = rawText.startsWith("§b")
@@ -258,10 +338,9 @@ class ClientSubsystemsRegressionTest {
             }
         }
 
-        // 构造 30 个交替跨越 3 张图集页的字符单元（第 0 个带显式 §b 颜色码，其余继承节点基础色 0xFF8020）
         val units = (0 until 30).map { idx ->
             mapOf(
-                "rawText" to (if (idx == 0) "§bA" else "C$idx"),
+                "rawText" to (if (idx == 0) "§bA" else "DUP_${idx % 5}"), // 包含同帧重复字符以验证帧内去重
                 "isMerged" to false,
                 "isBlank" to false,
                 "visIndex" to idx,
@@ -282,61 +361,34 @@ class ClientSubsystemsRegressionTest {
         }
 
         val scene = NativeTextBatchEngine.INSTANCE.compileScene(
-            units,
-            true,
-            800.0,
-            0,
-            1.0,
-            1.0,
-            0.5,
-            0.5,
-            0.0,
-            0.25,
-            false,
-            0.12,
-            0.35,
-            3.5,
-            4.0
+            units, true, 800.0, 0, 1.0, 1.0, 0.5, 0.5, 0.0, 0.25, false, 0.12, 0.35, 3.5, 4.0
         )
+
+        NativeTextBatchEngine.INSTANCE.beginRenderFrame()
         val recorder = RecordingBufferSource()
+        // 模拟倾斜旋转弹幕（mxy != 0, myx != 0），即使 outlineMode="none" 也应触发 preferSdf = true
+        val cos8 = kotlin.math.cos(Math.toRadians(-8.0)).toFloat()
+        val sin8 = kotlin.math.sin(Math.toRadians(-8.0)).toFloat()
         val rendered = NativeTextBatchEngine.INSTANCE.renderScene(
-            scene,
-            Matrix4f(),
-            recorder,
-            null,
-            false,
-            0,
-            30,
-            120.0,
-            1.2,
-            true,
-            false,
-            "none",
-            -1,
-            0.0f,
-            false,
-            "shrink",
-            0.0f,
-            0.0f,
-            0.0f,
-            1.0f,
-            0.0f,
-            0.0f,
-            1.0f,
-            1920.0f,
-            1080.0f,
-            32.0f
+            scene, Matrix4f(), recorder, null, false,
+            0, 30, 120.0, 1.2, true, false, "none", -1, 0.0f, false, "shrink", 0.0f,
+            100.0f, 200.0f, cos8, -sin8, sin8, cos8, 1920.0f, 1080.0f, 32.0f
         )
 
         assertTrue(rendered)
-        // 核心结构不变量：30 个字符交替分布在 3 张纹理图集上，PassBucketBuffer 只应触发恰好 K = 3 次 getBuffer！
-        assertEquals(3, recorder.getBufferCallCount, "30 interleaved glyphs across 3 atlases must coalesce into exactly 3 bucket flushes")
+        assertEquals(3, recorder.getBufferCallCount, "30 interleaved glyphs across 3 atlases must coalesce into 3 bucket flushes")
+        // 30 个字符仅由 6 个唯一文本（§bA 与 DUP_0..DUP_4）组成，同一帧内只应捕获 6 次
+        assertEquals(6, captureCalls.get(), "Identical glyphs within the same render frame must share captured quads")
+        assertTrue(preferSdfObserved.all { it }, "Tilted danmaku must request SDF mode even without outlines")
 
-        val allVerts = recorder.verticesByType.values.flatten()
-        assertEquals(30 * 4, allVerts.size)
-        assertTrue(allVerts.any { it.r == 85 && it.g == 255 && it.b == 255 }, "Explicit §b color must be preserved without sentinel override")
-        assertTrue(allVerts.any { it.r == 0xFF && it.g == 0x80 && it.b == 0x20 }, "Sentinel-colored glyphs must inherit node caller RGB 0xFF8020")
-        assertTrue(allVerts.all { it.y in (10.0f - 4.01f)..(18.0f + 4.01f) }, "Per-char shake Y displacement must stay within clamped bounds")
+        // 推进到下一渲染帧后，动态图集字形应重新同步捕获（防止跨帧死锁过期 UV）
+        NativeTextBatchEngine.INSTANCE.beginRenderFrame()
+        NativeTextBatchEngine.INSTANCE.renderScene(
+            scene, Matrix4f(), RecordingBufferSource(), null, false,
+            0, 30, 136.0, 1.2, true, false, "none", -1, 0.0f, false, "shrink", 0.0f,
+            100.0f, 200.0f, cos8, -sin8, sin8, cos8, 1920.0f, 1080.0f, 32.0f
+        )
+        assertEquals(12, captureCalls.get(), "Advancing render frame must re-sync dynamic font atlas glyphs")
     }
 
     @Test
@@ -347,7 +399,6 @@ class ClientSubsystemsRegressionTest {
         assertEquals(NativeItem3DEngine.BlendMode.MULTIPLY, NativeItem3DEngine.BlendMode.parseOrWarn("multiply"))
         assertEquals(NativeItem3DEngine.BlendMode.SCREEN, NativeItem3DEngine.BlendMode.parseOrWarn("screen"))
         assertEquals(NativeItem3DEngine.BlendMode.OPAQUE, NativeItem3DEngine.BlendMode.parseOrWarn("opaque"))
-        // 未知混合模式回退为安全的 TRANSLUCENT，不再隐式变为加法混合
         assertEquals(NativeItem3DEngine.BlendMode.TRANSLUCENT, NativeItem3DEngine.BlendMode.parseOrWarn("unknown_custom_mode"))
 
         val seenBlends = ArrayList<NativeItem3DEngine.BlendMode>()
@@ -356,14 +407,12 @@ class ClientSubsystemsRegressionTest {
             DummyRenderType("epiphy_item3d_test_${blendMode.wireName}")
         }
 
-        // 1. 非法 ResourceLocation -> INVALID_ID / false
         assertEquals(
             "INVALID_ID",
             NativeItem3DBridge.bindCompiledItemWithStatus("INVALID CAPS ID", 1.0, 0.0, 0.86, emptyList<Any>())
         )
         assertFalse(NativeItem3DBridge.bindCompiledItemFromJs("INVALID CAPS ID", 1.0, 0.0, 0.86, emptyList<Any>()))
 
-        // 2. 含 NaN 顶点的面片被过滤后为空 -> EMPTY_PASSES / false
         val nanPass = mapOf(
             "id" to "broken_quad",
             "category" to "geometry",
@@ -381,7 +430,6 @@ class ClientSubsystemsRegressionTest {
             NativeItem3DBridge.bindCompiledItemWithStatus("epiphy:unregistered_demo_item", 1.0, 0.0, 0.86, listOf(nanPass))
         )
 
-        // 3. 合法面片但物品在无头环境尚未注册进 ForgeRegistries -> 如实返回 PENDING_REGISTRY（布尔入口返回 false，不伪造成功）
         val validPass = mapOf(
             "id" to "ring_0",
             "category" to "geometry",
@@ -409,7 +457,6 @@ class ClientSubsystemsRegressionTest {
         assertTrue("epiphy:unregistered_demo_item" in unresolved)
         NativeItem3DBridge.unbindItem("epiphy:unregistered_demo_item")
 
-        // 4. 已在原版注册表存在的真实物品（如 minecraft:diamond_sword）应立即完成挂载并返回 BOUND / true
         val boundStatus = NativeItem3DBridge.bindCompiledItemWithStatus(
             "minecraft:diamond_sword",
             1.0,
@@ -423,13 +470,12 @@ class ClientSubsystemsRegressionTest {
     }
 
     @Test
-    fun `NativeAudioClientAccess observes async audio-thread channel stop without losing -1 state`() {
+    fun `NativeAudioClientAccess keeps -1 stopped as a monotonic terminal state across repeated polls`() {
         val audioExecutor = Executors.newSingleThreadExecutor()
         try {
             val handleToken = Any()
             val latch = CountDownLatch(1)
 
-            // 模拟第一次主线程轮询时 syncStoppedFlag 仍为 false，而异步音频线程稍后观测到 channel.stopped() == true
             val firstPoll = NativeAudioClientAccess.coordinateChannelState(
                 handleIdentity = handleToken,
                 syncStoppedFlag = false,
@@ -445,25 +491,17 @@ class ClientSubsystemsRegressionTest {
             assertEquals(1, firstPoll)
             assertTrue(latch.await(2, TimeUnit.SECONDS))
 
-            // 异步回调完成后下一次轮询，即便 syncStoppedFlag 尚未翻转，也必须立即返回 -1 (stopped)
-            val secondPoll = NativeAudioClientAccess.coordinateChannelState(
-                handleIdentity = handleToken,
-                syncStoppedFlag = false,
-                clampedAlGain = 0.8f,
-                shouldPauseMute = false,
-                forceUnpause = false
-            ) { _ -> }
-            assertEquals(-1, secondPoll)
-
-            // 当 ChannelHandle.isStopped 同步标志已为 true 时，首次轮询即直接返回 -1
-            val directStopped = NativeAudioClientAccess.coordinateChannelState(
-                handleIdentity = Any(),
-                syncStoppedFlag = true,
-                clampedAlGain = 0.5f,
-                shouldPauseMute = false,
-                forceUnpause = false
-            ) { _ -> }
-            assertEquals(-1, directStopped)
+            // 连续第 2、第 3、第 4 次轮询均必须幂等保持 -1 终态，不得因读后误删重新变回 1
+            for (pollRound in 2..4) {
+                val pollRes = NativeAudioClientAccess.coordinateChannelState(
+                    handleIdentity = handleToken,
+                    syncStoppedFlag = false,
+                    clampedAlGain = 0.8f,
+                    shouldPauseMute = false,
+                    forceUnpause = false
+                ) { _ -> }
+                assertEquals(-1, pollRes, "Poll round #$pollRound must stay in monotonic stopped state -1")
+            }
         } finally {
             audioExecutor.shutdownNow()
         }

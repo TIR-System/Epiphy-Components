@@ -40,10 +40,10 @@ import kotlin.math.sin
  * 工作机制：
  * - 在模型绑定或资源重载阶段接收编译后的紧凑顶点与颜色数组，过滤含 NaN/Infinity 的异常坐标，并返回明确的挂载状态 [BindStatus]；
  * - 按显式 [BlendMode] 枚举与材质参数缓存 `RenderType`（支持 `translucent`、`additive`、`premultiplied`、`multiply`、`screen`、`opaque`）；
- * - 为启用了 `flushBase = true` 的单件绑定物品提供独立的局部可复用 `MultiBufferSource.BufferSource`，使基底深度刷新与自定义图层刷新仅作用于当前单件物品，不打断容器多槽位的外部共享批次。
+ * - 为需要深度缓冲同步的单件绑定物品提供深度可重入（最多 4 层嵌套）的局部可复用 `MultiBufferSource.BufferSource` 槽池，使基底深度刷新与自定义图层刷新仅作用于当前单件物品，在支持嵌套子物品（如 BEWLR 容器物品）的同时不打断外部容器多槽位的共享批次。
  *
  * 已知边界：
- * - 独立局部 `BufferSource` 仅在客户端主渲染线程且外层缓冲为标准 `MultiBufferSource.BufferSource`（未处于嵌套递归渲染）时启用；开启接管 `MultiBufferSource` 的第三方光影模组时，表现取决于光影管线对自定义 `RenderType` 与核心着色器的支持程度。
+ * - 独立局部缓冲槽池仅在客户端主渲染线程、嵌套深度 `<= 4` 且外层缓冲为标准 `MultiBufferSource.BufferSource` 时借出；开启接管 `MultiBufferSource` 的第三方光影模组时，表现取决于光影管线对自定义 `RenderType` 与核心着色器的支持程度。
  */
 object NativeItem3DEngine : RenderStateShard("epiphy_item3d_shards", Runnable {}, Runnable {}) {
 
@@ -193,6 +193,7 @@ object NativeItem3DEngine : RenderStateShard("epiphy_item3d_shards", Runnable {}
         val visibleIn: String, // "all" | "hand" | "gui"
         val renderType: RenderType,
         val shaderId: String?,
+        val depthTest: Boolean,
         val flushAfter: Boolean,
         val uniforms: List<Pair<String, UniformBinding>>,
         val transform: TransformSpec,
@@ -215,15 +216,20 @@ object NativeItem3DEngine : RenderStateShard("epiphy_item3d_shards", Runnable {}
         val overlayCount: Int,
         val geometryCount: Int,
         val totalVertices: Int
-    )
+    ) {
+        val needsIsolatedBuffer: Boolean =
+            (renderBase && flushBase && passes.any { it.depthTest || it.isOverlay }) || passes.any { it.flushAfter }
+    }
+
+    private const val MAX_ISOLATION_SLOTS = 4
 
     private val renderTypeCache = ConcurrentHashMap<MaterialKey, RenderType>()
     private val pendingSpecs = ConcurrentHashMap<String, CompiledItemModel>()
     private val activeModels = ConcurrentHashMap<String, CompiledItemModel>()
 
-    // 仅客户端渲染线程访问的单物品局部隔离缓冲源（防止 endBatch 打断外层容器槽位的共享 BufferSource）
-    private var isolatedBufferSource: MultiBufferSource.BufferSource? = null
-    private var isolatedBufferInUse: Boolean = false
+    // 仅客户端主渲染线程访问的可重入局部缓冲槽池（支持嵌套 BEWLR 渲染而不互相提前刷出，也不打断外部容器共享 BufferSource）
+    private val isolatedBufferSlots = arrayOfNulls<MultiBufferSource.BufferSource>(MAX_ISOLATION_SLOTS)
+    private val isolatedSlotInUse = BooleanArray(MAX_ISOLATION_SLOTS)
 
     val passCircuitBreaker = RenderFaultCircuitBreaker(
         module = "EpiphyItem3D",
@@ -236,32 +242,116 @@ object NativeItem3DEngine : RenderStateShard("epiphy_item3d_shards", Runnable {}
     private val guiCalls = AtomicLong(0L)
     private val overlayDraws = AtomicLong(0L)
     private val geometryDraws = AtomicLong(0L)
+    private val isolatedFlushes = AtomicLong(0L)
     private val totalRenderNanos = AtomicLong(0L)
     @Volatile private var lastRenderUs: Long = 0L
     @Volatile private var maxRenderUs: Long = 0L
     @Volatile private var lastError: String? = null
 
-    internal fun acquireIsolatedBufferSource(outerBuffer: MultiBufferSource): MultiBufferSource {
-        if (outerBuffer !is MultiBufferSource.BufferSource) return outerBuffer
-        if (!RenderSystem.isOnRenderThread() || isolatedBufferInUse) return outerBuffer
-        var local = isolatedBufferSource
-        if (local == null) {
-            local = MultiBufferSource.immediate(BufferBuilder(4096))
-            isolatedBufferSource = local
+    /**
+     * 可重入局部缓冲槽协调器（将线程/类型前置判定与槽位借还解耦，便于无头单测直接验证嵌套重入与异常恢复）。
+     */
+    internal fun <B : Any> leaseSlotFromPool(
+        pool: Array<B?>,
+        inUseFlags: BooleanArray,
+        outerBuffer: B,
+        factory: (Int) -> B,
+        canIsolate: Boolean
+    ): B {
+        if (!canIsolate) return outerBuffer
+        for (idx in pool.indices) {
+            if (!inUseFlags[idx]) {
+                var slot = pool[idx]
+                if (slot == null) {
+                    slot = factory(idx)
+                    pool[idx] = slot
+                }
+                inUseFlags[idx] = true
+                return slot
+            }
         }
-        isolatedBufferInUse = true
-        return local
+        return outerBuffer
     }
 
-    internal fun releaseIsolatedBufferSource(activeBuffer: MultiBufferSource?) {
-        val local = isolatedBufferSource ?: return
-        if (activeBuffer === local && isolatedBufferInUse) {
-            try {
-                local.endBatch()
-            } catch (t: Throwable) {
-                RenderFaultCircuitBreaker.rethrowIfFatalJvmError(t)
-            } finally {
-                isolatedBufferInUse = false
+    internal inline fun <B : Any> returnSlotToPool(
+        pool: Array<B?>,
+        inUseFlags: BooleanArray,
+        leasedBuffer: B?,
+        flushSlot: (B) -> Unit
+    ): Boolean {
+        if (leasedBuffer == null) return false
+        for (idx in pool.indices) {
+            val slot = pool[idx]
+            if (slot != null && leasedBuffer === slot && inUseFlags[idx]) {
+                try {
+                    flushSlot(slot)
+                } catch (t: Throwable) {
+                    RenderFaultCircuitBreaker.rethrowIfFatalJvmError(t)
+                } finally {
+                    inUseFlags[idx] = false
+                }
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun isKnownIsolatedSlot(buffer: MultiBufferSource): Boolean {
+        for (slot in isolatedBufferSlots) {
+            if (slot != null && buffer === slot) return true
+        }
+        return false
+    }
+
+    internal fun acquireIsolatedBufferSource(outerBuffer: MultiBufferSource): MultiBufferSource {
+        if (outerBuffer !is MultiBufferSource.BufferSource || !RenderSystem.isOnRenderThread()) {
+            return outerBuffer
+        }
+        return leaseSlotFromPool(
+            pool = isolatedBufferSlots,
+            inUseFlags = isolatedSlotInUse,
+            outerBuffer = outerBuffer,
+            factory = { MultiBufferSource.immediate(BufferBuilder(2048)) },
+            canIsolate = true
+        )
+    }
+
+    internal fun releaseIsolatedBufferSource(leasedBuffer: MultiBufferSource?) {
+        val candidate = leasedBuffer as? MultiBufferSource.BufferSource ?: return
+        val flushed = returnSlotToPool(
+            pool = isolatedBufferSlots,
+            inUseFlags = isolatedSlotInUse,
+            leasedBuffer = candidate
+        ) { slot ->
+            slot.endBatch()
+        }
+        if (flushed) {
+            isolatedFlushes.incrementAndGet()
+        }
+    }
+
+    /**
+     * 帧末统一收口自检：若因未知极端字节码绕过导致槽位标记残留，强制冲洗归零并限频记录告警。
+     */
+    fun onRenderFrameEnd() {
+        if (!RenderSystem.isOnRenderThread()) return
+        for (idx in isolatedSlotInUse.indices) {
+            if (isolatedSlotInUse[idx]) {
+                try {
+                    isolatedBufferSlots[idx]?.endBatch()
+                } catch (t: Throwable) {
+                    RenderFaultCircuitBreaker.rethrowIfFatalJvmError(t)
+                } finally {
+                    isolatedSlotInUse[idx] = false
+                }
+                runCatching {
+                    EpiphyRuntime.ensureInitialized()
+                    EpiphyRuntime.logEngine.warn(
+                        "EpiphyItem3D",
+                        "IsolatedSlotFrameSweep",
+                        "Reclaimed leaked isolated item buffer slot #$idx at end of render frame."
+                    )
+                }
             }
         }
     }
@@ -350,7 +440,7 @@ object NativeItem3DEngine : RenderStateShard("epiphy_item3d_shards", Runnable {}
         Item3DRenderHooks.bindItem(
             item = item,
             renderBase = model.renderBase,
-            isolateBuffer = model.flushBase
+            isolateBuffer = model.needsIsolatedBuffer
         ) { stack, displayContext, _, poseStack, bufferSource, _, _, bakedModel ->
             renderCompiledItem(model, stack, displayContext, poseStack, bufferSource, bakedModel)
         }
@@ -422,8 +512,9 @@ object NativeItem3DEngine : RenderStateShard("epiphy_item3d_shards", Runnable {}
         displayContext: ItemDisplayContext,
         bakedModel: BakedModel
     ) {
-        if (bufferSource === isolatedBufferSource) {
+        if (isKnownIsolatedSlot(bufferSource)) {
             bufferSource.endBatch()
+            isolatedFlushes.incrementAndGet()
             return
         }
 
@@ -648,6 +739,7 @@ object NativeItem3DEngine : RenderStateShard("epiphy_item3d_shards", Runnable {}
                 "guiCalls" to guiCalls.get(),
                 "overlayDraws" to overlayDraws.get(),
                 "geometryDraws" to geometryDraws.get(),
+                "isolatedFlushes" to isolatedFlushes.get(),
                 "lastRenderUs" to lastRenderUs,
                 "maxRenderUs" to maxRenderUs,
                 "avgRenderUs" to avgUs,

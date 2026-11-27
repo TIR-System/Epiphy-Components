@@ -19,11 +19,11 @@ import java.util.WeakHashMap
  *
  * 工作机制：
  * 1. 通过 `SoundManagerAccessor`、`SoundEngineAccessor` 与 `AbstractSoundInstanceAccessor` 读写声源坐标、音量、声道挂起恢复及右下角字幕；
- * 2. 在 [applyChannelGainAndPauseState] 中优先检查 `ChannelHandle.isStopped` 同步标志与跨线程弱键停止集合 `observedStoppedHandles`；
- *    当音频线程在 `handle.execute` 内部观测到 `channel.stopped()` 时将其记入弱键集合，使后续主线程轮询能稳定获知 `-1`（已停止）状态。
+ * 2. 在 [applyChannelGainAndPauseState] 中同步检查 `ChannelHandle.isStopped` 与跨线程弱键终态集合 `observedStoppedHandles`；
+ *    一旦音频线程在 `handle.execute` 内部观测到 `channel.stopped()`，该句柄即保持单调停止终态（后续所有轮询均恒定返回 `-1`，并在句柄释放后由弱引用自动回收）。
  *
  * 已知边界：
- * - `ChannelAccess.ChannelHandle.execute` 本身仍在独立音频线程异步执行，若底层 OpenAL 声道在同一 tick 内首次自然播完且 `handle.isStopped` 尚未置位，停止状态会在紧邻的下一次轮询返回 `-1`。
+ * - `ChannelAccess.ChannelHandle.execute` 在独立音频线程异步执行：在声道刚自然播完但 `handle.isStopped` 尚未由 `SoundEngine` tick 置位的那一次同帧调用中，主线程尚无法同步等待音频线程结果，停止终态 `-1` 将从该次异步回调执行完毕后的下一次及后续所有轮询起持续返回。
  */
 object NativeAudioClientAccess {
 
@@ -56,7 +56,9 @@ object NativeAudioClientAccess {
         ) -> Unit
     ): Int {
         if (syncStoppedFlag || observedStoppedHandles.contains(handleIdentity)) {
-            observedStoppedHandles.remove(handleIdentity)
+            if (syncStoppedFlag) {
+                observedStoppedHandles.add(handleIdentity)
+            }
             return -1
         }
         dispatchToAudioThread { isChannelStopped, setVolume, pause, unpause ->

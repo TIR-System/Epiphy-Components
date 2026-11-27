@@ -4,7 +4,9 @@ package dev.epiphy.client
 import com.mojang.blaze3d.systems.RenderSystem
 import com.mojang.logging.LogUtils
 import dev.epiphy.client.audio.NativeAudioClientAccess
+import dev.epiphy.client.compat.EpiphyClientCompatModule
 import dev.epiphy.client.config.EpiphyConfigScreen
+import dev.epiphy.client.debug.EpiphyRenderPerfReporter
 import dev.epiphy.client.fx3d.item.Item3DRenderHooks
 import dev.epiphy.client.fx3d.item.NativeItem3DBridge
 import dev.epiphy.client.fx3d.item.NativeItem3DEngine
@@ -13,6 +15,7 @@ import dev.epiphy.client.shader.EpiphyCoreShaders
 import dev.epiphy.client.surface2d.NativeSurface2DAccelerator
 import dev.epiphy.client.surface2d.fbo.FboCachePool
 import dev.epiphy.client.surface2d.hook.GuiInterceptionHooks
+import dev.epiphy.client.surface2d.text.NativeTextBatchEngine
 import dev.epiphy.core.bridge.EpiphyBridgeRegistry
 import dev.epiphy.core.config.EpiphyConfig
 import net.minecraft.server.packs.resources.ResourceManagerReloadListener
@@ -24,6 +27,7 @@ import net.minecraftforge.event.TickEvent
 import net.minecraftforge.eventbus.api.IEventBus
 import net.minecraftforge.fml.ModLoadingContext
 import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent
+import java.util.ServiceLoader
 
 /**
  * 客户端隔离启动入口。
@@ -99,6 +103,7 @@ object EpiphyClientBootstrap {
         forgeBus.addListener(::onClientLoggingOut)
         forgeBus.addListener(::onScreenClosing)
         forgeBus.addListener(::onClientTick)
+        forgeBus.addListener(::onRenderTick)
 
         ModLoadingContext.get().registerExtensionPoint(ConfigScreenHandler.ConfigScreenFactory::class.java) {
             ConfigScreenHandler.ConfigScreenFactory { _, parent -> EpiphyConfigScreen(parent) }
@@ -108,6 +113,7 @@ object EpiphyClientBootstrap {
             applyClientConfigNow()
         }
         applyClientConfigNow()
+        EpiphyRenderPerfReporter.registerToDebugHub()
 
         EpiphyBridgeRegistry.registerAccelerator("surface2d.fbo", sharedFboPool)
         EpiphyBridgeRegistry.registerAccelerator("surface2d.guiHooks", GuiInterceptionHooks)
@@ -117,6 +123,7 @@ object EpiphyClientBootstrap {
         EpiphyBridgeRegistry.registerAccelerator("fx3d.itemBridge", NativeItem3DBridge)
         EpiphyBridgeRegistry.registerAccelerator("audio.clientAccess", NativeAudioClientAccess)
         EpiphyBridgeRegistry.registerAccelerator("shader.registry", EpiphyCoreShaders)
+        EpiphyBridgeRegistry.registerAccelerator("debug.renderPerf", EpiphyRenderPerfReporter)
     }
 
     private fun applyClientConfigNow() {
@@ -139,10 +146,29 @@ object EpiphyClientBootstrap {
     private fun onClientSetup(event: FMLClientSetupEvent) {
         event.enqueueWork {
             EpiphyConfig.syncFromSpecs()
+            val loadedCompatIds = ArrayList<String>()
+            runCatching {
+                val loader = ServiceLoader.load(
+                    EpiphyClientCompatModule::class.java,
+                    EpiphyClientBootstrap::class.java.classLoader
+                )
+                for (module in loader) {
+                    runCatching {
+                        module.onClientSetup()
+                        loadedCompatIds.add(module.id)
+                    }.onFailure { err ->
+                        LOGGER.warn("[EpiphyClient] Optional client compat module '{}' failed during setup: {}", module.id, err.toString())
+                    }
+                }
+            }.onFailure { err ->
+                LOGGER.warn("[EpiphyClient] ServiceLoader discovery for EpiphyClientCompatModule failed: {}", err.toString())
+            }
+
             val bound = NativeItem3DEngine.rebindAllPending()
             val unresolved = NativeItem3DEngine.auditUnresolvedPendingItems()
             LOGGER.info(
-                "[EpiphyClient] Client rendering & audio primitives initialized (bound3dItems={}, unresolved3dItems={}).",
+                "[EpiphyClient] Client rendering & audio primitives initialized (compatSpi={}, bound3dItems={}, unresolved3dItems={}).",
+                loadedCompatIds,
                 bound,
                 unresolved.size
             )
@@ -164,6 +190,15 @@ object EpiphyClientBootstrap {
 
     private fun onScreenClosing(event: ScreenEvent.Closing) {
         GuiInterceptionHooks.onScreenClosing(event.screen)
+    }
+
+    private fun onRenderTick(event: TickEvent.RenderTickEvent) {
+        if (event.phase == TickEvent.Phase.START) {
+            NativeTextBatchEngine.INSTANCE.beginRenderFrame()
+        } else if (event.phase == TickEvent.Phase.END) {
+            NativeItem3DEngine.onRenderFrameEnd()
+            EpiphyRenderPerfReporter.onRenderFrameEnd()
+        }
     }
 
     private fun onClientTick(event: TickEvent.ClientTickEvent) {

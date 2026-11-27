@@ -25,7 +25,9 @@ class RollingNanoSampler(val capacity: Int = 256) {
         val windowSamples: Int,
         val totalCalls: Long,
         val avgMs: Double,
+        val p50Ms: Double = 0.0,
         val p95Ms: Double,
+        val p99Ms: Double = 0.0,
         val maxMs: Double,
         val lastMs: Double
     )
@@ -53,7 +55,7 @@ class RollingNanoSampler(val capacity: Int = 256) {
     @Synchronized
     fun snapshot(): PerfSnapshot {
         if (filled == 0) {
-            return PerfSnapshot(0, totalSamples.get(), 0.0, 0.0, 0.0, 0.0)
+            return PerfSnapshot(0, totalSamples.get(), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         }
         val copy = LongArray(filled)
         for (i in 0 until filled) {
@@ -62,12 +64,16 @@ class RollingNanoSampler(val capacity: Int = 256) {
         copy.sort()
         var sum = 0L
         for (v in copy) sum += v
+        val p50Idx = ((filled - 1) * 50) / 100
         val p95Idx = ((filled - 1) * 95) / 100
+        val p99Idx = ((filled - 1) * 99) / 100
         return PerfSnapshot(
             windowSamples = filled,
             totalCalls = totalSamples.get(),
             avgMs = (sum.toDouble() / filled) / 1_000_000.0,
+            p50Ms = copy[p50Idx] / 1_000_000.0,
             p95Ms = copy[p95Idx] / 1_000_000.0,
+            p99Ms = copy[p99Idx] / 1_000_000.0,
             maxMs = maxNanosSeen / 1_000_000.0,
             lastMs = lastNanos / 1_000_000.0
         )

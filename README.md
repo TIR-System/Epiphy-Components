@@ -37,9 +37,9 @@
 1. **存储、配置、日志与诊断底座 (`dev.epiphy.core.*`)**
    - **`AtomicJsonStore<T>`**：先写入同目录 `.tmp` 并执行 `FileChannel.force(true)` 刷盘后再移动替换；区分“文件未创建”与“文件损坏”；正本解析失败时尝试从 `.bak` 恢复，若正本与备份均损坏则重命名为 `.corrupt.<ts>.bak` 并置 `corruptLocked` 拒写标志，避免内存默认状态覆盖待排查文件（仅针对单进程写盘场景，不提供跨进程文件锁）。
    - **`EpiphyDataManager` & `EpiphyConfig`**：管理 `<gameDir>/epiphy-data/` 外置目录与 `<gameDir>/config/epiphy-*.toml` 双端配置，拦截写入 `saves/<world>/` 内部的安全配置路径；通过比对存档内 `epiphy_world_id.json` 与外部 `meta.json` 的路径记录，在检测到复制存档时分叉独立目录。
-   - **`EpiphyLogEngine` & `EpiphyDebugHub`**：通过有界阻塞队列在独立守护线程写盘，支持按时间窗口折叠重复日志并在进退存档时切换日志目录；配套环形数组耗时采样器 `RollingNanoSampler` 与单提供者异常捕获隔离的诊断汇总中心。
+   - **`EpiphyLogEngine`、`EpiphyDebugHub` & `EpiphyRenderPerfReporter`**：通过有界阻塞队列在独立守护线程写盘，支持按时间窗口折叠重复日志并在进退存档时切换日志目录；配套环形数组耗时采样器 `RollingNanoSampler`、单提供者异常捕获隔离的诊断汇总中心，以及带运行环境五元组与 512 帧 P50/P95/Max CPU 提交段统计的渲染性能报告导出器（可在游戏内配置页一键生成至 `epiphy-data/logs/render-perf-report.md`）。
 2. **客户端 2D / 3D 渲染与空间音频原语 (`dev.epiphy.client.*` & `mixin.*`)**
-   - **`NativeTextBatchEngine`**：在首次遇到某文本片段时捕获其字形 Quad 与所属字体纹理页 `RenderType`，后续每帧在 Java 侧计算逐字偏移并在各深度阶段内部按 `RenderType` 分桶归并提交，减少跨纹理页交替绘制引发的批次中断。
+   - **`NativeTextBatchEngine`**：在单渲染帧内对相同文本片段与 SDF 偏好组合做字形捕获去重（跨帧刷新以跟随动态字体图集重排与分辨率缩放），在 Java 侧计算逐字偏移并在各深度阶段内部按 `RenderType` 分桶归并提交，减少跨纹理页交替绘制引发的批次中断。
    - **`FboCachePool`**：按 32px 步进分桶管理 `TextureTarget` 离屏缓冲，使用预乘 Alpha（`GL_ONE, GL_ONE_MINUS_SRC_ALPHA`）缓解半透明边缘二次混合发暗问题，并在 `finally` 中重新绑定主 `RenderTarget`。
    - **容器界面钩子与物品 3D 管线**：`AbstractContainerScreenMixin` 在容器背景后、槽位绘制前后与前景后提供回调挂载点；`GuiGraphicsMixin` 在 `innerBlit` 入口按映射表替换纹理路径；`ItemRendererMixin` 与 `NativeItem3DEngine` 基于原版 `ShaderInstance` 与 `BakedModel.getRenderPasses` 提交声明式物品 3D 图层。
    - **音频访问器与游戏内配置界面**：通过编译期生成的 `@Accessor` 接口访问 `SoundEngine` 声道映射与 `AbstractSoundInstance` 属性，在播放受管音乐时暂停 `minecraft:` 命名空间背景音乐；提供游戏内模组列表可直达的 `EpiphyConfigScreen` 可视化设置页。
@@ -59,13 +59,14 @@
 ./gradlew check build
 ```
 
-`check` 任务自动执行六项工程门禁：
+`check` 任务自动执行七项工程门禁：
 1. `epiphy-api:test` (`ProtoV6ContractAndAliasTest`)：对照 [`docs/proto_v6_schema.json`](docs/proto_v6_schema.json) 校验协议字段、「至多 2 个官方别名」规则与 SemVer 2.0 预发布数值序；
 2. `epiphy-core:test` (`EngineeringCharterGuardTest`)：执行动态反向案例词汇隔离检查、注释与主干文档反自夸/反无依据耗时断言检查、核心引擎类边界说明完整性校验，以及 `gradle.properties` 版本单一事实源对齐检查；
 3. `epiphy-core:test` (`CoreInfrastructureRobustnessTest`)：文件 I/O 故障注入测试（`.bak` 恢复、锚点自愈保 UUID、双坏拒写锁、复制存档分叉、外置权限路径拦截、异步日志开关与累计丢弃统计）；
-4. `epiphy-core:test` (`ClientSubsystemsRegressionTest`)：客户端渲染、音频与桥接无头回归套件（`PoseStackWatermark` 多层溢出/下溢恢复、`RenderFaultCircuitBreaker` 致命错误重抛与阈值熔断、界面级 GUI 纹理重映射失效、`NativeTextBatchEngine` 跨图集分桶次数 $== K$ 与颜色继承、`NativeItem3DBridge` 显式 `BlendMode` 与绑定状态码、`NativeAudioClientAccess` 异步线程停止观测）；
-5. `epiphy-core:test` (`BytecodeSafetyGuardTest`)：通过 ASM 扫描编译产物，校验 `EpiphyMod.class` 与 `EpiphyConfig.class` 不直接引用客户端专属类、校验 `PoseStack.withPose` 异常表，并校验启动与 KubeJS 插件入口无 `java.lang.reflect` 反射调用；
-6. `epiphy-core:verifyNoBundledKotlin`：同时检查瘦包与 `-all.jar` 胖包，校验未混入 `kotlin/` 或 `kotlinx/` 标准库字节码、`META-INF/mods.toml` 已声明 `mixinbooster` 前置，且 `epiphy.refmap.json` 完整包含各 Mixin 混淆映射。
+4. `epiphy-core:test` (`ClientSubsystemsRegressionTest`)：客户端渲染、音频与桥接无头回归套件（`PoseStackWatermark` 含 `size == 0` 弹空在内的溢出/下溢恢复、可重入多槽位局部缓冲借还与异常退栈释放、`RenderFaultCircuitBreaker` 致命错误重抛与阈值熔断、界面级 GUI 纹理重映射失效、`NativeTextBatchEngine` 倾斜弹幕 SDF 请求与跨帧图集刷新、`NativeItem3DBridge` 显式 `BlendMode` 与绑定状态码、`NativeAudioClientAccess` 单调终态停止观测）；
+5. `epiphy-core:test` (`DualPathEquivalenceTest`)：通过内嵌 `rhino-forge` 加载真实 KubeJS 2D/3D 组件脚本，对同一组 Spec 同时运行 JS 参考路径与 `NativeItem3DEngine` / `NativeTextBatchEngine` 原生路径，逐项比对通道数、顶点数、材质键、变换指纹与逐字抖动位移轨迹；
+6. `epiphy-core:test` (`BytecodeSafetyGuardTest`)：通过 ASM 扫描编译产物，校验 `EpiphyMod.class` 与 `EpiphyConfig.class` 不直接引用客户端专属类、校验 `PoseStack.withPose` 异常表，并校验启动与 KubeJS 插件入口无 `java.lang.reflect` 反射调用；
+7. `epiphy-core:verifyNoBundledKotlin`：同时检查瘦包与 `-all.jar` 胖包，校验未混入 `kotlin/` 或 `kotlinx/` 标准库字节码、`META-INF/mods.toml` 已声明 `mixinbooster` 前置、`epiphy.refmap.json` 完整包含各 Mixin 混淆映射，且全部文本资源满足严格 UTF-8 解码与零 `U+FFFD` 替换符。
 
 ---
 
