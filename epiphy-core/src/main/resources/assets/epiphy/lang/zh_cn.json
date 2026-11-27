@@ -13,8 +13,8 @@
   "epiphy.config.client.textOutlineQuality.tooltip": "控制文字 stroke 描边与 glow 柔光的外圈采样阶数：\n• 高精度：8 向轮廓 + 大字重 4 向内环闭合\n• 均衡：标准 8 向轮廓\n• 性能优先：轻量 4 向轮廓\n• 关闭：仅绘制正文与基础阴影",
   "epiphy.config.client.enableFboCache": "静态声明式面板离屏 FBO 缓存池",
   "epiphy.config.client.enableFboCache.tooltip": "允许高复杂度静态 UI 子树复用离屏帧缓冲（TextureTarget），在无状态跳变帧直接发射单张合成贴图。",
-  "epiphy.config.client.enableGuiTextureRemap": "会话级 GUI 纹理动态重映射",
-  "epiphy.config.client.enableGuiTextureRemap.tooltip": "允许在特定容器界面打开期间对指定 GUI 纹理进行非侵入式重定向（关闭界面或退服时自动清零，不污染全局材质表）。",
+  "epiphy.config.client.enableGuiTextureRemap": "界面级 GUI 纹理动态重映射",
+  "epiphy.config.client.enableGuiTextureRemap.tooltip": "允许在当前界面打开期间对指定 GUI 纹理路径进行重定向（切换或关闭界面、退服时自动清空，不修改全局材质注册表）。",
   "epiphy.config.client.surface2DFrameBudgetMs": "低优先级弹幕单帧耗时预算",
   "epiphy.config.client.surface2DFrameBudgetMs.tooltip": "当单帧普通弹幕累计 CPU 渲染耗时超过该阈值时自动熔断跳过剩余低优先级弹幕；高优先级提示与 HUD/GUI 层不受影响。",
 
@@ -36,7 +36,7 @@
   "epiphy.config.client.debugPerfSampling": "客户端渲染微秒级性能采样",
   "epiphy.config.client.debugPerfSampling.tooltip": "开启客户端渲染热路径高精度微秒遥测采样（配合 /epiphy debug renderperf 查看详细指标）。",
   "epiphy.config.common.enableAsyncFileLogging": "启用 epiphy-data 异步日志落盘",
-  "epiphy.config.common.enableAsyncFileLogging.tooltip": "在后台独立协程中将运行诊断与审计日志写入 <游戏目录>/epiphy-data/，不阻塞主逻辑线程。",
+  "epiphy.config.common.enableAsyncFileLogging.tooltip": "在后台独立写盘线程中将运行诊断与审计日志写入 <游戏目录>/epiphy-data/，减少主线程磁盘 I/O 等待。",
   "epiphy.config.common.logDeprecationWarnings": "记录旧版协议别名迁移提示",
   "epiphy.config.common.logDeprecationWarnings.tooltip": "遇到已冻结的旧版协议字段别名时在日志中输出一次性升级提示。",
 

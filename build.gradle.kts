@@ -10,4 +10,8 @@ plugins {
 allprojects {
     group = providers.gradleProperty("mod_group_id").get()
     version = providers.gradleProperty("mod_version").get()
+
+    tasks.withType<ProcessResources>().configureEach {
+        filteringCharset = "UTF-8"
+    }
 }

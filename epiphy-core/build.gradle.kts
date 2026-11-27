@@ -1,4 +1,8 @@
 // 许可证声明 (License): 本文件适用 RAL-1.6 (Reciprocal Attribution License 1.6 / 相互开源署名许可证 1.6)
+import java.nio.ByteBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CodingErrorAction
+import java.nio.charset.StandardCharsets
 import java.util.jar.JarFile
 
 plugins {
@@ -213,6 +217,8 @@ tasks.named<JavaCompile>("compileJava") {
 }
 
 tasks.named<ProcessResources>("processResources") {
+    filteringCharset = "UTF-8"
+    inputs.property("filteringCharset", filteringCharset)
     val replaceProperties = mapOf(
         "mod_id" to providers.gradleProperty("mod_id").get(),
         "mod_version" to project.version.toString()
@@ -283,6 +289,30 @@ val verifyNoBundledKotlin by tasks.registering {
                 val modsTomlText = jf.getInputStream(modsTomlEntry).bufferedReader(Charsets.UTF_8).readText()
                 if (!modsTomlText.contains("modId = \"mixinbooster\"")) {
                     throw GradleException("META-INF/mods.toml in ${jarFile.name} must declare mandatory 'mixinbooster' dependency!")
+                }
+                if (!modsTomlText.contains("声明式 2D 平面合成与富文本渲染") || !modsTomlText.contains("【配置 (Config)】")) {
+                    throw GradleException("META-INF/mods.toml in ${jarFile.name} suffered CJK character mangling during resource filtering!")
+                }
+
+                // 全包文本资源严格 UTF-8 解码与零损坏替换符 (U+FFFD) 门禁（防御 Windows GBK 默认编码破坏 expand/filter 资源）
+                val textExts = listOf(".toml", ".json", ".mcmeta", ".fsh", ".vsh", ".txt")
+                for (entry in jf.entries().asSequence()) {
+                    if (entry.isDirectory) continue
+                    if (textExts.none { entry.name.endsWith(it, ignoreCase = true) }) continue
+                    val rawBytes = jf.getInputStream(entry).readBytes()
+                    val decoded: String = try {
+                        StandardCharsets.UTF_8
+                            .newDecoder()
+                            .onMalformedInput(CodingErrorAction.REPORT)
+                            .onUnmappableCharacter(CodingErrorAction.REPORT)
+                            .decode(ByteBuffer.wrap(rawBytes))
+                            .toString()
+                    } catch (ce: CharacterCodingException) {
+                        throw GradleException("Invalid UTF-8 byte sequence in ${jarFile.name}!/${entry.name}: ${ce.message}", ce)
+                    }
+                    if (decoded.contains('\uFFFD')) {
+                        throw GradleException("Corrupted Unicode replacement character (U+FFFD) detected in ${jarFile.name}!/${entry.name}!")
+                    }
                 }
 
                 val refmapEntry = jf.getJarEntry("epiphy.refmap.json")

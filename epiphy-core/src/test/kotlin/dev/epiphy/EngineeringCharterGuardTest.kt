@@ -296,7 +296,9 @@ class EngineeringCharterGuardTest {
             root.resolve("README_EN.md"),
             root.resolve("README-LLM.md"),
             root.resolve("docs/native-mod-migration-plan.md"),
-            root.resolve("epiphy-core/src/main/resources/META-INF/mods.toml")
+            root.resolve("epiphy-core/src/main/resources/META-INF/mods.toml"),
+            root.resolve("epiphy-core/src/main/resources/assets/epiphy/lang/zh_cn.json"),
+            root.resolve("epiphy-core/src/main/resources/assets/epiphy/lang/en_us.json")
         )
         for (doc in primaryDocs) {
             if (!Files.isRegularFile(doc)) continue
