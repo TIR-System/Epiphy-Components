@@ -8,11 +8,16 @@ import com.mojang.blaze3d.vertex.Tesselator;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import dev.epiphy.client.shader.EpiphyCoreShaders;
 import dev.epiphy.client.surface2d.hook.GuiInterceptionHooks;
+import dev.epiphy.client.surface2d.text.NativeTextBatchEngine;
+import dev.epiphy.core.config.EpiphyConfig;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.Font;
 import net.minecraft.client.renderer.GameRenderer;
+import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.resources.ResourceLocation;
 import org.joml.Matrix4f;
 
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -32,6 +37,117 @@ public final class NativeSurface2DAccelerator {
 
     public void clearResourceCache() {
         textureExistsCache.clear();
+        NativeTextBatchEngine.INSTANCE.clearCache();
+    }
+
+    public boolean isSurface2DEnabled() {
+        return EpiphyConfig.surface2DEnabled;
+    }
+
+    public boolean isNativeTextBatcherEnabled() {
+        return EpiphyConfig.nativeTextBatcherEnabled;
+    }
+
+    public double getFrameBudgetMs() {
+        return EpiphyConfig.surface2DFrameBudgetMs;
+    }
+
+    public Object compilePerCharScene(
+            List<?> rawUnits,
+            boolean unifiedFreq,
+            double sharedPeriodMs,
+            int styleCode,
+            double shiftXScale,
+            double shiftYScale,
+            double swayXScale,
+            double swayYScale,
+            double rotDegAmp,
+            double swayWin,
+            boolean isSnap,
+            double transWin,
+            double jitterWin,
+            double maxDxPx,
+            double maxDyPx
+    ) {
+        return NativeTextBatchEngine.INSTANCE.compileScene(
+                rawUnits,
+                unifiedFreq,
+                sharedPeriodMs,
+                styleCode,
+                shiftXScale,
+                shiftYScale,
+                swayXScale,
+                swayYScale,
+                rotDegAmp,
+                swayWin,
+                isSnap,
+                transWin,
+                jitterWin,
+                maxDxPx,
+                maxDyPx
+        );
+    }
+
+    public boolean renderPerCharScene(
+            Object sceneHandle,
+            Matrix4f baseItemMat,
+            MultiBufferSource bufferSource,
+            Font font,
+            boolean seeThrough,
+            int startSkipVis,
+            int keepEndVis,
+            double ageMs,
+            double activeShakeAmp,
+            boolean isPerCharShake,
+            boolean shadow,
+            String defOutlineModeStr,
+            int defOutlineColor,
+            float defOutlineWidth,
+            boolean inFade,
+            String fadeStyleStr,
+            float fadeProgress,
+            float px,
+            float py,
+            float mxx,
+            float mxy,
+            float myx,
+            float myy,
+            float screenW,
+            float screenH,
+            float offPadPx
+    ) {
+        return NativeTextBatchEngine.INSTANCE.renderScene(
+                sceneHandle,
+                baseItemMat,
+                bufferSource,
+                font,
+                seeThrough,
+                startSkipVis,
+                keepEndVis,
+                ageMs,
+                activeShakeAmp,
+                isPerCharShake,
+                shadow,
+                defOutlineModeStr,
+                defOutlineColor,
+                defOutlineWidth,
+                inFade,
+                fadeStyleStr,
+                fadeProgress,
+                px,
+                py,
+                mxx,
+                mxy,
+                myx,
+                myy,
+                screenW,
+                screenH,
+                offPadPx
+        );
+    }
+
+    public Map<String, Object> getTextBatchStats() {
+        return NativeTextBatchEngine.INSTANCE.collectStats();
     }
 
     public boolean checkTextureExists(String rawPath) {
@@ -55,6 +171,7 @@ public final class NativeSurface2DAccelerator {
     }
 
     public boolean setTextureRemap(String origPath, String repPath) {
+        if (!EpiphyConfig.guiTextureRemapEnabled) return false;
         if (origPath == null || repPath == null || origPath.isEmpty() || repPath.isEmpty()) return false;
         ResourceLocation origRl = ResourceLocation.tryParse(origPath.trim());
         ResourceLocation repRl = ResourceLocation.tryParse(repPath.trim());

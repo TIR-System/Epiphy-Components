@@ -1,13 +1,24 @@
 modLoader = "kotlinforforge"
 loaderVersion = "[4,5)"
 license = "RAL-1.6"
+issueTrackerURL = "https://github.com/TIR-System/Epiphy-Components/issues"
 
 [[mods]]
 modId = "epiphy"
 version = "${file.jarVersion}"
-displayName = "Epiphy Core"
+displayName = "Epiphy Core (Epiphy 核心组件底座)"
+displayURL = "https://github.com/TIR-System/Epiphy-Components"
+authors = "Epiphy-iLLUMs, Gemini 4 Series, Claude 5.5 Series"
+credits = "Mascot: DeepSeek"
 description = '''
-Declarative 2D/3D presentation engine, native hot-path accelerators, spatial audio, chunk-section block tracker, and hardened server infrastructure.
+Epiphy 原生高性能表现层与基础设施核心模组（Minecraft 1.20.1 · Forge · Kotlin for Forge）。
+
+核心能力概览：
+• 声明式 2D 平面合成与富文本引擎：支持屏幕/容器夹心层/物品槽位/世界三维平面多载体渲染、离屏 FBO 静态面板缓存、零全局污染会话级 GUI 纹理重映射，以及原生字形捕获与图集分桶（Atlas-Bucketed）逐字抖动合批加速。
+• 零第三方依赖 3D 物品与空间特效管线：基于原生 ShaderInstance、延迟缓冲同步与预烘焙网格实现多层材质覆层、环绕几何流光与世界空间三维图元渲染。
+• 三维空间音频与高鲁棒服务端底座：提供编译期 Accessor 零反射 OpenAL 声源控制、原版背景音乐温和避让、区块段调色板极速方块扫描，以及带损坏隔离锁与跨档分叉保护的外置 epiphy-data/ 原子持久化体系。
+
+提示：点击左侧【配置 (Config)】按钮可在游戏内实时调整 2D/3D 渲染精度、帧耗时预算与音频选项，无需重启客户端。
 '''
 
 [[dependencies.epiphy]]

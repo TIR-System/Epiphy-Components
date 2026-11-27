@@ -11,11 +11,11 @@ import java.util.Collections
 import java.util.IdentityHashMap
 
 /**
- * 零 `CodeChickenLib` 依赖的原生物品 3D 渲染挂载中心。
+ * 零 `CodeChickenLib` 依赖的原生物品 3D 声明式渲染挂载中心。
  *
- * 通过 `IdentityHashMap<Item, Item3DOverlayRenderer>` 实现指针级 O(1) 匹配：
- * - 未注册 3D 特效的普通物品仅经过 1 次 `volatile boolean` 短路判空，零堆分配、零性能损耗；
- * - 命中物品在原版基底 `BakedModel` 绘制完成后紧接提交声明式 3D 特效层，外层强制 `PoseStack` 异常还原。
+ * 通过 `IdentityHashMap<Item, BoundItemEntry>` 实现指针级 O(1) 匹配：
+ * - 未注册 3D 图层的普通物品仅经过 1 次 `volatile boolean` 短路判空，零堆分配、零性能损耗；
+ * - 支持 `renderBase` 基底模型开关控制，外层强制执行 `PoseStack` 对称推弹异常保护。
  */
 object Item3DRenderHooks {
 
@@ -32,7 +32,12 @@ object Item3DRenderHooks {
         )
     }
 
-    private val registry: MutableMap<Item, Item3DOverlayRenderer> =
+    private class BoundItemEntry(
+        val renderBase: Boolean,
+        val renderer: Item3DOverlayRenderer
+    )
+
+    private val registry: MutableMap<Item, BoundItemEntry> =
         Collections.synchronizedMap(IdentityHashMap())
 
     @Volatile
@@ -40,8 +45,9 @@ object Item3DRenderHooks {
     var hasBoundItems: Boolean = false
 
     @JvmStatic
-    fun bindItem(item: Item, renderer: Item3DOverlayRenderer) {
-        registry[item] = renderer
+    @JvmOverloads
+    fun bindItem(item: Item, renderBase: Boolean = true, renderer: Item3DOverlayRenderer) {
+        registry[item] = BoundItemEntry(renderBase, renderer)
         hasBoundItems = registry.isNotEmpty()
     }
 
@@ -58,7 +64,15 @@ object Item3DRenderHooks {
     }
 
     @JvmStatic
-    fun dispatchAfterBaseItem(
+    fun shouldRenderBaseModel(stack: ItemStack): Boolean {
+        if (!hasBoundItems || stack.isEmpty) return true
+        if (!NativeItem3DEngine.enabled) return true
+        val entry = registry[stack.item] ?: return true
+        return entry.renderBase
+    }
+
+    @JvmStatic
+    fun dispatchCustomLayers(
         stack: ItemStack,
         displayContext: ItemDisplayContext,
         leftHand: Boolean,
@@ -69,10 +83,10 @@ object Item3DRenderHooks {
         bakedModel: BakedModel
     ) {
         if (!hasBoundItems || stack.isEmpty) return
-        val renderer = registry[stack.item] ?: return
+        val entry = registry[stack.item] ?: return
         poseStack.pushPose()
         try {
-            renderer.renderOverlay(
+            entry.renderer.renderOverlay(
                 stack,
                 displayContext,
                 leftHand,
@@ -83,9 +97,21 @@ object Item3DRenderHooks {
                 bakedModel
             )
         } catch (_: Throwable) {
-            // 单件物品特效异常静默隔离，确保手持与背包界面不崩溃
+            // 单件物品图层异常静默隔离，确保手持与容器界面渲染栈不发生泄漏
         } finally {
             runCatching { poseStack.popPose() }
         }
     }
+
+    @JvmStatic
+    fun dispatchAfterBaseItem(
+        stack: ItemStack,
+        displayContext: ItemDisplayContext,
+        leftHand: Boolean,
+        poseStack: PoseStack,
+        bufferSource: MultiBufferSource,
+        combinedLight: Int,
+        combinedOverlay: Int,
+        bakedModel: BakedModel
+    ) = dispatchCustomLayers(stack, displayContext, leftHand, poseStack, bufferSource, combinedLight, combinedOverlay, bakedModel)
 }

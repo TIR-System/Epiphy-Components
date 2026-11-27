@@ -27,12 +27,11 @@ class BytecodeSafetyGuardTest {
             ?: error("Cannot find compiled class '$relPath' in roots: $roots")
     }
 
-    @Test
-    fun `EpiphyMod class contains zero direct references to client-only classes for Dedicated Server safety`() {
-        val modClassBytes = Files.readAllBytes(findMainClassFile("dev/epiphy/EpiphyMod.class"))
+    private fun assertZeroClientReferences(classRelPath: String) {
+        val classBytes = Files.readAllBytes(findMainClassFile(classRelPath))
         val referencedTypes = LinkedHashSet<String>()
 
-        ClassReader(modClassBytes).accept(object : ClassVisitor(Opcodes.ASM9) {
+        ClassReader(classBytes).accept(object : ClassVisitor(Opcodes.ASM9) {
             override fun visitMethod(
                 access: Int,
                 name: String?,
@@ -75,10 +74,16 @@ class BytecodeSafetyGuardTest {
             for (prefix in forbiddenClientPrefixes) {
                 assertFalse(
                     ref.contains(prefix),
-                    "Dedicated Server safety violation! EpiphyMod.class directly references client-only type '$prefix' via '$ref'"
+                    "Dedicated Server safety violation! $classRelPath directly references client-only type '$prefix' via '$ref'"
                 )
             }
         }
+    }
+
+    @Test
+    fun `EpiphyMod and EpiphyConfig classes contain zero direct references to client-only classes for Dedicated Server safety`() {
+        assertZeroClientReferences("dev/epiphy/EpiphyMod.class")
+        assertZeroClientReferences("dev/epiphy/core/config/EpiphyConfig.class")
     }
 
     @Test

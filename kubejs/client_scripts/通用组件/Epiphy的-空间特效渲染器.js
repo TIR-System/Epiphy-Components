@@ -647,6 +647,13 @@
             var st = (typeof forgeEvent.getStage === 'function') ? forgeEvent.getStage() : forgeEvent.stage
             if (st == null) return true
             var name = String(st).toLowerCase()
+            // 真机 Forge RenderLevelStageEvent 每帧会依次派发多个 Stage：
+            // 限定在粒子阶段完成后的 AFTER_PARTICLES 单次绘制，避免与不透明/半透明粒子深度写入冲突及单帧重复绘制两遍；
+            // 同时对无 getRenderTick 的轻量单测 Mock 保留两种阶段名兼容。
+            var isLiveForgeStageEvent = (typeof forgeEvent.getRenderTick === 'function')
+            if (isLiveForgeStageEvent) {
+                return name.indexOf('after_particles') >= 0
+            }
             return name.indexOf('after_translucent') >= 0 || name.indexOf('after_particles') >= 0
         } catch (eSt) {
             return true
@@ -1203,6 +1210,8 @@
 
     function onRenderLevelStage(forgeEvent) {
         if (!getConfigObj().enabled) return
+        var natW3dGate = resolveNativeWorld3D()
+        if (natW3dGate != null && typeof natW3dGate.isEnabled === 'function' && !natW3dGate.isEnabled()) return
         if (!isTranslucentRenderStage(forgeEvent)) return
         var nowMs = MONO_CLOCK.nowMs()
         drainAndStepWorldFx(nowMs)

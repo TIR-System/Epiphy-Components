@@ -3,6 +3,7 @@ package dev.epiphy.client
 
 import com.mojang.logging.LogUtils
 import dev.epiphy.client.audio.NativeAudioClientAccess
+import dev.epiphy.client.config.EpiphyConfigScreen
 import dev.epiphy.client.fx3d.item.Item3DRenderHooks
 import dev.epiphy.client.fx3d.item.NativeItem3DBridge
 import dev.epiphy.client.fx3d.item.NativeItem3DEngine
@@ -12,10 +13,14 @@ import dev.epiphy.client.surface2d.NativeSurface2DAccelerator
 import dev.epiphy.client.surface2d.fbo.FboCachePool
 import dev.epiphy.client.surface2d.hook.GuiInterceptionHooks
 import dev.epiphy.core.bridge.EpiphyBridgeRegistry
+import dev.epiphy.core.config.EpiphyConfig
 import net.minecraft.server.packs.resources.ResourceManagerReloadListener
+import net.minecraftforge.client.ConfigScreenHandler
 import net.minecraftforge.client.event.ClientPlayerNetworkEvent
 import net.minecraftforge.client.event.RegisterClientReloadListenersEvent
 import net.minecraftforge.eventbus.api.IEventBus
+import net.minecraftforge.fml.ModList
+import net.minecraftforge.fml.ModLoadingContext
 import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent
 
 /**
@@ -31,6 +36,8 @@ object EpiphyClientBootstrap {
      * 面向脚本层暴露的世界 3D 批渲染网关实例（仅客户端加载）。
      */
     object World3DBridge {
+        fun isEnabled(): Boolean = EpiphyConfig.world3DEnabled
+
         fun acquireEmissiveBuffer(bs: net.minecraft.client.renderer.MultiBufferSource?) =
             NativeWorld3DBatchRenderer.acquireEmissiveBuffer(bs)
 
@@ -86,6 +93,17 @@ object EpiphyClientBootstrap {
         modBus.addListener(::onRegisterReloadListeners)
         forgeBus.addListener(::onClientLoggingOut)
 
+        // 注册 Forge 游戏内模组列表【配置 (Config)】可视化界面入口
+        ModLoadingContext.get().registerExtensionPoint(ConfigScreenHandler.ConfigScreenFactory::class.java) {
+            ConfigScreenHandler.ConfigScreenFactory { _, parent -> EpiphyConfigScreen(parent) }
+        }
+
+        // 绑定配置热同步监听器：界面保存或配置文件重载时立即同步至各客户端引擎
+        EpiphyConfig.addSyncListener {
+            applyClientConfigNow()
+        }
+        applyClientConfigNow()
+
         // 注册客户端原生高性能加速原语，供 KubeJS 脚本外挂绑定调用
         EpiphyBridgeRegistry.registerAccelerator("surface2d.fbo", sharedFboPool)
         EpiphyBridgeRegistry.registerAccelerator("surface2d.guiHooks", GuiInterceptionHooks)
@@ -97,8 +115,34 @@ object EpiphyClientBootstrap {
         EpiphyBridgeRegistry.registerAccelerator("shader.registry", EpiphyCoreShaders)
     }
 
+    private fun applyClientConfigNow() {
+        NativeItem3DEngine.enabled = EpiphyConfig.item3DEnabled
+        NativeItem3DEngine.overlaysEnabled = EpiphyConfig.item3DOverlaysEnabled
+        NativeItem3DEngine.geometryEnabled = EpiphyConfig.item3DGeometryEnabled
+        NativeItem3DEngine.guiGlobalScale = EpiphyConfig.item3DGuiScale
+
+        if (!EpiphyConfig.fboCacheEnabled) {
+            runCatching { sharedFboPool.destroyAll() }
+        }
+        if (!EpiphyConfig.guiTextureRemapEnabled) {
+            GuiInterceptionHooks.clearAllTextureRemaps()
+        }
+        if (!EpiphyConfig.spatialAudioEnabled || !EpiphyConfig.vanillaMusicDuckingEnabled) {
+            NativeAudioClientAccess.setVanillaMusicDucked(false)
+        }
+    }
+
     private fun onClientSetup(event: FMLClientSetupEvent) {
         event.enqueueWork {
+            EpiphyConfig.syncFromSpecs()
+            if (ModList.get().isLoaded("modernui")) {
+                runCatching {
+                    val cls = Class.forName("dev.epiphy.compat.modernui.ModernUiGlyphCaptureBackend")
+                    cls.getMethod("tryInstall").invoke(null)
+                }.onFailure { err ->
+                    LOGGER.debug("[EpiphyClient] ModernUI soft-compat backend skipped: {}", err.toString())
+                }
+            }
             val bound = NativeItem3DEngine.rebindAllPending()
             LOGGER.info("[EpiphyClient] Client native rendering & audio primitives initialized (bound3dItems={}).", bound)
         }

@@ -406,6 +406,7 @@
             blend:      blend,
             blur:       m.blur !== undefined ? Boolean(m.blur) : (d.blur !== undefined ? Boolean(d.blur) : true),
             cull:       m.cull !== undefined ? Boolean(m.cull) : (d.cull !== undefined ? Boolean(d.cull) : false),
+            depthTest:  m.depthTest !== undefined ? Boolean(m.depthTest) : (d.depthTest !== undefined ? Boolean(d.depthTest) : true),
             depthWrite: m.depthWrite !== undefined ? Boolean(m.depthWrite) : (d.depthWrite !== undefined ? Boolean(d.depthWrite) : false),
             flushAfter: m.flushAfter !== undefined ? Boolean(m.flushAfter) : (d.flushAfter !== undefined ? Boolean(d.flushAfter) : false)
         }
@@ -1255,7 +1256,9 @@
                 })
             }
         }
-        if (nat3d.bindCompiledItemFromJs(itemId, cfg.motion.speed, cfg.motion.attackExpand, cfg.lod.guiScale, rawPasses)) {
+        var flushBase  = (cfg.model == null || cfg.model.flushBase !== false)
+        var renderBase = (cfg.model == null || cfg.model.renderBase !== false)
+        if (nat3d.bindCompiledItemFromJs(itemId, cfg.motion.speed, cfg.motion.attackExpand, cfg.lod.guiScale, rawPasses, flushBase, renderBase)) {
             BACKEND_STATUS.mode = 'native_mod_gpu'
             BAKED_ITEMS[itemId] = { passes: rawPasses.length, overlays: ovCnt, geometries: geoCnt, totalVerts: totalVerts }
             BAKED_COUNT = Object.keys(BAKED_ITEMS).length

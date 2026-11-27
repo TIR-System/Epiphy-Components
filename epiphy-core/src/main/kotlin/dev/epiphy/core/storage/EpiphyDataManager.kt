@@ -2,6 +2,9 @@
 package dev.epiphy.core.storage
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.UUID
@@ -61,7 +64,7 @@ class EpiphyDataManager(rawGameDir: Path) {
     @Serializable
     data class WorldsIndexFile(
         val version: Int = 1,
-        val worlds: Map<String, String> = emptyMap() // worldId -> folderName (<slug>__<shortId>)
+        val worlds: Map<String, JsonElement> = emptyMap() // 兼容字符串 folderName 与对象 { folderName, worldId, ... }
     )
 
     data class BoundWorldContext(
@@ -159,7 +162,7 @@ class EpiphyDataManager(rawGameDir: Path) {
                     forceWrite = true
                 )
                 currentIndexMap[newWorldId] = newFolder
-                indexStore.save(WorldsIndexFile(worlds = currentIndexMap))
+                saveIndexMap(currentIndexMap)
 
                 pendingForkNotices.add(
                     WorldForkNotice(
@@ -207,7 +210,7 @@ class EpiphyDataManager(rawGameDir: Path) {
             )
             if (currentIndexMap[existingAnchor.worldId] != knownFolder) {
                 currentIndexMap[existingAnchor.worldId] = knownFolder
-                indexStore.save(WorldsIndexFile(worlds = currentIndexMap))
+                saveIndexMap(currentIndexMap)
             }
 
             val ctx = BoundWorldContext(
@@ -247,7 +250,7 @@ class EpiphyDataManager(rawGameDir: Path) {
             forceWrite = true
         )
         currentIndexMap[freshId] = freshFolder
-        indexStore.save(WorldsIndexFile(worlds = currentIndexMap))
+        saveIndexMap(currentIndexMap)
 
         val ctx = BoundWorldContext(
             worldId = freshId,
@@ -343,12 +346,35 @@ class EpiphyDataManager(rawGameDir: Path) {
         )
     }
 
-    private fun loadIndexMap(): Map<String, String> =
-        when (val res = indexStore.load()) {
+    private fun saveIndexMap(map: Map<String, String>) {
+        val encoded = map.mapValues { (wid, folder) ->
+            JsonObject(
+                mapOf(
+                    "worldId" to JsonPrimitive(wid),
+                    "folderName" to JsonPrimitive(folder)
+                )
+            )
+        }
+        indexStore.save(WorldsIndexFile(worlds = encoded))
+    }
+
+    private fun loadIndexMap(): Map<String, String> {
+        val rawMap = when (val res = indexStore.load()) {
             is AtomicJsonStore.LoadOutcome.Loaded -> res.value.worlds
             is AtomicJsonStore.LoadOutcome.RecoveredFromBackup -> res.value.worlds
             else -> emptyMap()
         }
+        val out = LinkedHashMap<String, String>(rawMap.size)
+        for ((k, elem) in rawMap) {
+            val folder = when (elem) {
+                is JsonPrimitive -> elem.content.takeIf { it.isNotBlank() }
+                is JsonObject -> (elem["folderName"] as? JsonPrimitive)?.content?.takeIf { it.isNotBlank() }
+                else -> null
+            }
+            if (folder != null) out[k] = folder
+        }
+        return out
+    }
 
     companion object {
         /**

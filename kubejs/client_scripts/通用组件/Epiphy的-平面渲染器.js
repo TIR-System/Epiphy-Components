@@ -7395,6 +7395,13 @@
 
     function renderGuiSurfacePass(screenOrEvent, phase, guiCtx) {
         var now = monotonicNowMs()
+        var natS2dGui = resolveNativeSurface2D()
+        if (natS2dGui != null && typeof natS2dGui.isSurface2DEnabled === 'function' && !natS2dGui.isSurface2DEnabled()) {
+            if (Object.keys(REPLACED_TEXTURE_REGISTRY).length > 0) {
+                restoreAllReplacedTextures()
+            }
+            return 0
+        }
         flushPendingActions(now)
         var ctx = isPlainObjLike(guiCtx) ? guiCtx : {}
         var screenObj = ctx.screen || (screenOrEvent != null ? (screenOrEvent.screen || getActiveScreen(screenOrEvent)) : null)
@@ -7552,6 +7559,17 @@
         }
 
         var now = monotonicNowMs()
+        var natS2dFrame = resolveNativeSurface2D()
+        if (natS2dFrame != null && typeof natS2dFrame.isSurface2DEnabled === 'function' && !natS2dFrame.isSurface2DEnabled()) {
+            if (passMode !== 'pre_hud' && Object.keys(REPLACED_TEXTURE_REGISTRY).length > 0) {
+                restoreAllReplacedTextures()
+            }
+            return
+        }
+        var effFrameBudgetMs = (natS2dFrame != null && typeof natS2dFrame.getFrameBudgetMs === 'function')
+            ? Number(natS2dFrame.getFrameBudgetMs())
+            : CONFIG.frameBudgetMs
+        if (!isFinite(effFrameBudgetMs) || effFrameBudgetMs <= 0) effFrameBudgetMs = CONFIG.frameBudgetMs
         flushPendingActions(now)
 
         // 每帧绘制前统一清理全部已到期弹幕，避免紧急熔断时残留过期项未淘汰
@@ -7648,7 +7666,7 @@
 
             // 单帧硬防卡死熔断（每绘制 8 条采样一次 monotonicNowMs，大幅削减 System.nanoTime JNI 跨界开销）：
             // 仅截断低优先级普通弹幕 (renderPriority <= 0 && priority <= 2)；高优先级弹幕与 HUD/GUI/slot (renderPriority > 0) 始终放行。
-            if (curRenderPri <= 0 && (item.priority || 0) <= 2 && drawnCount >= 1 && (drawnCount & 7) === 1 && (monotonicNowMs() - frameStartMs) >= CONFIG.frameBudgetMs) {
+            if (curRenderPri <= 0 && (item.priority || 0) <= 2 && drawnCount >= 1 && (drawnCount & 7) === 1 && (monotonicNowMs() - frameStartMs) >= effFrameBudgetMs) {
                 PERF_STATS.budgetTrips++
                 continue
             }
@@ -8096,6 +8114,93 @@
                         var baseShakeAmp = item.shakeAmp || 0.65
                         var activeShake  = curShake > 0 ? curShake : baseShakeAmp
                         var visRange     = findVisibleUnitRange(charUnits, startSkipVis, keepEndVis)
+
+                        // 原生字形捕获与图集分桶（Atlas-Bucketed）逐字批处理快速通道：
+                        // 首次命中时将 charUnits 一次性编译为原生紧凑数组，每帧仅 1 次跨界调用并按纹理图集归并提交。
+                        var handledByNativeText = false
+                        if (natS2dFrame != null &&
+                            itemBatchCtx != null &&
+                            itemBatchCtx.itemMat != null &&
+                            itemBatchCtx.bufSrc != null &&
+                            fontObj != null &&
+                            typeof natS2dFrame.isNativeTextBatcherEnabled === 'function' &&
+                            natS2dFrame.isNativeTextBatcherEnabled()) {
+                            try {
+                                if (item._nativePerCharScene == null || item._nativePerCharSceneKey !== item.charShakeCacheKey) {
+                                    var nCfg = getCharShakeConfig(item)
+                                    var sharedPerMs = (isFinite(item._charShakeSharedPeriodMs) && item._charShakeSharedPeriodMs > 0)
+                                        ? item._charShakeSharedPeriodMs
+                                        : (item.shakeFreqMin || CONFIG.charShakeDefaultMinMs)
+                                    item._nativePerCharScene = natS2dFrame.compilePerCharScene(
+                                        charUnits,
+                                        Boolean(item._charShakeUnifiedFreq),
+                                        Number(sharedPerMs),
+                                        Number(nCfg.styleCode || 0),
+                                        Number(nCfg.shiftXScale),
+                                        Number(nCfg.shiftYScale),
+                                        Number(nCfg.swayXScale),
+                                        Number(nCfg.swayYScale),
+                                        Number(nCfg.rotDegAmp || 0.0),
+                                        Number(nCfg.swayWin),
+                                        Boolean(nCfg.isSnap),
+                                        Number(nCfg.transWin),
+                                        Number(nCfg.jitterWin),
+                                        Number(CONFIG.charShakeMaxDxPx),
+                                        Number(CONFIG.charShakeMaxDyPx)
+                                    )
+                                    item._nativePerCharSceneKey = item.charShakeCacheKey
+                                }
+                                if (item._nativePerCharScene != null) {
+                                    var isSeeThroughMode = (itemBatchCtx.displayMode != null && String(itemBatchCtx.displayMode).toUpperCase().indexOf('SEE_THROUGH') >= 0)
+                                    handledByNativeText = Boolean(natS2dFrame.renderPerCharScene(
+                                        item._nativePerCharScene,
+                                        itemBatchCtx.itemMat,
+                                        itemBatchCtx.bufSrc,
+                                        fontObj,
+                                        isSeeThroughMode,
+                                        startSkipVis,
+                                        keepEndVis,
+                                        age,
+                                        activeShake,
+                                        Boolean(isPerCharShake),
+                                        Boolean(item.shadow),
+                                        String(defOutMod || 'none'),
+                                        Number(defOutCol != null ? defOutCol : -1),
+                                        Number(defOutWid || 0.75),
+                                        Boolean(inFade),
+                                        String(item.fadeStyle || 'shrink'),
+                                        Number(fadeProgress || 0.0),
+                                        Number(px),
+                                        Number(py),
+                                        Number(mxx),
+                                        Number(mxy),
+                                        Number(myx),
+                                        Number(myy),
+                                        Number(sw),
+                                        Number(sh),
+                                        Number(offPadPx)
+                                    ))
+                                    if (handledByNativeText && blinkCursor.length > 0 && visRange.hi > visRange.lo) {
+                                        var tailUnit = charUnits[visRange.hi - 1]
+                                        if (tailUnit != null && tailUnit.isMerged && Array.isArray(tailUnit.subFrags)) {
+                                            for (var tsi = tailUnit.subFrags.length - 1; tsi >= 0; tsi--) {
+                                                var tSub = tailUnit.subFrags[tsi]
+                                                if (tSub.visIndex >= startSkipVis && tSub.visIndex < keepEndVis) {
+                                                    lastVisCf = tSub
+                                                    break
+                                                }
+                                            }
+                                        } else {
+                                            lastVisCf = tailUnit
+                                        }
+                                    }
+                                }
+                            } catch (eNatTxt) {
+                                handledByNativeText = false
+                            }
+                        }
+
+                        if (!handledByNativeText) {
                         var groupPasses  = rCtx.canGroupPasses
                         var passCount    = 0
                         for (var uIdx = visRange.lo; uIdx < visRange.hi; uIdx++) {
@@ -8165,6 +8270,7 @@
                             } else {
                                 drawUnitsPassGrouped(rCtx, PASS_UNIT_SCRATCH, passCount)
                             }
+                        }
                         }
 
                         if (blinkCursor.length > 0 && lastVisCf != null) {
@@ -8792,6 +8898,10 @@
     function onRenderLevelStageWorldPlanes(forgeEvent) {
         if (!isWorldPlaneTranslucentStage(forgeEvent)) return
         var now = monotonicNowMs()
+        var natS2dWp = resolveNativeSurface2D()
+        if (natS2dWp != null && typeof natS2dWp.isSurface2DEnabled === 'function' && !natS2dWp.isSurface2DEnabled()) {
+            return
+        }
         flushPendingActions(now)
 
         for (var expIdx = activeOverlays.length - 1; expIdx >= 0; expIdx--) {

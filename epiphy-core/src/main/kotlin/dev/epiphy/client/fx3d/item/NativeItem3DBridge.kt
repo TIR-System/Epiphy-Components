@@ -30,12 +30,15 @@ object NativeItem3DBridge {
      * 接收脚本层编译好的面片与变换描述并烘焙为原生紧凑数组模型挂载至 `Item3DRenderHooks`。
      */
     @Suppress("UNCHECKED_CAST")
+    @JvmOverloads
     fun bindCompiledItemFromJs(
         itemId: String,
         speedMul: Double,
         attackExpand: Double,
         guiScale: Double,
-        rawPasses: List<*>
+        rawPasses: List<*>,
+        flushBase: Boolean = true,
+        renderBase: Boolean = true
     ): Boolean {
         val bakedPasses = ArrayList<NativeItem3DEngine.BakedPass>(rawPasses.size)
         var overlayCount = 0
@@ -55,6 +58,7 @@ object NativeItem3DBridge {
             val additive = (matMap["blend"]?.toString()?.lowercase() != "translucent")
             val blur = (matMap["blur"] as? Boolean) ?: true
             val cull = (matMap["cull"] as? Boolean) ?: false
+            val depthTest = (matMap["depthTest"] as? Boolean) ?: true
             val depthWrite = (matMap["depthWrite"] as? Boolean) ?: false
             val flushAfter = (matMap["flushAfter"] as? Boolean) ?: false
 
@@ -108,7 +112,7 @@ object NativeItem3DBridge {
                 }
             }
 
-            val rt = NativeItem3DEngine.getOrCreateRenderType(shaderId, texStr, additive, blur, cull, depthWrite)
+            val rt = NativeItem3DEngine.getOrCreateRenderType(shaderId, texStr, additive, blur, cull, depthWrite, depthTest)
             bakedPasses.add(
                 NativeItem3DEngine.BakedPass(
                     id = passId,
@@ -129,6 +133,8 @@ object NativeItem3DBridge {
 
         val model = NativeItem3DEngine.CompiledItemModel(
             itemId = itemId,
+            renderBase = renderBase,
+            flushBase = flushBase,
             speedMul = speedMul.toFloat().let { if (it.isFinite()) it else 1.0f },
             attackExpand = attackExpand.toFloat().let { if (it.isFinite()) it else 0.0f },
             guiScale = guiScale.toFloat().let { if (it.isFinite()) it else 0.86f },

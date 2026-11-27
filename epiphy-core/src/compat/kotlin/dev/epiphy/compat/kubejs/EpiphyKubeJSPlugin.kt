@@ -9,6 +9,7 @@ import dev.epiphy.api.preset.PresetRegistry
 import dev.epiphy.api.spec.EpiphyProtocolSpec
 import dev.epiphy.core.EpiphyRuntime
 import dev.epiphy.core.bridge.EpiphyBridgeRegistry
+import dev.epiphy.core.config.EpiphyConfig
 import dev.epiphy.core.debug.RollingNanoSampler
 import dev.epiphy.core.storage.RawJsonFileStore
 import dev.epiphy.core.world.NativeSectionScanner
@@ -164,6 +165,8 @@ object EpiphyNativeJsFacade {
     fun getAccelerator(domain: String): Any? = EpiphyBridgeRegistry.getAccelerator(domain)
 
     fun listAccelerators(): Set<String> = EpiphyBridgeRegistry.listAccelerators()
+
+    fun getConfigSnapshot(): Map<String, Any> = EpiphyConfig.snapshotMap()
 
     // 客户端外挂快捷入口（在专用服务端自动返回 null，零客户端类引用）
     fun getSurface2D(): Any? = EpiphyBridgeRegistry.getAccelerator("surface2d.accel")

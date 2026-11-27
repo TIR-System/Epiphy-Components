@@ -14,9 +14,12 @@ import net.minecraft.client.renderer.RenderStateShard
 import net.minecraft.client.renderer.RenderType
 import net.minecraft.client.resources.model.BakedModel
 import net.minecraft.resources.ResourceLocation
+import net.minecraft.world.item.BlockItem
 import net.minecraft.world.item.ItemDisplayContext
 import net.minecraft.world.item.ItemStack
 import net.minecraft.world.item.Items
+import net.minecraft.world.level.block.HalfTransparentBlock
+import net.minecraft.world.level.block.StainedGlassPaneBlock
 import net.minecraftforge.registries.ForgeRegistries
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -28,9 +31,9 @@ import kotlin.math.sin
 /**
  * 100% 零 `CodeChickenLib` 原生物品三维渲染与预烘焙引擎。
  *
- * - 编译期直接调用 Mojmap / Forge API（`RenderType.create`、`ShaderStateShard`、`Item3DRenderHooks`），自动重映射 SRG；
+ * - 编译期直接调用 Mojmap / Forge 标准渲染契约（`BakedModel.getRenderPasses`、`RenderType.create`、`ShaderStateShard`、`Item3DRenderHooks`），自动重映射 SRG；
  * - 启动期或资源重载期接收声明式编译后的紧凑网格数据（`FloatArray` 顶点 + `IntArray` 颜色），内置非有限数（NaN/Inf）防火墙；
- * - 每帧渲染 100% 运行在原生 JVM 字节码中，零 Rhino 跨界回调、零堆分配矩阵变换。
+ * - 统一管理原版延迟固定缓冲（`BufferSource.fixedBuffers`）与流式自定义材质层的硬件提交顺序及深度测试契约。
  */
 object NativeItem3DEngine : RenderStateShard("epiphy_item3d_shards", Runnable {}, Runnable {}) {
 
@@ -48,6 +51,7 @@ object NativeItem3DEngine : RenderStateShard("epiphy_item3d_shards", Runnable {}
         val additive: Boolean,
         val blur: Boolean,
         val cull: Boolean,
+        val depthTest: Boolean,
         val depthWrite: Boolean
     )
 
@@ -100,6 +104,8 @@ object NativeItem3DEngine : RenderStateShard("epiphy_item3d_shards", Runnable {}
 
     class CompiledItemModel(
         val itemId: String,
+        val renderBase: Boolean = true,
+        val flushBase: Boolean = true,
         val speedMul: Float,
         val attackExpand: Float,
         val guiScale: Float,
@@ -160,8 +166,8 @@ object NativeItem3DEngine : RenderStateShard("epiphy_item3d_shards", Runnable {}
         if (item == Items.AIR) return false
 
         activeModels[model.itemId] = model
-        Item3DRenderHooks.bindItem(item) { stack, displayContext, _, poseStack, bufferSource, _, _, _ ->
-            renderCompiledItem(model, stack, displayContext, poseStack, bufferSource)
+        Item3DRenderHooks.bindItem(item, model.renderBase) { stack, displayContext, _, poseStack, bufferSource, _, _, bakedModel ->
+            renderCompiledItem(model, stack, displayContext, poseStack, bufferSource, bakedModel)
         }
         return true
     }
@@ -172,13 +178,14 @@ object NativeItem3DEngine : RenderStateShard("epiphy_item3d_shards", Runnable {}
         additive: Boolean,
         blur: Boolean,
         cull: Boolean,
-        depthWrite: Boolean
+        depthWrite: Boolean,
+        depthTest: Boolean = true
     ): RenderType {
         val texRl = ResourceLocation.tryParse(
             if (':' in textureStr) textureStr.trim() else "epiphy:${textureStr.trim()}"
         ) ?: ResourceLocation("epiphy", "textures/effect/white_pixel.png")
 
-        val key = MaterialKey(shaderId?.takeIf { it.isNotBlank() }, texRl, additive, blur, cull, depthWrite)
+        val key = MaterialKey(shaderId?.takeIf { it.isNotBlank() }, texRl, additive, blur, cull, depthTest, depthWrite)
         return renderTypeCache.computeIfAbsent(key) { k ->
             val shaderShard = if (k.shaderId != null) {
                 ShaderStateShard {
@@ -192,12 +199,13 @@ object NativeItem3DEngine : RenderStateShard("epiphy_item3d_shards", Runnable {}
                 .setShaderState(shaderShard)
                 .setTextureState(TextureStateShard(k.texture, k.blur, false))
                 .setTransparencyState(if (k.additive) LIGHTNING_TRANSPARENCY else TRANSLUCENT_TRANSPARENCY)
+                .setDepthTestState(if (k.depthTest) LEQUAL_DEPTH_TEST else NO_DEPTH_TEST)
                 .setCullState(if (k.cull) CULL else NO_CULL)
                 .setWriteMaskState(if (k.depthWrite) COLOR_DEPTH_WRITE else COLOR_WRITE)
                 .createCompositeState(false)
 
             val safeName = "epiphy_item3d_${k.hashCode().toUInt().toString(16)}"
-            RenderType.create(
+            val created: RenderType = RenderType.create(
                 safeName,
                 DefaultVertexFormat.POSITION_COLOR_TEX,
                 VertexFormat.Mode.QUADS,
@@ -206,6 +214,43 @@ object NativeItem3DEngine : RenderStateShard("epiphy_item3d_shards", Runnable {}
                 false,
                 state
             )
+            created
+        }
+    }
+
+    /**
+     * 对齐 Forge `ItemRenderer.render` 自身的 `fabulous` 缓冲选择规则，遍历基底 `BakedModel` 实际产出的全部 `RenderType`
+     * 并执行显式 `endBatch`，使原版延迟缓冲（`fixedBuffers`）的颜色与深度先于后续流式自定义 3D 图层提交至硬件帧缓冲，
+     * 消除固定缓冲在外层 `endBatch()` 阶段延后提交引发的逆序覆盖问题。
+     */
+    private fun flushBaseModelRenderTypes(
+        bufferSource: MultiBufferSource.BufferSource,
+        stack: ItemStack,
+        displayContext: ItemDisplayContext,
+        bakedModel: BakedModel
+    ) {
+        val fabulous = if (displayContext != ItemDisplayContext.GUI && !displayContext.firstPerson() && stack.item is BlockItem) {
+            val block = (stack.item as BlockItem).block
+            block !is HalfTransparentBlock && block !is StainedGlassPaneBlock
+        } else {
+            true
+        }
+
+        for (passModel in bakedModel.getRenderPasses(stack, fabulous)) {
+            for (rt in passModel.getRenderTypes(stack, fabulous)) {
+                bufferSource.endBatch(rt)
+            }
+        }
+
+        if (stack.hasFoil()) {
+            if (fabulous) {
+                bufferSource.endBatch(RenderType.glintDirect())
+                bufferSource.endBatch(RenderType.entityGlintDirect())
+            } else {
+                bufferSource.endBatch(RenderType.glintTranslucent())
+                bufferSource.endBatch(RenderType.glint())
+                bufferSource.endBatch(RenderType.entityGlint())
+            }
         }
     }
 
@@ -214,7 +259,8 @@ object NativeItem3DEngine : RenderStateShard("epiphy_item3d_shards", Runnable {}
         stack: ItemStack,
         displayContext: ItemDisplayContext,
         poseStack: PoseStack,
-        bufferSource: MultiBufferSource
+        bufferSource: MultiBufferSource,
+        bakedModel: BakedModel
     ) {
         if (!enabled || model.passes.isEmpty()) return
         val t0 = System.nanoTime()
@@ -246,8 +292,15 @@ object NativeItem3DEngine : RenderStateShard("epiphy_item3d_shards", Runnable {}
             }
         }
 
-        // ItemRendererMixin 在 PoseStack.popPose() 之前注入，此时栈顶已处于模型局部空间 [-0.5, -0.5, -0.5] (对应 [0..1] 坐标)
+        if (model.renderBase && model.flushBase && bufferSource is MultiBufferSource.BufferSource && !bakedModel.isCustomRenderer) {
+            runCatching {
+                flushBaseModelRenderTypes(bufferSource, stack, displayContext, bakedModel)
+            }
+        }
+
+        // ItemRendererMixin 在局部空间平移 (-0.5, -0.5, -0.5) 之后、最终 popPose() 之前派发，栈顶对应 [0..1]^3 归一化模型空间
         val radScale = if (isGui) (model.guiScale * guiGlobalScale) else attackScale
+        var lastDrawnRt: RenderType? = null
 
         for (pass in model.passes) {
             if (pass.isOverlay && !overlaysEnabled) continue
@@ -312,6 +365,9 @@ object NativeItem3DEngine : RenderStateShard("epiphy_item3d_shards", Runnable {}
 
                 if (pass.flushAfter && bufferSource is MultiBufferSource.BufferSource) {
                     bufferSource.endBatch(pass.renderType)
+                    lastDrawnRt = null
+                } else {
+                    lastDrawnRt = pass.renderType
                 }
 
                 if (pass.isOverlay) overlayDraws.incrementAndGet() else geometryDraws.incrementAndGet()
@@ -319,6 +375,10 @@ object NativeItem3DEngine : RenderStateShard("epiphy_item3d_shards", Runnable {}
                 lastError = "${model.itemId}/${pass.id}: ${err.message}"
                 LOGGER.debug("[NativeItem3D] Pass error in {}/{}: {}", model.itemId, pass.id, err.toString())
             }
+        }
+
+        if (lastDrawnRt != null && bufferSource is MultiBufferSource.BufferSource) {
+            runCatching { bufferSource.endBatch(lastDrawnRt) }
         }
 
         val dtNs = max(0L, System.nanoTime() - t0)

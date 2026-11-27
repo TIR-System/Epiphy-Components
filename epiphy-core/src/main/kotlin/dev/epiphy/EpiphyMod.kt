@@ -5,13 +5,17 @@ import com.mojang.logging.LogUtils
 import dev.epiphy.client.EpiphyClientBootstrap
 import dev.epiphy.core.EpiphyRuntime
 import dev.epiphy.core.bridge.EpiphyBridgeRegistry
+import dev.epiphy.core.config.EpiphyConfig
 import dev.epiphy.core.network.EpiphyNetwork
 import dev.epiphy.mixin.EpiphyMixinPlugin
 import dev.epiphy.server.EpiphyDedicatedServerBootstrap
 import net.minecraftforge.event.server.ServerAboutToStartEvent
 import net.minecraftforge.event.server.ServerStoppedEvent
 import net.minecraftforge.fml.ModList
+import net.minecraftforge.fml.ModLoadingContext
 import net.minecraftforge.fml.common.Mod
+import net.minecraftforge.fml.config.ModConfig
+import net.minecraftforge.fml.event.config.ModConfigEvent
 import net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent
 import thedarkcolour.kotlinforforge.forge.FORGE_BUS
 import thedarkcolour.kotlinforforge.forge.MOD_BUS
@@ -35,7 +39,13 @@ object EpiphyMod {
             EpiphyMixinPlugin.isMixinBoosterActive()
         )
 
+        val modCtx = ModLoadingContext.get()
+        modCtx.registerConfig(ModConfig.Type.COMMON, EpiphyConfig.COMMON_SPEC)
+        modCtx.registerConfig(ModConfig.Type.CLIENT, EpiphyConfig.CLIENT_SPEC)
+
         MOD_BUS.addListener(::onCommonSetup)
+        MOD_BUS.addListener(::onConfigLoading)
+        MOD_BUS.addListener(::onConfigReloading)
         FORGE_BUS.addListener(::onServerAboutToStart)
         FORGE_BUS.addListener(::onServerStopped)
 
@@ -61,6 +71,18 @@ object EpiphyMod {
                 "CommonSetup",
                 "Network ready; optional compat loaded: kubejs=${modList.isLoaded("kubejs")}, modernui=${modList.isLoaded("modernui")}, curios=${modList.isLoaded("curios")}"
             )
+        }
+    }
+
+    private fun onConfigLoading(event: ModConfigEvent.Loading) {
+        if (event.config.modId == ID) {
+            EpiphyConfig.syncFromSpecs()
+        }
+    }
+
+    private fun onConfigReloading(event: ModConfigEvent.Reloading) {
+        if (event.config.modId == ID) {
+            EpiphyConfig.syncFromSpecs()
         }
     }
 
