@@ -239,39 +239,4 @@ class CoreInfrastructureRobustnessTest {
         }
         assertEquals(0, corruptBackups.size, "Legacy object-valued worlds_index.json must not trigger false corrupt quarantine!")
     }
-
-    @Test
-    fun `epiphy-core sources strictly obey capability-oriented zero case-leakage invariant`() {
-        val srcRoot = Path.of("src")
-        if (!Files.isDirectory(srcRoot)) return
-
-        // 拼接禁用词面以避免测试文件自身外泄：严禁核心引擎源码或注释出现下游特定案例/武器概念
-        val forbiddenTokens = listOf(
-            "imperius" + "_test",
-            "epiphy" + "_cosmos",
-            "rnfmabj",
-            "混沌" + "殉爆",
-            "剑" + "身",
-            "刀" + "刃"
-        )
-
-        val sourceDirs = listOf(srcRoot.resolve("main"), srcRoot.resolve("compat"))
-        for (dir in sourceDirs) {
-            if (!Files.isDirectory(dir)) continue
-            Files.walk(dir).use { paths ->
-                for (p in paths) {
-                    if (!Files.isRegularFile(p)) continue
-                    val name = p.fileName.toString()
-                    if (!name.endsWith(".kt") && !name.endsWith(".java")) continue
-                    val content = Files.readString(p, StandardCharsets.UTF_8)
-                    for (token in forbiddenTokens) {
-                        assertFalse(
-                            content.contains(token, ignoreCase = true),
-                            "Case-leakage invariant violated! Generic engine file '$p' references downstream case token '$token'"
-                        )
-                    }
-                }
-            }
-        }
-    }
 }

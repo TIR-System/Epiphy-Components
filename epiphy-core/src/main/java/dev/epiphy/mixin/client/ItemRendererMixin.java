@@ -15,10 +15,10 @@ import org.spongepowered.asm.mixin.injection.Slice;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * 原生零 CCL 物品 3D 声明式图层挂载 Mixin：
+ * 物品 3D 自定义图层挂载 Mixin（注入 {@link ItemRenderer#render}）：
  * <ul>
- *   <li>当已绑定物品的声明式规范显式指定 {@code model.renderBase = false} 时，在局部坐标系平移 {@code (-0.5, -0.5, -0.5)} 完成后跳过原版基底 {@link BakedModel} 绘制，直接提交自定义 3D 图层并对称弹出 {@link PoseStack}；</li>
- *   <li>当保持默认 {@code model.renderBase = true} 时，通过 {@link Slice} 精准锚定方法尾声唯一的退出 {@code popPose()}（排除动态附魔纹理内层 {@code popPose()} 干扰），在原版基底绘制完成后紧接提交声明式 3D 图层。</li>
+ *   <li>当已绑定物品的模型配置指定 {@code renderBase = false} 时，在局部坐标系完成 {@code translate(-0.5, -0.5, -0.5)} 后跳过原版基底 {@link BakedModel} 绘制，提交自定义 3D 图层并对称执行 {@code popPose()}；</li>
+ *   <li>当保持默认 {@code renderBase = true} 时，利用 {@link Slice} 从 {@code renderByItem} 之后开始匹配末尾的退出 {@code popPose()}（避开前段动态附魔纹理分支内部的局部 {@code popPose()}），在原版基底提交之后追加自定义 3D 图层。</li>
  * </ul>
  */
 @Mixin(ItemRenderer.class)

@@ -6,7 +6,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.gen.Accessor;
 
 /**
- * 编译期校验的 {@link AbstractSoundInstance} 字段访问器（自动重映射 SRG f_119572_..f_119576_，彻底淘汰运行期反射）。
+ * 编译期生成的 {@link AbstractSoundInstance} 受保护字段访问器（构建时由 Mixin 重映射为对应 SRG 字段名，替代运行期字符串反射）。
  */
 @Mixin(AbstractSoundInstance.class)
 public interface AbstractSoundInstanceAccessor {

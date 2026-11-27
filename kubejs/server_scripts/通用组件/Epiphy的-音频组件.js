@@ -2872,10 +2872,10 @@
         '  §bcategory=§frecords(默认)|music|master|ambient|block|hostile|player|voice',
         '  §bkey=§f唯一标识键 §7| §btag=§f分组标签 §7| §bpriority=§flow|normal|high|critical|active §7| §breplace=§ftrue',
         '§7----------------------------------------------------',
-        '§d【示例 1（在脚下放置 30 格平滑衰减循环音乐，离开时 1 秒淡出）】：',
-        '  §f/epiphy audio at ~ ~ ~ epiphy:children_of_the_city loop range=30 falloff=smooth fadein=1s fadeout=1s key=city_bgm',
-        '§d【示例 2（跟随自身实体的防空警报，仅 48 格内可听）】：',
-        '  §f/epiphy audio follow @s epiphy:air_raid_siren loop range=48 falloff=linear key=siren_alert'
+        '§d【示例 1（在脚下放置 30 格平滑衰减循环唱片音乐，离开时 1 秒淡出）】：',
+        '  §f/epiphy audio at ~ ~ ~ minecraft:music_disc.otherside loop range=30 falloff=smooth fadein=1s fadeout=1s key=area_bgm',
+        '§d【示例 2（跟随自身实体的循环提示音，仅 48 格内可听）】：',
+        '  §f/epiphy audio follow @s minecraft:block.bell.resonate loop range=48 falloff=linear key=bell_alert'
     ]
 
     var AUDIO_SPEC_SCHEMA = {

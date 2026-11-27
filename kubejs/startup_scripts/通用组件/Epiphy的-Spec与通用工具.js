@@ -1865,7 +1865,7 @@
         //   2. RenderLevelStageEvent -> global.Epiphy3DFX._onRenderLevelStage(event)
         //      与 global.Epiphy2DRenderer._onRenderLevelStage(event)：
         //      同时承载世界空间 3D 特效 (`surface: 'world'`) 与世界悬浮 2D 平面 (`surface: 'world_plane'`)，
-        //      零活跃实例时 O(1) 布尔短路零开销，彻底物理隔离于物品 3D 可选 CCL 管线。
+        //      无活跃实例时通过布尔标志直接返回，并与物品 3D 渲染管线相互独立。
         if (global.EpiphyRenderHooks == null || typeof global.EpiphyRenderHooks !== 'object') {
             global.EpiphyRenderHooks = {
                 preHudActive:      false,

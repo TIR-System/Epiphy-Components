@@ -12,13 +12,16 @@ import net.minecraft.client.Minecraft
 import net.minecraft.client.renderer.GameRenderer
 
 /**
- * `TextureTarget` (FBO) 按需离屏缓存池（完结路线图 §5.2 第 1 项阻塞能力）。
+ * `TextureTarget` (FBO) 按需离屏缓存池，供静态或低频变更的声明式 2D 节点子树复用合成纹理。
  *
- * 工程安全红线保证：
- * 1. **尺寸钳制与分桶复用**：宽高按 32px 向上对齐并严格钳制在 `[32, 2048]`，防止异常尺寸耗尽显存；
- * 2. **预乘 Alpha 复合（防半透明边缘黑边）**：离屏绘制与屏幕/3D 平面贴回统一使用
- *    `blendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)`，并在 `finally` 中恢复标准混合与着色器颜色；
- * 3. **主帧缓冲绝对恢复**：任何离屏绘制异常均在 `finally` 中无条件执行 `mainRenderTarget.bindWrite(true)`。
+ * 工作机制：
+ * 1. 尺寸对齐与上限钳制：逻辑宽高钳制在 `[32, 2048]` 并按 32px 向上对齐分桶，以便相近尺寸面板复用空闲 `TextureTarget`；
+ * 2. 预乘 Alpha 混合：离屏绘制写入预乘 Alpha，贴回屏幕或世界平面时使用 `blendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)`，减轻半透明边缘二次衰减发暗现象；
+ * 3. 状态清理：离屏绘制结束后在 `finally` 中解绑离屏目标、重新绑定主 `RenderTarget`，并重置混合函数与着色器颜色。
+ *
+ * 已知边界：
+ * - 仅限客户端渲染线程调用（内部执行 `RenderSystem.assertOnRenderThread()`）；
+ * - 按 32px 向上对齐会产生至多 31px 的右侧/底部纹理留白开销；不适用于依赖主帧深度缓冲与场景几何相互穿插遮挡的图层。
  */
 class FboCachePool(
     val maxActiveEntries: Int = 32,
@@ -130,7 +133,7 @@ class FboCachePool(
     }
 
     /**
-     * 以预乘 Alpha 混合将缓存好的离屏 FBO 单次发射为 1 个 Quad（零半透明二次衰减黑边）。
+     * 使用预乘 Alpha 混合方程将已缓存的离屏 FBO 绘制为单个纹理矩形。
      */
     fun blitPremultiplied(
         surface: CachedFboSurface,

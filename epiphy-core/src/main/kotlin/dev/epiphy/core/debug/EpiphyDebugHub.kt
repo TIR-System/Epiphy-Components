@@ -5,7 +5,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * 零堆分配环形纳秒耗时统计器（专用于 2D/3D 每帧渲染与区块热路径采样）。
+ * 基于固定长度 `LongArray` 环形缓冲区的耗时采样器（用于统计渲染阶段或服务端任务的分位数耗时）。
+ *
+ * 已知边界：`recordNanos` 与 `snapshot` 通过 `@Synchronized` 互斥；`snapshot()` 会复制当前窗口样本并排序，适合在调试命令或低频遥测导出时调用，不宜在每帧热循环内高频调用。
  */
 class RollingNanoSampler(val capacity: Int = 256) {
     init {
@@ -105,7 +107,9 @@ data class HealthCheckItem(
 )
 
 /**
- * 统一诊断与自检中心（带单模块异常隔离保护，任何子模块报错绝不波及其他提供者）。
+ * 模块诊断与自检汇总中心。
+ *
+ * 遍历各已注册 [EpiphyDebugProvider] 时独立捕获其抛出的异常并转为错误条目，避免单个模块的诊断逻辑异常中断其余模块的汇总输出。
  */
 class EpiphyDebugHub {
     private val providers = ConcurrentHashMap<String, EpiphyDebugProvider>()

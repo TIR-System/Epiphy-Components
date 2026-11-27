@@ -16,18 +16,21 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 通用 2D 富文本字形网格捕获与纹理图集分桶（Atlas-Bucketed）逐字合批渲染引擎。
+ * 通用 2D 富文本字形网格捕获与按字体纹理图集（{@link RenderType}）分桶合批的逐字渲染器。
  *
- * <h3>核心底层机制（面向通用排版渲染管线）</h3>
+ * <h3>工作机制</h3>
  * <ol>
- *   <li><b>一次性字形 Quad 捕获（{@link GlyphQuadCapturer}）</b>：首次遇到某文本片段时，在单位矩阵下执行一次排版发射
- *       （支持软兼容 SDF 后端与原版 {@link Font#drawInBatch} 无缝双轨），将产出的全部纹理页 {@link RenderType}、局部 Quad 几何与固有色
- *       固化为紧凑原始类型数组并按 LRU 缓存；</li>
- *   <li><b>场景级预编译（{@link CompiledPerCharScene}）</b>：将富文本行/字素序列一次性编译为扁平原始类型表，
- *       每帧仅需 <b>1 次跨语言调用</b> 即可驱动上百个独立运动字素的视口剔除、确定性运动学求解、描边柔光与淡出变形；</li>
- *   <li><b>按层级分阶段 + 按纹理图集（{@link RenderType}）自动归并合批</b>：在每个深度阶段（Pass 0 外圈 ➔ Pass 1 阴影/残影 ➔ Pass 2 正文）内部，
- *       跨所有可见字素将相同图集页的 Quad 归并至同一连续桶后一次性写入 {@link VertexConsumer}，彻底消除 CJK 多纹理页交替切换引发的数百次断批 Flush。</li>
+ *   <li><b>字形 Quad 捕获（{@link GlyphQuadCapturer}）</b>：首次遇到某文本片段时，在单位矩阵下执行一次排版输出
+ *       （支持可选软兼容 SDF 后端与原版 {@link Font#drawInBatch} 回退），记录产出的 {@link RenderType}、局部顶点坐标、UV 与固有色并存入有界 LRU 缓存；</li>
+ *   <li><b>场景预编译（{@link CompiledPerCharScene}）</b>：将分段后的富文本单元编译为紧凑原始类型数组，后续每帧通过单次方法调用完成可见区间定位、视口裁剪与逐字运动学偏移计算；</li>
+ *   <li><b>分阶段与按图集归并提交</b>：按深度阶段（Pass 0 外圈 ➔ Pass 1 阴影/残影 ➔ Pass 2 正文）顺序，在每个阶段内将落入同一纹理页 {@link RenderType} 的字符 Quad 归并到同一缓冲区后集中写入 {@link VertexConsumer}，减少多纹理页交替切换带来的断批次数。</li>
  * </ol>
+ *
+ * <h3>已知边界</h3>
+ * <ul>
+ *   <li>内部复用的捕获器与分桶数组面向客户端主渲染线程单线程设计，不支持多线程并发调用 {@link #renderScene}；</li>
+ *   <li>若自定义字体渲染后端输出非 4 顶点整数倍的图元或含非有限坐标，该片段会被标记为不可捕获并交由上层常规路径回退绘制。</li>
+ * </ul>
  */
 public final class NativeTextBatchEngine {
 

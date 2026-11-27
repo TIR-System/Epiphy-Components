@@ -6,8 +6,8 @@
 //    - 视觉表现层【子系统 B】(详见 docs/rendering-subsystem-roadmap.md §1、§2 功能六 & §8.1 P3-2)
 //    - 与【子系统 A】2D 平面渲染器 (Epiphy的-平面渲染器.js / Epiphy2DRenderer) 严格正交解耦；
 //    - 承担两大职责：
-//      1. 世界 3D 空间特效消费端 (`surface: 'world'`, 频道 `epiphy:spatial_fx`, 协议 v1，100% 零第三方 Mod 依赖)：
-//         由 `Epiphy的-Spec与通用工具.js` 内的 `RenderLevelStageEvent` 相位桥接直接驱动（零活跃特效时 O(1) 短路零开销）；
+//      1. 世界 3D 空间特效消费端 (`surface: 'world'`, 频道 `epiphy:spatial_fx`, 协议 v1，无第三方渲染库硬依赖)：
+//         由 `Epiphy的-Spec与通用工具.js` 内的 `RenderLevelStageEvent` 相位桥接驱动（无活跃特效时通过布尔标志直接返回）；
 //         负责 Fail-Closed 协议校验、Mojmap/SRG 全兼容 NBT 解码、待处理队列与同槽 `patch` 合并、
 //         `'player'`/`'system'` 隔离与单向淘汰、`once`/`active` 生命周期与淡入淡出包络、
 //         `followEntityUuid` 实体平滑插值追踪、内置 4 种纯原版图元默认渲染器 (`ring`/`beam`/`helix`/`sphere`)，

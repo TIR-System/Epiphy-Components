@@ -4377,7 +4377,7 @@
         '  §bshakefreq=§f单字震动周期(如 0.8s 统一同步抖动，或 0.8~1.3 区间随机) §7| §bshakeamp=§f震动幅度数值',
         '  §bfade=§fshrink(逐渐变小)|char_first(首字剥落)|char_last(尾字退格)|blink(闪烁)|shatter(碎片崩解)|blur(柔和虚化)|split(裂解重影)|random §8(默认 shrink)',
         '  §bspacing=§f额外字距像素(默认 0 关闭) §7| §boutline=§fstroke(描边外圈)|glow(发光外圈) §7| §boutlinecolor=§f#000000 §7| §boutlinewidth=§f0.75',
-        '  §b局部富文本标签§7：文本内可写 §f<b>加粗</b>§7、§f<big>放大</big>§7(或 §f<scale=1.4>...§7)、§f<shake>局部抖动</shake>§7、§f<outline=#000000>描边</outline>§7（默认不开启零开销）',
+        '  §b局部富文本标签§7：文本内可写 §f<b>加粗</b>§7、§f<big>放大</big>§7(或 §f<scale=1.4>...§7)、§f<shake>局部抖动</shake>§7、§f<outline=#000000>描边</outline>§7（默认按需解析）',
         '  §bmaxgroup=§f同分组同屏最大弹幕条数(如 3，超出时自动淘汰同组最早弹幕，默认0不限)',
         '  §bmaxwidth=§f最大行宽(像素或0~1屏幕比例，默认0按86%屏宽折行) §7| §bwrap=§ftrue|false §7| §bclamp=§ftrue|false',
         '  §bshowingui=§ftrue|false §8(默认 false：打开背包/箱子/菜单时不遮挡 GUI 界面)',

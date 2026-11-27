@@ -2292,7 +2292,7 @@
                     var periodMs = isUnifiedFreq
                         ? minMs
                         : (minMs + hashUnit(cSeed + 0.7) * max2(1, maxMs - minMs))
-                    // 当 minMs === maxMs（如 [rnfmabj-测试] 要求统一 0.8s 震动一次）时，统一相位 0，使所有字同步触发抖动但方向各异
+                    // 当 minMs === maxMs（固定周期同步抖动配置）时统一取初相位 0，使各字符在同一时刻触发位移、仅随机方向不同
                     var phaseOff  = isUnifiedFreq ? 0.0 : (hashUnit(cSeed + 1.9) * 10.0)
                     var rawTxt    = rf.text || ''
                     var textPair  = getCachedTextCompSeq(rawTxt, false)
@@ -2426,7 +2426,7 @@
 
     // 弹幕级共享时序预计算：
     //   【可以】整条弹幕仅计算一次 pulse / wave / transT 的场合（仅限全条共享同一周期与零相位偏移时）：
-    //     1) item._charShakeUnifiedFreq === true（即 Math.abs(shakeFreqMax - shakeFreqMin) <= 5ms，如默认统一 800ms）；
+    //     1) item._charShakeUnifiedFreq === true（即 Math.abs(shakeFreqMax - shakeFreqMin) <= 5 的毫秒容差区间，如默认统一周期 800）；
     //     2) styleCode === 0 ('omni') 或 styleCode === 1 ('horizontal_step')；
     //     3) ageMs >= 0 且 periodMs > 0 均有限。
     //   【不能】共用一次 pulse / wave 的场合（触发即显式将共享时序字段置为非法哨兵 NaN，绝不沿用陈旧值）：
@@ -6851,7 +6851,7 @@
                 var c = node._c || compileDeclarativeNode(node, depth || 0)
                 if (c == null) continue
 
-                // 极速静态纯色/线框合批快路径（覆盖绝大多数静态背板/边框/刻度：零 resolveVarNum / 零 bind / 零 clip / 零字符串分配）
+                // 静态纯色/线框直接合批路径（用于静态背板、边框与刻度：跳过动态变量求值、数据绑定与裁剪栈切换）
                 if (canRectBatch && c.isStaticFastRect) {
                     var sAlpha = clampNum(c.alpha * fadeAlpha, 0.0, 1.0)
                     if (sAlpha <= 0.005) continue
@@ -7124,7 +7124,7 @@
 
     function applyReplacedTexturesForGui(replaceMap) {
         if (!isPlainObjLike(replaceMap)) return
-        // 优先外挂原生 Mod 的 GuiGraphicsMixin 会话级贴图重映射（100% 零全局 TextureManager 污染）
+        // 优先走原生 Mod 的 GuiGraphicsMixin 参数级贴图重映射（无需修改全局 TextureManager 注册表）
         var natS2d = resolveNativeSurface2D()
         if (natS2d != null) {
             for (var nOrig in replaceMap) {
@@ -7659,7 +7659,7 @@
             var curRenderPri = item.renderPriority != null ? Number(item.renderPriority) : 0
             if (lastRenderPri !== null && curRenderPri !== lastRenderPri) {
                 flushBatchedBeforeImmediate()
-                // 每跨一个更高 renderPriority 层级推进 +1.0 Z，彻底消除低层文字 +0.03 深度残影反向遮挡高层 HUD 矩形
+                // 每跨一个更高 renderPriority 层级推进 +1.0 Z，避免低层文字的 +0.03 深度偏移遮挡高层 HUD 矩形
                 layerZ = min2(layerZMax, layerZ + 1.0)
             }
             lastRenderPri = curRenderPri
@@ -8535,7 +8535,7 @@
     // ========================================================================
     // 三维空间中的 2D 画布投影渲染引擎 (`surface: 'world_plane'`)
     //   - 统一挂载在 EpiphySpec `RenderLevelStageEvent` (`AFTER_TRANSLUCENT_BLOCKS`) 相位
-    //   - 零活跃 `world_plane` 实例时 `_hasActiveWorldPlanes()` O(1) 短路零开销
+    //   - 无活跃 `world_plane` 实例时通过 `_hasActiveWorldPlanes()` 布尔检查直接返回
     //   - 100% 复用 `renderDeclarativeNodes` 图元树编译器（支持 rect/sprite/nine_slice/group/text + tracks/bind/clip）
     //   - 支持 `billboard: 'center' | 'vertical' | 'fixed'`（配 `yaw`/`pitch`/`roll`）与 `seeThrough` (`Font$DisplayMode.SEE_THROUGH` / 深度控制)
     // ========================================================================

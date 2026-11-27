@@ -22,10 +22,12 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 2D 平面渲染原生加速算子（供 KubeJS `Epiphy2DRenderer` 外挂调用）：
- * 1. 零全局污染的会话级 GUI 贴图重映射（直连 {@link GuiInterceptionHooks} / {@code GuiGraphicsMixin}，取代危险的 {@code TextureManager.register}）；
- * 2. 资源包感知的贴图存在性并发缓存（F3+T 重载时自动清空）；
- * 3. 纯 Java 17 紧凑 {@link BufferBuilder} 渐变矩形与双采样器遮罩（{@code epiphy:ui_masked_fill}）单批次绘制。
+ * 面向 2D 平面渲染管线的原生辅助工具集（同时供脚本层 `Epiphy2DRenderer` 桥接调用）：
+ * 1. 转发 `GuiInterceptionHooks` 纹理重映射与基于资源管理器的纹理存在性缓存（在 F3+T 资源重载时清空）；
+ * 2. 提供基于 `Tesselator` 的双色/三色渐变矩形与双采样器蒙版矩形（`epiphy:ui_masked_fill`）立即提交绘制；
+ * 3. 转发 `NativeTextBatchEngine` 的逐字富文本预编译与按图集分桶合批接口。
+ *
+ * 已知边界：所有直接操作 `RenderSystem` / `Tesselator` 的绘制方法必须在客户端主渲染线程调用，且调用前若存在未提交的 `GuiGraphics` 批次需由上层先行刷新。
  */
 public final class NativeSurface2DAccelerator {
 

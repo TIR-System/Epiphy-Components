@@ -52,7 +52,7 @@ class EpiphyKubeJSPlugin : KubeJSPlugin() {
 }
 
 /**
- * 与现有 KubeJS `EpiphySpec.createBoundedCache` 100% 同签名兼容的原生 O(1) 缓存适配器。
+ * 与脚本层 `EpiphySpec.createBoundedCache` 方法签名对齐的有界缓存包装器。
  */
 class JsBoundedCacheAdapter(
     private val limitCount: Int,
@@ -143,7 +143,7 @@ object EpiphyNativeJsFacade {
     }
 
     /**
-     * 原生极速 16x16x16 区块段调色板预筛与扫描（替代 Rhino 4096 次跨界循环）。
+     * 调用原生 16x16x16 区块段调色板预筛与匹配方块坐标扫描。
      */
     fun scanChunkSection(
         section: LevelChunkSection?,

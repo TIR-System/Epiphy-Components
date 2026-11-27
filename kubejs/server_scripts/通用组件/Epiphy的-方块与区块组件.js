@@ -11,7 +11,7 @@
 //    2. 统一持久化至按存档隔离的 JSON 文件（优先 Java NIO .tmp + .bak 原子写，ClassFilter 下回退 JsonIO + persistentData 双写）；
 //    3. 提供 migrateLegacyOnce(sourceSpec, blockId) 供业务侧声明旧存档数据一次性迁移，底座本身零业务耦合；
 //    4. 集成【三级开销门控与统一帧时间预算】的区块地形批处理服务（`EpiphyWorldOps` / `EpiphyBlockTracker`）：
-//       - 静态零开销休眠 + 反射句柄 Lazy Init（未提交重型地形任务时零内存与 CPU 开销）；
+//       - 空闲休眠与反射句柄按需初始化（未提交地形任务时跳过扫描循环）；
 //       - 自适应开销开关（Pre-flight Cost Estimator）：小半径区域（R <= smallSphereDirectRadius）直接走单帧局部扫描，
 //         大半径区域自动升级为 LevelChunkSection 调色板 O(1) 预筛 + 热点列复扫 + 未加载区块挂起队列；
 //       - 统一帧时间预算（Unified Tick Budget）：当高优先级地形/流体批处理任务活跃时，自动共享帧预算并礼让低优后台区块巡检；

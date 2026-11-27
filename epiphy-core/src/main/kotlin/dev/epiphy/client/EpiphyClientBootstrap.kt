@@ -159,7 +159,7 @@ object EpiphyClientBootstrap {
     }
 
     private fun onClientLoggingOut(event: ClientPlayerNetworkEvent.LoggingOut) {
-        // 退出服务器/存档时自动清空会话级 GUI 贴图重映射、音乐避让追踪与离屏 FBO 显存，100% 零跨服残留
+        // 退出服务器或单人存档时清空当前纹理重映射表、恢复被暂停的原版音乐记录并释放离屏 FBO 缓冲
         GuiInterceptionHooks.clearAllTextureRemaps()
         NativeAudioClientAccess.setVanillaMusicDucked(false)
         sharedFboPool.destroyAll()

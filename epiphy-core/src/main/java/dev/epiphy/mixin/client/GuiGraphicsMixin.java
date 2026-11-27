@@ -9,7 +9,8 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
 
 /**
- * 零全局状态污染的会话级纹理重映射 Mixin（取代脚本期高危的 `TextureManager.register` 全局覆盖）。
+ * `GuiGraphics.innerBlit` 纹理路径重定向 Mixin。
+ * 当存在活跃纹理映射规则时在绘制入口替换传入的 `ResourceLocation`，避免直接改写全局 `TextureManager` 注册项。
  */
 @Mixin(GuiGraphics.class)
 public abstract class GuiGraphicsMixin {

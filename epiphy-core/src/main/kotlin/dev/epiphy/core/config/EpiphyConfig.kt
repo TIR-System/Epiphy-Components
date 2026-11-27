@@ -5,10 +5,11 @@ import net.minecraftforge.common.ForgeConfigSpec
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
- * Epiphy Core 双端通用与客户端配置规范（基于 `ForgeConfigSpec`，存储于 `<gameDir>/config/`，严格独立于世界存档目录）。
+ * Epiphy Core 双端通用与客户端配置定义（基于 `ForgeConfigSpec`，生成于 `<gameDir>/config/`，独立于世界存档目录）。
  *
- * 字节码隔离铁律：本类位于 `dev.epiphy.core.config`，严禁引用任何 `net.minecraft.client.*` 或 `com.mojang.blaze3d.*`
- * 客户端专属类型，确保 Dedicated Server 类加载 100% 安全。
+ * 已知边界与约束：
+ * - 本类位于双端共享包 `dev.epiphy.core.config`，不得引入 `net.minecraft.client.*` 或 `com.mojang.blaze3d.*` 等客户端专属类型，以保证专用服务端（Dedicated Server）正常加载；
+ * - 热路径直接读取下方 `@Volatile` 镜像字段以减少每帧穿过 `ConfigValue.get()` 的读取开销，修改配置值后需调用 [syncFromSpecs] 或 [saveClientAndSync] 刷新镜像并通知监听器。
  */
 object EpiphyConfig {
 

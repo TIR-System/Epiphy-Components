@@ -1,46 +1,48 @@
 # Epiphy Core (`epiphy`) — Minecraft 1.20.1 原生视听表现与服务端基础设施模组
 
-[中文 (默认)](README.md) · [English](README_EN.md) · [原生迁移工程计划书](docs/native-mod-migration-plan.md) · [渲染子系统规范](docs/rendering-subsystem-roadmap.md) · [LLM 工程准则](README-LLM.md) · [许可证 (RAL 1.6)](LICENSE.md)
+[中文 (默认)](README.md) · [English](README_EN.md) · [AI 协作宪章](AGENTS.md) · [原生迁移工程计划书](docs/native-mod-migration-plan.md) · [渲染子系统规范](docs/rendering-subsystem-roadmap.md) · [跨上下文交接指南](README-LLM.md) · [许可证 (RAL 1.6)](LICENSE.md)
 
 面向 **Minecraft 1.20.1 · Forge 47.2+ · Kotlin for Forge 4.12.0+ · Sinytra MixinBooster** 构建的独立原生模组（**Kotlin 2.2.21 + Java 17** 混编）。  
-本项目提供声明式 2D/3D 视觉合成管线、离屏 FBO 缓存池、容器 GUI/槽位精准夹心与无污染贴图重映射、零 `CodeChickenLib` 原生物品 3D 特效、零反射 OpenAL 3D 声场桥接，以及带防损坏覆写锁与世界自动分叉的高鲁棒服务端存储底座。
+本项目提供声明式 2D/3D 视觉合成管线、离屏 FBO 缓存池、容器 GUI/槽位夹心注入、按调用重定向的 GUI 贴图重映射、不依赖 `CodeChickenLib` 的原生物品 3D 渲染钩子、基于 Mixin `@Accessor` 的 OpenAL 3D 声源控制，以及带损坏隔离锁与世界分叉检测的外置存储底座。
 
 > [!IMPORTANT]
 > **分支说明与兼容性契约**
-> 1. **历史纯 KubeJS 脚本归档位置**：过渡期的完整纯 KubeJS 脚本与沙盒单测已永久冻结于 **`legacy-kubejs`** 分支（Tag `v6.3.0-kubejs-eol`）；当前 **`main` 分支为独立原生模组主仓库**。
-> 2. **无共存期、单向升级**：原生 Mod 正式发布后纯 KubeJS 版直接进入 **EOL**（无共存期、无 Maintenance LTS）；**不保证从原生 Mod 降级回旧 KubeJS 版时数据可读**，升级前请自行备份存档与 `epiphy-data/`。
-> 3. **KubeJS 联动推荐模式**：安装 KubeJS 时，本模组会自动激活软兼容插件并暴露顶层网关 **`EpiphyNative`**。以脚本形式调用原生 Mod 接口依然是官方推荐并长期广泛支持的用法（大更新中不兼容的旧版边缘特性不会特意逆向修补）。
+> 1. **历史纯 KubeJS 脚本归档位置**：过渡期的纯 KubeJS 脚本与沙盒测试已归档于 **`legacy-kubejs`** 分支（Tag `v6.3.0-kubejs-eol`）；当前 **`main` 分支为独立原生模组主仓库**。
+> 2. **无共存期、单向升级**：原生 Mod 正式发布后纯 KubeJS 版直接进入 **EOL**（无共存期、无 Maintenance LTS）；**不保证从原生 Mod 降级回旧 KubeJS 版时数据可读**，升级前请先备份存档与 `epiphy-data/`。
+> 3. **KubeJS 联动推荐模式**：安装 KubeJS 时，本模组会激活软兼容插件并暴露顶层网关 **`EpiphyNative`**。以脚本形式调用原生 Mod 接口依然是官方推荐并长期支持的用法（大更新中不兼容的旧版边缘特性不会特意逆向修补）。
 > 4. **仅支持 Forge**：基于 `Forge 47.2+` 与 `Kotlin for Forge`，**暂不推出 Fabric 版**。
 
 ---
 
-## 工程模块结构与已落地核心能力
+## 工程模块结构与核心能力概览
 
 ```text
 .
-├── epiphy-api/               # 纯公共契约层（零 Minecraft/Forge 依赖，毫秒级 JUnit 测试）
+├── AGENTS.md                 # AI 协作入口宪章（强制前置机制拆解、平实注释规范与测量协议）
+├── epiphy-api/               # 公共契约层（不依赖 Minecraft/Forge 类库，独立运行契约单测）
 │   └── dev.epiphy.api.*      #   PROTO v6 契约、官方双别名单点归一化、BoundedCache (FIFO/LRU)、PresetRegistry、SemVer
-├── epiphy-core/              # 原生核心主模组（双 SourceSet 物理隔离，产出单一重映射发行 Jar）
-│   ├── src/main/             #   [核心层：编译类路径物理隔离，零第三方业务 Mod 依赖]
-│   │   ├── dev.epiphy.core.* #     AtomicJsonStore (fsync/.bak自愈/损坏锁)、EpiphyDataManager (复制档自动分叉)、异步限频日志、环形纳秒遥测
-│   │   ├── dev.epiphy.client.*#    FboCachePool (预乘Alpha离屏池)、GuiInterceptionHooks、ui_masked_fill 着色器、零CCL物品3D钩子、零反射音频桥接
-│   │   └── dev.epiphy.mixin.*#     纯 Java 17 Mixin（MixinBooster守卫、容器四相位夹心、innerBlit贴图重定向、ItemRenderer钩子、Sound*Accessor）
-│   └── src/compat/           #   [软兼容层：独占 compileOnly(KubeJS / ModernUI / Curios)，按需动态激活]
-│       └── compat.kubejs.*   #     EpiphyKubeJSPlugin：暴露单一克制顶层入口 EpiphyNative，供脚本绑定高性能原生算子
-├── epiphy-showcase/          # 可选独立示范附属包（不打入核心发行 Jar）
-└── docs/                     # PROTO v6 权威 Schema (proto_v6_schema.json)、渲染路线图与迁移计划书
+├── epiphy-core/              # 原生核心主模组（双 SourceSet 编译隔离，产出重映射发行 Jar）
+│   ├── src/main/             #   [核心层：编译类路径不含第三方业务 Mod]
+│   │   ├── dev.epiphy.core.* #     AtomicJsonStore (fsync/.bak自愈/损坏锁)、EpiphyDataManager (复制档分叉)、异步限频日志、环形纳秒采样
+│   │   ├── dev.epiphy.client.*#    FboCachePool (预乘Alpha离屏池)、NativeTextBatchEngine (图集分桶合批)、GuiInterceptionHooks、配置界面
+│   │   └── dev.epiphy.mixin.*#     Java 17 Mixin（MixinBooster探测、容器四相位钩子、innerBlit贴图重定向、ItemRenderer钩子、Sound*Accessor）
+│   └── src/compat/           #   [软兼容层：compileOnly(KubeJS / ModernUI / Curios)，按需动态启用]
+│       ├── compat.kubejs.*   #     EpiphyKubeJSPlugin：暴露顶层入口 EpiphyNative，供脚本绑定原生算子
+│       └── compat.modernui.* #     ModernUiGlyphCaptureBackend：自适应多版本签名的可选 SDF 字形捕获后端
+└── docs/                     # PROTO v6 Schema (proto_v6_schema.json)、渲染路线图、迁移计划书与历史归档
 ```
 
-### 核心底座亮点
+### 核心子系统说明
 
-1. **🛡️ 铁桶级存储、日志与诊断底座 (`dev.epiphy.core.*`)**
-   - **`AtomicJsonStore<T>`**：同目录 `.tmp` + `FileChannel.force(true)` 刷盘后原子替换；严格区分“文件未创建”与“文件损坏”（绝不复活已删文件）；正本损坏时自动从 `.bak` 校验自愈，双坏时自动重命名隔离为 `.corrupt.<ts>.bak` 并开启 `corruptLocked` 拒写保护，防止空状态覆盖可抢救数据。
-   - **`EpiphyDataManager`**：维护 `<gameDir>/epiphy-data/` 外置安全目录；双向比对存档内 `epiphy_world_id.json` 与外部 `meta.json` 物理路径，复制存档时自动分叉全新 `<slug>__<shortId>` 目录并生成 OP 提醒。
-   - **`EpiphyLogEngine` & `EpiphyDebugHub`**：有界队列守护线程异步写盘、滑动窗口限频折叠 `(suppressed N repeats)`、进退档自动切换世界日志目录；配以零分配 `RollingNanoSampler` 环形 P95/Max 耗时采样器与单模块异常隔离自检中心。
-2. **⚡ 原生渲染与视听阻塞突破原语 (`dev.epiphy.client.*` & `mixin.*`)**
-   - **`FboCachePool`**：按 32px 分桶复用 `TextureTarget` 离屏帧缓冲，使用预乘 Alpha（`GL_ONE, GL_ONE_MINUS_SRC_ALPHA`）根除半透明二次混合黑边，并在 `finally` 中 100% 恢复主帧缓冲。
-   - **容器 `gui` / `slot` 真夹心与零污染贴图重映射**：`AbstractContainerScreenMixin` 精确注入 `renderBg` 后、`renderSlot` 前后与前景后四个相位；`GuiGraphicsMixin` 在 `innerBlit` 入口做 O(1) 贴图重映射，彻底告别篡改全局 `TextureManager`。
-   - **双采样器蒙版着色器 & 零 CCL 物品 3D & 零反射音频**：内置 GLSL 1.50 `epiphy:ui_masked_fill` 蒙版着色器、`ItemRendererMixin` O(1) 物品 3D 覆层钩子，以及编译期校验的 `SoundEngine`/`SoundManager` `@Accessor`（温和暂停 `minecraft:` BGM，绝不误停他模组音乐）。
+1. **存储、配置、日志与诊断底座 (`dev.epiphy.core.*`)**
+   - **`AtomicJsonStore<T>`**：先写入同目录 `.tmp` 并执行 `FileChannel.force(true)` 刷盘后再移动替换；区分“文件未创建”与“文件损坏”；正本解析失败时尝试从 `.bak` 恢复，若正本与备份均损坏则重命名为 `.corrupt.<ts>.bak` 并置 `corruptLocked` 拒写标志，避免内存默认状态覆盖待排查文件（仅针对单进程写盘场景，不提供跨进程文件锁）。
+   - **`EpiphyDataManager` & `EpiphyConfig`**：管理 `<gameDir>/epiphy-data/` 外置目录与 `<gameDir>/config/epiphy-*.toml` 双端配置，拦截写入 `saves/<world>/` 内部的安全配置路径；通过比对存档内 `epiphy_world_id.json` 与外部 `meta.json` 的路径记录，在检测到复制存档时分叉独立目录。
+   - **`EpiphyLogEngine` & `EpiphyDebugHub`**：通过有界阻塞队列在独立守护线程写盘，支持按时间窗口折叠重复日志并在进退存档时切换日志目录；配套环形数组耗时采样器 `RollingNanoSampler` 与单提供者异常捕获隔离的诊断汇总中心。
+2. **客户端 2D / 3D 渲染与空间音频原语 (`dev.epiphy.client.*` & `mixin.*`)**
+   - **`NativeTextBatchEngine`**：在首次遇到某文本片段时捕获其字形 Quad 与所属字体纹理页 `RenderType`，后续每帧在 Java 侧计算逐字偏移并在各深度阶段内部按 `RenderType` 分桶归并提交，减少跨纹理页交替绘制引发的批次中断。
+   - **`FboCachePool`**：按 32px 步进分桶管理 `TextureTarget` 离屏缓冲，使用预乘 Alpha（`GL_ONE, GL_ONE_MINUS_SRC_ALPHA`）缓解半透明边缘二次混合发暗问题，并在 `finally` 中重新绑定主 `RenderTarget`。
+   - **容器界面钩子与物品 3D 管线**：`AbstractContainerScreenMixin` 在容器背景后、槽位绘制前后与前景后提供回调挂载点；`GuiGraphicsMixin` 在 `innerBlit` 入口按映射表替换纹理路径；`ItemRendererMixin` 与 `NativeItem3DEngine` 基于原版 `ShaderInstance` 与 `BakedModel.getRenderPasses` 提交声明式物品 3D 图层。
+   - **音频访问器与游戏内配置界面**：通过编译期生成的 `@Accessor` 接口访问 `SoundEngine` 声道映射与 `AbstractSoundInstance` 属性，在播放受管音乐时暂停 `minecraft:` 命名空间背景音乐；提供游戏内模组列表可直达的 `EpiphyConfigScreen` 可视化设置页。
 
 ---
 
@@ -48,7 +50,7 @@
 
 ### 运行时前置
 - **必需**：`Minecraft 1.20.1` · `Forge 47.2.20+` · `Kotlin for Forge 4.12.0+` · `Sinytra MixinBooster 0.1.3+`（`MixinExtras` 已通过 Jar-in-Jar 随包内嵌）
-- **可选软兼容**（装了自动启用桥接，未装零报错运行）：`KubeJS 2001.6.5+` · `ModernUI` · `Curios API`
+- **可选软兼容**（已安装时自动启用桥接，未安装时保持基础功能运行）：`KubeJS 2001.6.5+` · `ModernUI` · `Curios API`
 
 ### 本地构建与门禁测试
 需要 **JDK 17**（Gradle 会自动从 `~/.jdks` 检测）：
@@ -57,11 +59,12 @@
 ./gradlew check build
 ```
 
-`check` 任务会自动执行四重硬性门禁：
-1. `epiphy-api:test`：直读 [`docs/proto_v6_schema.json`](docs/proto_v6_schema.json) 校验协议字段与「至多 2 个官方别名」契约；
-2. `epiphy-core:test` (`CoreInfrastructureRobustnessTest`)：真实文件 I/O 故障注入测试（`.bak` 自愈、双坏防覆写锁、复制存档自动分叉、异步日志限频折叠与环形采样百分位）；
-3. `epiphy-core:test` (`BytecodeSafetyGuardTest`)：ASM 扫描编译产物验证 `EpiphyMod.class` 零客户端类引用（Dedicated Server 安全）及 `PoseStack.withPose` 含真实 JVM `finally` 异常表；
-4. `epiphy-core:verifyNoBundledKotlin`：扫描构建 Jar 确保零 `kotlin/` 或 `kotlinx/` 标准库字节码打入模组包（杜绝 KFF `LinkageError`）。
+`check` 任务自动执行五项工程门禁：
+1. `epiphy-api:test` (`ProtoV6ContractAndAliasTest`)：对照 [`docs/proto_v6_schema.json`](docs/proto_v6_schema.json) 校验协议字段与「至多 2 个官方别名」规则；
+2. `epiphy-core:test` (`EngineeringCharterGuardTest`)：执行动态反向案例词汇隔离检查、注释与主干文档反自夸/反无依据耗时断言检查，以及核心引擎类边界说明完整性校验；
+3. `epiphy-core:test` (`CoreInfrastructureRobustnessTest`)：文件 I/O 故障注入测试（`.bak` 恢复、双坏拒写锁、复制存档分叉、外置权限路径拦截、异步日志限频折叠与分位数统计）；
+4. `epiphy-core:test` (`BytecodeSafetyGuardTest`)：通过 ASM 扫描编译产物，校验 `EpiphyMod.class` 与 `EpiphyConfig.class` 不直接引用客户端专属类（保障 Dedicated Server 加载安全），并校验 `PoseStack.withPose` 生成了 JVM `finally` 异常表；
+5. `epiphy-core:verifyNoBundledKotlin`：检查构建 Jar 内未混入 `kotlin/` 或 `kotlinx/` 标准库字节码（避免与 KFF 模块层冲突）。
 
 ---
 

@@ -13,7 +13,12 @@ import java.util.Collections
 import java.util.IdentityHashMap
 
 /**
- * 零反射 OpenAL 3D 音频底层安全桥接（编译期由 Mixin `@Accessor` 保障，彻底淘汰脚本期脆弱的 SRG 字段反射）。
+ * 基于编译期 Mixin `@Accessor` 的客户端 OpenAL 3D 音频控制桥接（替代脚本期手写 SRG 字段名的运行期反射）。
+ *
+ * 工作机制：通过 `SoundManagerAccessor`、`SoundEngineAccessor` 与 `AbstractSoundInstanceAccessor` 读写声源坐标、音量、声道挂起恢复及右下角字幕，
+ * 并在播放受管音乐时按命名空间暂停原版 `minecraft:` 背景音乐。
+ *
+ * 已知边界：`ChannelAccess.ChannelHandle.execute` 会将任务异步提交至独立音频线程执行，因此在主线程调用时无法同步获知音频线程闭包内的即时返回状态。
  */
 object NativeAudioClientAccess {
 
@@ -112,7 +117,7 @@ object NativeAudioClientAccess {
     }
 
     /**
-     * 零反射刷新循环 3D 音源的右下角原版字幕保活与 `< >` 方向箭头。
+     * 通过 `GuiAccessor` 刷新循环 3D 音源的右下角原版字幕显示与方向指示。
      */
     @JvmStatic
     fun refreshSubtitle(instance: SoundInstance?, soundId: String?): Boolean {

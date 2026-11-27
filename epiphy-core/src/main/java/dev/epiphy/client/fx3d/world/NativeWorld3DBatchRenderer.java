@@ -17,7 +17,11 @@ import java.util.UUID;
 import java.util.WeakHashMap;
 
 /**
- * 世界空间 3D 特效纯 Java 17 零分配批发射器（替代 KubeJS Rhino 解释器逐顶点三角函数与 JNI 跨界循环）。
+ * 世界空间 3D 基础几何图元（光环、光柱、双螺旋、球壳）顶点批发射工具。
+ *
+ * 工作方式：在客户端渲染阶段复用线程局部旋转矩阵数组计算局部欧拉变换，将图元 Quad 顶点直接写入传入的 {@link VertexConsumer}，
+ * 并通过按维度清理的 {@link WeakHashMap} 缓存客户端实体 UUID 查找结果。
+ * 已知边界：所有发射方法须在客户端渲染线程且持有有效 {@link PoseStack} 与 {@link MultiBufferSource} 的阶段调用。
  */
 public final class NativeWorld3DBatchRenderer {
 
@@ -56,7 +60,7 @@ public final class NativeWorld3DBatchRenderer {
     }
 
     /**
-     * 零反射查找客户端实体并写入帧间线性插值坐标 {@code [x, y, z]}。
+     * 按 UUID 查找当前客户端世界中的实体并计算帧间线性插值坐标 {@code [x, y, z]}。
      */
     public static boolean resolveEntityInterpolatedPos(String uuidStr, float partialTick, double[] outXyz) {
         if (uuidStr == null || uuidStr.isEmpty() || outXyz == null || outXyz.length < 3) return false;

@@ -9,12 +9,16 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
- * 原生 GUI 夹心层（`bg` / `slot.underlay` / `slot.overlay` / `fg`）与零污染纹理重映射钩子中心。
+ * 容器界面四相位回调（`bg` / `slot.underlay` / `slot.overlay` / `fg`）与 `GuiGraphics.innerBlit` 纹理重映射分发中心。
  *
- * 解决 KubeJS 阶段 `P2-1` / `P2-3` 两大硬性阻塞：
- * 1. 未注册任何活跃拦截器或贴图映射时，所有 Mixin 入口仅执行 1 次 `volatile boolean` 布尔读取（`< 1ns` 零开销短路）；
- * 2. 所有回调在退出时强制校验并恢复 `PoseStack` 深度水位线，杜绝下游脚本或监听器异常污染原版界面；
- * 3. 会话级贴图重映射直接在 `GuiGraphics.innerBlit` 入口做 O(1) Map 查找，**彻底告别篡改全局 `TextureManager` 状态**。
+ * 工作机制：
+ * 1. 未注册监听器或纹理映射时，Mixin 入口仅检查对应的 `volatile boolean` 标志后直接返回；
+ * 2. 分发容器界面回调时在外层包裹一层 `PoseStack` 推弹与异常捕获；
+ * 3. 纹理重映射在 `GuiGraphics.innerBlit` 入口按映射表替换传入的 `ResourceLocation`，避免直接覆盖全局 `TextureManager` 中的纹理对象。
+ *
+ * 已知边界：
+ * - 当前 `runGuardedWithPoseWatermark` 仅执行单次外层 `pushPose/popPose`，若监听器内部自身发生不对称的多次 `pushPose` 未弹出，仍需依赖后续栈深度水位线校验加固；
+ * - 当前 `activeTextureRemaps` 为全局映射表，依赖界面关闭或退服钩子显式清空，尚未与单个 `Screen` 实例生命周期强绑定。
  */
 object GuiInterceptionHooks {
 

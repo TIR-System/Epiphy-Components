@@ -6,12 +6,12 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
 /**
- * Epiphy 跨端协议核心常量与官方双别名上限规范（Phase 4 原生版）。
+ * Epiphy 跨端协议核心常量与官方双别名归一化契约（Phase 4 原生版）。
  *
- * 严格遵循迁移计划书 §1.1 铁律 4：
- * - 每个标准字段保留「1 个主标准名 + 至多 2 个显式官方别名（合计 <= 3 个名称）」；
- * - 彻底移除历史过渡期 `DEPRECATED_*_ALIASES`；
- * - 所有官方别名均在 API/DSL/JSON 入口单点归一化为主标准名，内部管线与二进制网络帧零别名。
+ * 设计说明与边界：
+ * - 每个标准字段保留「1 个主标准名 + 至多 2 个显式官方别名（合计不超过 3 个名称）」，不再包含历史过渡期的 `DEPRECATED_*_ALIASES`；
+ * - 所有官方别名均在 API/DSL/JSON 入口归一化为主标准名，内部处理管线只消费主标准名；
+ * - 已知边界：`normalizeNodeMap` 递归深度上限设为 6 层，超出深度的嵌套节点将原样返回以防异常环路导致栈溢出。
  */
 object EpiphyProtocolSpec {
     const val SCHEMA_VERSION: String = "6.3.0"

@@ -7,8 +7,10 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 /**
- * 面向过渡期 KubeJS 脚本（动态 JSON 结构）的原子存储包装器。
- * 底层 100% 委托 [AtomicJsonStore]：`.tmp` + `FileChannel.force(true)` + `ATOMIC_MOVE` + `.bak` 自愈 + 损坏隔离防覆写锁。
+ * 面向动态 JSON 文本的读写包装器（供过渡期脚本按路径读写无固定 Kotlin Schema 的 JSON 配置或状态文件）。
+ *
+ * 内部委托 [AtomicJsonStore] 执行临时文件刷盘、`.bak` 副本恢复与损坏拒写锁，并在解锁时按数量上限清理历史 `.corrupt.*.bak` 备份。
+ * 已知边界：每次读写均会经过 `JsonElement` 解析校验，不适用于超大体积流式文本文件。
  */
 class RawJsonFileStore @JvmOverloads constructor(
     val targetPath: Path,

@@ -20,7 +20,7 @@
 //      3. 4 类内置预烘焙几何图层原语（`surface_overlay` / `ribbon_ring` / `ribbon_helix` / `sprite_cluster`）
 //         与可扩展注册机制（`registerLayerType` / `registerPart` / `registerPreset`）；
 //      4. 材质签名级 `RenderType` 缓存池（支持无闪烁加法发光 `LIGHTNING_TRANSPARENCY` + 双线性滤波 + `sortOnUpload=false`）
-//         与纯 Java `CCModel.render` 极速热路径（烘焙期有限值防火墙 + `computeNormals()`）。
+//         与 Java 侧 `CCModel.render` 提交路径（烘焙期有限值校验 + `computeNormals()`）。
 //  语法规范：遵循 README-LLM.md §1 强制 Rhino ES5 语法基准（严禁读取 Math.PI 等 NativeMath 缺失常量）。
 // ============================================================================
 

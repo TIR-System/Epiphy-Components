@@ -15,14 +15,17 @@ import java.nio.file.StandardOpenOption
 import java.util.concurrent.ThreadLocalRandom
 
 /**
- * 强类型状态化 JSON 原子持久化门面（对应并强化原 `openJsonStore`）。
+ * 带备份恢复与损坏写保护的强类型 JSON 文件存储门面（对应原脚本层的 `openJsonStore`）。
  *
- * 鲁棒性保证：
- * 1. **缺失与损坏严格区分**：正本与 `.bak` 均不存在时返回 [LoadOutcome.Missing]，绝不复活已主动删除的文件；
- * 2. **自动 `.bak` 备份自愈**：仅当正本存在但解析失败时，自动校验并从 `.bak` 恢复正本；
- * 3. **损坏现场隔离与防覆写锁 (`corruptLocked`)**：若正本损坏且无可用 `.bak`，立即将坏文件隔离重命名为
- *    `<file>.corrupt.<epochMs>.bak` 并置 [isCorruptLocked] = `true`，拒绝后续常规写入以防空内存状态覆盖可抢救数据；
- * 4. **fsync + 原子替换 + 幂等跳过**：写入先经同目录 `.tmp` 强制刷盘 (`FileChannel.force`) 再原子替换，内容未变时零磁盘 I/O。
+ * 工作机制：
+ * 1. 区分“文件未创建”与“文件损坏”：当正本不存在时直接返回 [LoadOutcome.Missing]，不会从残留 `.bak` 重新生成已删除的文件；
+ * 2. 备份恢复：当正本存在但反序列化失败时，尝试读取并校验同目录下的 `.bak` 副本，校验通过则用其修复正本；
+ * 3. 损坏隔离与拒写保护：若正本与 `.bak` 均不可用，将损坏正本重命名为 `<file>.corrupt.<epochMs>.bak` 并置 [isCorruptLocked] 为 `true`，
+ *    阻止后续常规保存用内存默认值覆盖现场；
+ * 4. 刷盘与替换：保存时先写入同目录临时文件并调用 `FileChannel.force(true)`，再移动替换目标文件；序列化文本未变化时跳过写盘。
+ *
+ * 已知边界：
+ * - 同步保护仅作用于当前 JVM 实例内的同一 `AtomicJsonStore` 对象，不提供跨进程文件锁，不能防御外部编辑器或另一进程同时改写同一文件。
  */
 class AtomicJsonStore<T : Any>(
     rawFilePath: Path,

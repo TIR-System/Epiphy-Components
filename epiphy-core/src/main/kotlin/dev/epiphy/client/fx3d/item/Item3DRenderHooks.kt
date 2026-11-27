@@ -11,11 +11,11 @@ import java.util.Collections
 import java.util.IdentityHashMap
 
 /**
- * 零 `CodeChickenLib` 依赖的原生物品 3D 声明式渲染挂载中心。
+ * 不依赖 `CodeChickenLib` 的原生物品 3D 图层挂载注册表。
  *
- * 通过 `IdentityHashMap<Item, BoundItemEntry>` 实现指针级 O(1) 匹配：
- * - 未注册 3D 图层的普通物品仅经过 1 次 `volatile boolean` 短路判空，零堆分配、零性能损耗；
- * - 支持 `renderBase` 基底模型开关控制，外层强制执行 `PoseStack` 对称推弹异常保护。
+ * 工作机制：使用 `IdentityHashMap<Item, BoundItemEntry>` 按物品实例引用匹配已绑定渲染器；
+ * 未绑定任何物品时，Mixin 入口读取 `hasBoundItems` 布尔标志后直接返回。
+ * 已知边界：当前仅包裹单层 `PoseStack` 推弹并捕获异常，后续需接入栈深度水位线校验与异常计数熔断机制。
  */
 object Item3DRenderHooks {
 

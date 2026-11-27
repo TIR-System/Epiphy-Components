@@ -11,7 +11,9 @@ import net.minecraftforge.client.event.RegisterShadersEvent
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * 原生 `ShaderInstance` 注册与强类型 `Uniform` 预缓存中心（100% 原版机制，彻底替代 `CCShaderInstance`）。
+ * 原版 `ShaderInstance` 注册与 `Uniform` 引用预缓存中心（通过 Forge `RegisterShadersEvent` 加载核心着色器，替代脚本期借用的 `CCShaderInstance`）。
+ *
+ * 已知边界：`RegisterShadersEvent` 在客户端启动及资源包重载时触发；晚于该时机动态注册的着色器需等待下一次资源重载后方会实例化生效。
  */
 object EpiphyCoreShaders {
     private val LOGGER = LogUtils.getLogger()

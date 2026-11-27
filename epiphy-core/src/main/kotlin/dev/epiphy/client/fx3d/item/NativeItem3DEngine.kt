@@ -29,11 +29,16 @@ import kotlin.math.roundToLong
 import kotlin.math.sin
 
 /**
- * 100% 零 `CodeChickenLib` 原生物品三维渲染与预烘焙引擎。
+ * 基于原版 `ShaderInstance`、`RenderType` 与 `Item3DRenderHooks` 的声明式物品三维图层渲染引擎（不依赖 `CodeChickenLib`）。
  *
- * - 编译期直接调用 Mojmap / Forge 标准渲染契约（`BakedModel.getRenderPasses`、`RenderType.create`、`ShaderStateShard`、`Item3DRenderHooks`），自动重映射 SRG；
- * - 启动期或资源重载期接收声明式编译后的紧凑网格数据（`FloatArray` 顶点 + `IntArray` 颜色），内置非有限数（NaN/Inf）防火墙；
- * - 统一管理原版延迟固定缓冲（`BufferSource.fixedBuffers`）与流式自定义材质层的硬件提交顺序及深度测试契约。
+ * 工作机制：
+ * - 在模型绑定或资源重载阶段接收编译后的紧凑顶点与颜色数组，过滤含 NaN/Infinity 的异常坐标；
+ * - 按材质参数缓存 `RenderType`（支持自定义着色器、透明度混合、深度测试与深度写入开关）；
+ * - 在渲染绑定物品时协调基底 `BakedModel` 缓冲刷新与自定义三维图层的提交顺序。
+ *
+ * 已知边界：
+ * - 当前 `flushBaseModelRenderTypes` 直接在传入的 `MultiBufferSource.BufferSource` 上调用 `endBatch(rt)`，在容器多槽位同屏渲染多个绑定物品时会提前刷出同类型共享批次；
+ * - 开启第三方光影模组（如 Iris）并接管物品渲染缓冲时，自定义核心着色器的表现取决于光影管线的兼容支持情况。
  */
 object NativeItem3DEngine : RenderStateShard("epiphy_item3d_shards", Runnable {}, Runnable {}) {
 

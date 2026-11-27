@@ -11,12 +11,16 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
- * `epiphy-data/` 统一外部数据目录与存档复制防串档自动分叉管理器。
+ * `<gameDir>/epiphy-data/` 外置数据目录与世界存档路径绑定管理器。
  *
- * 严格遵循 `README-LLM.md` §5.1 与迁移计划书 §6.2 契约：
- * - 外部骨架：`config/`, `worlds/`, `players/`, `events/`, `logs/`, `presets/`, `backups/`；
- * - 世界标识双向核验：比对存档内 `data/epiphy_world_id.json` 与外部 `worlds/<slug>__<shortId>/meta.json` (`lastWorldPath`)；
- * - 当玩家复制世界文件夹导致物理路径变化时，自动分叉出全新 `worldId` 与外部目录，并入队 OP 通知，100% 兼容既有 `epiphy-data/` 格式。
+ * 工作机制：
+ * - 维护外置目录骨架：`config/`, `worlds/`, `players/`, `events/`, `logs/`, `presets/`, `backups/`；
+ * - 比对存档内的 `data/epiphy_world_id.json` 与外部 `worlds/<slug>__<shortId>/meta.json` 中记录的 `lastWorldPath`；
+ * - 当检测到存档文件夹被复制到新路径时，为其分配新的 `worldId` 与独立外部子目录，并将分叉提醒放入待消费队列；
+ * - 提供 [requireExternalSecurityPath] 校验，拒绝将权限与安全配置文件指向 `saves/<world>/` 存档目录内部。
+ *
+ * 已知边界：
+ * - 路径同一性基于规范化后的本地文件系统路径字符串判定；若用户直接重命名原存档文件夹（而非复制），同样会被识别为路径变更并触发分叉。
  */
 class EpiphyDataManager(rawGameDir: Path) {
 

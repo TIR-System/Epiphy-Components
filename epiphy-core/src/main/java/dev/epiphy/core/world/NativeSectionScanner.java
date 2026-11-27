@@ -16,8 +16,11 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 原生 16x16x16 {@link LevelChunkSection} 极速调色板预筛与扫描算子。
- * 将过渡期 KubeJS 脚本中每区块段 4096 次 Rhino 跨界调用压缩为单次纯 Java 紧凑指针扫描。
+ * 16x16x16 {@link LevelChunkSection} 调色板预筛与方块坐标扫描工具。
+ *
+ * 工作方式：先过滤空区块段并通过 {@link LevelChunkSection#maybeHas} 检查该段调色板是否包含目标方块集合；
+ * 未命中时直接跳过逐格遍历，命中时在 Java 侧遍历 4096 个局部坐标收集匹配结果。
+ * 已知边界：调用方需在持有对应区块有效引用的线程上下文（通常为服务端主线程）中调用，扫描期间不会对区块段加锁。
  */
 public final class NativeSectionScanner {
 

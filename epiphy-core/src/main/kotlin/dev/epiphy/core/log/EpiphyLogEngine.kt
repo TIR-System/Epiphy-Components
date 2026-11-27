@@ -18,13 +18,15 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Epiphy 高鲁棒异步限频日志引擎（对应并升级原 `EpiphyLog`）。
+ * 基于有界队列与后台写盘线程的限频日志记录器（对应原脚本层的 `EpiphyLog`）。
  *
- * 核心保护机制：
- * 1. **零阻塞有界异步写盘**：主逻辑与渲染线程仅向有界 `ArrayBlockingQueue` 投递日志事件，绝不因磁盘抖动卡顿帧率或服务端 Tick；
- * 2. **滑动窗口限频折叠 (`RateBucket`)**：高频重复异常在窗口内仅输出首条，窗口结束后自动附加 `(suppressed N repeats)` 折叠计数；
- * 3. **幂等一次性告警 (`warnOnce` / `warnDeprecatedOnce`)**：受独立 `deprecationWarningsEnabled` 开关控制；
- * 4. **世界上下文路由**：未进档写 `epiphy-data/logs/YYYY-MM-DD.log`，绑定世界后自动无缝切至对应世界 `logs/` 目录。
+ * 工作机制：
+ * 1. 调用线程将日志条目放入有界 `ArrayBlockingQueue` 后立即返回，由守护线程负责打开文件与顺序写入，减少磁盘 I/O 对主线程的阻塞；
+ * 2. 对指定了 `rateLimitMs > 0` 的日志按级别、模块与标签聚合，在时间窗口内抑制重复输出并在下一次输出时附带 `(suppressed N repeats)` 计数；
+ * 3. 支持按生命周期切换输出目录：未进入世界时写入 `epiphy-data/logs/YYYY-MM-DD.log`，绑定世界后切换至对应世界 `logs/` 目录。
+ *
+ * 已知边界：
+ * - 当后台写盘速度慢于突发日志产生速度且队列满载时，新入队条目会被丢弃并累加丢弃计数（SLF4J 控制台输出不受队列满载影响）。
  */
 class EpiphyLogEngine(
     initialLogDir: Path,

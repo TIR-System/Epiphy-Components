@@ -16,12 +16,15 @@ import java.lang.invoke.MethodType
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * ModernUI 可选软兼容字形网格捕获后端（物理隔离于 `src/compat`，仅在检测到 `modernui` 加载时注册）。
+ * ModernUI 可选软兼容字形网格捕获后端（位于 `src/compat`，仅在运行环境加载了 `modernui` 时启用）。
  *
- * 兼容性保障：
- * - ModernUI `3.8 ~ 3.9` 的 `TextLayout.drawText` 为 13 参数，而 `3.10.1+ ~ 3.12+` 变更为 14 参数（新增 `float density`）；
- * - 本适配器通过 `MethodHandles.publicLookup()` 在初始化阶段自适应绑定双版本签名，避免硬链接特定版本引发 `NoSuchMethodError`；
- * - 遇到含彩色 Emoji 的片段自动降回普通纹理采样模式（`preferredMode = 0`），保证色彩无偏色；其余旋转/缩放/描边片段启用 SDF（`preferredMode = 1`）。
+ * 版本适配与行为：
+ * - ModernUI `3.8 ~ 3.9` 的 `TextLayout.drawText` 为 13 参数，而 `3.10.1+ ~ 3.12+` 为 14 参数（增加了 `float density`）；
+ * - 初始化阶段通过 `MethodHandles.publicLookup()` 探测两个公开方法签名，匹配其一后用于捕获字形 Quad；
+ * - 含彩色 Emoji 的文本片段走常规纹理采样（`preferredMode = 0`），避免按单通道 SDF 距离场采样导致彩色贴图偏色；其余需要缩放、旋转或描边的片段请求 SDF 模式（`preferredMode = 1`）。
+ *
+ * 已知边界：
+ * - 依赖 `icyllis.modernui.mc.text.TextLayoutEngine` 与 `TextLayout` 的上述公开签名；若更高版本调整了参数列表或运行期抛出异常，当前后端会将 `degraded` 置为 `true` 并回退至原版 `Font` 字形捕获。
  */
 object ModernUiGlyphCaptureBackend : GlyphCaptureBackend {
 

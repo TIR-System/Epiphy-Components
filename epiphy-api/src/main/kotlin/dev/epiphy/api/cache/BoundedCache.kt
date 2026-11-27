@@ -10,8 +10,11 @@ enum class EvictionPolicy {
 }
 
 /**
- * O(1) 均摊复杂度的有界键值缓存池。
- * 基于 JDK 内置双向哈希链表 [LinkedHashMap]，零迭代器分配地支持 FIFO（插入序）与 LRU（访问序）淘汰。
+ * 基于 JDK [LinkedHashMap] 的有界键值缓存容器，支持 FIFO（按插入顺序淘汰）与 LRU（按最近访问顺序淘汰）。
+ *
+ * 已知边界：
+ * - `get`、`set`、`has`、`delete` 的均摊时间复杂度为 `O(1)`；但在 `LRU` 策略下，`peek` 为避免触发 `LinkedHashMap` 的访问序重排，采用 `entries` 线性查找（`O(N)`）；
+ * - 线程安全通过实例级 `@Synchronized` 互斥锁维持，适用于常规预设与元数据缓存，不适用于多线程高争用热路径。
  */
 class BoundedCache<K : Any, V : Any>(
     val maxSize: Int,

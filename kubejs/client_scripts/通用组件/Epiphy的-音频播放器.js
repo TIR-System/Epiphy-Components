@@ -973,7 +973,7 @@
 
     // 原版 SoundEngine.play(SoundInstance) 在检查 volume <= 0 之前就会先通知所有 SoundEventListener (含 SubtitleOverlay)，
     // 且当 !canStartSilent() && volume <= 0 时会在通知完 SubtitleOverlay 后立即返回，不分配任何 OpenAL 通道或解码音频流！
-    // 因此每 24 tick (1.2s) 发送一次 volume=0.0、带 3D 坐标与 LINEAR 衰减的 SimpleSoundInstance，即可零开销保持右下角字幕常驻并实时更新 < > 方向！
+    // 因此每 24 tick (1.2s) 发送一次 volume=0.0、带 3D 坐标与 LINEAR 衰减的 SimpleSoundInstance，可在不额外占用音频通道的情况下刷新右下角字幕与 < > 方向指示。
     var invokeOnPlaySound = (lsn, inst, weighed) => {
         if (lsn == null) return false
         if (typeof lsn.onPlaySound === 'function') {

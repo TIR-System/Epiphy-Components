@@ -11,11 +11,13 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * 容器界面四相位精准夹心 Mixin（完结 P2-1 与 P2-3 阻塞项）：
- * 1. `renderBg` 返回后（全部槽位之前） -> `bgNodes`；
- * 2. `renderSlot` 头部 -> `slot.underlayNodes`（位于物品图标底层）；
- * 3. `renderSlot` 尾部 -> `slot.overlayNodes`（位于物品图标与数量叠字顶层）；
- * 4. `render` 尾部（全部槽位与前景标签之后） -> `fgNodes`。
+ * 容器界面（{@link AbstractContainerScreen}）四阶段绘制挂载 Mixin：
+ * <ol>
+ *   <li>{@code renderBg} 返回后（槽位绘制前）：分发背景扩展层；</li>
+ *   <li>{@code renderSlot} 头部：分发单槽位底层衬底（位于物品图标下方）；</li>
+ *   <li>{@code renderSlot} 尾部：分发单槽位顶层叠画（位于物品图标与数量文字上方）；</li>
+ *   <li>{@code render} 尾部（槽位与前景标签绘制完成后）：分发整体前景层。</li>
+ * </ol>
  */
 @Mixin(AbstractContainerScreen.class)
 public abstract class AbstractContainerScreenMixin {

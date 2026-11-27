@@ -68,7 +68,7 @@ class ProtoV6ContractAndAliasTest {
             )
         }
 
-        // 确认历史过渡期淘汰别名（msg / slot）在原生契约层已 100% 裁撤
+        // 确认历史过渡期淘汰别名（msg / slot）已从官方别名表中移除
         assertFalse(EpiphyProtocolSpec.OFFICIAL_ENVELOPE_ALIASES.containsKey("msg"))
         assertFalse(EpiphyProtocolSpec.OFFICIAL_ENVELOPE_ALIASES.containsKey("slot"))
     }

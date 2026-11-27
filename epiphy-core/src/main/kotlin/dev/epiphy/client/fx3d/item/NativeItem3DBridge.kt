@@ -4,7 +4,14 @@ package dev.epiphy.client.fx3d.item
 import dev.epiphy.client.shader.EpiphyCoreShaders
 
 /**
- * 面向脚本层暴露的零 CCL 物品 3D 动态绑定桥接门面（仅在客户端注册到 `EpiphyBridgeRegistry`）。
+ * 面向脚本层暴露的物品 3D 动态绑定桥接门面（仅在客户端注册至 `EpiphyBridgeRegistry`）。
+ *
+ * 负责将脚本层传入的面片顶点、颜色、材质参数与运动学配置整理为 `NativeItem3DEngine.CompiledItemModel`，
+ * 并转交 `NativeItem3DEngine` 与 `EpiphyCoreShaders`。
+ *
+ * 已知边界：
+ * - `bindCompiledItemFromJs` 当前仅在解析完成后调用注册并返回 `true`，尚未把“物品尚未在 Forge 注册表就绪而暂存 `pendingSpecs`”或“全部面片因格式不合法被跳过”区分成不同返回值；
+ * - 材质 `blend` 字段当前仅区分 `"translucent"` 与非 `"translucent"`（其余值统一按加法混合处理），尚未建立多混合模式的显式枚举校验。
  */
 object NativeItem3DBridge {
 
